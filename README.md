@@ -1,2 +1,24 @@
-# Retro-bug
-RetroBug is a cross-platform 32-bit Android compatibility layer designed to bring legacy Android apps and games back to modern devices. Built for Android and iOS, with one-click launching, per-app compatibility profiles, and optional game-specific patches for troublesome legacy software.
+RetroBug
+
+<p align="center">
+  <img src="file_0000000033448211bbdb620eed523634.png" alt="RetroBug" width="450">
+</p>Bringing legacy 32-bit Android apps back to modern devices.
+
+RetroBug is an open-source compatibility layer for running legacy 32-bit Android applications on modern ARM64 devices.
+
+Features
+
+- ARMv7 ("armeabi-v7a") compatibility
+- Dynamic binary translation
+- Per-app compatibility profiles
+- Advanced per-app environments
+- App Revival compatibility patches
+- Android and iOS support
+
+Status
+
+Early development. Compatibility varies by application.
+
+License
+
+Apache License 2.0.
