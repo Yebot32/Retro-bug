@@ -1,15 +1,21 @@
-RetroBug
+<div align="center">RetroBug
 
-<p align="center">
-  <img src="file_0000000033448211bbdb620eed523634.png" alt="RetroBug" width="450">
-</p>Bringing legacy 32-bit Android apps back to modern devices.
+<p>
+  <img src="file_0000000033448211bbdb620eed523634.png" width="500" alt="RetroBug">
+</p>A 32-bit Android compatibility layer for modern devices.
 
-RetroBug is an open-source compatibility layer for running legacy 32-bit Android applications on modern ARM64 devices.
+"About" (#about) · "Features" (#features) · "Status" (#status) · "License" (#license)
+
+</div>About
+
+RetroBug is an open-source compatibility layer designed to run legacy 32-bit Android applications on modern ARM64 devices.
+
+The project is focused on both games and general Android applications.
 
 Features
 
 - ARMv7 ("armeabi-v7a") compatibility
-- Dynamic binary translation
+- ARMv7 → ARM64 dynamic binary translation
 - Per-app compatibility profiles
 - Advanced per-app environments
 - App Revival compatibility patches
@@ -17,7 +23,9 @@ Features
 
 Status
 
-Early development. Compatibility varies by application.
+Early development
+
+Compatibility will vary between applications as the project develops.
 
 License
 
