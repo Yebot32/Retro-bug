@@ -115,6 +115,38 @@ rejection of undefined `VST4/VLD4 .64` encodings. Grep-found gaps have to be rea
 the emulator, with two named constraints — its reference is GPL Unicorn (test-side only, never linked), and
 three cases the harness itself excludes because *Unicorn* is wrong need a different oracle.
 
+## Step 3b — engine test lane green, and U-2 has a first answer
+
+**Dynarmic's own suite runs here, GPL-free.** `DYNARMIC_TESTS_USE_UNICORN` defaults to **OFF**, so
+`dynarmic_tests` builds and runs with no Unicorn involved: **200,561 assertions in 48 test cases, all
+passing** on the x86_64 emulator, including `A32/test_svc.cpp` (guest kernel entry) and
+`A32/test_coprocessor.cpp` (CP15/TLS). Reproduce with `tools/run_engine_tests.sh`. Two caveats kept
+attached to that result, because "green" is easy to over-read: the build exercises the **x64** backend for
+A32, so the AArch64 backend that real arm64 devices use is still untested, and a suite asserts what its
+author chose to assert — Dynarmic's own README still admits FPSR state is approximate.
+
+**U-2, first data point** (`tools/va_probe.c`, x86_64 Android emulator, `shell` domain):
+
+```
+pagesize=16384  sizeof(void*)=8
+anon PROT_NONE 4GiB, any address                        ok      addr=0x7eeeb3e00000
+anon PROT_NONE 4GiB at hint 0x10000 (MAP_FIXED_NOREPLACE) ok    addr=0x10000
+anon PROT_NONE 4GiB at hint 0 (MAP_FIXED_NOREPLACE)     FAILED  errno=1 (EPERM)
+anon PROT_NONE 4GiB at hint 0x80000000                  ok      addr=0x80000000
+anon RWX (single-mapping JIT)                           ok
+```
+
+So a contiguous low 4 GiB window **can** be reserved, which is what fastmem needs — but it cannot start at
+address 0, only at `0x10000`, because the kernel refuses to map page zero. That looks like a constraint on
+an identity-mapped model and is actually a match for it: a real 32-bit Android has the same
+`mmap_min_addr` rule, so guest page 0 is unmapped there too and a guest NULL dereference faults. Biasing
+the window base to `0x10000` therefore reproduces guest behaviour rather than compromising it. Still,
+`GUEST_BASE` must stay a variable and not a literal, per AD-6.
+
+Caveat carried forward: these are kernel VA answers from the `shell` domain, so they transfer; the
+**executable-memory** answer does not necessarily transfer, since `execmem` is decided per SELinux domain.
+The authoritative app-domain result has to come from inside an installed RetroBug build (U-13).
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |

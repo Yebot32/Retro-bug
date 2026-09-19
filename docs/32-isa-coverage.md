@@ -71,19 +71,23 @@ identified; correctness against a reference is not yet measured.
 
 ## 5. The remaining work, in priority order
 
-1. **Differential semantic lanes.** Dynarmic ships `tests/test_generator.cpp` +
-   `tests/dynarmic_test_reader` and a `tests/unicorn_emu/` reference, i.e. a harness that generates A32
-   programs and compares engine output to a reference implementation. Enable `DYNARMIC_TESTS=ON` and run
-   the `arm` and `thumb` lanes on x86_64 Android in the emulator. Note two constraints: the reference in
-   that harness is **Unicorn (GPL-2.0)**, acceptable only as a separately-involved test dependency and
-   never linked into anything shipped (`docs/10` §13.3), and Dynarmic maintains its own exclusion list of
-   cases where *Unicorn* is wrong (`asimd_VRECPS`, `asimd_VRSQRTS`, `vfp_VCVT_from_fixed`) — those three
-   are therefore unresolvable by that oracle and need QEMU or hand-derived ARM ARM vectors.
+1. **Differential semantic lanes — first result in, and it is a good one.** Dynarmic's own
+   `dynarmic_tests` target builds with `DYNARMIC_TESTS_USE_UNICORN=OFF` (the default), so **no GPL code
+   is configured, built, or linked** — the `docs/10` §13.3 clean-room posture stays intact while we still
+   get a large existing ARMv7 test suite. Run via [`../tools/run_engine_tests.sh`](../tools/run_engine_tests.sh)
+   on the x86_64 emulator: **200,561 assertions in 48 test cases, all passing**, including
+   `A32/test_svc.cpp` (guest kernel entry) and `A32/test_coprocessor.cpp` (CP15 / TLS registers) — the two
+   paths RetroBug leans on hardest and the ones a console-oriented front end might plausibly neglect.
+   Two limits before this counts as verification: the build exercises the **x64** backend for A32, so the
+   AArch64 backend that real arm64 devices use is still untested (and running an arm64 build under the
+   emulator's arm64→x86 translation would not be representative of a JIT — that lane needs arm64 hardware
+   or CI runners, §17's U-14); and it asserts what Dynarmic chose to assert, leaving anything outside its
+   test set — plus its own "FPSR state is approximate" admission — still open.
 2. **Mnemonic→handler mapping tool.** Automate the presence half: map each histogram entry onto the
    `Translate*` group that implements it, so "which of the 855 mnemonics real code uses are unhandled" is
    a query rather than a grep. Small, and it turns §4 into a number.
 3. **IT-block and FP-status vectors first.** Ranked by §2: IT-blocks, `f64` VFP paths, `vmrs`/FPSCR,
-   ASIMD structures.
+   ASIMD structures — these are where Dynarmic's own suite is thinnest relative to measured demand.
 4. Repeat on the **app-level** corpus once `docs/research/10`'s APK fixtures are downloaded, since
    bionic will under-represent what games' hand-written assembly and codec libraries use.
 
