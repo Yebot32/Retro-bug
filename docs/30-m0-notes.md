@@ -188,6 +188,70 @@ Also fixed while here: the destructor unmapped from the aligned window base with
 which could have run past the reservation and released unrelated host memory; the original reservation is
 now tracked and released as a whole.
 
+## Step 5 — `rb::loader` (C05): implemented and compiling; **execution not yet verified**
+
+`core/loader/guest_elf.cpp` loads a real armeabi-v7a shared object into `rb::mem`: program headers,
+per-segment file mapping at the correct residual offset (`p_offset - (p_vaddr & ~PAGE_MASK)`),
+`R_ARM_RELATIVE` / `ABS32` / `GLOB_DAT` / `JUMP_SLOT` application, import refusal when a symbol cannot
+be bound, final segment protections then `PT_GNU_RELRO` stripping, export/import tables, `DT_NEEDED`,
+and an optional `PT_NOTE` build-id. `core/tests/guest_elf_test.cpp` asserts all of it.
+
+**Status, stated precisely: the loader and its tests build, but they have not been executed.** The
+emulator stopped being able to start partway through this step (see the acceleration note below), and
+these tests need a running Android guest to load an image into. Everything claimed green earlier in
+this file was actually run; nothing claimed here was.
+
+**The test derives its expectations from the fixture instead of hard-coding them.** The first draft
+asserted offsets taken from an earlier spike `.so`; rebuilding the fixture as `tests/corpus/fixture_jni.c`
+moved every one of them, and `__register_atfork` appeared as a new import purely because the compiler
+decided to register an atfork handler. Any address baked in would have made the test fail loudly and
+meaninglessly, or worse, pass against a stale image. It now parses the fixture's own program headers,
+`.dynamic`, `.rel.dyn`, `.rel.plt` and symbol table, and compares each against what the loader wrote.
+The ELF structures it needs are shared with the loader via `core/include/rb/loader/elf_defs.h`.
+
+Two bugs caught by writing the shared definitions properly rather than trusting recall:
+
+1. **`Elf32_Sym.st_shndx` is 16-bit, not 32.** A `static_assert` on `sizeof(Sym32) == 16` fired
+   immediately; a 20-byte symbol entry would have walked the symbol table at the wrong stride and
+   read garbage names from the third entry onward, with no crash.
+2. **ARM relocation numbers.** Checked against the fixture's real `r_info` values:
+   `R_ARM_RELATIVE` is **23** (0x17) and `R_ARM_JUMP_SLOT` is **22** (0x16). The first draft had
+   `RELATIVE = 0x11` and `JUMP_SLOT = 0x17` — a swap that would have applied load-bias fixes to GOT
+   slots and vice versa, producing plausible pointers instead of an error. The values are now
+   commented with where they were verified.
+
+**Unverifiable-by-design point worth recording:** the loader's `LoadFromBytes` goes through
+`memfd_create`, because guest images arrive as bytes or asset fds and the isolated environment hands
+the same descriptors over Binder — and because code executed *from a file in app storage is forbidden*
+(docs/10 §7). It is called via `syscall(SYS_memfd_create, ...)` rather than the wrapper, since
+`memfd_create()` is only declared from API 30 and the core builds against android-26.
+
+**One real bug the test found by being written properly:** a load that failed partway left its
+already-mapped segments in place, because `LoadFromFd` returned early without unwinding. The test
+asserts `mapped_page_count() == 0` after a refused load, which is the behaviour that matters — a
+rejected image's leftover pages get picked up by the next load's free-space scan and surface as
+corruption somewhere unrelated to their cause. `LoadFromFd` now carries an RAII rollback that unmaps
+every segment it mapped unless the load commits.
+
+### The emulator lost its acceleration mid-step
+
+`emulator.exe -accel-check` reported **"AEHD (version 2.2) is installed and usable"** at the start of
+this session, and the AVD booted twice successfully (the step 3 and step 4 test runs above). It now
+reports **"Android Emulator hypervisor driver is not installed on this machine"**, and the x86_64 AVD
+refuses to start. So something about stopping the emulator unloaded a driver that was working — which
+means the locally-runnable test loop this session depended on is not reliably re-startable without
+re-arming AEHD.
+
+That needs elevation, so it is an operator action, not something to do quietly from a script. Two ways
+forward, and the un-accelerated attempt is in flight: re-install/start AEHD (or enable WHPX/Hyper-V
+instead), or boot with `-accel off`, which is expected to be very slow for an x86_64 guest on an
+x86_64 host and may not bring the framework up at all in a sane time. Until one of those works, the
+step 5 tests are **built, not run** — and `tools/run_engine_tests.sh` is the single command that will
+make them real.
+
+Also fixed in the runner: `[ -x "$BIN" ]` is the wrong test on Windows for an extension-less ELF
+output — the linker produced an 85 MB `dynarmic_tests` that `-x` called non-executable. It is now `-f`.
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |

@@ -5,7 +5,8 @@
 # as a host pointer without going through rb::mem (docs/20 §3, core/README.md).
 
 add_library(rb_core STATIC
-  mem/guest_memory.cpp)
+  mem/guest_memory.cpp
+  loader/guest_elf.cpp)
 
 target_include_directories(rb_core PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}/include"

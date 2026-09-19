@@ -35,19 +35,33 @@ ADB="$SDK/platform-tools/adb.exe"
   -DCMAKE_TOOLCHAIN_FILE="$SDK/ndk/$NDK_VER/build/cmake/android.toolchain.cmake" \
   -DANDROID_ABI="$ABI" -DANDROID_PLATFORM=android-26 -DCMAKE_BUILD_TYPE=Release \
   -DDYNARMIC_TESTS=ON -DDYNARMIC_TESTS_USE_UNICORN=OFF -DRB_BUILD_TESTS=ON >/dev/null
-"$NJ" -C "$BUILD" dynarmic_tests rb_interval_compat_tests
+"$NJ" -C "$BUILD" dynarmic_tests rb_interval_compat_tests rb_guest_memory_tests rb_guest_elf_tests
+
+# The armeabi-v7a fixture. Built for the guest ISA, not the test host's: the loader and the
+# execution tiers have to consume real ARMv7 bytes, and these are the same bytes M1 launches on
+# the phone (docs/21 §3).
+TC="$SDK/ndk/$NDK_VER/toolchains/llvm/prebuilt/windows-x86_64"
+FIXTURE="$BUILD/librb_fixture.so"
+"$TC/bin/clang.exe" --target=armv7-none-linux-androideabi26 --sysroot="$TC/sysroot" \
+  -mthumb -mfloat-abi=softfp -mfpu=neon -fPIC -shared -Os \
+  -o "$FIXTURE" "$ROOT/tests/corpus/fixture_jni.c" -llog
 
 BIN="$BUILD/external/dynarmic/tests/dynarmic_tests"
-[ -x "$BIN" ] || { echo "build produced no binary at $BIN" >&2; exit 1; }
+[ -f "$BIN" ] || { echo "build produced no binary at $BIN" >&2; exit 1; }
 
 "$ADB" wait-for-device
 # Device paths must not be rewritten by MSYS, and adb push clears the execute bit — both bit us
 # once already (docs/30-m0-notes.md).
-MSYS_NO_PATHCONV=1 "$ADB" push "$BIN" /data/local/tmp/dynarmic_tests >/dev/null
-MSYS_NO_PATHCONV=1 "$ADB" push "$BUILD/core/tests/rb_interval_compat_tests" /data/local/tmp/rb_interval_compat_tests >/dev/null
+for spec in "$FIXTURE:/data/local/tmp/librb_fixture.so" \
+            "$BUILD/core/tests/rb_interval_compat_tests:/data/local/tmp/rb_interval_compat_tests" \
+            "$BUILD/core/tests/rb_guest_memory_tests:/data/local/tmp/rb_guest_memory_tests" \
+            "$BUILD/core/tests/rb_guest_elf_tests:/data/local/tmp/rb_guest_elf_tests" \
+            "$BIN:/data/local/tmp/dynarmic_tests"; do
+  MSYS_NO_PATHCONV=1 "$ADB" push "${spec%%:*}" "${spec##*:}" >/dev/null
+done
 
 status=0
-for t in rb_interval_compat_tests dynarmic_tests; do
+for t in rb_interval_compat_tests rb_guest_memory_tests rb_guest_elf_tests dynarmic_tests; do
   echo "=== $t ==="
   MSYS_NO_PATHCONV=1 "$ADB" shell "chmod 755 /data/local/tmp/$t; /data/local/tmp/$t" || status=1
 done

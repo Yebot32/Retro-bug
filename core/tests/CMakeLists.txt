@@ -10,3 +10,8 @@ target_include_directories(rb_interval_compat_tests PRIVATE
 
 add_executable(rb_guest_memory_tests guest_memory_test.cpp)
 target_link_libraries(rb_guest_memory_tests PRIVATE rb_core)
+
+add_executable(rb_guest_elf_tests guest_elf_test.cpp)
+target_link_libraries(rb_guest_elf_tests PRIVATE rb_core)
+# Path the fixture is pushed to on the device by tools/run_engine_tests.sh.
+target_compile_definitions(rb_guest_elf_tests PRIVATE RB_FIXTURE_PATH="/data/local/tmp/librb_fixture.so")
