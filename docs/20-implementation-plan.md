@@ -21,6 +21,10 @@ Everything below was run on this machine on 2026-09-19. It matters because it de
 | Recover *per-API-level* symbol availability | **works locally, measured** | stub dirs exist for 21…35 and their symbol sets genuinely differ: `libc.so` exposes **1094 funcs at API 21 → 1226 at 24 → 1392 at 29 → 1470 at 33 → 1493 at 35**. Diffing the dirs recovers the API-availability table with no AOSP checkout. **No `.map` files ship in the NDK**, so this diff is the local source of truth |
 | Build + sign a complete APK **without Gradle, Python, or `gh`** | **works** | `javac -source 8 -target 8 -bootclasspath platforms/android-36/android.jar` → `d8 --output dexout/classes.zip --lib $AJ --min-api 21` → `aapt2 link -I $AJ --manifest … --min-sdk-version 21` → `jar -cfM0` → `zipalign -f -p 4` → `apksigner sign` (keystore from `keytool`) → `apksigner verify` clean. 29 103-byte APK, `aapt2 dump badging` reports `native-code: 'armeabi-v7a'`, `minSdkVersion:'21'` |
 | Disassembly / readelf / dexdump for review passes | **works** | NDK `llvm-objdump.exe`, `llvm-readelf.exe`; build-tools `dexdump` |
+| Build a **Windows host binary** (M0's original "desktop tests" plan) | **impossible here** | no `gcc`, `cc`, `clang`, `cl`, or mingw on PATH. §9 item 2 and M0's exit tests are re-homed to x86_64 Android as a result — this was the plan's most wrong assumption and it was caught before writing code |
+| Run x86_64 Android locally | **works** | `emulator.exe -accel-check` → "AEHD (version 2.2) is installed and usable"; an AVD already exists (`Medium_Phone`, android-37.1 google_apis_playstore/x86_64); `adb` 1.0.41 |
+| 16 KiB-page Android locally | **available in the image, not yet confirmed at runtime** | the only installed system image is the `ps16k` variant, which should mean 16 KiB pages → confirms AD-7's mixed-granule path locally. **Must be proven with `getconf PAGESIZE` on a booted emulator before it is claimed**, which also contradicts `docs/21` §1's "not testable locally" line in our favour |
+| `arm64-v8a` inside the x86_64 emulator | **available, by translation** | image props read `ro.system.product.cpu.abilist=x86_64,arm64-v8a`, `abilist64=x86_64,arm64-v8a`, `abilist32=` **empty**. Two uses: RetroBug's own arm64 build can run locally translated, and the empty `abilist32` independently reproduces the target device's 32-bit absence in a disposable environment |
 | **Run** an `armeabi-v7a` APK | **impossible here** | host CPU is `x86_64`; the only installed system image is `android-37.1/google_apis_playstore_ps16k` with empty `abilist32`. Needs a physical 64-bit-only arm64 phone |
 | Run the `qemu-arm` semantics oracle | **CI-only** | `linux-user` QEMU needs a Linux kernel; no WSL/Docker/Python locally |
 | `gradle`, `python`, `zip` on PATH | **absent** | use the Gradle wrapper (needs network) or the verified no-Gradle path; `jar` from the JDK replaces `zip`; **no tool in this project may require Python** |
@@ -68,10 +72,11 @@ Nineteen components. `Tier` = which execution path uses it (T0 normal path, T1 i
 | C18 | Import pipeline: APK parse, ABI gate, native-method index | `rb::import` (Kotlin+JNI) | BOTH | M1 | C05,C09 |
 | C19 | UI: library + long-press (AD-17), T1 first-run, badges, settings | Kotlin | BOTH | M1 (minimal) | C14,C16,C18 |
 
-Dependency-critical reading: **C01/C02/C03/C05/C07 + C08 form a closed loop that can be finished and tested on a
-desktop without Android at all** — a host Linux/Windows `rb-core` unit-test binary that runs guest code and serves a
-minimal fake syscall surface. That is the single most important structural fact in this plan: it means milestone 0
-can reach "executes a real ARMv7 `fib()` and returns 6765" with no device and no APK.
+Dependency-critical reading: **C01/C02/C03/C05/C07 + C08 form a closed loop that can be finished and tested without
+a phone and without an APK** — as a cross-compiled `rb_core_tests` binary running on the local x86_64 emulator (or on
+Linux CI), driving a guest `.so` loaded into its own process with a minimal fake syscall surface. That is the single
+most important structural fact in this plan: milestone 0 can reach "executes a real ARMv7 `fib()` and returns 6765"
+with no device and no APK. It cannot, however, reach it as a *Windows* executable — see §1.
 
 ```
 C01 → C02 → C08 ↘
@@ -415,13 +420,19 @@ Build targets, in the order a developer needs them: `rb_core_host_tests` (deskto
 `M0` exists for one reason: the device is the scarcest dependency, so everything not requiring one is pulled
 forward and made green first.
 
-### M0 — emulation core bring-up, no Android, no APK *(fully local)*
+### M0 — emulation core bring-up: no phone, no APK *(fully local)*
+
+Test target is **x86_64 Android binaries cross-compiled by the NDK and run in the local emulator**
+(`rb_core_tests` pushed with `adb push`, executed over `adb shell`) — not a Windows host build, which this machine
+cannot produce (§1). Dynarmic's existing **x64 backend for the A32 front end** makes this more than a stand-in:
+Tier J is genuinely exercised here, and `docs/research/07` notes that same backend is what its CI differentially
+tests against. Linux CI carries the `qemu-arm` oracle and the arm64 build.
 | Deliverable | Acceptance test |
 |---|---|
 | Dynarmic vendored + patched; Tier I and Tier J over one IR | same guest program bit-identical in `MachineState` under both tiers (back-end equivalence, not semantics) |
 | Semantics vs external oracle | `qemu-arm` linux-user on CI, ≥ 1 000 instruction-vector programs, **0 mismatches**; ARMv7 barriers/LDREX/IT-block/NEON each explicitly covered |
 | Decoder coverage audit | `llvm-objdump` over corpus `.so`s ⇒ every mnemonic in `CoverageReport` or a triaged gap list. **This closes U-8 host-side** |
-| `rb::mem` + address models | 4 KiB guest / 16 KiB host mixed-granule unit tests; `guest_base != 0` exercised on x86_64 host so no identity-only code path survives |
+| `rb::mem` + address models | 4 KiB guest / 16 KiB host mixed-granule tests (the local image is a `ps16k` build — confirm `getconf PAGESIZE`, §1); `guest_base != 0` exercised under x86_64 Android so no identity-only code path survives |
 | `rb::loader` | loads a real `armeabi-v7a` `.so` (the one built in §1) into a host process, applies relocations, resolves `libc.so` symbols to our own implementations |
 | `fib(20) == 6765` | **the M0 exit test**: call the loaded `Java_..._stringFromJNI` through `rb::abi` with a fake `JNIEnv`, under Tier I and Tier J, assert identical result |
 | Audio proxy strategy locked | one stub-lib sweep confirms §1's finding for every remaining guest library, so no interface-vtable API is ever assumed symbol-generatable |
