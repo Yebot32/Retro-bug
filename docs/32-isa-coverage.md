@@ -71,18 +71,21 @@ identified; correctness against a reference is not yet measured.
 
 ## 5. The remaining work, in priority order
 
-1. **Differential semantic lanes — first result in, and it is a good one.** Dynarmic's own
+1. **Differential semantic lanes — done on both back ends, and the arm64 half was the interesting one.**
+   Dynarmic's own
    `dynarmic_tests` target builds with `DYNARMIC_TESTS_USE_UNICORN=OFF` (the default), so **no GPL code
    is configured, built, or linked** — the `docs/10` §13.3 clean-room posture stays intact while we still
-   get a large existing ARMv7 test suite. Run via [`../tools/run_engine_tests.sh`](../tools/run_engine_tests.sh)
-   on the x86_64 emulator: **200,561 assertions in 48 test cases, all passing**, including
+   get a large existing ARMv7 test suite. Run via [`../tools/run_engine_tests.sh`](../tools/run_engine_tests.sh):
+   **200,561 assertions, all passing** on the x86_64 emulator (48 cases) *and* on arm64 hardware (47 — the
+   one-case difference is dynarmic's own x86-only, assertion-free `x64_cpu_info.cpp`, verified in its
+   `CMakeLists.txt` rather than backed out of the arithmetic), including
    `A32/test_svc.cpp` (guest kernel entry) and `A32/test_coprocessor.cpp` (CP15 / TLS registers) — the two
    paths RetroBug leans on hardest and the ones a console-oriented front end might plausibly neglect.
-   Two limits before this counts as verification: the build exercises the **x64** backend for A32, so the
-   AArch64 backend that real arm64 devices use is still untested (and running an arm64 build under the
-   emulator's arm64→x86 translation would not be representative of a JIT — that lane needs arm64 hardware
-   or CI runners, §17's U-14); and it asserts what Dynarmic chose to assert, leaving anything outside its
-   test set — plus its own "FPSR state is approximate" admission — still open.
+   Making the arm64 build compile at all needed a `compat/` Boost-shim fix, and the gap was itself a
+   finding: `apply_visitor` must unwrap `recursive_wrapper` the way Boost does (`docs/30` §Step 5f).
+   What stays open: it asserts what Dynarmic chose to assert, so anything outside its test set — plus its
+   own "FPSR state is approximate" admission — is uncovered, and **item 2 is what turns "green on its own
+   tests" into "covers what real code demands"**.
 2. **Mnemonic→handler mapping tool.** Automate the presence half: map each histogram entry onto the
    `Translate*` group that implements it, so "which of the 855 mnemonics real code uses are unhandled" is
    a query rather than a grep. Small, and it turns §4 into a number.
