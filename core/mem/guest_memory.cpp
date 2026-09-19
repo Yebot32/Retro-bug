@@ -305,11 +305,19 @@ bool GuestMemory::RebalanceGranule(std::size_t granule, std::string* err,
       flags |= MAP_ANONYMOUS;
     }
 
-    // Snapshot anything currently held out of line, so migrating in preserves guest bytes.
+    // Snapshot everything currently held in this granule, so migrating preserves guest bytes.
+    //
+    // This has to include pages that are *already* in place, not just out-of-line ones: the mmap
+    // below is MAP_FIXED over the top of them, and re-mapping a private file page from its fd resets
+    // it to the file's contents. That is not a theoretical cost — it is what a loader does. Applying
+    // relocations writes the GOT and .data.rel.ro while the segment is mapped writable, and the very
+    // next step is the protection pass that drops write; without the snapshot every relocated word
+    // silently reverts to its pre-relocation file value and the image runs with a GOT full of linker
+    // stub addresses. A kernel's mprotect never re-reads the file, and neither may this.
     std::vector<std::pair<std::size_t, std::vector<unsigned char>>> saved;
     for (std::size_t i : live) {
       Page& p = pages_[i];
-      if (p.backing && !IsFastmem(PageAddr(i))) {
+      if (p.backing) {
         std::vector<unsigned char> bytes(kGuestPage);
         std::memcpy(bytes.data(), p.backing, kGuestPage);
         saved.emplace_back(i, std::move(bytes));

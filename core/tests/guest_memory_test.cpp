@@ -12,14 +12,17 @@
  */
 #include "rb/mem/guest_memory.h"
 
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -37,6 +40,12 @@ void fail(const char* what, int line, const std::string& detail = {}) {
   do {                                      \
     ++checks;                               \
     if (!(__VA_ARGS__)) fail(#__VA_ARGS__, __LINE__); \
+  } while (0)
+
+#define CHECK_CTX(cond, detail)              \
+  do {                                       \
+    ++checks;                                \
+    if (!(cond)) fail(#cond, __LINE__, detail); \
   } while (0)
 
 /// This kernel's real page-size shift. mmap/mprotect cannot be finer than this, so an injected
@@ -223,6 +232,74 @@ void protect_migration_preserves_content_both_ways() {
   CHECK(gm->Write(0x2000, payload, sizeof payload));  // writable again through the fast path
 }
 
+/// A private file mapping has to behave like a kernel's: changing its protection changes permission
+/// and nothing else.
+///
+/// This is the shape the ELF loader drives the model through on every single load — map a segment
+/// writable, write its relocations into it, then drop the write bit for RELRO and text. If the
+/// protection change re-establishes the mapping from the fd instead, every word the loader wrote
+/// reverts to the file's copy, and the guest runs with the linker's placeholder GOT while the load
+/// reports complete success. The anonymous migration test above cannot catch that: an anonymous
+/// granule has no fd to fall back to.
+void file_backed_writes_survive_a_protection_change() {
+  // 12 and 14 KiB shifts cover the two rebalancing forms: at 4 KiB every granule is one page, so a
+  // protection change stays in place; at 16 KiB four differently-protected guest pages share one
+  // granule and have to migrate out of line. Both must preserve content.
+  for (const unsigned shift : {12u, 14u}) {
+    auto gm = make(shift);
+    if (!gm) return;
+    std::string err;
+    const std::size_t n = 4 * kGuestPage;
+    int fd = -1;
+#if defined(SYS_memfd_create)
+    fd = static_cast<int>(syscall(SYS_memfd_create, "rb-file-pages", 0u));
+#endif
+    if (fd < 0) {
+      ++skipped;
+      std::printf("SKIP   file-backed protection change (no memfd: %s)\n", std::strerror(errno));
+      return;
+    }
+    std::vector<unsigned char> content(n);
+    for (std::size_t i = 0; i < n; ++i) content[i] = static_cast<unsigned char>(i * 31 + 7);
+    for (std::size_t done = 0; done < n;) {
+      const auto w = ::pwrite(fd, content.data() + done, n - done, static_cast<off_t>(done));
+      if (w <= 0) break;
+      done += static_cast<std::size_t>(w);
+    }
+    CHECK(gm->MapFile(0x0, n, kRead | kWrite, fd, 0, /*shared=*/false, &err));
+
+    // Two words, in different granules at the 16 KiB shift, and a sentinel the file does not contain.
+    const std::uint32_t marker = 0xA1B2C3D4u;
+    CHECK(gm->Write(0x0008, &marker, sizeof marker));
+    CHECK(gm->Write(0x2008, &marker, sizeof marker));
+
+    // Uniform change: the granule stays in place.
+    CHECK(gm->Protect(0x0, n, kRead | kExec, &err));
+    std::uint32_t got = 0;
+    CHECK(gm->Read(0x0008, &got, sizeof got));
+    CHECK_CTX(got == marker, "shift " + std::to_string(shift) + " page 0 after mprotect: 0x" +
+                                 std::to_string(got));
+    got = 0;
+    CHECK(gm->Read(0x2008, &got, sizeof got));
+    CHECK_CTX(got == marker, "shift " + std::to_string(shift) + " page 2 after mprotect");
+    CHECK(gm->Write(0x0008, &marker, sizeof marker) == false);  // the new permission is real
+    unsigned char unchanged[4] = {};
+    CHECK(gm->Read(0x1000, unchanged, sizeof unchanged));
+    CHECK_CTX(std::memcmp(unchanged, content.data() + 0x1000, 4) == 0,
+              "untouched file bytes must still read as the file's");
+
+    // Conflicting protection in one granule: migrates out of line, and must still hold the writes.
+    CHECK(gm->Protect(0x1000, 0x1000, kRead | kWrite, &err));
+    got = 0;
+    CHECK(gm->Read(0x0008, &got, sizeof got));
+    CHECK_CTX(got == marker, "shift " + std::to_string(shift) + " page 0 after leaving fastmem");
+    got = 0;
+    CHECK(gm->Read(0x2008, &got, sizeof got));
+    CHECK_CTX(got == marker, "shift " + std::to_string(shift) + " page 2 after leaving fastmem");
+    ::close(fd);
+  }
+}
+
 void unmap_clears_both_forms() {
   auto gm = make(14);
   if (!gm) return;
@@ -364,6 +441,7 @@ int main() {
   RUN(same_protections_stay_in_fastmem_at_16k);
   RUN(mixed_protections_stay_in_fastmem_on_a_4k_host);
   RUN(protect_migration_preserves_content_both_ways);
+  RUN(file_backed_writes_survive_a_protection_change);
   RUN(unmap_clears_both_forms);
 
   RUN(translate_round_trips_in_both_forms);
