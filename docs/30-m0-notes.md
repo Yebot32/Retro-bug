@@ -290,6 +290,11 @@ them cheap or silent: give the wrapper a conversion set that makes the variant p
 `variant`'s inherited converting constructor reject wrapper sources; or use real Boost headers for the
 AArch64 lane only. Deciding this needs a proper look, so it is written down rather than patched blind.
 
+> **Resolved in Step 5f, and none of the three options above was the cause.** All three assume the
+> conversion set is the problem; it is not. `apply_visitor` was forwarding the `recursive_wrapper` to
+> the visitor, which is what Boost does *not* do. Left as written above because the diagnosis here was
+> the state of knowledge at this point in the sequence.
+
 It does not block the tests that matter today. **`rb::mem` and `rb::loader` have no engine dependency**
 (docs/20 §3 lists their dependencies as none), so `core/CMakeLists.txt` is split into `rb_mem`,
 `rb_loader`, and an aggregate `rb_core`, and the memory and loader suites now build and run on a target
@@ -476,6 +481,73 @@ cross-checked against `llvm-readelf` rather than against itself. **What may not:
 has been *executed* yet (that is Step 6, `rb::exec`), the Thumb tag is verified as a reported value and
 not as a mode switch that ran, `.so` files needing `R_ARM_COPY`/`THM_*` relocations are still untested,
 and the mixed-granule loader path on a **native** 16 KiB host is still emulator-blocked.
+
+## Step 5f — Step 5b resolved: `apply_visitor` has to unwrap, and the arm64 DBT lane runs on hardware
+
+Step 5b left the AArch64 ambiguity **unresolved** and listed three candidate fixes — weaken the
+wrapper's conversion set, make `variant`'s converting constructor reject wrapper sources, or take real
+Boost for that lane. All three were the wrong shape: they attacked the conversions, and the conversions
+were fine. The missing piece is that **Boost's visitor dispatch unwraps `recursive_wrapper` before
+calling the visitor**, so a visitor's `operator()(const If&)` receives an `If`. A bare `std::visit` —
+what my shim forwarded to — hands over the wrapper instead, and *that* is what makes the call
+ambiguous. Unwrapped, the by-value alternative overload is an exact match and the whole-variant overload
+is not even a candidate. Fourth option, none of the three above needed, and no edit to
+`external/dynarmic`: `detail::invoke_visitor` in `compat/boost/variant.hpp`, used by all three
+`apply_visitor` overloads.
+
+Two small changes fell out of the same reading, both in the shim:
+
+- `recursive_wrapper`'s default constructor left `held_` null while `operator const T&()`
+  dereferences it unconditionally — reachable undefined behaviour from legal code. It now always
+  holds a `T`, as Boost's does, and the null branches in copy/`operator==` went away with it.
+- `mutate()` (added earlier, used nowhere) became a `value()` pair, which is what the unwrapping
+  dispatch needs: `T&` from a mutable variant, `const T&` from a const one.
+
+**Why this was worth a test, not just a green build.** "It compiles now" is not the property; the
+property is *which overload the visitor reaches*, because a shim that quietly preferred the
+whole-variant overload would also compile and would recurse forever. `core/tests/variant_compat_test.cpp`
+(12 checks) asserts the unwrapped type is what the generic lambda sees, drives dynarmic's exact
+overload shape and records which function ran, reproduces the incomplete-type declaration order from
+`ir/terminal.h`, and checks deep-copy and `which()`/`get<>` behaviour. `boost::get<Interpret>` is
+included because that is the only wrapped-variant `get` dynarmic performs, and my shim forwards it to
+`std::get_if` — which requires the exact alternative type, so had it asked for a wrapped one it would
+not have compiled.
+
+**Measured, all five suites, one run:**
+
+| Suite | Result |
+|---|---|
+| `rb_interval_compat_tests` | 33 checks, 0 failures |
+| `rb_variant_compat_tests` (new) | 12 checks, 0 failures |
+| `rb_guest_memory_tests` | 131 checks, 0 failures, 0 skipped |
+| `rb_guest_elf_tests` | 71 checks, 0 failures |
+| `dynarmic_tests` | **200,561 assertions in 47 test cases, all passing** |
+
+The engine number matters more than the four above it: it is Dynarmic's **AArch64** back end translating
+A32 IR into real arm64 host code and executing it, which is the configuration RetroBug ships on Android.
+The x86_64 emulator run was 48 cases for the same 200,561 assertions, and the difference is not a lost
+test — `tests/x64_cpu_info.cpp` is added by dynarmic's own `CMakeLists.txt` only
+`if ("x86_64" IN_LIST ARCHITECTURE)` and its `TEST_CASE` prints xbyak's CPU-feature table with **zero**
+assertions. Checked in the CMakeLists, not inferred from the arithmetic.
+
+`tools/run_engine_tests.sh` now keeps one `SUITES` list for build, push and run (a suite missing from the
+push list silently stops being evidence, which is how `rb_variant_compat_tests` would have been missed),
+and the `MSYS_NO_PATHCONV` trap got its fix: that variable is needed for the *device* path but also
+stops conversion of the *local* path, so `adb.exe` was handed a `/c/...` path it cannot open and the
+push failed on a file that plainly exists. `to_host()` converts the local path explicitly; a Linux CI
+runner takes the no-op branch.
+
+**Attribution, stated carefully.** The five-suite run above went to the **SM-X710 Tab S9** — confirmed by
+reading `ro.product.model` and the `/data/local/tmp` timestamps on it. The earlier `dynarmic_tests` pass
+that first showed the arm64 lane green was run while the OnePlus 12 was the attached device; that
+attribution rests on which device was connected at the time rather than on a property read from the
+device, so it is the weaker of the two claims. What is not in doubt: the AArch64 lane has now passed on
+two different arm64 devices, so it is not a one-machine result.
+
+Consequence for the plan: `docs/10` §17's U-8 line "still unverified: the AArch64 A32 backend" is
+closed, and Step 5b's `compat/` limitation is gone. What that lane still does **not** cover is unchanged
+and is written in the script's header: dynarmic asserts what it asserts, and no guest app instruction has
+run yet — that is Step 6, `rb::exec`.
 
 ## Standing environment facts (so they are not re-derived)
 

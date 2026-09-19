@@ -19,6 +19,7 @@
 #include <memory>
 #include <set>
 #include <tuple>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -39,15 +40,18 @@ namespace boost {
 template <typename T>
 class recursive_wrapper {
  public:
-  recursive_wrapper() = default;
+  /// Always holds a real `T`, as Boost does: `operator const T&()` dereferences this unconditionally,
+  /// so a null `held_` would be undefined behaviour reachable through a perfectly legal
+  /// default-construction. Only instantiated if someone actually default-constructs a wrapper, which
+  /// dynarmic does not — its variant's first alternative is the unwrapped `Invalid`.
+  recursive_wrapper() : held_(std::make_unique<T>()) {}
   recursive_wrapper(const T& value) : held_(std::make_unique<T>(value)) {}
   recursive_wrapper(T&& value) : held_(std::make_unique<T>(std::move(value))) {}
-  recursive_wrapper(const recursive_wrapper& other)
-      : held_(other.held_ ? std::make_unique<T>(*other.held_) : nullptr) {}
+  recursive_wrapper(const recursive_wrapper& other) : held_(std::make_unique<T>(*other.held_)) {}
   recursive_wrapper(recursive_wrapper&&) noexcept = default;
 
   recursive_wrapper& operator=(const recursive_wrapper& other) {
-    held_ = other.held_ ? std::make_unique<T>(*other.held_) : nullptr;
+    held_ = std::make_unique<T>(*other.held_);
     return *this;
   }
   recursive_wrapper& operator=(recursive_wrapper&&) noexcept = default;
@@ -56,18 +60,19 @@ class recursive_wrapper {
     return *this;
   }
 
-  /// Only the const conversion, as Boost does. Adding a non-const `operator T&()` makes every
-  /// by-value `EmitA32Terminal(..., IR::Term::If terminal, ...)` call ambiguous — the compiler has
-  /// two equally-ranked user-defined conversions and cannot prefer one, which is exactly what
-  /// Dynarmic's AArch64 backend hit at emit_arm64_a32.cpp:153.
+  /// The conversion Boost provides, and the reason dynarmic's `EmitA32Terminal(..., IR::Term::If
+  /// terminal, ...)` by-value parameters keep compiling. Only the const form exists, because a
+  /// non-const `operator T&()` would give the wrapper two equally-ranked user-defined conversions
+  /// into a `const T&` parameter. Reachable values that need mutation go through `value()` below,
+  /// which is also what apply_visitor uses rather than relying on this conversion.
   operator const T&() const { return *held_; }
-  T& mutate() { return *held_; }
+  /// Direct access, in both const-nesses. `apply_visitor` below uses this to hand the visitor the
+  /// wrapped value rather than the wrapper, which is what Boost's visitor dispatch does.
+  T& value() { return *held_; }
+  const T& value() const { return *held_; }
   const T* get() const { return held_.get(); }
 
   friend bool operator==(const recursive_wrapper& a, const recursive_wrapper& b) {
-    if (!a.held_ || !b.held_) {
-      return a.held_ == b.held_;
-    }
     return *a.held_ == *b.held_;
   }
 
@@ -93,6 +98,37 @@ class variant : public std::variant<Types...> {
   std::size_t which() const { return this->index(); }
 };
 
+namespace detail {
+
+template <typename T>
+struct is_recursive_wrapper : std::false_type {};
+template <typename T>
+struct is_recursive_wrapper<recursive_wrapper<T>> : std::true_type {};
+
+/**
+ * Invoke a visitor on one alternative, unwrapping a `recursive_wrapper` first.
+ *
+ * This is not a convenience. Boost's visitor dispatch tests `is_recursive_wrapper` on each
+ * alternative and forwards the *held* value, so a visitor's `operator()(const If&)` overload is what
+ * gets selected. Forwarding the wrapper instead — which is what a bare `std::visit` does — leaves
+ * dynarmic's terminals ambiguous: `EmitA32Terminal` has one overload per alternative taking it by
+ * value plus one taking the whole `Terminal` variant, and a `recursive_wrapper<CheckHalt>` argument
+ * reaches either through exactly one user-defined conversion, so neither outranks the other and
+ * every wrapped alternative fails to compile (`If`, `CheckBit`, `CheckHalt` — the three wrapped
+ * ones — and nothing else, which is what identified it). Unwrapped, the specific overload is an
+ * exact match and the variant overload is not a candidate at all.
+ */
+template <typename Visitor, typename Alternative>
+decltype(auto) invoke_visitor(Visitor&& visitor, Alternative&& alt) {
+  if constexpr (is_recursive_wrapper<std::remove_cvref_t<Alternative>>::value) {
+    return static_cast<Visitor&&>(visitor)(alt.value());
+  } else {
+    return static_cast<Visitor&&>(visitor)(static_cast<Alternative&&>(alt));
+  }
+}
+
+}  // namespace detail
+
 /// Present only because dynarmic's Common::detail::VariantVisitor derives from it; the
 /// inherited `Lambda::operator()` is what std::visit actually calls.
 template <typename ResultT>
@@ -100,19 +136,27 @@ struct static_visitor {
   using result_type = ResultT;
 };
 
+/// The three overloads exist so the down-cast to the `std::variant` base keeps the caller's
+/// value-category and const-ness, which is what decides whether a visitor sees `T&` or `const T&`.
 template <typename Visitor, typename... Alt>
 decltype(auto) apply_visitor(Visitor&& visitor, variant<Alt...>& v) {
-  return std::visit(std::forward<Visitor>(visitor), static_cast<std::variant<Alt...>&>(v));
+  return std::visit(
+      [&](auto&& a) -> decltype(auto) { return detail::invoke_visitor(visitor, a); },
+      static_cast<std::variant<Alt...>&>(v));
 }
 
 template <typename Visitor, typename... Alt>
 decltype(auto) apply_visitor(Visitor&& visitor, const variant<Alt...>& v) {
-  return std::visit(std::forward<Visitor>(visitor), static_cast<const std::variant<Alt...>&>(v));
+  return std::visit(
+      [&](auto&& a) -> decltype(auto) { return detail::invoke_visitor(visitor, a); },
+      static_cast<const std::variant<Alt...>&>(v));
 }
 
 template <typename Visitor, typename... Alt>
 decltype(auto) apply_visitor(Visitor&& visitor, variant<Alt...>&& v) {
-  return std::visit(std::forward<Visitor>(visitor), static_cast<std::variant<Alt...>&&>(v));
+  return std::visit(
+      [&](auto&& a) -> decltype(auto) { return detail::invoke_visitor(visitor, std::move(a)); },
+      static_cast<std::variant<Alt...>&&>(v));
 }
 
 /// `boost::get<T>(&v)` — pointer-returning, null when the active alternative is not T.
