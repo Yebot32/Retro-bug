@@ -54,6 +54,8 @@ verified.
 | AD-14 | Vendored Dynarmic kept **byte-identical to upstream**, RetroBug changes only in `patches/` + wrapper | `docs/research/08`: upstream drift cost that team weeks; also makes provenance auditable | C12 |
 | AD-15 | Host **GLES forwarding on Android**, ANGLE-on-Metal on iOS, **SwANGLE as universal reference renderer**; Vulkan is not the host abstraction | Android 16 CDD still mandates GLES1/2/3 [UNVERIFIED U-4]; one host API per platform beats one abstraction everywhere | C4 |
 | AD-16 | **Vocabulary + license hygiene in-repo**: `NOTICE.md`, `LICENSES/`, `REUSE.toml`, clean-room protocol doc, `external/` provenance | Apache-2.0 §4 is a distribution obligation that starts on day one, not at release | C12 |
+| AD-17 | **T1 entry is a long-press on the app's library entry**, opening a contextual "Enter isolated environment"; single tap still means T0 | A deliberate, discoverable gesture is what makes "never a silent fallback" true in practice, and it fixes the list's data model before Phase 2 wires it | — |
+| AD-18 | **App Revival patches are orthogonal to the tier** — they apply on T0 and never require T1; the two are separate optional tools on one profile row | Coupling them would push apps into the slower tier to fix a problem a patch already solves | — |
 
 ---
 
@@ -414,7 +416,55 @@ apps, not a RetroBug defect** — the `docs/research/05` §3.5 disclosure list D
 wording, with crypto-erase (Keychain-wrapped key + `FileProtectionType.complete`) substituting for guaranteed
 teardown.
 
+### 10.7 AD-17 — entering T1 is a long-press on the app's list entry
+
+Decided now, not deferred to polish, because the gesture determines the library screen's data model (an app entry
+must know its own tier state and patch state before Phase 2 wires the list) and because a discoverable, deliberate
+entry gesture is what keeps brief (c)'s "never a silent fallback" true in practice.
+
+**The interaction.** The library is RetroBug's normal app list. **A single tap on an entry launches it on T0** —
+that is the zero-config path (f) and it never changes. **A long-press (long-hold) on an entry opens that app's
+contextual action surface**, whose primary item is:
+
+> **Enter isolated environment** — for this app only
+
+Long-press is the *defined* gesture. Because long-press alone is inaccessible (motor impairment, switch-control and
+screen-reader users, and some stylus users), the same contextual surface must also be reachable from a visible
+overflow control on the entry and from the app's detail screen; the gesture and the overflow open **one** menu, not
+two implementations. That is an accessibility requirement on the design, not a later addition.
+
+**Contextual items on the same surface** (all per-app, all per-tier-explicit): compatibility profile summary,
+active App Revival patches (§12), force-check/repair the isolated environment's self-test, reset this app's
+profile, and remove this app.
+
+**States the entry must render**, which is why this constrains the data model:
+
+| State | Rendering |
+|---|---|
+| never launched | plain entry |
+| last/next launch on T0 | plain entry; tier is implicit (T0 is the default and needs no badge cluttering the list) |
+| flagged by App Revival heuristics as wanting T1 | quiet indicator **plus** a one-line reason; tapping still launches T0 — the indicator only points at the long-press menu |
+| T1 created for this app | labelled "Isolated environment created" so the user knows a second, separate thing exists |
+| currently running in T1 | in-progress indicator, and the running surface carries the badge below |
+
+**What must never happen:** no automatic transition to T1, no "we couldn't start it normally so we switched you"
+path, and no T1 option that is disabled-but-visible without an explanation. Concretely: the T1 bind failure case
+(§10.3) renders a failure message naming the reason and **must not** offer "try normally instead" as a follow-up,
+because that would reintroduce the silent fallback through the back door.
+
+**Entering T1 shows a first-run screen** stating, in the user's language, the reduced contract — no network unless
+they turn it on for this app, software rendering unless they opt into the experimental hardware channel, slower
+cold start and lower fps, and that a bug in RetroBug cannot cross this line because Android's own process sandbox
+enforces it. On iOS the same screen carries the §10.6 disclosures, since T1 there is monitor-enforced only.
+
+**While running, the tier is always visible.** T1 sessions render a persistent badge and a distinct frame/colour so
+"running normally" and "running in an isolated environment" can never be confused at a glance, and the exit
+affordance is explicit rather than only the system back gesture. T0 renders no badge. This is the visual
+counterpart to the naming discipline in AD-8: the badge is where the tier name is *earned* by the runtime
+self-test.
+
 ---
+
 
 ## 11. AD-12 — per-app profile model
 
@@ -430,6 +480,10 @@ two parallel config systems guarantee drift.
   API that takes an unnamespaced key, so "fall back to global" is not expressible. Defaults are a versioned
   compiled-in table keyed `(guestAppId, configName)`, never an ambient read of `SharedPreferences`,
   `Settings.*`, or system properties.
+- **Tier and patches are separate fields, neither implying the other** (AD-18). A profile row carries
+  `tier ∈ {T0, T1}` and `patches: []` independently; the schema must make a cross-reference between them
+  unrepresentable, so "patched ⇒ isolated" and "isolated ⇒ patched" are both non-starters in the data model, not
+  merely UI conventions.
 - **No cross-tier inheritance, stated explicitly.** A T1 row is created from probe results at creation time. It
   is **not** copied from, does not reference, and cannot be read by the T0 row for the same app — and vice versa:
   the T0 loader is handed a `NormalKey` type that an isolated instance cannot construct, and the T1 store lives
@@ -443,25 +497,108 @@ two parallel config systems guarantee drift.
 
 ## 12. AD-13 — App Revival extensibility
 
-Data-driven, three tiers, pattern taken from the developer's proven per-game system in `docs/research/08`
-(TOML overlays, hash-gated in-memory patching, built-in profiles with user overrides winning):
+Data-driven, three mechanisms, pattern taken from the developer's proven per-game system in `docs/research/08`
+(TOML overlays, hash-gated in-memory patching, built-in profiles with user overrides winning), which is itself the
+same shape as Xenia's per-game patch model:
 
 1. **Compatibility profiles** — declarative TOML per `(guestAppId, instanceId)`: executor/renderer/flag choices,
-   API-level behaviour divergences, virtualised `Settings`, permission grants.
-2. **In-memory code patches** — applied to the loaded guest image in the emulator's memory, keyed by
+   API-level behaviour divergences, virtualised `Settings`, permission grants, and named behaviour overrides such
+   as a synthesised connectivity state.
+2. **In-memory code patches** — applied to the loaded guest image inside the emulator's memory, keyed by
    `(library, sha256(build-id), byte pattern, arch)`. **The APK is never modified** (brief (g) and the distribution
-   posture in §13.3), and a build-id mismatch makes the patch inert rather than harmful.
+   posture in §13.3), so the user's copy stays byte-identical to what they imported and a build-id mismatch makes
+   the patch inert rather than harmful.
 3. **Diagnostics backbone** — the `>>> INITIALIZATION FAILED AT: <stage> <<<` probe-report pattern proven in
    `docs/research/08`: every appendable stage echoes "requested vs active", because silent-ignore interfaces were
-   what cost that team debug sessions.
+   what cost that team debug sessions. For patches that means a *declared* patch that failed to match must be
+   reported as inactive, never quietly skipped.
+
+### 12.1 AD-18 — the patch system is independent of T1, not a feature inside it
+
+**Patching belongs to the runtime reproduction layer, which both tiers use. It is not part of the sandbox and the
+sandbox is not a prerequisite for it.** Concretely:
+
+- **A patch applies on the normal T0 path.** An app whose startup connectivity check is broken but which needs no
+  actual internet is fixed by the patch and **stays on T0** — no isolation, no software renderer, no cold-start
+  penalty. This is the common case and it is the reason the two must not be coupled: coupling would move apps into
+  the slower tier to solve a problem the patch already solved.
+- **Two orthogonal axes on one profile row.** `tier ∈ {T0, T1}` and `patches: []` are separate fields with no
+  validation, UI state, or code path from either implying the other. Entering T1 must never require a patch entry
+  to exist; applying a patch must never change the tier. Phase 2 should assert this in the profile schema (no field
+  may reference the other) rather than rely on discipline.
+- **Usable independently or together.** Apps needing both get both, and the diagnostics report records the pair,
+  because a patch that behaves differently in T1 (different renderer, no `gpu_device`, proxied services) must be
+  visible as such rather than debugged blind.
+- **One honest interaction to surface in the UI.** T1's network is off by default (§10.5), while a connectivity
+  spoof reports "connected". Both can be true at once — the app believes it is online and no traffic flows — and
+  that combination is often exactly what the app wants. But a user reading "network available" may infer "this app
+  can reach the internet", so **every patch that touches connectivity states its effect on connectivity rather
+  than its mechanism**, and the T1 network opt-in toggle is presented separately from it.
+- **Scoping.** Patches are per `(guestAppId, instanceId)`: a patch created for one app is never offered to, or
+  inherited by, another, mirroring the config rule in §11.
+
+### 12.2 Worked example — spoofing "network available" (the reference shape for Phase 2)
+
+Target: a 2012-era app, `armeabi-v7a`-only, `targetSdk 10`, that shows *"No connection — check your network"* and
+exits at launch although its actual function needs no network. Three ways such a guard can be written, and the
+escalation ladder RetroBug uses to reach each. **All three run on T0.**
+
+| # | How the guard is written | RetroBug mechanism | Layer | Needs T1? |
+|---|---|---|---|---|
+| 1 | Java calls `ConnectivityManager.getActiveNetworkInfo()` / `isConnected()` | declarative override: the virtualised connectivity service returns a synthesised connected `NetworkInfo` **for that app only** | service layer (host ART side) | no |
+| 2 | Guest `.so` calls `getifaddrs()`, `ioctl(SIOCGIFFLAGS)`, or reads `/sys/class/net/wlan0/operstate` / `/proc/net/dev` | virtualise the interface-enumeration surface for that instance: one up, running, non-loopback `wlan0` with plausible MTU and `IFF_UP\|IFF_RUNNING\|IFF_BROADCAST\|IFF_MULTICAST` | syscall/VFS layer (AD-7's resolver already serves a synthetic `/proc`, so this is the same seam) | no |
+| 3 | Guard is inlined and uninterceptable by a behaviour flag — a cached comparison, a `strcmp` against a specific interface name, a check whose result is latched before any API is reached | hash-gated in-memory code patch on the loaded guest image | emulator memory, after load | no |
+
+Mechanisms 1 and 2 are declarative profile fields; only 3 needs a byte pattern. **Phase 2 should implement 1 and 2
+first**, because most legacy guards are written against the connectivity service, and the escalation to 3 must be
+possible to *detect* (the app still fails, the diagnostics show no connectivity API was ever called) rather than
+reached by guessing.
+
+Concrete shape of a tier-3 patch, as data (byte sequences illustrative, not from a real APK):
+
+```toml
+# revival/<guestAppId>/network-guard.toml
+[patch]
+id     = "appx-network-guard-1"
+title  = 'Skip startup "no connection" guard'
+effect = "App is told a network is present. Grants no internet access."   # §12.1 wording rule
+when   = "after_load"        # after the guest image is mapped, before JNI_OnLoad runs
+
+[[target]]
+library         = "libmain.so"
+build_id_sha256 = "9f2c…e17"    # mismatch ⇒ inert + a logged reason, never a best-effort apply
+arch            = "armeabi-v7a"
+expect          = 1             # exactly one match site; 0 or >1 ⇒ refuse and report
+
+[[target.op]]
+kind   = "redirect"            # nop | bytes | redirect
+match  = "2D E9 F0 47 06 46 0F F4 80 6F"   # Thumb-2 guard prologue, matched not offset-pinned
+to     = "@rb_spoof_connected"             # RetroBug-provided helper, emitted as *guest* code
+```
+
+Why `redirect` rather than just `nop`: the fix usually has to make the check *return true*, not remove the branch.
+So the patch system needs a way to **emit guest code** — a small assembler for the handful of ARMv7/Thumb-2
+sequences patch authors need, placed in a reserved region of that instance's code cache (hence instance-tagged,
+per §8.3 and C5) and targeted by a `B`/`BX` from the patched site. Matching a *prologue pattern* rather than
+pinning a file offset is what lets one patch survive a re-link of the same app build, and `expect = 1` is the
+safety rule: ambiguous matches are refused, not resolved by picking one.
+
+**Verification obligation** (brief (h) applied to patches, not just isolation): every shipped patch file carries
+an assertion — the observable post-conditions RetroBug must see if it worked (the app reached `Activity.onResume`,
+the connectivity API was called and answered, no `SIGSEGV` inside the patched block) — and CI runs patch tests
+against the corpus so a RetroBug change that silently breaks a patch fails a build rather than reappearing as a
+user report.
 
 **Flagging heuristics for T1** are a rule set over import analysis plus first-run diagnostics, and they *suggest* —
 they never enter: repeated guest crashes with a signature matching an environment-conflict class, `EACCES`/denied
 network the app evidently requires, path-collision between two guests' assumptions about shared storage, or an
 API-level behaviour divergence RetroBug's shared layer cannot satisfy simultaneously for all apps. Entering T1
-remains a visible, deliberate user transition (brief (c)).
+remains a deliberate user transition reached by the AD-17 long-press (brief (c)) — and note the ordering: the
+heuristic list is triaged **against patches first**, so a patchable startup guard never costs an app a trip into
+the slower tier.
 
 ---
+
 
 ## 13. AD-16 — cross-platform core split, and repo/licensing hygiene
 
@@ -532,7 +669,9 @@ claim:
 ## 15. What this document deliberately does not decide
 
 Component interface *signatures*, milestone slicing, the corpus list, CI shape, and the on-device test harness
-belong to Phase 2. Per the brief, Phase 2 does not start until this summary is approved.
+belong to Phase 2. Two UI matters are **already** decided here rather than deferred: the T1 entry gesture and its
+state rendering (AD-17, §10.7), and the rule that patches are tier-independent (AD-18, §12.1). Phase 2's UI work
+builds toward those directly.
 
 ---
 
@@ -593,3 +732,32 @@ domain beyond the three rules quoted, the Apple `pthread_jit_write_protect_np` q
 `java_vm_ext.cc`/`native_loader_namespace.cpp` line references, the MRA licence text, and `docs/research/08`'s
 first-party iOS probes. Each is load-bearing somewhere in this document and each is listed in §17 with its
 experiment.
+
+---
+
+## 18. Approval record
+
+Approved by the product owner on 2026-09-19, on the architecture summary rather than the full document:
+
+- **AD-3 approved** — guest managed code executes on the host's native 64-bit ART and only ARMv7 machine code is
+  emulated. The owner's wording: this "matches my intent", closing the question of whether running DEX natively
+  conflicts with the brief's "not a compatibility shim" constraint. It does not, as the owner reads it.
+- **The T0/T1 split approved** as the execution model (§3, §6, §10).
+
+Two additions the owner required before Phase 2, both now in this document rather than deferred:
+
+1. **§10.7 / AD-17** — T1 is entered by a **long-press on the app's entry in the normal library list**, opening a
+   contextual per-app option to enter that app's isolated environment. Defined as a required interaction now, with
+   the list state model and accessibility alternative, so Phase 2's UI work builds toward the gesture directly.
+2. **§12.1–§12.2 / AD-18** — the **App Revival patch system is architecturally independent of T1**, belonging to
+   the runtime reproduction layer that both tiers share. A patch (worked example: spoofing "network available" for
+   an app with a broken connectivity check that needs no real internet) applies on the **normal T0 path** without
+   moving the app into the isolated environment; patches and the isolated environment are separate optional tools
+   on an app's profile, usable independently or together; and the mechanism stays data-driven with no APK
+   modification, modelled on the owner's own per-game patch system in `docs/research/08` and on Xenia's per-game
+   patch shape.
+
+Still pending owner action: approval to **push** commits `a1a2d7b` and `c5e324c` (currently local-only), and the
+§17 items that need a physical 64-bit-only arm64 device — most consequentially **U-2** (4 GiB reservation) and
+**U-10** (whether an isolated process can load the guest DEX at all), since a U-10 failure restricts T1 to native
+code only and must then be disclosed in the UI per §10.5.
