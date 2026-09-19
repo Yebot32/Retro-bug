@@ -18,11 +18,11 @@ and why RetroBug exists. On this device there is **no possible native execution 
 `armeabi-v7a` binary, so the question "is it really emulating?" has a clean answer — and step
 E1 can be a hard negative control rather than an inference.
 
-**Cannot prove two things — one needs a second device, the other turned out to be testable locally:**
+**Two things one run here cannot settle on its own:**
 
 | Not proven on OnePlus 12 | Why | Where it gets covered |
 |---|---|---|
-| 16 KiB host page vs 4 KiB guest page mixed-granule path (AD-7) | SD 8 Gen 3 / OxygenOS ships 4 KiB pages | **Already available locally, not a device gap:** the x86_64 emulator measured `getconf PAGESIZE` = **16384** (`docs/30-m0-notes.md`), so the mixed-granule path is testable in M0. This row originally claimed a second device was required; it is not, and the OnePlus 12 run is still worth doing as confirmation on real hardware. |
+| 16 KiB host page vs 4 KiB guest page mixed-granule path (AD-7) | SD 8 Gen 3 / OxygenOS ships 4 KiB pages | **This device covers both granule cases, not neither.** On a 4 KiB host the native case is 4 KiB and the 16 KiB case is testable by injecting a coarser grouping — because `mmap`/`mprotect` granularity can be simulated *coarser* than the kernel's but never finer (`docs/30` §Step 4). The local x86_64 emulator (`getconf PAGESIZE` = 16384) tests 16 KiB natively and must skip its 4 KiB-only cases. So: 4 KiB + injected 16 KiB here, both natively-observed behaviours across the two machines. |
 | OEM variance of `execmem`/memfd-exec (U-13) | one OEM build is one data point | the 6-device probe matrix in `docs/research/05`'s test plan; OnePlus 12 is device #1 of that matrix, not the matrix |
 
 Record these as *limits of what one device run proves*, not as accepted conclusions.

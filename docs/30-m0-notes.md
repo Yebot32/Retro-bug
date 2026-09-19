@@ -147,6 +147,47 @@ Caveat carried forward: these are kernel VA answers from the `shell` domain, so 
 **executable-memory** answer does not necessarily transfer, since `execmem` is decided per SELinux domain.
 The authoritative app-domain result has to come from inside an installed RetroBug build (U-13).
 
+## Step 4 — `rb::mem` (C03): green, with one asymmetry worth knowing
+
+`core/mem/guest_memory.cpp` implements the window model, and `core/tests/guest_memory_test.cpp` covers it:
+**94 checks, 0 failures, 1 skipped** on the x86_64 emulator (page shift 14), alongside the interval suite's
+33/33. The mixed-granule behaviour AD-7 specified is now real and tested: two adjacent guest pages with
+different protections inside one host granule leave fastmem and are served out-of-line, rather than the
+model granting the union of their permissions — which would have quietly permitted guest writes to an RX
+page and destroyed both the W^X story and self-modifying-code detection.
+
+**The asymmetry: `host_page_shift` can be injected coarser than the kernel's page size, but never
+finer.** mmap/mprotect granularity is enforced by the kernel, so asking for 4 KiB on a 16 KiB host is
+`EINVAL`, not a simulation. The model now refuses that at `Create` with an explanatory error instead of
+silently mis-simulating. Consequences, one good and one to correct elsewhere:
+
+- **Good, and it changes the device plan:** a 4 KiB host can test *both* granules — native 4 KiB plus an
+  injected 16 KiB grouping, which is exactly the mixed case. The **OnePlus 12 is therefore the better
+  machine for granule testing**, not the worse; `docs/21` had listed 16 KiB coverage as something it
+  could not provide.
+- To correct: the earlier note in this file framing the emulator as making the 16 KiB path testable
+  "rather than requiring a second device" is only half right — it tests the 16 KiB case natively and
+  *loses* the 4 KiB one. Both cases together need one of each, and the suite now says so explicitly via
+  `SKIP` lines rather than passing quietly.
+
+Three defects the tests caught before this was committed, all worth remembering because two of them were
+silent rather than fatal:
+
+1. **Out-of-line migration read a page after withdrawing its permissions.** `mprotect(granule,
+   PROT_NONE)` ran before the snapshot `memcpy`, so the copy faulted. Caught as a SIGSEGV, and the crash
+   was only localisable after adding per-test progress markers, because on Android the crashing
+   process's own stdout is lost.
+2. **Fresh-page zeroing ran after the final protection was applied**, so mapping a guest page RX
+   faulted on its own memset. Now the granule is mapped writable, zeroed, then dropped to its final
+   permissions.
+3. **`Host()` ignored the intra-page offset** and returned the page base. This one is the dangerous
+   class: it returned a valid-looking pointer, so the first wrong read came from a *different* address
+   than requested rather than from any error at the call.
+
+Also fixed while here: the destructor unmapped from the aligned window base with a rounded-up length,
+which could have run past the reservation and released unrelated host memory; the original reservation is
+now tracked and released as a whole.
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |
