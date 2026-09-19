@@ -1047,7 +1047,6 @@ RunResult InterpExecutor::Run(MachineState& state, unsigned max_instructions) {
         state.mode = location.TFlag() ? isa::Mode::Thumb : isa::Mode::Arm;
         state.pc = location.PC();
         state.r[15] = location.PC();
-        state.itstate = location.IT().Value();
         ++steps;
         result.reason = StopReason::Budget;
         continue;
@@ -1077,9 +1076,12 @@ RunResult InterpExecutor::Run(MachineState& state, unsigned max_instructions) {
     state.mode = location.TFlag() ? isa::Mode::Thumb : isa::Mode::Arm;
     state.pc = location.PC();
     state.r[15] = location.PC();
-    state.itstate = location.IT().Value();
     result.reason = StopReason::Budget;
   }
+  // The IT mirror is derived from CPSR here rather than from each block's location descriptor, in both
+  // tiers, so that the two-tier comparison measures guest behaviour instead of two representations of
+  // the same field. Translation still takes IT from the descriptor, which is where Dynarmic keeps it.
+  state.itstate = ItStateFromCpsr(state.cpsr);
   result.instructions_executed = steps;
   return result;
 }

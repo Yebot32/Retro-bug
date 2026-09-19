@@ -122,6 +122,11 @@ GuestMemory::~GuestMemory() {
   for (const auto& block : out_of_line_) {
     munmap(block.host, block.bytes);
   }
+  // The mappings go away with the address space first, so closing these last only matters for the
+  // next `GuestMemory` in the same process — which the tests do build, one per case.
+  for (const int fd : owned_fds_) {
+    close(fd);
+  }
   if (raw_base_) munmap(raw_base_, raw_bytes_);
 }
 
@@ -193,12 +198,29 @@ bool GuestMemory::MapFile(std::uint32_t at, std::size_t len, unsigned prot, int 
     return false;
   }
 
+  // The caller's fd is duplicated and owned from here on. Keeping the number it handed over is a
+  // latent dangling descriptor: `Page::fd` is used again by every later re-granulation (a protection
+  // change, a `Protect` on one page of a loaded module), and a loader that closes its fd once the
+  // mapping exists is doing nothing wrong — the mapping has its own reference.
+  //
+  // Found that way, on the tier-diff test's `Protect` of a module's text page: `Bad file descriptor
+  // (errno 9)`, a symptom as far from its cause as this API can arrange. `guest_memory_test.cpp`'s
+  // file-backed case now closes the caller's fd for the same reason and fails 12 checks if this line
+  // ever goes back to `= fd`, because the failed re-map drops the pages it was rebalancing and every
+  // read after it is a fault on unmapped memory.
+  const int owned = ::dup(fd);
+  if (owned < 0) {
+    if (err) *err = SysErr("dup() of the file descriptor failed", errno);
+    return false;
+  }
+  owned_fds_.push_back(owned);
+
   for (std::size_t i = first; i < last; ++i) {
     DropPage(i);
     Page& p = pages_[i];
     p = Page{};
     p.prot = prot;
-    p.fd = fd;
+    p.fd = owned;
     p.file_backed = true;
     p.shared = shared;
     p.file_off = offset + ((i - first) * kGuestPage) + (at & (kGuestPage - 1));

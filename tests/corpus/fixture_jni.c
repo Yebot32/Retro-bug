@@ -114,3 +114,66 @@ JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_it_probe(JNIEnv* e
       : "cc");
   return out;
 }
+
+/*
+ * Two functions whose machine code differs in exactly one byte, for the code-cache invalidation test.
+ *
+ * The first attempt at that test patched a bit of `it_probe` and asserted the answer would change. It
+ * does not: inside an IT block the legs are encoded *unpredicated* — the condition lives in CPSR's IT
+ * field, not in the instruction — so `addgt` and `addle` differ only in their immediates, and the bit
+ * that was flipped happened to be one that neither leg's arithmetic cared about. The test then "passed"
+ * a patch that patched nothing, and its own author had to notice. So the byte being written here is
+ * known-bad-by-construction: the assertion is not "some other number came out" but "the number the
+ * *other* function returns on hardware came out", which is only reachable if the old code really is
+ * gone from the cache.
+ *
+ * Bodies are complete asm definitions with fixed registers, for two reasons: the compiler must not
+ * choose a different register allocation between the two (that would put differences in bytes nobody
+ * intended), and the shapes have to survive `-Os` the way `it_probe`'s do. `r2`/`r3` are the declared
+ * parameters under AAPCS, matching what `EntryState` sets up in the test rig. The trailing
+ * `__builtin_unreachable()` is not paranoia: `bx lr` means control never reaches the end of the body,
+ * and without that statement the compiler warns about a non-void function that "does not return", on a
+ * function that returns on every path.
+ *
+ * Expected values, derived here so the reader can check them: with (a,b) = (3,7) the `LE` leg adds five
+ * giving 8, and 8 < 10 takes the second block's `LT` leg to 1008. Adding seven gives 10, and `cmp 10,10`
+ * is not `LT`, so the patched form takes the `GE` leg to 10|0x20 = 42 — the one-byte patch also flips
+ * the *other* IT block, which is what makes it exercise two invalidated blocks rather than one. With
+ * (7,3) the first block takes the `GT` leg, which the patch does not touch, so both answer 42: the
+ * patch is local to the byte written. Immediates above 7 need the 32-bit form (`#9` does, and changed
+ * four bytes instead of one), which is why this pair is 5 and 7 rather than something larger.
+ */
+JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_patch_probe(JNIEnv* env, jclass clazz,
+                                                                         jint a, jint b) {
+  (void)env; (void)clazz; (void)a; (void)b;
+  __asm__ volatile(
+      "movs   r0, #0\n"
+      "cmp    r2, r3\n"
+      "ite    gt\n"
+      "addgt  r0, r2, #3\n"
+      "addle  r0, r2, #5\n"
+      "cmp    r0, #10\n"
+      "ite    lt\n"
+      "addlt  r0, r0, #1000\n"
+      "orrge  r0, r0, #0x20\n"
+      "bx     lr\n" ::: "r0", "cc");
+  __builtin_unreachable();
+}
+
+JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_patch_probe_b(JNIEnv* env,
+                                                                           jclass clazz, jint a,
+                                                                           jint b) {
+  (void)env; (void)clazz; (void)a; (void)b;
+  __asm__ volatile(
+      "movs   r0, #0\n"
+      "cmp    r2, r3\n"
+      "ite    gt\n"
+      "addgt  r0, r2, #3\n"
+      "addle  r0, r2, #7\n"
+      "cmp    r0, #10\n"
+      "ite    lt\n"
+      "addlt  r0, r0, #1000\n"
+      "orrge  r0, r0, #0x20\n"
+      "bx     lr\n" ::: "r0", "cc");
+  __builtin_unreachable();
+}

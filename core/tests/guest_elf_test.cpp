@@ -404,9 +404,10 @@ void applies_every_relocation_the_image_declares() {
   CHECK(slot_seen > 0);
 
   // Exports: every function the image defines is reported at st_value + bias, mapped, and inside a
-  // segment the loader has made read-only executable. All three of the fixture's exports are Thumb,
-  // so this is also where the bit-0 tag has to come out right: branch to the unmasked value and the
-  // guest runs its Thumb bytes through the ARM decoder, which does not fault — it does something else.
+  // segment the loader has made read-only executable. Every export in this fixture is a Thumb
+  // function, so this is also where the bit-0 tag has to come out right: branch to the unmasked value
+  // and the guest runs its Thumb bytes through the ARM decoder, which does not fault — it does
+  // something else.
   for (const auto& [name, value] : f.export_funcs) {
     auto found = mod->FindExport(name);
     CHECK_CTX(found.has_value(), "export " + name);

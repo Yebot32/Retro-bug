@@ -267,6 +267,12 @@ void file_backed_writes_survive_a_protection_change() {
       done += static_cast<std::size_t>(w);
     }
     CHECK(gm->MapFile(0x0, n, kRead | kWrite, fd, 0, /*shared=*/false, &err));
+    // The caller closes its own descriptor straight away, exactly as an ELF loader will: a mapping
+    // holds its own reference to the file, so nothing further may depend on this fd staying open.
+    // Everything below still has to work, including the re-granulations, which remap from the file.
+    // `MapFile` used to keep the number it was handed rather than duplicating it, and the first
+    // symptom was a `Protect` failing with EBADF long after the load.
+    ::close(fd);
 
     // Two words, in different granules at the 16 KiB shift, and a sentinel the file does not contain.
     const std::uint32_t marker = 0xA1B2C3D4u;
@@ -296,7 +302,6 @@ void file_backed_writes_survive_a_protection_change() {
     got = 0;
     CHECK(gm->Read(0x2008, &got, sizeof got));
     CHECK_CTX(got == marker, "shift " + std::to_string(shift) + " page 2 after leaving fastmem");
-    ::close(fd);
   }
 }
 

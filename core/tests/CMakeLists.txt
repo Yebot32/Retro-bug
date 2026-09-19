@@ -46,3 +46,9 @@ target_compile_definitions(rb_abi_jni_tests PRIVATE RB_FIXTURE_PATH="/data/local
 add_executable(rb_abi_call_tests abi_call_test.cpp)
 target_link_libraries(rb_abi_call_tests PRIVATE rb_abi rb_exec rb_loader)
 target_compile_definitions(rb_abi_call_tests PRIVATE RB_FIXTURE_PATH="/data/local/tmp/librb_fixture.so")
+
+# The back-end equivalence test (docs/20 §C02): one fixture, two tiers, every field of MachineState
+# compared, and both compared to the hardware oracle. It is the M0 exit test's second half.
+add_executable(rb_exec_tier_diff_tests exec_tier_diff_test.cpp)
+target_link_libraries(rb_exec_tier_diff_tests PRIVATE rb_exec rb_loader)
+target_compile_definitions(rb_exec_tier_diff_tests PRIVATE RB_FIXTURE_PATH="/data/local/tmp/librb_fixture.so")

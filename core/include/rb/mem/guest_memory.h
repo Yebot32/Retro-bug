@@ -149,6 +149,10 @@ class GuestMemory {
   AddressModel::Kind kind_ = AddressModel::kFlatIdentity;
   std::vector<Page> pages_;
   std::vector<OutOfLine> out_of_line_;
+  /// Descriptors duplicated from the `MapFile` arguments, closed with the instance. See `MapFile`: the
+  /// caller may close its own fd as soon as the mapping exists, and a later re-granulation still needs
+  /// a valid one.
+  std::vector<int> owned_fds_;
 };
 
 }  // namespace rb::mem

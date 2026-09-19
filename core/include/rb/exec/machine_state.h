@@ -48,6 +48,28 @@ struct MachineState {
 
 static_assert(sizeof(GuestAddr) == 4, "guest addresses are 32-bit by definition");
 
+/**
+ * The CPSR IT field, as the low 8 bits ARMv7 splits across bits 15:10 and 26:25.
+ *
+ * Both tiers derive `MachineState::itstate` through these two functions rather than each computing it
+ * their own way. That is not tidiness: Tier I had the mirror come from the block's location descriptor
+ * and Tier J from CPSR, and the two differ at the moment execution stops — dynarmic's IT encoding is not
+ * CPSR's bit layout — so a differential test reported an `itstate` disagreement while `cpsr`, which is
+ * the architectural register, agreed exactly. A redundant field with two definitions is a field that
+ * produces false findings and hides real ones.
+ */
+[[nodiscard]] inline std::uint8_t ItStateFromCpsr(std::uint32_t cpsr) {
+  const std::uint32_t lo = (cpsr >> 10) & 0x3fu;  ///< IT[7:2]
+  const std::uint32_t hi = (cpsr >> 24) & 0x3u;   ///< IT[1:0]
+  return static_cast<std::uint8_t>((hi << 6) | lo);
+}
+
+[[nodiscard]] inline std::uint32_t CpsrWithIt(std::uint32_t cpsr, std::uint8_t itstate) {
+  const std::uint32_t cleared = cpsr & ~(0x3f00'0000u | 0x0000'fc00u);
+  return cleared | (static_cast<std::uint32_t>(itstate & 0x3fu) << 10) |
+         (static_cast<std::uint32_t>(itstate >> 6) << 24);
+}
+
 /// Why a Run call returned. `halted` is the only normal outcome; the rest are diagnostics that must
 /// reach a log, because each one is a case where the guest stopped for a reason RetroBug chose.
 enum class StopReason {

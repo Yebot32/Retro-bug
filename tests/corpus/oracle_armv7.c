@@ -27,6 +27,10 @@ extern jint Java_com_retrobug_fixture_MainActivity_fib(JNIEnv* env, jclass clazz
 extern jint Java_com_retrobug_fixture_MainActivity_wide(JNIEnv* env, jclass clazz, jint seed);
 extern jint Java_com_retrobug_fixture_MainActivity_it_probe(JNIEnv* env, jclass clazz, jint a,
                                                             jint b);
+extern jint Java_com_retrobug_fixture_MainActivity_patch_probe(JNIEnv* env, jclass clazz, jint a,
+                                                               jint b);
+extern jint Java_com_retrobug_fixture_MainActivity_patch_probe_b(JNIEnv* env, jclass clazz, jint a,
+                                                                 jint b);
 extern jint Java_com_retrobug_fixture_MainActivity_jni_utf(JNIEnv* env, jclass clazz, jint seed);
 
 /*
@@ -146,6 +150,25 @@ int main(int argc, char** argv) {
                                                                   it_cases[i][1]));
   }
   printf("\n");
+
+  // patch_probe / patch_probe_b: the code-cache invalidation case. Two functions whose machine code
+  // differs in exactly one byte — the immediate of one leg of the first IT block — measured on silicon
+  // so the test's expectation of *patched* code is a hardware number rather than something RetroBug
+  // computed about itself. (3,7) takes the patched leg and so separates them; (7,3) takes the other leg
+  // and must therefore agree, which is what shows the patch is local to the byte written.
+  {
+    typedef jint (*probe_fn)(JNIEnv*, jclass, jint, jint);
+    static const probe_fn probes[] = {Java_com_retrobug_fixture_MainActivity_patch_probe,
+                                      Java_com_retrobug_fixture_MainActivity_patch_probe_b};
+    static const jint pairs[][2] = {{3, 7}, {7, 3}, {0, 0}};
+    for (unsigned p = 0; p < 2; ++p) {
+      printf("patch_probe%s:", p == 0 ? "" : "_b");
+      for (unsigned i = 0; i < sizeof pairs / sizeof pairs[0]; ++i) {
+        printf(" %d", probes[p](NULL, NULL, pairs[i][0], pairs[i][1]));
+      }
+      printf("\n");
+    }
+  }
 
   // jni_utf, against a JNIEnv built right here.
   //
