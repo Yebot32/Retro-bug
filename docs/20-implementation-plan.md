@@ -195,6 +195,17 @@ LoadResult Load(const std::vector<uint8_t>& image, C03::GuestMemory&, LinkerHook
 **Review focus:** Thumb-bit correctness on entry (`|1`), `.ARM.exidx` preservation for unwinding, and that `PT_GNU_STACK`
 /`PT_ARM.exidx` are not ignored.
 
+**As built** (`30` §Step 5e — recording the deltas rather than editing the sketch above):
+
+| Sketch | Built | Why it moved |
+|---|---|---|
+| `LoadResult Load(image, GuestMemory&, LinkerHooks&)` | `LoadFromFd` / `LoadFromBytes` → `std::optional<GuestModule>` + `LoadOptions{hint, apply_relocations, enforce_relro, resolve}` | `LinkerHooks` was C06's placeholder for what is really one question — "what address does this imported name get?" — so it is a `SymbolResolver` and C06 stays unbuilt until M1 needs it. The named-stage diagnostic survived as `err`, which is what makes a phone-only failure readable |
+| `GuestAddr base; uint64_t size;` | `std::uint32_t base, extent` | Guest addresses are 32-bit by definition here, and a wider type only gives a load bias somewhere to grow that the guest cannot represent |
+| `SymbolIndex exports` | `std::vector<Symbol> exports` + `FindExport` | A map is an optimisation over a table that is eight entries in the fixture; revisit against the first corpus `.so` rather than guessing the size now |
+| `BuildId build_id` (*"sha256, C15's match key"*) | `std::vector<uint8_t> build_id`, read from `PT_NOTE`, **no hash computed** | The NDK fixture has no build-id at all, so a hash of the content is the only key that works for every image. That belongs with tier-3 patching, which is deliberately held — the gap is named here so it is not rediscovered as a surprise in C15 |
+| `entry` as an address | `CodeAddress{addr, thumb}`, on `entry`/`init`/`fini` and on `FindExport`; `Symbol::value` keeps the raw tagged value | The review focus above. Masking bit 0 loses the ARM/Thumb choice, which is unrecoverable downstream and does not fault — it executes different instructions. Data relocations need the tagged value, execution needs it split out, so both are exposed |
+| `ExIdxTable unwinding` | **not implemented** | `PT_ARM_EXIDX` is recognised and discarded. Needed before a guest can unwind a C++ exception across a `.so` boundary, which is a corpus-app behaviour, so it is M1 work — not silently dropped: `R_ARM_THM_CALL`/`R_ARM_COPY` and `PT_GNU_STACK` are likewise unhandled and land in `unsupported_relocs` or are ignored |
+
 ### C06 `rb::linker`
 ```cpp
 namespace rb::linker {
@@ -548,17 +559,24 @@ A profile for a **T0** app carrying `kReportNetworkAvailable` must work with no 
 ## 9. M0 task breakdown (the immediate next work, all local)
 
 Progress and the findings that change this plan are tracked in
-[`30-m0-notes.md`](30-m0-notes.md) — item 1 is done (`419fe9f`), item 2 is blocked on one dependency
-decision documented there with a recommendation.
+[`30-m0-notes.md`](30-m0-notes.md). Status as of `30` §Step 5e:
 
 1. `core/` + `external/dynarmic` vendoring with `patches/` layout and `NOTICE.md`/`LICENSES/`/`REUSE.toml` in the
-   same commit (AD-16: obligations start now).
+   same commit (AD-16: obligations start now). **Done** (`419fe9f`), with the one mechanical deviation recorded in
+   `external/PROVENANCE.md`.
 2. `rb_core_tests` target, cross-compiled for x86_64 Android and run in the local emulator via `adb shell`
    (no Windows host build is possible here — §1), plus a Linux CI job carrying the `qemu-arm` oracle.
-   **Blocked on the Boost decision in `30-m0-notes.md` §Step 2.**
+   **Done except the CI job.** The tests were re-homed to run on arm64 **phones** as well, which turned out to be
+   the better lane: three of this step's findings (Step 5c, 5e) only reproduce on 4 KiB hardware.
 3. `rb::isa` wrapper + `CoverageReport`; corpus disassembly job → coverage gap list (**closes U-8**).
-4. `rb::mem` with both address models + mixed-granule tests.
-5. `rb::loader` → load the §1 `.so`.
+   **Half done, and the halves are unrelated.** The corpus measurement landed as `docs/32-isa-coverage.md` and
+   settled the demand question; the wrapper and its mnemonic→handler coverage tool are unwritten, so the
+   "what is still unimplemented" side is still open.
+4. `rb::mem` with both address models + mixed-granule tests. **Done** — 131 checks, 0 failures, executed on a
+   OnePlus 12. The injected 16 KiB cases run on any host; the *native* 16 KiB ones still need the emulator.
+5. `rb::loader` → load the §1 `.so`. **Done** — 71 checks, 0 failures on hardware, with `llvm-readelf` as the
+   external oracle rather than the loader's own parser (`30` §Step 5e). Three bugs found and fixed in getting
+   there; one of them was in `rb::mem` and had been silently corrupting every load.
 6. `rb::exec` Tier I; then Tier J behind `RbCodeCache`.
 7. `rb::abi` `CallGuest` + fake `JNIEnv`; **M0 exit test: `fib(20) == 6765`, both tiers, identical state**.
 8. `docs/research/01` corrections (stale `MemoryProcessor` API; no interpreter upstream) and `docs/00` §2 note that

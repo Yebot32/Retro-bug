@@ -75,9 +75,14 @@ constexpr std::uint32_t R_ARM_COPY = 20, R_ARM_GLOB_DAT = 21, R_ARM_JUMP_SLOT = 
 constexpr std::uint32_t R_ARM_GOTOFF = 24, R_ARM_GOTPC = 25, R_ARM_GOT32 = 26;
 constexpr std::uint32_t R_ARM_THM_CALL = 10, R_ARM_THM_JUMP24 = 31;
 
+// Tag 11 is SYMENT: the size of *one* Elf32_Sym (16), not the length of the table. There is no
+// DT_SYMSZ — a symbol table's extent is not in the dynamic section at all, which is easy to miss
+// because every neighbour of DT_SYMTAB has an "SZ" partner (STRSZ, RELSZ, PLTRELSZ). Reading tag 11
+// as a byte count bounds the export scan at one entry, and one entry is the null symbol, so the
+// loader reports an image with no exports and no imports and still says it loaded cleanly.
 constexpr std::int32_t DT_NULL = 0, DT_NEEDED = 1, DT_PLTRELSZ = 2, DT_PLTGOT = 3, DT_HASH = 4,
                        DT_STRTAB = 5, DT_SYMTAB = 6, DT_RELA = 7, DT_RELASZ = 8, DT_RELAENT = 9,
-                       DT_STRSZ = 10, DT_SYMSZ = 11, DT_INIT = 12, DT_FINI = 13, DT_SONAME = 14,
+                       DT_STRSZ = 10, DT_SYMENT = 11, DT_INIT = 12, DT_FINI = 13, DT_SONAME = 14,
                        DT_REL = 17, DT_RELSZ = 18, DT_RELENT = 19, DT_PLTREL = 20, DT_JMPREL = 23,
                        DT_INIT_ARRAY = 25, DT_FINI_ARRAY = 26, DT_INIT_ARRAYSZ = 27, DT_FLAGS = 30,
                        DT_GNU_HASH = 0x6ffffef5, DT_VERNEED = 0x6ffffffe, DT_VERSYM = 0x6fffffff,

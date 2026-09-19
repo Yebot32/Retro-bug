@@ -16,14 +16,31 @@
 
 namespace rb::loader {
 
+/// A guest address that holds code.
+///
+/// The ARM ABI carries the ISA state in bit 0 of every function address: set means Thumb, clear means
+/// ARM. Branching to such an address with the bit still in it, or having thrown the bit away, decodes
+/// the guest's Thumb instructions as ARM — which does not fault, it executes different semantics. So
+/// the flag has to travel with the address rather than being masked out at each use.
+struct CodeAddress {
+  std::uint32_t addr = 0;  ///< Byte address, bit 0 cleared.
+  bool thumb = false;
+  explicit operator bool() const { return addr != 0; }
+  bool operator==(const CodeAddress&) const = default;
+};
+
 /// One exported or imported dynamic symbol, in guest terms.
 struct Symbol {
   std::string name;
-  std::uint32_t value = 0;   ///< Guest address for defined symbols.
+  /// st_value plus the load bias, kept exactly as the image states it: for a function that includes
+  /// the bit-0 Thumb tag, which is what a data reference to the function has to point at. Use
+  /// GuestModule::FindExport to get an address to execute.
+  std::uint32_t value = 0;
   std::uint32_t size = 0;
   bool defined = false;      ///< False for undefined symbols the loader must resolve elsewhere.
   bool weak = false;
   bool is_function = false;
+  bool thumb = false;        ///< is_function and st_value bit 0 set.
 };
 
 /// The linker-facing facts about one loaded module.
@@ -32,9 +49,9 @@ struct GuestModule {
   std::string soname;
   std::uint32_t base = 0;      ///< Guest address the image was placed at.
   std::uint32_t extent = 0;    ///< Guest bytes covered, rounded to guest pages.
-  std::uint32_t entry = 0;     ///< e_entry, already biased by `base`.
-  std::uint32_t init = 0;
-  std::uint32_t fini = 0;
+  CodeAddress entry;           ///< e_entry, already biased by `base`.
+  CodeAddress init;            ///< DT_INIT, biased. Absent (addr 0) on NDK images, which use init_array.
+  CodeAddress fini;            ///< DT_FINI, biased.
   std::vector<std::string> needed;
   std::vector<Symbol> exports;
   std::vector<Symbol> imports;
@@ -45,7 +62,9 @@ struct GuestModule {
   /// content hash as the fallback key; that lands with tier-3 patching, which is deliberately held.
   std::vector<std::uint8_t> build_id;
 
-  std::optional<std::uint32_t> FindExport(const std::string& name) const;
+  /// An address to branch to, with the Thumb tag split out of it. nullopt when the name is not
+  /// defined by this module.
+  std::optional<CodeAddress> FindExport(const std::string& name) const;
   std::vector<std::string> ExportNames() const;
 };
 

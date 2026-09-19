@@ -21,6 +21,7 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -59,6 +60,21 @@ void fail(const char* what, int line, const std::string& detail = {}) {
     if (!(cond)) fail(#cond, __LINE__, detail); \
   } while (0)
 
+std::string Hex(std::uint32_t v) {
+  char buf[12];
+  std::snprintf(buf, sizeof(buf), "%x", v);
+  return buf;
+}
+
+std::string Join(const std::vector<std::string>& v) {
+  std::string s;
+  for (const auto& e : v) {
+    if (!s.empty()) s += ", ";
+    s += e;
+  }
+  return s;
+}
+
 std::vector<std::uint8_t> read_file(const char* path) {
   std::ifstream in(path, std::ios::binary);
   return std::vector<std::uint8_t>((std::istreambuf_iterator<char>(in)),
@@ -72,12 +88,19 @@ struct Fixture {
   std::uint32_t entry = 0;
   std::vector<elf::Phdr32> loads;
   std::uint32_t relro_vaddr = 0, relro_memsz = 0;
-  std::uint32_t strtab = 0, strsz = 0, symtab = 0, symsz = 0;
+  std::uint32_t strtab = 0, strsz = 0, symtab = 0, yment = 0, symtab_bytes = 0;
+  /// One past the largest symbol index any relocation in this image refers to. Independent of the
+  /// section header table, so it constrains symtab_bytes from a source the bound is not derived
+  /// from — a scan truncated to one entry would otherwise agree with itself.
+  std::uint32_t sym_index_high_water = 0;
   std::uint32_t rel = 0, relsz = 0, relent = 0;
   std::uint32_t jmprel = 0, pltrelsz = 0;
   std::vector<std::string> needed;
+  std::vector<std::uint32_t> needed_off;  ///< raw DT_NEEDED values, before .dynstr is located
   std::vector<std::string> import_names;
   std::vector<std::pair<std::string, std::uint32_t>> export_funcs;  ///< name, st_value
+  std::string last_named;       ///< name of the highest-index enumerated symbol in .dynsym
+  bool last_named_undef = false;
 
   std::optional<std::size_t> file_off(std::uint32_t vaddr) const {
     for (const auto& p : loads) {
@@ -95,21 +118,35 @@ struct Fixture {
     std::memcpy(&v, bytes.data() + *off, sizeof(T));
     return v;
   }
-  std::string cstr(std::uint32_t vaddr) const {
-    auto off = file_off(vaddr);
+  /// A string at an offset **into .dynstr** — which is what `st_name`, DT_NEEDED and DT_SONAME all
+  /// hold. Taking the same value as a vaddr instead (the mistake this replaced) lands inside the
+  /// ELF header and returns garbage as a dependency name; the loader was right and this test was
+  /// reporting a mismatch it had caused itself.
+  std::string strtab_at(std::uint32_t strtab_offset) const {
+    auto off = file_off(strtab + strtab_offset);
     if (!off) return {};
     std::string s;
     for (std::size_t i = *off; i < bytes.size() && bytes[i]; ++i) s.push_back(
         static_cast<char>(bytes[i]));
     return s;
   }
-  std::string sym_name(std::uint32_t st_name) const {
-    auto off = file_off(strtab + st_name);
-    if (!off) return {};
-    std::string s;
-    for (std::size_t i = *off; i < bytes.size() && bytes[i]; ++i) s.push_back(
-        static_cast<char>(bytes[i]));
-    return s;
+  /// The .dynsym section header, located the only way it can be: ELF has no DT_SYMSZ, so the
+  /// dynamic section says where the table starts (DT_SYMTAB) and how wide an entry is (DT_SYMENT,
+  /// 16) but never how long the table is. Matching on sh_addr as well as sh_type keeps this off the
+  /// non-alloc .symtab, whose symbols index a different string table.
+  std::optional<elf::Shdr32> dynsym() const {
+    const auto* h = reinterpret_cast<const elf::Ehdr32*>(bytes.data());
+    if (!h->e_shoff || h->e_shentsize < sizeof(elf::Shdr32)) return std::nullopt;
+    for (std::uint16_t i = 0; i < h->e_shnum; ++i) {
+      const std::size_t off = h->e_shoff + std::size_t{i} * h->e_shentsize;
+      if (off + sizeof(elf::Shdr32) > bytes.size()) break;
+      elf::Shdr32 s;
+      std::memcpy(&s, bytes.data() + off, sizeof(s));
+      if (s.sh_type != elf::SHT_DYNSYM && s.sh_type != elf::SHT_SYMTAB) continue;
+      if (s.sh_addr != symtab) continue;
+      return s;
+    }
+    return std::nullopt;
   }
 };
 
@@ -141,37 +178,30 @@ Fixture parse_fixture() {
           case elf::DT_STRTAB: f.strtab = d[o].d_val; break;
           case elf::DT_STRSZ: f.strsz = d[o].d_val; break;
           case elf::DT_SYMTAB: f.symtab = d[o].d_val; break;
-          case elf::DT_SYMSZ: f.symsz = d[o].d_val; break;
+          case elf::DT_SYMENT: f.yment = d[o].d_val; break;
           case elf::DT_REL: f.rel = d[o].d_val; break;
           case elf::DT_RELSZ: f.relsz = d[o].d_val; break;
           case elf::DT_RELENT: f.relent = d[o].d_val; break;
           case elf::DT_JMPREL: f.jmprel = d[o].d_val; break;
           case elf::DT_PLTRELSZ: f.pltrelsz = d[o].d_val; break;
-          case elf::DT_NEEDED: f.needed.push_back({}); break;  // resolved after strtab is known
+          case elf::DT_NEEDED: f.needed_off.push_back(d[o].d_val); break;
           default: break;
         }
       }
     }
   }
-  // DT_NEEDED strings and the symbol table now that strtab is located.
-  {
-    const auto* h2 = reinterpret_cast<const elf::Ehdr32*>(f.bytes.data());
-    for (std::uint16_t i = 0; i < h2->e_phnum; ++i) {
-      const auto* p = reinterpret_cast<const elf::Phdr32*>(
-          f.bytes.data() + h2->e_phoff + std::size_t{i} * h2->e_phentsize);
-      if (p->p_type != elf::PT_DYNAMIC) continue;
-      const auto* d = reinterpret_cast<const elf::Dyn32*>(f.bytes.data() + p->p_offset);
-      for (std::size_t o = 0; o < p->p_filesz / sizeof(elf::Dyn32); ++o) {
-        if (d[o].d_tag == elf::DT_NULL) break;
-        if (d[o].d_tag == elf::DT_NEEDED) f.needed.back() = f.cstr(d[o].d_val);
-      }
-    }
+  // DT_NEEDED values are .dynstr offsets, but DT_STRTAB itself may appear after them in the table,
+  // so names can only be resolved once the whole table has been read. Filling `f.needed` in place
+  // here looked reasonable and silently kept only the last dependency.
+  for (std::uint32_t off : f.needed_off) f.needed.push_back(f.strtab_at(off));
+  if (f.symtab) {
+    if (auto s = f.dynsym()) f.symtab_bytes = s->sh_size;
   }
-  if (f.symtab && f.symsz) {
-    for (std::size_t o = 0; o + sizeof(elf::Sym32) <= f.symsz; o += sizeof(elf::Sym32)) {
+  if (f.symtab && f.symtab_bytes) {
+    for (std::size_t o = 0; o + sizeof(elf::Sym32) <= f.symtab_bytes; o += sizeof(elf::Sym32)) {
       auto s = f.at_vaddr<elf::Sym32>(f.symtab + static_cast<std::uint32_t>(o));
       if (!s) break;
-      const auto name = f.sym_name(s->st_name);
+      const auto name = f.strtab_at(s->st_name);
       if (name.empty()) continue;
       const std::uint8_t type = elf::ELF32_ST_TYPE(s->st_info);
       if (s->st_shndx == elf::SHN_UNDEF) {
@@ -179,16 +209,37 @@ Fixture parse_fixture() {
       } else if (type == elf::STT_FUNC) {
         f.export_funcs.emplace_back(name, s->st_value);
       }
+      // Only the types the loader enumerates, or the last-named probe would ask for a symbol the
+      // loader is entitled to skip.
+      if (type == elf::STT_FUNC || type == elf::STT_OBJECT || type == elf::STT_GNU_IFUNC) {
+        f.last_named = name;
+        f.last_named_undef = (s->st_shndx == elf::SHN_UNDEF);
+      }
     }
   }
-  f.ok = !f.loads.empty() && f.symtab && (f.rel || f.jmprel);
+  {
+    const auto note = [&](std::uint32_t table, std::uint32_t bytes, std::uint32_t ent) {
+      for (std::size_t o = 0; o + ent <= bytes; o += ent) {
+        auto r = f.at_vaddr<elf::Rel32>(table + static_cast<std::uint32_t>(o));
+        if (!r) break;
+        f.sym_index_high_water =
+            std::max(f.sym_index_high_water, elf::ELF32_R_SYM(r->r_info) + 1u);
+      }
+    };
+    const std::uint32_t relent = f.relent ? f.relent : sizeof(elf::Rel32);
+    note(f.rel, f.relsz, relent);
+    note(f.jmprel, f.pltrelsz, sizeof(elf::Rel32));
+  }
+  f.ok = !f.loads.empty() && f.symtab && f.symtab_bytes && (f.rel || f.jmprel);
   // Counts on stderr: when the loader and this disagree, the first question is which side parsed
   // badly, and guessing cost two iterations already.
   std::fprintf(stderr,
-               "[fixture] loads=%zu rel=0x%x relsz=%u jmprel=0x%x pltrelsz=%u symtab=0x%x symsz=%u "
-               "strtab=0x%x exports=%zu imports=%zu needed=%zu ok=%d\n",
-               f.loads.size(), f.rel, f.relsz, f.jmprel, f.pltrelsz, f.symtab, f.symsz, f.strtab,
-               f.export_funcs.size(), f.import_names.size(), f.needed.size(), f.ok ? 1 : 0);
+               "[fixture] loads=%zu rel=0x%x relsz=%u jmprel=0x%x pltrelsz=%u symtab=0x%x "
+               "symtab_bytes=%u yment=%u symidx_hi=%u strtab=0x%x exports=%zu imports=%zu "
+               "needed=%zu [%s] ok=%d\n",
+               f.loads.size(), f.rel, f.relsz, f.jmprel, f.pltrelsz, f.symtab, f.symtab_bytes,
+               f.yment, f.sym_index_high_water, f.strtab, f.export_funcs.size(),
+               f.import_names.size(), f.needed.size(), Join(f.needed).c_str(), f.ok ? 1 : 0);
   std::fflush(stderr);
   if (!f.ok) fail("fixture parsing produced nothing to assert against", __LINE__);
   return f;
@@ -283,8 +334,31 @@ void applies_every_relocation_the_image_declares() {
   const std::uint32_t base = mod->base;
   CHECK(err.empty());
   CHECK(mod->unsupported_relocs.empty());
-  CHECK(mod->entry == (f.entry ? base + f.entry : 0));
-  CHECK(mod->needed == f.needed);
+  CHECK(mod->entry == loader::CodeAddress{f.entry ? base + (f.entry & ~1u) : 0, (f.entry & 1u) != 0});
+  CHECK_CTX(mod->needed == f.needed,
+            "loader=[" + Join(mod->needed) + "] fixture=[" + Join(f.needed) + "]");
+
+  // The symbol table's extent, cross-checked against something other than the section header table
+  // the loader read: the largest symbol index any relocation names has to be inside it.
+  CHECK(f.yment == 0 || f.yment == sizeof(elf::Sym32));
+  CHECK_CTX(f.symtab_bytes / sizeof(elf::Sym32) >= f.sym_index_high_water,
+              "symtab_bytes=" + std::to_string(f.symtab_bytes) +
+                  " but a relocation names symbol index " +
+                  std::to_string(f.sym_index_high_water - 1));
+  // And the loader has to have walked that far. This is the exact shape of the bug DT_SYMSZ
+  // caused: a bound of 16 bytes means one entry, which is the null symbol, which yields two empty
+  // lists and a successful-looking load.
+  CHECK(!f.last_named.empty());
+  {
+    const auto last = std::find_if(mod->exports.begin(), mod->exports.end(),
+                                   [&](const loader::Symbol& s) { return s.name == f.last_named; });
+    const auto last_imp = std::find_if(mod->imports.begin(), mod->imports.end(),
+                                       [&](const loader::Symbol& s) { return s.name == f.last_named; });
+    CHECK_CTX(last != mod->exports.end() || last_imp != mod->imports.end(),
+              "highest-index symbol " + f.last_named + " is missing from the loader's tables");
+    CHECK_CTX((last_imp != mod->imports.end()) == f.last_named_undef,
+              "highest-index symbol " + f.last_named + " has the wrong defined/undefined state");
+  }
 
   std::uint32_t top = 0;
   for (const auto& p : f.loads) top = std::max(top, p.p_vaddr + p.p_memsz);
@@ -302,8 +376,10 @@ void applies_every_relocation_the_image_declares() {
     const auto addend = f.at_vaddr<std::uint32_t>(r->r_offset);
     if (!addend) continue;
     const std::uint32_t want = *addend + base;
-    CHECK_CTX(read_word(*gm, base + r->r_offset) == want,
-              "R_ARM_RELATIVE at guest vaddr (decimal) " + std::to_string(r->r_offset));
+    const std::uint32_t got = read_word(*gm, base + r->r_offset);
+    CHECK_CTX(got == want,
+              "R_ARM_RELATIVE at guest vaddr 0x" + Hex(r->r_offset) + " want 0x" + Hex(want) +
+                  " got 0x" + Hex(got) + " (file word 0x" + Hex(*addend) + ", base 0x" + Hex(base) + ")");
   }
   CHECK(relative_seen > 0);
 
@@ -317,29 +393,48 @@ void applies_every_relocation_the_image_declares() {
     if (elf::ELF32_R_TYPE(r->r_info) != elf::R_ARM_JUMP_SLOT) continue;
     auto s = f.at_vaddr<elf::Sym32>(f.symtab + elf::ELF32_R_SYM(r->r_info) * sizeof(elf::Sym32));
     if (!s) break;
-    const std::string name = f.sym_name(s->st_name);
+    const std::string name = f.strtab_at(s->st_name);
     auto it = given.find(name);
     if (it == given.end()) continue;
     ++slot_seen;
-    CHECK_CTX(read_word(*gm, base + r->r_offset) == it->second, "JUMP_SLOT for " + name);
+    const std::uint32_t got = read_word(*gm, base + r->r_offset);
+    CHECK_CTX(got == it->second, "JUMP_SLOT for " + name + " at 0x" + Hex(r->r_offset) +
+                                     " want 0x" + Hex(it->second) + " got 0x" + Hex(got));
   }
   CHECK(slot_seen > 0);
 
   // Exports: every function the image defines is reported at st_value + bias, mapped, and inside a
-  // segment the loader has made read-only executable.
+  // segment the loader has made read-only executable. All three of the fixture's exports are Thumb,
+  // so this is also where the bit-0 tag has to come out right: branch to the unmasked value and the
+  // guest runs its Thumb bytes through the ARM decoder, which does not fault — it does something else.
   for (const auto& [name, value] : f.export_funcs) {
     auto found = mod->FindExport(name);
     CHECK_CTX(found.has_value(), "export " + name);
     if (!found) continue;
-    CHECK_CTX(*found == base + (value & ~1u), name + " address");  // strip the Thumb bit
-    CHECK(gm->IsMapped(*found));
+    CHECK_CTX(found->addr == base + (value & ~1u),
+              name + " address: want 0x" + Hex(base + (value & ~1u)) + " got 0x" + Hex(found->addr));
+    CHECK_CTX(found->thumb == ((value & 1u) != 0), name + " Thumb flag (st_value 0x" + Hex(value) + ")");
+    CHECK(gm->IsMapped(found->addr));
     std::uint32_t scratch = 0;
-    CHECK_CTX(gm->Write(*found, &scratch, 4) == false, name + " must not be writable");
+    CHECK_CTX(gm->Write(found->addr, &scratch, 4) == false, name + " must not be writable");
   }
   CHECK(!f.export_funcs.empty());
 
-  // Imports are surfaced for the binding layer (AD-5 builds its native index from these).
-  CHECK(mod->imports.size() >= f.import_names.size() - 1);
+  // Imports are surfaced for the binding layer (AD-5 builds its native index from these). The count
+  // is exact because both sides use the same criterion — a named symbol with st_shndx == SHN_UNDEF —
+  // while exports are only ">=" because this test records functions and the loader also lists
+  // objects and IFUNCs.
+  CHECK_CTX(mod->imports.size() == f.import_names.size(),
+              "loader imports=" + std::to_string(mod->imports.size()) +
+                  " fixture imports=" + std::to_string(f.import_names.size()));
+  CHECK_CTX(mod->exports.size() >= f.export_funcs.size(),
+              "loader exports=" + std::to_string(mod->exports.size()) +
+                  " fixture functions=" + std::to_string(f.export_funcs.size()));
+  for (const auto& n : f.import_names) {
+    const bool seen = std::any_of(mod->imports.begin(), mod->imports.end(),
+                                  [&](const loader::Symbol& s) { return s.name == n && !s.defined; });
+    CHECK_CTX(seen, "import " + n + " not reported");
+  }
 
   // RELRO: relocated, then read-only. This is the step that makes the mixed 4 KiB/16 KiB granule
   // path fire on a real image rather than only in the memory model's own tests.
@@ -407,6 +502,28 @@ void truncated_image_is_refused() {
   CHECK(!err.empty());
 }
 
+/// A stripped or hand-built image with no section header table has no way to say how long .dynsym
+/// is. The loader must say so: loading it "successfully" with an empty export set is the failure
+/// this whole path exists to prevent, because the empty set is indistinguishable from a library
+/// that genuinely exports nothing and only shows up later as a native method that will not bind.
+void symbol_table_without_a_bound_is_refused() {
+  Fixture f = parse_fixture();
+  auto gm = make_mem();
+  if (!f.ok || !gm) return;
+  auto bytes = f.bytes;
+  auto* eh = reinterpret_cast<elf::Ehdr32*>(bytes.data());
+  CHECK(eh->e_shoff != 0);
+  eh->e_shoff = 0;
+
+  std::map<std::string, std::uint32_t> given;
+  loader::LoadOptions opts;
+  opts.resolve = make_resolver(f, given);
+  std::string err;
+  CHECK(!loader::LoadFromBytes(*gm, bytes, "noshdrs.so", opts, &err));
+  CHECK_CTX(err.find("symbol table") != std::string::npos, "error was: " + err);
+  CHECK(gm->mapped_page_count() == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -415,6 +532,7 @@ int main() {
   applies_every_relocation_the_image_declares();
   two_loads_are_independent_copies();
   truncated_image_is_refused();
+  symbol_table_without_a_bound_is_refused();
 
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;

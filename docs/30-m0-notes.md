@@ -353,6 +353,11 @@ Still open before the loader can be called verified: fix the test's resolver wir
 0 failures; re-run the same three suites on the OnePlus 12 when it is free; and the unresolved
 `compat/` limitation for the AArch64 backend (Step 5b), which blocks `dynarmic_tests` on arm64.
 
+> **Correction, Step 5e:** the diagnosis in the two paragraphs above — "the test does not populate its
+> own resolver map in time" — was wrong, and so was the implied praise ("the loader's behaviour is the
+> desired one"). The loader had a second, larger bug. Nothing in Step 5c's *result* (13 checks /
+> 3 failures, DT_PLTRELSZ fixed) changes; only its interpretation did. See Step 5e.
+
 ## Step 5d — measurements only the OnePlus 12 can give (taken before it was put away)
 
 `tools/aarch32_el0_probe.c` and `tools/va_probe.c`, cross-built and pushed; run from `adb shell`
@@ -380,6 +385,97 @@ in the design rather than becoming the default.
 the app-domain case must be measured inside an installed RetroBug build — but it is the first evidence
 that OEM policy has not tightened beyond AOSP here. Device page size confirmed 4096, so both granule
 cases remain testable on this phone.
+
+## Step 5e — first green load: three real bugs, and the "13 checks" was a masked count
+
+Re-running the loader test on the OnePlus 12 with the diagnostics Step 5c left behind took the guesswork
+out of it in one pass. The reported symptom was `[fixture] … symsz=16` where the image plainly has more
+symbols than that, and `llvm-readelf` settled what the truth was:
+
+```
+Symbol table '.dynsym' contains 8 entries:      # .dynsym sh_size = 0x80 = 128 bytes
+ 0 … UND (null)   1 __cxa_finalize   2 __cxa_atexit   3 __register_atfork   4 snprintf
+ 5 …stringFromJNI (0x1481)  6 …fib (0x14e5)  7 …wide (0x14e9)          # all three odd ⇒ Thumb
+DT_SYMTAB 0x1ec   DT_SYMENT 16 (bytes)   — and no SYMSZ anywhere in the 24-entry table
+```
+
+**Bug 1 — `elf_defs.h` invented a tag that does not exist.** I had `DT_SYMSZ = 11`. Tag 11 is
+`DT_SYMENT`: the size of *one* entry, 16 — and ELF has no symbol-table *length* tag at all, which is
+easy to miss because every other neighbour of `DT_SYMTAB` has an `SZ` partner (`STRSZ`, `RELSZ`,
+`PLTRELSZ`). The loader therefore bounded its export scan at one entry, and entry 0 is the null symbol
+with an empty name, which the scan skips. Net effect: **every guest library loads with zero exports and
+zero imports reported, successfully.** That is worse than the `DT_PLTRELSZ` miss in Step 5c, because
+`GuestModule::exports` is what AD-5's `RegisterNatives` index is built from — the failure would have
+surfaced as "native method not found" inside a running app, with a loader log saying the image was fine.
+`imports` was equally empty, so the "unresolved symbol" refusal this design leans on never fired for a
+single import either; the abort seen in Step 5c came from the *relocation* path, which indexes symbols
+by number and so was unaffected. That is why it looked like the resolver's fault.
+
+Fix: `DT_SYMENT` named correctly and actually used (an image whose entries are not 16 bytes is refused),
+and the table's length taken from the section header table — the only authoritative file-backed source —
+matched on `sh_addr == DT_SYMTAB` as well as type, because the fixture also carries a non-alloc `.symtab`
+whose symbols index a *different* string table. When there is no section header table the load now
+**fails** with `cannot bound the symbol table … no matching SHT_DYNSYM section header` rather than
+returning an empty export set, on the grounds that an empty set is indistinguishable from a library that
+genuinely exports nothing. That refusal is tested (`symbol_table_without_a_bound_is_refused`, which zeroes
+`e_shoff` in a copy of the real fixture and also proves the rollback unmaps the pages it had already put
+in). `[UNVERIFIED]` how common a section-header-less `.so` is in real legacy APKs — the case is packed or
+hand-built images, and if one turns up the honest extension is `DT_HASH`'s `nchain`, which the fixture
+does **not** have (`--hash-style=gnu`, only `DT_GNU_HASH`), so it could not be written against anything
+I could test today.
+
+**Bug 2 — the memory model reverted the loader's writes, and only on 4 KiB hosts.** Once the scan
+worked, 18 assertions fired that the truncated scan had been skipping, and the numbers were unambiguous:
+every relocated word read back as its **pristine file value** (`JUMP_SLOT … want 0x9000000 got 0x1510`,
+which is the linker's placeholder `.plt` address). Relocations were being applied — the unresolved-import
+refusal proves the code runs — and then thrown away. Cause: `RebalanceGranule`'s in-place branch does a
+`MAP_FIXED` `mmap` of the granule to change its protection, and re-mapping a *private file* page from its
+fd resets it to the file's contents. The loader maps a segment writable, writes its GOT and
+`.data.rel.ro`, then calls `Protect` to drop write — so the protection pass undid the relocations. A
+kernel's `mprotect` never re-reads the file; now neither does this.
+
+The snapshot loop existed but only covered pages held **out of line** (`!IsFastmem`), which is precisely
+the set that excludes the pages this sequence damages. `[INFER]` This is invisible on a 16 KiB host: the
+fixture's `R`/`RX`/`RW`-then-RELRO pages collide inside granules, so those pages take the out-of-line
+branch, which *did* snapshot. Every device we own has 4 KiB pages, so the emulator lane would have passed
+and the phones would not — do not treat a green 16 KiB run as evidence for this. Regression test:
+`file_backed_writes_survive_a_protection_change` (both granules, in-place **and** out-of-line, with an
+untouched-page check so the fix cannot be "zero it instead").
+
+**Bug 3 — `PT_LOAD` tails read neighbouring file bytes as BSS.** The segment loop file-mapped
+`AlignUp(vaddr + max(memsz, filesz))`, so for the fixture's RW segment (`filesz 0xe8`, `memsz 0xa90`) the
+232 bytes past its content were served from the file's `.comment`/`.ARM.attributes` region instead of
+zeros. Now the file is mapped only across its own content, the remainder of the last content page is
+explicitly cleared, and whole BSS pages are mapped anonymous — the kernel's shape, and the reason the
+`BSS byte at +232` check exists.
+
+**Also fixed, in the test, after the loader stopped being the suspect:** `f.needed` was assembled by a
+second `PT_DYNAMIC` pass that assigned every `DT_NEEDED` to `f.needed.back()`, so two of three
+dependencies were discarded and the third was `libc.so`; and its string helper took a `.dynstr` *offset*
+where a *vaddr* was needed. Both made the loader look wrong when it was right — `liblog.so, libdl.so,
+libc.so` in the loader's output matches `readelf` exactly. Recorded because the same two mistakes are
+waiting for whoever writes the next ELF-side test, and because "the fixture and the loader disagree" has
+now cost two rounds in which the fixture was the broken side.
+
+**Measured, OnePlus 12 (arm64 host, 4 KiB pages, guest = the armeabi-v7a fixture), all three suites in one
+session, current binaries:**
+
+| Suite | Result |
+|---|---|
+| `rb_interval_compat_tests` | 33 checks, 0 failures |
+| `rb_guest_memory_tests` | **131 checks, 0 failures, 0 skipped** (was 99; +32 from the file-backed regression test) |
+| `rb_guest_elf_tests` | **71 checks, 0 failures** (was 13/3 — the old count *was* the symptom: a scan of one entry runs almost no assertions) |
+
+x86_64 lane: all three targets compile clean against the same headers (`build/x64-recheck.log`, `exit=0`).
+**Running** them there still needs the emulator, i.e. `net start aehd`.
+
+**What may now be claimed:** `rb::loader` is executed-and-verified against one real `armeabi-v7a` shared
+object for segment placement, `R_ARM_RELATIVE`/`R_ARM_JUMP_SLOT` correctness, per-symbol import refusal,
+export enumeration, RELRO and BSS content, and Thumb-tag reporting — on hardware, with the numbers
+cross-checked against `llvm-readelf` rather than against itself. **What may not:** no guest instruction
+has been *executed* yet (that is Step 6, `rb::exec`), the Thumb tag is verified as a reported value and
+not as a mode switch that ran, `.so` files needing `R_ARM_COPY`/`THM_*` relocations are still untested,
+and the mixed-granule loader path on a **native** 16 KiB host is still emulator-blocked.
 
 ## Standing environment facts (so they are not re-derived)
 

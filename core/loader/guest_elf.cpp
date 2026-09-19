@@ -31,13 +31,14 @@ using elf::PT_LOAD; using elf::PT_DYNAMIC; using elf::PT_NOTE;
 using elf::PT_GNU_RELRO; using elf::PT_ARM_EXIDX;
 using elf::PF_X; using elf::PF_W; using elf::PF_R;
 using elf::SHN_UNDEF; using elf::SHN_ABS;
+using elf::SHT_DYNSYM; using elf::SHT_SYMTAB;
 using elf::STT_OBJECT; using elf::STT_FUNC; using elf::STT_GNU_IFUNC;
 using elf::STB_GLOBAL; using elf::STB_WEAK;
 using elf::ELF32_ST_BIND; using elf::ELF32_ST_TYPE; using elf::ELF32_R_SYM; using elf::ELF32_R_TYPE;
 using elf::R_ARM_NONE; using elf::R_ARM_ABS32; using elf::R_ARM_COPY;
 using elf::R_ARM_GLOB_DAT; using elf::R_ARM_JUMP_SLOT; using elf::R_ARM_RELATIVE;
 using elf::DT_NULL; using elf::DT_NEEDED; using elf::DT_PLTGOT; using elf::DT_PLTRELSZ;
-using elf::DT_STRTAB; using elf::DT_STRSZ; using elf::DT_SYMTAB; using elf::DT_SYMSZ;
+using elf::DT_STRTAB; using elf::DT_STRSZ; using elf::DT_SYMTAB; using elf::DT_SYMENT;
 using elf::DT_INIT; using elf::DT_FINI; using elf::DT_SONAME;
 using elf::DT_REL; using elf::DT_RELSZ; using elf::DT_RELENT;
 using elf::DT_RELA; using elf::DT_RELASZ; using elf::DT_RELAENT; using elf::DT_JMPREL;
@@ -69,7 +70,7 @@ struct Image {
 };
 
 struct Dynamic {
-  std::uint32_t strtab = 0, symtab = 0, symsz = 0, strsz = 0;
+  std::uint32_t strtab = 0, symtab = 0, yment = 0, strsz = 0;
   std::uint32_t rel = 0, relsz = 0, relent = 0;
   std::uint32_t rela = 0, relasz = 0, relaent = 0;
   std::uint32_t jmprel = 0, pltrelsz = 0, pltgot = 0, pltrel_kind = 0;
@@ -85,6 +86,7 @@ bool LooksLikeAArch32Elf(const std::uint8_t* data, std::size_t len) {
   static_assert(sizeof(Phdr32) == 32, "ELF32 program header layout assumed by the loader");
   static_assert(sizeof(Sym32) == 16, "ELF32 symbol layout assumed by the loader");
   static_assert(sizeof(Rel32) == 8 && sizeof(Rela32) == 12, "ELF32 relocation layout");
+  static_assert(sizeof(Shdr32) == 40, "ELF32 section header layout");
   if (!data || len < sizeof(Ehdr32)) return false;
   if (data[0] != 0x7f || data[1] != 'E' || data[2] != 'L' || data[3] != 'F') return false;
   if (data[4] != 1 /* ELFCLASS32 */) return false;
@@ -93,9 +95,14 @@ bool LooksLikeAArch32Elf(const std::uint8_t* data, std::size_t len) {
   return (h->e_machine & ~EF_ARM_MASK) == EM_ARM;
 }
 
-std::optional<std::uint32_t> GuestModule::FindExport(const std::string& name) const {
+std::optional<CodeAddress> GuestModule::FindExport(const std::string& name) const {
   for (const auto& s : exports) {
-    if (s.name == name) return s.value;
+    if (s.name != name) continue;
+    // `exports` holds defined symbols and `imports` the rest, but a name can appear in both — an
+    // image may reference a symbol it also defines, and returning the undefined one's value (0) as
+    // an entry point is how a guest ends up jumping to the null page.
+    if (!s.defined) continue;
+    return CodeAddress{s.value & ~1u, s.thumb};
   }
   return std::nullopt;
 }
@@ -232,18 +239,43 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
     const std::uint32_t seg_page = AlignDown(p.p_vaddr, mem::kGuestPage);
     const std::uint32_t delta = p.p_vaddr - seg_page;
     const std::uint32_t map_start = seg_page;
-    const std::uint32_t map_len =
-        AlignUp(p.p_vaddr + std::max(p.p_memsz, p.p_filesz), mem::kGuestPage) - seg_page;
+    const std::uint32_t total_end =
+        AlignUp(p.p_vaddr + std::max(p.p_memsz, p.p_filesz), mem::kGuestPage);
+    // Where this segment's own bytes end and where the mapping holding them ends. Those differ
+    // whenever p_filesz is not a page multiple, and the gap is *zeros* — the rest of that host page
+    // is file content belonging after this segment, not part of it. File-mapping the whole memsz
+    // span instead hands the guest the following section's bytes as its BSS, which reads back as
+    // plausible garbage and is diagnosed nowhere near here.
+    const std::uint32_t content_end = p.p_vaddr + p.p_filesz;
+    const std::uint32_t file_end = AlignUp(content_end, mem::kGuestPage);
     LoadedSeg s{};
     s.vaddr = base + map_start;
-    s.size = map_len;
+    s.size = total_end - map_start;
     s.file_off = p.p_offset - delta;
     s.prot = ((p.p_flags & PF_R) ? mem::kRead : 0) | ((p.p_flags & PF_W) ? mem::kWrite : 0) |
              ((p.p_flags & PF_X) ? mem::kExec : 0);
     std::string merr;
+    const auto cannot = [&](const char* what) -> std::optional<GuestModule> {
+      return fail(Stage(what, std::to_string(s.vaddr) + " " + merr));
+    };
     // Writable during relocation regardless of the segment's final flags; restored below.
-    if (!mem.MapFile(s.vaddr, s.size, s.prot | mem::kWrite, fd, s.file_off, /*shared=*/false, &merr)) {
-      return fail(Stage("mapping PT_LOAD at guest " + std::to_string(s.vaddr), merr));
+    if (p.p_filesz == 0) {
+      if (!mem.Map(s.vaddr, s.size, s.prot | mem::kWrite, &merr)) return cannot("mapping PT_LOAD at");
+    } else {
+      if (!mem.MapFile(s.vaddr, file_end - map_start, s.prot | mem::kWrite, fd, s.file_off,
+                       /*shared=*/false, &merr)) {
+        return cannot("file-mapping PT_LOAD at");
+      }
+      if (content_end < file_end) {
+        static constexpr std::uint8_t kZeros[mem::kGuestPage] = {};
+        if (!mem.Write(base + content_end, kZeros, file_end - content_end)) {
+          return fail("clearing the tail page of a PT_LOAD");
+        }
+      }
+      if (total_end > file_end &&
+          !mem.Map(base + file_end, total_end - file_end, s.prot | mem::kWrite, &merr)) {
+        return cannot("mapping the BSS of PT_LOAD at");
+      }
     }
     rollback.ranges.emplace_back(s.vaddr, s.size);
     segs.push_back(s);
@@ -264,7 +296,7 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
         case DT_STRTAB: dyn.strtab = d->d_val; break;
         case DT_STRSZ: dyn.strsz = d->d_val; break;
         case DT_SYMTAB: dyn.symtab = d->d_val; break;
-        case DT_SYMSZ: dyn.symsz = d->d_val; break;
+        case DT_SYMENT: dyn.yment = d->d_val; break;
         case DT_REL: dyn.rel = d->d_val; break;
         case DT_RELSZ: dyn.relsz = d->d_val; break;
         case DT_RELENT: dyn.relent = d->d_val; break;
@@ -323,11 +355,48 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
   std::size_t sym_off = 0;
   if (dyn.present && dyn.symtab && guest_to_file(dyn.symtab, sym_off)) symtab = img.At<Sym32>(sym_off);
 
+  // The symbol table's byte length: DT_SYMENT gives an entry's size, not the table's, and no
+  // DT_SYMSZ exists, so the section header table is the only authoritative source. Match on
+  // sh_addr as much as on sh_type — a linked image also carries a non-alloc .symtab whose symbols
+  // index a *different* string table, and pairing DT_SYMTAB's address with that table's entries
+  // yields plausible-looking names for the wrong symbols.
+  std::uint32_t symtab_bytes = 0;
+  if (symtab) {
+    if (dyn.yment && dyn.yment != sizeof(Sym32)) {
+      return fail("unsupported DT_SYMENT " + std::to_string(dyn.yment));
+    }
+    if (h->e_shoff && h->e_shentsize >= sizeof(Shdr32)) {
+      for (std::uint16_t i = 0; i < h->e_shnum; ++i) {
+        const auto* s = img.At<Shdr32>(h->e_shoff + static_cast<std::size_t>(i) * h->e_shentsize);
+        if (!s) break;
+        if (s->sh_type != SHT_DYNSYM && s->sh_type != SHT_SYMTAB) continue;
+        if (s->sh_addr != dyn.symtab) continue;
+        if (s->sh_entsize && s->sh_entsize != sizeof(Sym32)) continue;
+        symtab_bytes = s->sh_size;
+        break;
+      }
+    }
+    // Refusing beats guessing. A scan bounded by nothing gives an image with an empty export set,
+    // and the empty set is indistinguishable from a library that genuinely exports nothing — so the
+    // failure surfaces much later, as a native method that cannot be registered (AD-5). Guest
+    // libraries RetroBug builds itself always have section headers; the case that reaches here is
+    // a stripped or hand-built image, which is a finding to report rather than a thing to load.
+    if (!symtab_bytes) {
+      return fail("cannot bound the symbol table at guest " + std::to_string(dyn.symtab) +
+                  ": no matching SHT_DYNSYM section header");
+    }
+    if (sym_off + symtab_bytes > img.size) {
+      return fail("symbol table runs past the file image");
+    }
+  }
+
   auto symbol_at = [&](std::uint32_t idx, Sym32& out) -> bool {
     if (!symtab || !dyn.symtab) return false;
     const std::size_t entry_off = sym_off + idx * sizeof(Sym32);
-    if (entry_off + sizeof(Sym32) > img.size) return false;
-    out = *img.At<Sym32>(entry_off);
+    if (entry_off + sizeof(Sym32) > sym_off + symtab_bytes) return false;
+    const auto* p = img.At<Sym32>(entry_off);
+    if (!p) return false;
+    out = *p;
     return true;
   };
 
@@ -483,31 +552,39 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
 
   // ---- metadata
   if (dyn.present) {
-    mod.entry = h->e_entry ? base + h->e_entry : 0;
-    mod.init = dyn.init ? base + dyn.init : 0;
-    mod.fini = dyn.fini ? base + dyn.fini : 0;
+    // Bit 0 of a code address is the ARM ABI's Thumb tag, not part of the address, and it survives
+    // the load bias because bases are page-aligned. Splitting it here is the only place it can be
+    // told apart from the address itself; downstream there is nothing left to recover it from.
+    const auto code = [&](std::uint32_t v) -> CodeAddress {
+      return CodeAddress{v ? base + (v & ~1u) : 0, (v & 1u) != 0};
+    };
+    mod.entry = code(h->e_entry);
+    mod.init = code(dyn.init);
+    mod.fini = code(dyn.fini);
     if (dyn.soname && strtab) mod.soname = std::string(strtab + dyn.soname);
     for (auto n : dyn.needed) {
       if (strtab) mod.needed.emplace_back(strtab + n);
     }
-    if (symtab && dyn.symsz) {
-      for (std::size_t o = 0; o + sizeof(Sym32) <= dyn.symsz; o += sizeof(Sym32)) {
-        const auto* s = img.At<Sym32>(sym_off + o);
-        if (!s) break;
-        const std::uint8_t type = ELF32_ST_TYPE(s->st_info);
+    if (symtab && symtab_bytes) {
+      const std::size_t nsyms = symtab_bytes / sizeof(Sym32);
+      for (std::size_t i = 0; i < nsyms; ++i) {
+        Sym32 sym;
+        if (!symbol_at(static_cast<std::uint32_t>(i), sym)) break;
+        const std::uint8_t type = ELF32_ST_TYPE(sym.st_info);
         if (type != STT_FUNC && type != STT_OBJECT && type != STT_GNU_IFUNC) continue;
         Symbol out;
-        out.name = sym_name(s->st_name);
+        out.name = sym_name(sym.st_name);
         if (out.name.empty()) continue;
-        out.size = s->st_size;
+        out.size = sym.st_size;
         out.is_function = (type == STT_FUNC || type == STT_GNU_IFUNC);
-        out.weak = ELF32_ST_BIND(s->st_info) == STB_WEAK;
-        if (s->st_shndx == SHN_UNDEF) {
+        out.thumb = out.is_function && (sym.st_value & 1u);
+        out.weak = ELF32_ST_BIND(sym.st_info) == STB_WEAK;
+        if (sym.st_shndx == SHN_UNDEF) {
           out.defined = false;
           mod.imports.push_back(out);
         } else {
           out.defined = true;
-          out.value = (s->st_shndx == SHN_ABS) ? s->st_value : base + s->st_value;
+          out.value = (sym.st_shndx == SHN_ABS) ? sym.st_value : base + sym.st_value;
           mod.exports.push_back(out);
         }
       }
