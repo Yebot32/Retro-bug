@@ -196,11 +196,17 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
   const std::uint32_t span = hi - lo;
 
   // Placement: honour a caller hint, otherwise the first aligned run with nothing mapped in it.
+  //
+  // `base` is the **load bias**: an image-relative vaddr V lives at `base + V`, which is how every
+  // address below is formed. That is not the same thing as where the image's lowest byte lands, and
+  // conflating the two is a real bug waiting for an image whose first PT_LOAD is above 0 — the scan
+  // below would check a different range than the one gets mapped, and the image would be placed over
+  // somebody else's pages (or past the window) while reporting a clean load.
   std::uint32_t base = 0;
   const std::uint32_t start = AlignUp(opts.hint ? opts.hint : (2 * mem::kGuestPage), mem::kGuestPage);
-  for (std::uint32_t cand = start; cand + span <= mem.window_bytes(); cand += mem::kGuestPage) {
+  for (std::uint32_t cand = start; cand + hi <= mem.window_bytes(); cand += mem::kGuestPage) {
     bool free = true;
-    for (std::uint32_t pg = cand; pg < cand + span; pg += mem::kGuestPage) {
+    for (std::uint32_t pg = cand + lo; pg < cand + hi; pg += mem::kGuestPage) {
       if (mem.IsMapped(pg)) { free = false; break; }
     }
     if (free) { base = cand; break; }
@@ -209,8 +215,8 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
 
   GuestModule mod;
   mod.path = path;
-  mod.base = base;
-  mod.extent = span;
+  mod.base = base + lo;  // where the image's lowest mapped byte actually sits
+  mod.extent = span;     // so [mod.base, mod.base + mod.extent) is exactly the mapped range
 
   /// Every segment mapped below is undone if the load does not reach the end. Without this, a
   /// rejected image leaves pages mapped in the guest window, and the next load's free-space scan

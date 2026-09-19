@@ -23,9 +23,27 @@ endforeach()
 target_compile_definitions(rb_mem PUBLIC RB_GUEST_PAGE_SHIFT=12)
 target_link_libraries(rb_loader PUBLIC rb_mem)
 
+# rb::isa is the one core component that does depend on the vendored engine — it *is* the wrapper
+# around it (C01's ↑ in docs/20 §2 is Dynarmic itself), so it links dynarmic.
+add_library(rb_isa STATIC isa/front_end.cpp)
+target_compile_features(rb_isa PUBLIC cxx_std_20)
+# dynarmic links its own header dependencies PRIVATE (external/dynarmic/src/dynarmic/CMakeLists.txt:509),
+# which means anything including dynarmic's public headers has to supply them again: reaching the IR
+# pulls in <mcl/stdint.hpp>, <fmt/...>, <tsl/robin_*.h> and <boost/variant.hpp>. This is that same set
+# declared where it is actually needed — re-declaring it here rather than patching the vendored copy
+# is the point (AD-14).
+#
+# Boost is the odd one out: the stub FindBoost creates Boost::boost as a directory-scoped IMPORTED
+# target inside dynarmic's own subtree, so it is not visible here — hence the include directory
+# directly, which is also how rb_core gets it.
+target_link_libraries(rb_isa PUBLIC rb_mem dynarmic merry::mcl fmt::fmt tsl::robin_map)
+if(DEFINED RB_COMPAT_INCLUDE_DIR)
+  target_include_directories(rb_isa PUBLIC "${RB_COMPAT_INCLUDE_DIR}")
+endif()
+
 # rb_core is the aggregate the engine-facing components will hang off.
 add_library(rb_core INTERFACE)
-target_link_libraries(rb_core INTERFACE rb_mem rb_loader dynarmic)
+target_link_libraries(rb_core INTERFACE rb_mem rb_loader rb_isa dynarmic)
 
 if(DEFINED RB_COMPAT_INCLUDE_DIR)
   target_include_directories(rb_core INTERFACE "${RB_COMPAT_INCLUDE_DIR}")

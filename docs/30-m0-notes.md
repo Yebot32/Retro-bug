@@ -621,6 +621,72 @@ Also fixed in passing: `-llog` cannot link into a static 32-bit build (no `liblo
 `mrc` attempt was rejected by the assembler for a missing comma — GNU ARM syntax needs
 `mrc p15, 0, Rd, c0, c0, 0`, commas and all, which is what `docs/21` §3 already had right.
 
+## Step 6a — `rb::isa` (C01): the front-end door is open, and it found a loader bug on the way in
+
+`core/isa/front_end.cpp` + `core/include/rb/isa/front_end.h`: one function,
+`TranslateOne(guest_memory, pc, Mode) → TranslatedBlock{ir, ops, terminal, entry, mode, code_words,
+truncated_by_unmapped_read}`. It is the wrapper AD-14 requires — the vendored Dynarmic is untouched
+and everything RetroBug needs to *say* about the front end is said here: `ArchVersion::v7` (not `v8`:
+that would accept encodings no armeabi-v7a binary may contain; not `v6T2`: it would refuse the 47,894
+Thumb-2 wide encodings `docs/32` counted), `define_unpredictable_behaviour = true` because a real
+ARMv7 core does something rather than faulting, and `hook_hint_instructions = true` so BKPT and the
+cache-maintenance path reach RetroBug instead of becoming NOPs.
+
+`rb::isa` is the first core component that legitimately links the engine, so `core/CMakeLists.txt` now
+has `rb_isa` beside `rb_mem`/`rb_loader` and the split from Step 5b survives: the memory and loader
+suites still build without the DBT. One build-system fact worth keeping: **Dynarmic links
+`merry::mcl`, `fmt::fmt`, `tsl::robin_map` and `Boost::boost` PRIVATE**, so any consumer that includes
+its public headers must supply them again — reaching `ir/basic_block.h` alone pulls in
+`<mcl/stdint.hpp>` and `<boost/variant.hpp>`. `Boost::boost` is additionally *directory-scoped* (the
+stub `FindBoost` creates it as an IMPORTED target inside Dynarmic's subtree), so `core/` takes the
+compat include directory rather than the target.
+
+**The test found a bug in the loader, and the bug was found by writing an assertion the loader did not
+satisfy.** `Translate` reads 4-byte-aligned words; recording which words a block needed is what lets a
+code cache invalidate on a guest write (AD-7 self-modifying code), so the test asserts every recorded
+word is aligned, mapped, in the window, and **inside `[mod.base, mod.base + mod.extent)`**. That last
+one was not true in general: the loader placed segments at `base + map_start` (absolute image vaddr)
+while reporting `extent = hi - lo`. For every ordinary `ET_DYN` shared object `lo == 0`, so the two
+agree and no existing test can see it. For an image whose first `PT_LOAD` starts above 0 the image
+would be mapped up to `lo` bytes past the extent it advertises — and the free-space scan checked a
+*different* range than the one it then wrote into, which is precisely the "placed over somebody else's
+pages while reporting a clean load" failure this component has now produced twice. Fixed by separating
+the two ideas: `base` is the **load bias** (`image vaddr V lives at base + V`), and
+`mod.base = base + lo` is where the lowest byte sits, which makes the reported extent exactly the mapped
+range and makes the scan check the range it writes. `[1L]` for the `lo == 0` case, which is what runs;
+`[INFER]` that the fix is correct for `lo > 0` — no such image exists in the corpus, and hand-crafting
+one was not worth its error budget today. The assertion is the thing that will catch it if that
+reasoning is wrong.
+
+**One of my own test assertions was the wrong contract, and the code was right.** I wrote
+"an odd Thumb address is the ABI's mode tag, so it must not be refused" — but `TranslateOne` takes a
+*byte* address plus an explicit `Mode`, and a halfword-addressed fetch is the ARM-mode misalignment
+case, not a Thumb one. The tag belongs to symbols and function pointers, and `CodeAddress{addr,
+thumb}` (Step 5e) is where it gets split off. The test now states that contract instead of arguing
+with it.
+
+**What real Thumb-2 compiles to, printed rather than asserted** (101 checks, 0 failures on the SM-X710;
+the fixture loaded through `rb::loader`):
+
+| Export | IR | Terminal |
+|---|---|---|
+| `…_fib` @0x34e4 | 2 ops: `GetRegister`, `SetRegister` | `LinkBlock` — the JNI entry is a thunk; the recursive body is elsewhere |
+| `…_wide` @0x34e8 | 37 ops incl. `GetVector`/`VectorAdd32`/`SetVector`, `Add32`, `Eor32`, `GetNZCVFromOp`/`SetCpsrNZCV`, `BXWritePC` | `PopRSBHint` |
+| `…_stringFromJNI` @0x3480 | 28 ops incl. 4× `WriteMemory32`, `PushRSB` | `LinkBlock` |
+| `…_fib`'s bytes decoded as **ARM** | 4 ops ending `ExceptionRaised` | `CheckHalt` — which is the proof the mode flag reaches the decoder rather than being ignored |
+
+`wide` lowering to NEON element ops on a `-mfpu=neon -Os` build is the measured demand `docs/32` argued
+for ASIMD mattering, arriving from the other direction: the front end emits those ops for code a
+compiler wrote, so Tier I's dispatch table has to cover `GetVector`/`SetVector`/`VectorAdd32` and not
+only the scalar set.
+
+**Full lane, SM-X710, one run:** interval 33/0 · variant 12/0 · memory 131/0 · loader 71/0 ·
+**isa 101/0 (new)** · dynarmic 200,561 assertions / 47 cases.
+
+Not done, and not claimed: nothing has been *interpreted* yet. `TranslatedBlock::ops` is the list Tier
+I dispatches on, and the exit test (`fib(20) == 6765` under both tiers, `docs/20` §9 item 7) is still
+the milestone boundary.
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |

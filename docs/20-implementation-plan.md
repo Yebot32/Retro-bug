@@ -444,7 +444,7 @@ tests against. Linux CI carries the `qemu-arm` oracle and the arm64 build.
 | Semantics vs external oracle | `qemu-arm` linux-user on CI, ≥ 1 000 instruction-vector programs, **0 mismatches**; ARMv7 barriers/LDREX/IT-block/NEON each explicitly covered. **A second, better oracle exists for part of this**: an AArch32-capable arm64 device executes the same vectors natively, is real silicon rather than someone's model of it, and carries no GPL adjacency at all (`tools/run_armv7_oracle.sh`, `30` §Step 5g). It cannot replace `qemu-arm` — CI has no phone attached, and it can only run what the hardware implements — so it supplements the differential set rather than joining it |
 | Decoder coverage audit | `llvm-objdump` over corpus `.so`s ⇒ every mnemonic in `CoverageReport` or a triaged gap list. **This closes U-8 host-side** |
 | `rb::mem` + address models | 4 KiB guest / 16 KiB host mixed-granule tests (the local image is a `ps16k` build — confirm `getconf PAGESIZE`, §1); `guest_base != 0` exercised under x86_64 Android so no identity-only code path survives |
-| `rb::loader` | loads a real `armeabi-v7a` `.so` (the one built in §1) into a host process, applies relocations, resolves `libc.so` symbols to our own implementations. **First half done and hardware-verified** (`30` §Step 5e: 71 checks, expectations cross-checked against `llvm-readelf`); the second half — binding imports to RetroBug's own `libc` — is C07/C08 work rather than the loader's, and its test has only ever used a synthetic resolver |
+| `rb::loader` | loads a real `armeabi-v7a` `.so` (the one built in §1) into a host process, applies relocations, resolves `libc.so` symbols to our own implementations. **First half done and hardware-verified** (`30` §Step 5e: 71 checks, expectations cross-checked against `llvm-readelf`); the second half — binding imports to RetroBug's own `libc` — belongs to C06 and C11 rather than the loader, and its test has only ever used a synthetic resolver |
 | `fib(20) == 6765` | **the M0 exit test**: call the loaded `Java_..._stringFromJNI` through `rb::abi` with a fake `JNIEnv`, under Tier I and Tier J, assert identical result. Expected values are **measured, not assumed** — `tools/run_armv7_oracle.sh` runs the fixture's own `fib`/`wide_probe` as native Thumb-2 on an AArch32-capable device and reports `fib(0)=0 fib(1)=1 fib(2)=1 fib(20)=6765`, `wide(0)=52 wide(2)=50 wide(-1)=55`, string `fib(20)=6765 wide=50` |
 | Audio proxy strategy locked | one stub-lib sweep confirms §1's finding for every remaining guest library, so no interface-vtable API is ever assumed symbol-generatable |
 
@@ -569,9 +569,12 @@ Progress and the findings that change this plan are tracked in
    **Done except the CI job.** The tests were re-homed to run on arm64 **phones** as well, which turned out to be
    the better lane: three of this step's findings (Step 5c, 5e) only reproduce on 4 KiB hardware.
 3. `rb::isa` wrapper + `CoverageReport`; corpus disassembly job → coverage gap list (**closes U-8**).
-   **Half done, and the halves are unrelated.** The corpus measurement landed as `docs/32-isa-coverage.md` and
-   settled the demand question; the wrapper and its mnemonic→handler coverage tool are unwritten, so the
-   "what is still unimplemented" side is still open.
+   **Half done, and the halves turned out to be unrelated work.** The corpus measurement landed as
+   `docs/32-isa-coverage.md` and settled the demand question. The `rb::isa` wrapper is now built and
+   hardware-tested (`30` §Step 6a: 101 checks, and it is what `TranslatedBlock::ops` — the list Tier I
+   dispatches on — comes from); it also caught a latent load-bias bug in C05 on the way in. What is
+   still missing is the mnemonic→handler query itself, i.e. the "which of the 855 mnemonics real code
+   uses are unhandled" half.
 4. `rb::mem` with both address models + mixed-granule tests. **Done** — 131 checks, 0 failures, executed on a
    OnePlus 12. The injected 16 KiB cases run on any host; the *native* 16 KiB ones still need the emulator.
 5. `rb::loader` → load the §1 `.so`. **Done** — 71 checks, 0 failures on hardware, with `llvm-readelf` as the
