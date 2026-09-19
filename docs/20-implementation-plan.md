@@ -136,6 +136,20 @@ produce bit-identical `MachineState` for the same guest program (this is the *ba
 **Review focus:** interpreter dispatch must not read Dynarmic host-codegen internals; `tp` (TLS) and `ITState` must
 survive every block boundary.
 
+**As built** for Tier I (`30` §Step 6d) — two constraints on this sketch that only showing up in the IR revealed:
+
+- `MachineState` as written is complete, deliberately: CPSR's Q (bit 27) and GE (bits 19:16) live *inside*
+  `cpsr` rather than as fields. The back ends keep `cpsr_nzcv`/`cpsr_q`/`cpsr_ge` apart, but that is a host
+  layout choice, and splitting an architectural register into three fields would make the bit-identical-state
+  assertion above check the wrong thing.
+- **The flag contract is per-instruction, not per-machine.** `Add32`/`Sub32` and the shift family carry a
+  `carry_in` operand (not a set-flags bit), and flags are consumed by pseudo-operations that name their
+  producer — `GetNZCVFromOp`, `GetNZFromOp`, `GetCarryFromOp`, `GetOverflowFromOp` — falling back to
+  `TST v, v` (which clears C and V) when the producer has no flag-form. Any future tier, including Tier J's
+  C04 harness and anything that tries to share code between the two, has to model that as a map keyed by
+  IR instruction. One mutable `Flags` in `MachineState`-adjacent state is how `push` came to set `C` and
+  every recursive `fib` call returned an arithmetic series instead.
+
 ### C03 `rb::mem` — guest memory
 ```cpp
 namespace rb::mem {
@@ -445,7 +459,7 @@ tests against. Linux CI carries the `qemu-arm` oracle and the arm64 build.
 | Decoder coverage audit | `llvm-objdump` over corpus `.so`s ⇒ every mnemonic in `CoverageReport` or a triaged gap list. **This closes U-8 host-side** |
 | `rb::mem` + address models | 4 KiB guest / 16 KiB host mixed-granule tests (the local image is a `ps16k` build — confirm `getconf PAGESIZE`, §1); `guest_base != 0` exercised under x86_64 Android so no identity-only code path survives |
 | `rb::loader` | loads a real `armeabi-v7a` `.so` (the one built in §1) into a host process, applies relocations, resolves `libc.so` symbols to our own implementations. **First half done and hardware-verified** (`30` §Step 5e: 71 checks, expectations cross-checked against `llvm-readelf`); the second half — binding imports to RetroBug's own `libc` — belongs to C06 and C11 rather than the loader, and its test has only ever used a synthetic resolver |
-| `fib(20) == 6765` | **the M0 exit test**: call the loaded `Java_..._stringFromJNI` through `rb::abi` with a fake `JNIEnv`, under Tier I and Tier J, assert identical result. Expected values are **measured, not assumed** — `tools/run_armv7_oracle.sh` runs the fixture's own `fib`/`wide_probe` as native Thumb-2 on an AArch32-capable device and reports `fib(0)=0 fib(1)=1 fib(2)=1 fib(20)=6765`, `wide(0)=52 wide(2)=50 wide(-1)=55`, string `fib(20)=6765 wide=50` |
+| `fib(20) == 6765` | **the M0 exit test**: call the loaded `Java_..._stringFromJNI` through `rb::abi` with a fake `JNIEnv`, under Tier I and Tier J, assert identical result. Expected values are **measured, not assumed** — `tools/run_armv7_oracle.sh` runs the fixture's own `fib`/`wide_probe` as native Thumb-2 on an AArch32-capable device and reports `fib(0)=0 fib(1)=1 fib(2)=1 fib(20)=6765`, the short curve `fib(0..12) = 0 1 1 2 3 5 8 13 21 34 55 89 144`, `wide(0)=52 wide(2)=50 wide(-1)=55`, string `fib(20)=6765 wide=50`. Tier I already reproduces all of it (`30` §Step 6d); the curve is there so a recursion defect localises at n=4 rather than at n=20 |
 | Audio proxy strategy locked | one stub-lib sweep confirms §1's finding for every remaining guest library, so no interface-vtable API is ever assumed symbol-generatable |
 
 M0 is the plan's risk-killer: it validates AD-1 (Dynarmic fit), U-8 (ARMv7 coverage), C8's oracle strategy, and
@@ -559,7 +573,7 @@ A profile for a **T0** app carrying `kReportNetworkAvailable` must work with no 
 ## 9. M0 task breakdown (the immediate next work, all local)
 
 Progress and the findings that change this plan are tracked in
-[`30-m0-notes.md`](30-m0-notes.md). Status as of `30` §Step 5e:
+[`30-m0-notes.md`](30-m0-notes.md). Status as of `30` §Step 6d:
 
 1. `core/` + `external/dynarmic` vendoring with `patches/` layout and `NOTICE.md`/`LICENSES/`/`REUSE.toml` in the
    same commit (AD-16: obligations start now). **Done** (`419fe9f`), with the one mechanical deviation recorded in
@@ -582,8 +596,16 @@ Progress and the findings that change this plan are tracked in
 5. `rb::loader` → load the §1 `.so`. **Done** — 71 checks, 0 failures on hardware, with `llvm-readelf` as the
    external oracle rather than the loader's own parser (`30` §Step 5e). Three bugs found and fixed in getting
    there; one of them was in `rb::mem` and had been silently corrupting every load.
-6. `rb::exec` Tier I; then Tier J behind `RbCodeCache`.
+6. `rb::exec` Tier I; then Tier J behind `RbCodeCache`. **Tier I done** (`30` §Step 6d): the interpreter
+   computes the fixture's whole `fib` curve and all three `wide_probe` values exactly as the SM-X710
+   hardware oracle reported them, 80 checks, 0 failures. Getting there corrected three beliefs about the
+   IR — `Add32`/`Sub32`/shift operand 2 is a **carry-in**, not a set-flags bit; flags are read back through
+   pseudo-operations naming their producer, so they cannot live in one mutable copy; and a shift's
+   carry-in never reaches its result. **Tier J behind `RbCodeCache` (C04) is still open**, and with it
+   item 7's both-tiers exit test.
 7. `rb::abi` `CallGuest` + fake `JNIEnv`; **M0 exit test: `fib(20) == 6765`, both tiers, identical state**.
+   One dependency note from Tier I: those exports are JNI methods, so `n` arrives in **r2** behind `env`
+   and `clazz` — a call bridge that puts the first C argument in r0 will get `fib(0)` and look correct.
 8. `docs/research/01` corrections (stale `MemoryProcessor` API; no interpreter upstream) and `docs/00` §2 note that
    the no-Gradle build path is verified.
 

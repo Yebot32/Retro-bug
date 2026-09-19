@@ -782,6 +782,94 @@ rather than on the op list I would have guessed.
 Also from the same source: `docs/10`'s U-8 row is rewritten to "presence answered, semantics open", and
 `docs/20` §9 item 3 closes.
 
+## Step 6d — Tier I executes: fib matches the hardware curve, and three things I believed about the IR were wrong
+
+`core/exec/interp.cpp` + `core/tests/exec_interp_test.cpp`. **Definition of done, met:** the interpreter
+computes `fib(0..8, 20) = 0 1 1 2 3 5 8 13 21 6765` and `wide(0, 2, -1) = 52 50 55`, each value taken from
+`tests/corpus/oracle-armv7.txt` on the SM-X710 rather than from this engine. Step counts grow the way a
+real recursion must — 46 → 114 → 316 → 2266 → **735,946** for `fib(20)` — which is the observation that
+distinguishes "returns the right number" from "actually recursed". Suite green on hardware: 33 · 12 · 131 ·
+71 · 101 · 41 · **80** checks, 0 failures, plus Dynarmic's own 200,561 assertions in 47 cases.
+
+It took three wrong beliefs to get there, and each one was load-bearing enough to be worth writing down
+rather than fixing silently.
+
+**1. The first "engine bug" was my test, and it produced plausible answers.** The exports are JNI
+methods: `fib(JNIEnv*, jclass, jint n)`, so AAPCS delivers `n` in **r2** and my harness was putting it in
+r0. The guest then read `n = 0` and returned `fib(0) = 0` — correctly, for every input. A uniformly wrong
+but individually plausible value is the worst shape of harness bug, because it points at the engine's
+arithmetic and not at the register file. The hardware oracle is what pinned the positions down (it calls
+`NULL, NULL, arg`), and the expectation list is now the measured curve rather than two points, because
+"breaks at n=20" is far harder to localise than "breaks at n=4". `[1L]`
+
+**2. `Add32`/`Sub32`/shift third operand is `carry_in`, not `setflags`.** I had read it as the A64 IR's
+flag-setting bit, and built a working-looking rule on it: `if (operand2 != 0) { compute flags }`. It is
+`IR::IREmitter::AddWithCarry`/`SubWithCarry` (`ir/ir_emitter.cpp:151-180`), lowered to AArch64
+`ADC`/`SBC` when the carry is not an immediate, and plain `Sub(a, b)` is *emitted as*
+`Sub32(a, b, Imm1(1))`. Two separate damages followed:
+
+- Every `adc`/`sbc` computes the wrong **value**, since the carry-in was read and then discarded. Plain
+  add/sub were right by accident (ci is 0 for one, 1 for the other), which is exactly how this survived
+  the `wide_probe` checks.
+- **`push` sets flags in Tier I.** `push {r4,r5,r7,lr}` lowers to `Sub32(sp, #0x10, #1)`, whose `#1` is a
+  carry-in; my gate read it as "this op set flags" and recorded `C=1` for it.
+
+**3. Which exposed the real design error: one mutable copy of the flags.** The IR does not update CPSR in
+place. An arithmetic op *emits a value*, and a pseudo-operation naming that value — `GetNZCVFromOp`,
+`GetNZFromOp`, `GetCarryFromOp`, `GetOverflowFromOp` — is what reads flags back, so the only faithful
+question about a value is "what would this instruction's flag-form have left in the host flags
+register". The ambient `Flags flags` member made `push`'s invented flags readable by the next
+un-predicated consumer, which is what turned `cmp r0, #2` into `Z=1`. The symptom was
+`g(n) = g(n-1) + (n-2)` — `bhi` never taken, because `C` had been overwritten by a `movs` that had
+inherited it from a `push` — and the closed form matching the printed values is what confirmed the
+mechanism before the fix rather than after.
+
+The model now is: per-producing-instruction records (`produced_`, plus `carry_` for shifter carries),
+read by whichever pseudo-op names the producer; when the producer has no flag-form, the fallback is
+`TST v, v` — which is literally what the back end emits (`backend/arm64/emit_arm64.cpp:87`) and which
+**clears** C and V rather than carrying them through. `SetCpsrNZ` keeps C and V, `SetCpsrNZC` keeps only
+V, `SetCpsrNZCVQ` also writes Q from bit 27: each one is a mask over CPSR's top nibble, mirroring
+`emit_arm64_a32.cpp:398-492` line for line.
+
+Two corollaries of reading the back end instead of the ARM ARM:
+
+- **A shift's carry-in never affects its result.** The AArch64 lowering emits a plain `LSL`/`LSR`/`ASR`
+  and reads the carry-in only as the carry-*out* when the amount is zero
+  (`emit_arm64_data_processing.cpp:276`). So amount 0 is "no shift, carry unchanged" — **not** RRX; ARM's
+  `LSR #0` = shift-by-32 and `ROR #0` = RRX quirks are applied by the *translator*, which emits
+  `LogicalShiftRight32(v, 32, ci)` or `RotateRightExtended(v, ci)` to say so. My old code re-applied them
+  to IR that had already accounted for them, which would have shifted twice.
+- Bitwise ops need **no** flag record: `ANDS`/`ORS`/`EORS` leave N/Z from the result and clear C/V, which
+  is what the `TST` fallback already computes. Shifting that fact into a comment saved an entire case.
+
+**A latent one, found while writing the above:** every `SetCpsr*` masked CPSR with `~0xf'0000'0000ull`. On
+a `uint32_t` that promotes to a 64-bit complement whose low 32 bits are all zero, so it cleared the
+**entire** register and restored only the nibble — destroying the mode bits and anything else in the low
+28. Nothing in the fixture reads CPSR back, so it was invisible; it is now `~0xf000'0000u`. `[1L]` for the
+mask being wrong, `[UNVERIFIED]` for its reachability from a guest `MRS`.
+
+**`pop {…, pc}` does not restore LR, so LR-after-return is not an invariant.** Three of my assertions
+expected r14 to still hold the sentinel; `fib`'s epilogue loads PC from the stack and leaves r14 holding
+the last executed `bl`'s link (`0x34d7`) — correct behaviour, wrong test. Replaced with a callee-saved
+check (`r4/r5/r7` loaded with distinct values that nothing in `fib` could compute, so a `pop` writing to
+the wrong slot or in the wrong order is caught at the frame rather than several instructions later).
+
+**Not established by any of this.** IT-block semantics are untested — the fixture's Thumb-2 `fib`
+predicates nothing, and `docs/32` §2.1 measured 8,387 IT instructions in bionic, so the highest-priority
+differential lane still has no Tier I coverage. `[UNVERIFIED]` similarly: `GetGEFromOp` (SIMD32 GE flags,
+unimplemented — Tier I stops with `Unimplemented` rather than guessing), the FPSCR/Q flags beyond their
+masking, and whether the arm64 back end can even compile `wide_probe`'s `GetCarryFromOp` on a
+`MostSignificantWord` (it `ASSERT`s the pseudo-op is attached; that question belongs to Tier J bring-up in
+step 8, not to this file). Two tiers agreeing is also still *asserted nowhere* — the exit test that
+compares `MachineState` between them is step 7.
+
+**On-device debugging, kept rather than removed.** An interpreter on a phone has no debugger, so
+`interp.cpp` retains two switches: `RB_T1_TRACE=<run-index>` dumps each block's IR via
+`IR::DumpBlock` with pre/post registers, and `RB_T1_PROBE=1` prints the arithmetic and flag-derivation
+decisions. Both are off unless set, and the IR dump is what turned a 20-minute guess into the 5-minute
+identification of the `push`-sets-flags bug — it showed the `#1` on an operand that could not have meant
+set-flags on a `push`.
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |

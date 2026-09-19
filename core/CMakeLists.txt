@@ -41,8 +41,9 @@ if(DEFINED RB_COMPAT_INCLUDE_DIR)
   target_include_directories(rb_isa PUBLIC "${RB_COMPAT_INCLUDE_DIR}")
 endif()
 
-# rb::exec: the tier seam. Its census walks the graph rb::isa produces, so it depends on C01.
-add_library(rb_exec STATIC exec/census.cpp)
+# rb::exec: the tier seam. Its census walks the graph rb::isa produces, and its Tier I interpreter runs
+# on that same IR, so it depends on C01 either way.
+add_library(rb_exec STATIC exec/census.cpp exec/interp.cpp)
 target_compile_features(rb_exec PUBLIC cxx_std_20)
 target_link_libraries(rb_exec PUBLIC rb_isa rb_mem)
 

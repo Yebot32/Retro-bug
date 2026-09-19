@@ -30,3 +30,9 @@ target_compile_definitions(rb_isa_front_end_tests PRIVATE RB_FIXTURE_PATH="/data
 add_executable(rb_exec_census_tests exec_census_test.cpp)
 target_link_libraries(rb_exec_census_tests PRIVATE rb_exec rb_loader)
 target_compile_definitions(rb_exec_census_tests PRIVATE RB_FIXTURE_PATH="/data/local/tmp/librb_fixture.so")
+
+# Tier I's test is the first one that executes guest instructions, so it needs the engine through
+# rb_exec; the oracle values it asserts are hardware-derived (tests/corpus/oracle-armv7.txt).
+add_executable(rb_exec_interp_tests exec_interp_test.cpp)
+target_link_libraries(rb_exec_interp_tests PRIVATE rb_exec rb_loader)
+target_compile_definitions(rb_exec_interp_tests PRIVATE RB_FIXTURE_PATH="/data/local/tmp/librb_fixture.so")

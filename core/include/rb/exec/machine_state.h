@@ -36,11 +36,11 @@ struct MachineState {
   std::uint32_t cpsr = 0;
   std::uint32_t tp = 0;      ///< TPIDRURW — the TLS register bionic's __get_tls() reads.
   isa::Mode mode = isa::Mode::Thumb;
-  /// IT-block state. It has to survive every block boundary (docs/20 §C02's review focus): an
-  /// ARMv7 IT sequence can straddle a block edge, and losing it executes instructions unconditionally
-  /// that the guest meant to predicate.
+  /// IT-block state, as the low 8 bits of the PSR's IT encoding. It has to survive every block
+  /// boundary (docs/20 §C02's review focus): an ARMv7 IT sequence can straddle a block edge, and
+  /// losing it executes instructions unconditionally that the guest meant to predicate. The
+  /// interpreter takes it from the block's location descriptor, which is where Dynarmic keeps it.
   std::uint8_t itstate = 0;
-  std::uint8_t itbits = 0;
 
   /// The address execution is at. `r[15]` mirrors it for dump/telemetry convenience only.
   GuestAddr pc = 0;

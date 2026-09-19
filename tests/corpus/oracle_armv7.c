@@ -97,6 +97,15 @@ int main(int argc, char** argv) {
          Java_com_retrobug_fixture_MainActivity_fib(NULL, NULL, 20),
          Java_com_retrobug_fixture_MainActivity_fib(NULL, NULL, 20));
 
+  // The short end of the curve, measured rather than assumed. Tier I's fib cases use these as their
+  // expected values, and a recursion whose first wrong output is at n=20 is far harder to localise
+  // than one that breaks at n=4 — the whole point of printing the shape, not just two points.
+  printf("fib-curve:");
+  for (int n = 0; n <= 12; ++n) {
+    printf(" %d", Java_com_retrobug_fixture_MainActivity_fib(NULL, NULL, n));
+  }
+  printf("\n");
+
   // wide_probe: table sum XOR the low byte of a movw/movt-materialised 0x123456.
   printf("wide(0)=%d wide(2)=%d wide(-1)=%d\n",
          Java_com_retrobug_fixture_MainActivity_wide(NULL, NULL, 0),
