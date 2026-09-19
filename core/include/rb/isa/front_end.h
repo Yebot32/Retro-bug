@@ -19,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include "dynarmic/frontend/A32/a32_location_descriptor.h"
 #include "dynarmic/frontend/A32/translate/a32_translate.h"
 #include "dynarmic/frontend/A32/translate/translate_callbacks.h"
 #include "dynarmic/ir/basic_block.h"
@@ -97,6 +98,9 @@ struct TranslatedBlock {
   std::string terminal;
   std::uint32_t entry = 0;
   Mode mode = Mode::Arm;
+  /// The IT state the block was decoded under, for diagnostics and for a caller that wants to rebuild
+  /// this exact location. Zero outside IT blocks.
+  std::uint8_t itstate = 0;
   /// Guest word addresses the front end actually read, in the order it read them.
   std::vector<std::uint32_t> code_words;
   /// True when the block ended because code could not be fetched, rather than on a real terminal —
@@ -111,8 +115,18 @@ struct TranslatedBlock {
 /// as the CPSR.T bit.
 Dynarmic::A32::TranslationOptions Options();
 
-/// Translate the single basic block starting at `pc`. `err` is filled only on failure, and a failure
-/// here is always something the caller has to know about: an unmapped page, or a front-end error.
+/// Translate the block starting at exactly this location.
+///
+/// The descriptor carries pc, mode **and** IT state, and all three change what the same bytes decode
+/// to: an ARMv7 IT block predicates the instructions that follow it, so translating one of them with
+/// the IT state cleared produces different IR rather than an error. Anything walking a translated
+/// graph therefore has to propagate the successor descriptor the front end named, not just its pc.
+std::optional<TranslatedBlock> TranslateOne(const mem::GuestMemory& memory,
+                                            const Dynarmic::A32::LocationDescriptor& location,
+                                            std::string* err);
+
+/// The (pc, mode) form, with IT state clear — the right entry for a *function entry point*, which is
+/// where execution starts with no predicate in flight.
 std::optional<TranslatedBlock> TranslateOne(const mem::GuestMemory& memory, std::uint32_t pc, Mode mode,
                                             std::string* err);
 

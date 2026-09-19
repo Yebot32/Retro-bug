@@ -687,6 +687,51 @@ Not done, and not claimed: nothing has been *interpreted* yet. `TranslatedBlock:
 I dispatches on, and the exit test (`fib(20) == 6765` under both tiers, `docs/20` §9 item 7) is still
 the milestone boundary.
 
+## Step 6b — `rb::exec` interface + block census: Tier I's work list is 13 ops, not 612
+
+`Dynarmic::IR` has **612 opcode declarations**, which makes "implement the IR interpreter" look
+unbounded. It is not, and the census is what shows it: `core/exec/census.cpp` walks the block graph the
+way an executor will — following `LinkBlock`/`LinkBlockFast`/`Interpret` successors and descending the
+nested `If`/`CheckBit`/`CheckHalt` legs — keyed on the **full location descriptor**, and histograms the
+IR ops it reaches. Measured on the fixture, on hardware (41 checks, 0 failures):
+
+| Function | Blocks | Ops | Distinct ops | Terminals seen |
+|---|---|---|---|---|
+| `…_fib` | 4 | 55 | **13** | `LinkBlock`×2, `If`, `PopRSBHint` |
+| `…_wide` | 1 | 37 | 23 | `PopRSBHint` |
+| `…_stringFromJNI` | 4 | 81 | 13 | `LinkBlock`×2, `If`, `PopRSBHint` |
+
+fib's 13 are `GetRegister`, `SetRegister`, `Add32`, `Sub32`, `ReadMemory32`, `WriteMemory32`,
+`GetNZCVFromOp`, `SetCpsrNZCV`, `GetNZFromOp`, `SetCpsrNZ`, `BXWritePC`, `PushRSB`,
+`UpdateUpperLocationDescriptor`. `wide_probe` adds the VFP/NEON path (`GetVector`/`SetVector`/
+`VectorAdd32`, `GetExtendedRegister64`, `Pack2x32To1x64`, `LeastSignificantWord`, `MostSignificantWord`,
+`LeastSignificantByte`, `ZeroExtendByteToWord`, `GetCarryFromOp`, `And32`/`Or32`/`Eor32`).
+
+So Tier I's first milestone — run fib and wide correctly — is about 25 ops plus terminal handling, not
+612. That is the number to argue with if the tier ever looks enormous, and it came from the front end
+rather than from a guess, which is the point of building the census first.
+
+Three things the walk has to get right, each with a test rather than an assurance:
+
+- **Termination on guest loops**, by keying on `LocationDescriptor::UniqueHash()`. A loop returns to the
+  same descriptor, so it is a repeat key and not a repeat walk.
+- **Keying on the whole descriptor, not the pc.** ARMv7 IT state changes what the same bytes decode
+  to, so a block reached with two IT states is two blocks. Keying on pc alone would have merged them
+  and under-reported exactly the predication paths `docs/32` measured as load-bearing — which is why
+  `rb::isa` grew a descriptor-taking `TranslateOne` alongside the `(pc, mode)` one.
+- **An incomplete walk says so.** `Census::blocks_left_unvisited` is a field, not an error code, and the
+  test forces it non-zero with `max_blocks = 2` to prove the flag fires; otherwise a capped census is
+  indistinguishable from a small function. Same reasoning for a start address with no code behind it:
+  Dynarmic *does* emit a real block there (an `ExceptionRaised` epilogue), so the assertion is that the
+  walk reports *why* (`truncated_blocks`/`translate_failures`), not that it returns nothing. That
+  distinction came out of the test being wrong first: I asserted `blocks == 0` and it failed, because
+  zero was never the honest expectation.
+
+`rb::exec`'s `MachineState` is now fixed in types (r[16] and d[32] as docs/20 §C02 specifies, `tp` for
+TLS, IT state carried explicitly) with the width invariant asserted rather than commented: guest
+addresses are 4 bytes, and `tp` — the one field that could plausibly be mistaken for a host pointer —
+is checked to be one.
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |

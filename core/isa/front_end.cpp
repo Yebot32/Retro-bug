@@ -66,35 +66,40 @@ std::string TerminalName(const Term::Terminal& terminal) {
   return index < kTerminalNames.size() ? kTerminalNames[index] : "unknown";
 }
 
-std::optional<TranslatedBlock> TranslateOne(const mem::GuestMemory& memory, std::uint32_t pc, Mode mode,
-                                           std::string* err) {
+std::optional<TranslatedBlock> TranslateOne(const mem::GuestMemory& memory,
+                                            const LocationDescriptor& location, std::string* err) {
   const auto fail = [&](const std::string& msg) -> std::optional<TranslatedBlock> {
     if (err) *err = msg;
     return std::nullopt;
   };
-  // The alignment check is the architecture's, not a convenience: an ARM fetch is 4-aligned and a
-  // Thumb fetch tolerates the odd address only as the mode tag, never as a byte address.
-  if (mode == Mode::Arm ? (pc & 3u) != 0 : (pc & 1u) != 0) {
+  const bool thumb = location.TFlag();
+  // `location` is a byte address plus a mode, not a tagged symbol value: an odd address is the ABI's
+  // Thumb tag left in place by a caller that should have split it off (rb::loader's CodeAddress does),
+  // and a halfword address under ARM decoding is a genuine misalignment.
+  if (thumb ? (location.PC() & 1u) != 0 : (location.PC() & 3u) != 0) {
     return fail("guest code address is misaligned for the requested mode");
   }
 
-  CodeReader reader{memory, mode};
-  const LocationDescriptor descriptor =
-      LocationDescriptor{pc, Dynarmic::A32::PSR{}, Dynarmic::A32::FPSCR{}, false}
-          .SetTFlag(mode == Mode::Thumb);
-
-  TranslatedBlock block{Dynarmic::A32::Translate(descriptor, &reader, Options())};
+  CodeReader reader{memory, thumb ? Mode::Thumb : Mode::Arm};
+  TranslatedBlock block{Dynarmic::A32::Translate(location, &reader, Options())};
   block.ops.reserve(block.ir.size());
   for (const auto& inst : block.ir) block.ops.push_back(Dynarmic::IR::GetNameOf(inst.GetOpcode()));
   block.terminal = TerminalName(block.ir.GetTerminal());
-  block.entry = pc;
-  block.mode = mode;
+  block.entry = location.PC();
+  block.mode = thumb ? Mode::Thumb : Mode::Arm;
+  block.itstate = location.IT().Value();
   block.code_words = reader.code_words();
   block.truncated_by_unmapped_read = reader.saw_unmapped_read();
   if (block.ir.empty() && block.truncated_by_unmapped_read) {
-    return fail("no instruction could be fetched at " + std::to_string(pc));
+    return fail("no instruction could be fetched at " + std::to_string(location.PC()));
   }
   return block;
+}
+
+std::optional<TranslatedBlock> TranslateOne(const mem::GuestMemory& memory, std::uint32_t pc, Mode mode,
+                                           std::string* err) {
+  const LocationDescriptor descriptor{pc, Dynarmic::A32::PSR{}, Dynarmic::A32::FPSCR{}, false};
+  return TranslateOne(memory, descriptor.SetTFlag(mode == Mode::Thumb), err);
 }
 
 }  // namespace rb::isa

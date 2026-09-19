@@ -41,9 +41,14 @@ if(DEFINED RB_COMPAT_INCLUDE_DIR)
   target_include_directories(rb_isa PUBLIC "${RB_COMPAT_INCLUDE_DIR}")
 endif()
 
+# rb::exec: the tier seam. Its census walks the graph rb::isa produces, so it depends on C01.
+add_library(rb_exec STATIC exec/census.cpp)
+target_compile_features(rb_exec PUBLIC cxx_std_20)
+target_link_libraries(rb_exec PUBLIC rb_isa rb_mem)
+
 # rb_core is the aggregate the engine-facing components will hang off.
 add_library(rb_core INTERFACE)
-target_link_libraries(rb_core INTERFACE rb_mem rb_loader rb_isa dynarmic)
+target_link_libraries(rb_core INTERFACE rb_mem rb_loader rb_isa rb_exec dynarmic)
 
 if(DEFINED RB_COMPAT_INCLUDE_DIR)
   target_include_directories(rb_core INTERFACE "${RB_COMPAT_INCLUDE_DIR}")

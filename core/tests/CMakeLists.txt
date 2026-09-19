@@ -26,3 +26,7 @@ target_compile_definitions(rb_guest_elf_tests PRIVATE RB_FIXTURE_PATH="/data/loc
 add_executable(rb_isa_front_end_tests isa_front_end_test.cpp)
 target_link_libraries(rb_isa_front_end_tests PRIVATE rb_isa rb_loader)
 target_compile_definitions(rb_isa_front_end_tests PRIVATE RB_FIXTURE_PATH="/data/local/tmp/librb_fixture.so")
+
+add_executable(rb_exec_census_tests exec_census_test.cpp)
+target_link_libraries(rb_exec_census_tests PRIVATE rb_exec rb_loader)
+target_compile_definitions(rb_exec_census_tests PRIVATE RB_FIXTURE_PATH="/data/local/tmp/librb_fixture.so")
