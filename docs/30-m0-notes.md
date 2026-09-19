@@ -233,21 +233,34 @@ rejected image's leftover pages get picked up by the next load's free-space scan
 corruption somewhere unrelated to their cause. `LoadFromFd` now carries an RAII rollback that unmaps
 every segment it mapped unless the load commits.
 
-### The emulator lost its acceleration mid-step
+### The emulator lost its acceleration mid-step — cause identified
 
 `emulator.exe -accel-check` reported **"AEHD (version 2.2) is installed and usable"** at the start of
-this session, and the AVD booted twice successfully (the step 3 and step 4 test runs above). It now
-reports **"Android Emulator hypervisor driver is not installed on this machine"**, and the x86_64 AVD
-refuses to start. So something about stopping the emulator unloaded a driver that was working — which
-means the locally-runnable test loop this session depended on is not reliably re-startable without
-re-arming AEHD.
+this session, and the AVD booted twice successfully (the step 3 and step 4 test runs above). It then
+reported **"Android Emulator hypervisor driver is not installed on this machine"** and refused to
+start the x86_64 AVD.
 
-That needs elevation, so it is an operator action, not something to do quietly from a script. Two ways
-forward, and the un-accelerated attempt is in flight: re-install/start AEHD (or enable WHPX/Hyper-V
-instead), or boot with `-accel off`, which is expected to be very slow for an x86_64 guest on an
-x86_64 host and may not bring the framework up at all in a sane time. Until one of those works, the
-step 5 tests are **built, not run** — and `tools/run_engine_tests.sh` is the single command that will
-make them real.
+**That message is wrong, and the distinction matters.** The driver is installed; the service is only
+stopped:
+
+```
+Name  Status   StartType
+aehd  Stopped  System
+```
+
+with `aehd.sys`, `aehd.inf` and `aehd.cat` present under
+`%LOCALAPPDATA%/Android/Sdk/extras/google/Android_Emulator_Hypervisor_Driver`. Stopping the emulator
+tore down a driver that was working, and the recovery is to start it again rather than reinstall
+anything:
+
+```
+net start aehd          # requires an elevated shell
+```
+
+Elevation puts this outside what a build script — or an agent — should do unprompted, so the step 5
+tests below are recorded as built and not run, and `tools/run_engine_tests.sh` stays the single command
+that turns them into verified. `-accel off` was tried as a workaround and did not bring the image up
+within 15 minutes, as expected for an x86_64 guest on an x86_64 host with no hypervisor.
 
 Also fixed in the runner: `[ -x "$BIN" ]` is the wrong test on Windows for an extension-less ELF
 output — the linker produced an 85 MB `dynarmic_tests` that `-x` called non-executable. It is now `-f`.
@@ -257,7 +270,7 @@ output — the linker produced an 85 MB `dynarmic_tests` that `-x` called non-ex
 | Fact | Value |
 |---|---|
 | Host compiler for Windows binaries | **none** (`gcc`/`cc`/`clang`/`cl` all absent) → M0 tests are x86_64 **Android** binaries in the emulator |
-| Emulator acceleration | AEHD 2.2 installed and usable; AVD `Medium_Phone` exists |
+| Emulator acceleration | AEHD 2.2 **installed but stoppable**: it was "usable" for two boots, then the `aehd` service was found `Stopped` and the AVD refused to start. Re-arm with an elevated `net start aehd`; check `Get-Service aehd` before trusting `-accel-check`'s "not installed" wording. AVD `Medium_Phone` exists |
 | Emulator image | `android-37.1/google_apis_playstore_ps16k/x86_64`, `abilist=x86_64,arm64-v8a`, **`abilist32=` empty** |
 | `openat2`/`io_uring`/`landlock` from an app | unavailable (outside bionic's `SYSCALLS.TXT` allowlist) — see `docs/research/05` §1.4 |
 | Executable memory from an app | permitted: `allow appdomain self:process execmem;` (`private/app.te:189`, read directly) |
