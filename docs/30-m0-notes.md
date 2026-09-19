@@ -94,6 +94,27 @@ Practical notes for re-running, both of which cost a cycle:
 - Under Git Bash a device path like `/data/local/tmp/x` is rewritten to `C:/Program Files/Git/data/...`;
   set `MSYS_NO_PATHCONV=1` for every `adb push`/`pull` with an absolute device path.
 
+## Step 3 — coverage audit, demand half **(done: `docs/32-isa-coverage.md`)**
+
+`tools/isa_coverage.sh` measures what real ARMv7 Android code actually demands, from the NDK's own
+AArch32 archives: **711 objects, 338,034 instructions, 855 distinct mnemonics**. Three results that
+change assumptions rather than merely confirming them:
+
+- **8,387 IT-block instructions** in bionic itself — the IT-block risk named in `docs/research/01` is now
+  backed by demand, not just subtlety, so it leads the differential queue.
+- Hundreds of `vadd.f64`/`vmul.f64`/`vcmp.f64` — libm's double-precision paths mean **VFPv3 D32 is
+  mandatory**; a single-precision-scoped engine fails here.
+- `movw` 3,284 and `cbz` 3,271 — the concrete ARMv7-only forms the ARMv6-vs-ARMv7 question hinged on.
+
+Two self-corrections are recorded in that doc, because both would otherwise be re-cited as evidence: the
+§4.1 "file listing proves coverage" argument was the wrong kind of proof (dispatched ≠ correct), and a
+`UndefinedInstruction()` I initially flagged as a NEON gap turned out to be the architecturally-correct
+rejection of undefined `VST4/VLD4 .64` encodings. Grep-found gaps have to be read before being reported.
+
+**Still open in U-8:** semantic correctness. Next is Dynarmic's own `test_generator`/`test_reader` lanes on
+the emulator, with two named constraints — its reference is GPL Unicorn (test-side only, never linked), and
+three cases the harness itself excludes because *Unicorn* is wrong need a different oracle.
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |

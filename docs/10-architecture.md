@@ -138,6 +138,11 @@ README says FPSR state is approximate **[1A]**; (ii) the coverage of the ARMv7 s
 with `llvm-objdump` and diff the mnemonic set against the decoder's coverage. Until that runs, treat ARMv7-A
 completeness as **strongly indicated, unproven**.
 
+**Update after M0 step 3:** that measurement is now done — see
+[`32-isa-coverage.md`](32-isa-coverage.md), which quantifies what real ARMv7 bionic actually demands and
+formally downgrades the file-listing argument above to "dispatched, not proven". §17's U-8 row carries the
+result: demand half closed, semantic correctness still open.
+
 **Consequences of accepting this dependency**, stated plainly:
 - Upstream is unmaintained: `merryhime/dynarmic` 404 **[1L]**, `lioncash/dynarmic` archived 2024-03-05 **[1A]**.
   We take a live fork (`azahar-emu/dynarmic`) as the import source and treat it as ours to maintain. AD-14 keeps
@@ -713,7 +718,7 @@ Ordered by how much rework each would cause. **U-2** and **U-10** are the two th
 |---|---|---|---|---|
 | U-2 | A contiguous 4 GiB low reservation succeeds in a zygote-forked Android app process | **[UNVERIFIED]** — derived from `mmap` semantics, not run on a device | one `mmap` probe in `JNI_OnLoad` on emulator + 2–3 devices, logged in the device report | Biased `GUEST_BASE` everywhere: JIT perf survives (dynarmic supports a nonzero `fastmem_pointer`), pointer aliasing becomes slower and every host→guest crossing needs the handle table (§8.2) — a real cost, not a flag |
 | U-10 | `InMemoryDexClassLoader` over a host-brokered memfd works in an `isolated_app`, and `RegisterNatives` binds into it | **[UNVERIFIED]** | test APK: host memfd-writes a tiny dex, passes the fd over Binder, sandbox loads and calls a registered native | T1 covers **native code only**; DEX stays in T0, and the per-app FS isolation story weakens for managed code and must be disclosed |
-| U-8 | Dynarmic's A32 coverage of the ARMv7-A/VFPv3-D32/NEON subset real apps use, incl. misaligned access and FPSR accuracy | **[UNVERIFIED]** — my first-hand check was a *file listing* **[1L]**, not a semantic audit | diff `llvm-objdump` mnemonics across the corpus against decoder coverage; run dynarmic's own generator lanes | Patch the ops (0BSD allows it) or route unimplemented encodings to `ExceptionRaised` → a per-instruction host helper; **not** to Capstone in the shipped binary |
+| U-8 | Dynarmic's A32 coverage of the ARMv7-A/VFPv3-D32/NEON subset real apps use, incl. misaligned access and FPSR accuracy | **HALF-CLOSED** — demand measured ([`32-isa-coverage.md`](32-isa-coverage.md)): 338,034 instructions / 855 mnemonics from real bionic/libm/libc++/zlib ARMv7 code; 8,387 IT-block instructions and hundreds of `f64` VFP ops, so both are mandatory. **Semantic correctness is still unverified** — the file-listing argument in §4.1 was explicitly downgraded to "dispatched, not proven" | Enable `DYNARMIC_TESTS=ON` and run the `arm`/`thumb` generator lanes on the x86_64 emulator; add a mnemonic→handler mapping tool for the presence half | Patch the ops (0BSD allows it) or route unimplemented encodings to `ExceptionRaised` → a per-instruction host helper; **not** to Capstone in the shipped binary |
 | U-11 | Hidden-API `Activity.attach` / `AssetManager.addAssetPath` / `HiddenApiBypass` still work at targetSdk 36 / Android 16 | **[UNVERIFIED]**, and it is the *runtime* layer's soft spot | one build on emulator + one OEM device | Designed fallback exists (v1a/v1b, §6); the listing must not promise "any APK" until green |
 | U-13 | `execmem` + memfd-exec survive on Samsung/Xiaomi/OPPO/vivo/Huawei | **[UNVERIFIED]** — HIGH only for AOSP `main` **[1L]**, never for OEM overlays | 6-device probe matrix capturing `errno` (apps cannot read `dmesg`) | Fall to Tier I in that process — which is why Tier I is built early (AD-2) |
 | U-4 | Android 16 CDD still mandates GLES 1.1, i.e. host GLES1 forwarding exists | **[UNVERIFIED]** | grep the CDD; `dlopen("libGLESv1_CM.so")` + `glGetString(GL_VERSION)` on 5 devices | SwANGLE everywhere for GLES1, losing fps on old fixed-function apps |
