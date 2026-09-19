@@ -1,0 +1,25 @@
+# device=SM-X710 abilist32=armeabi-v7a,armeabi page=4096
+# built from f00464d 2026-09-19T17:55:13+04:00
+--- numeric oracle
+thumb=1 fib_addr=0x1b1ed
+fib(0)=0 fib(1)=1 fib(2)=1 fib(20)=6765 fib(20)again=6765
+wide(0)=52 wide(2)=50 wide(-1)=55
+string=fib(20)=6765 wide=50
+cp15: run `--cp15 <name>` per register; a refused one kills this process
+rc=0
+--- cp15 reads reachable from an AArch32 EL0 process (rc=132 means SIGILL)
+midr: attempting
+Illegal instruction 
+rc=132
+ctr: attempting
+rc=132
+Illegal instruction 
+mpidr: attempting
+rc=132
+Illegal instruction 
+tpidrurw: attempting
+tpidrurw: 0xf7450fe0
+rc=0
+fpsid: attempting
+Illegal instruction 
+rc=132

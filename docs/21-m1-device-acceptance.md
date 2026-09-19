@@ -38,6 +38,11 @@ build could report `active_tier=TierJ` while something else ran. So:
 > RetroBug.** That is E1 (the Android package manager, an OS component, refusing the guest
 > APK) and E4 (a control build in which translation is *disabled* and the launch must fail).
 > Evidence generated inside RetroBug (E2, E3, E5) is corroborating, never sufficient alone.
+>
+> A third, stronger class now exists for the *numbers*: `tools/run_armv7_oracle.sh` runs the
+> fixture's own functions as native ARMv7 code on a device that has AArch32 at EL0, so E5's and V's
+> expected values are produced by a real ARMv7 core rather than by RetroBug or by host arithmetic
+> (§3). The oracle is also where two of this document's findings came from — see the CP15 note there.
 
 ---
 
@@ -54,10 +59,38 @@ checked in. Properties that make it a good probe:
   without ambiguity.
 - It is RetroBug's own Apache-2.0 code, so there is no licensing question in committing it.
 
-Two additions the fixture must make for E5 (both are small, do them in the same change):
-`mrc p15, 0, rN, c0, c0, 0` (MIDR) read, and a Thumb-2-only arithmetic sequence
-(`movw`/`movt` pair) whose result is printed. Both are unexecorable natively on this device and
-both exercise the CP15 / T32 paths named in `docs/research/01`.
+Two additions the fixture must make for E5: a `mrc p15, 0, rN, c0, c0, 0` (MIDR) read, and a
+Thumb-2-only arithmetic sequence (`movw`/`movt` pair) whose result is printed. **The second is already
+built and hardware-oracled** — `wide_probe()` in `tests/corpus/fixture_jni.c`. What both must produce is
+no longer something this document has to guess:
+
+```
+$ tools/run_armv7_oracle.sh          # on an SM-X710, which runs AArch32 natively
+thumb=1                      fib(0)=0 fib(1)=1 fib(2)=1 fib(20)=6765 fib(20)again=6765
+wide(0)=52  wide(2)=50  wide(-1)=55
+string=fib(20)=6765 wide=50
+```
+
+Those are the values an **ARMv7 core executing its own instructions** produced, from the same source
+file and the same compiler flags M1 runs (`-mthumb -mfloat-abi=softfp -mfpu=neon -Os`), so the expected
+output of the V step is hardware-derived rather than RetroBug-derived. `thumb=1` is the proof the build
+really was Thumb-2: bit 0 of an ARM function pointer is the ISA tag, and it is set for every function in
+a `-mthumb` image.
+
+**And one thing the oracle turned up that changes E5.** The same program, on a device that *does* run
+32-bit code, dies with SIGILL on the MIDR read — and on CTR, MPIDR, and even `vmrs Rd, fpsid`, while
+`mrc p15, 0, Rd, c13, c0, 3` (TPIDRURW, the TLS register bionic uses) returns `0xf7450fe0` normally. So
+on current hardware an ordinary 32-bit Android app cannot read the CPU ID registers at all; there is no
+native behaviour for RetroBug's answer to be compared against. Consequences, both recorded here because
+each one is a trap:
+
+1. **E5's MIDR assertion is against the architecture, not the device.** RetroBug emulating a plausible
+   ARMv7-A MIDR is deliberately *more* permissive than the hardware it runs on, because a real ARMv7-A
+   core answers that read. That is the brief's requirement — reproduce ARMv7 CPU semantics — but it must
+   be stated in the milestone rather than discovered as a discrepancy later.
+2. **This fixture cannot be used as a native control on a 32-bit-capable device once it reads MIDR.**
+   It would crash for a reason that has nothing to do with emulation. E1's control stays on the
+   64-bit-only device, where the kernel refuses the binary before any instruction executes.
 
 ---
 
@@ -146,8 +179,8 @@ UI ever displays the word "isolated" for a T0 session (it must not — AD-8 nami
 | E4 | translation-disabled control build fails at a named loader stage | **build variant, not RetroBug's runtime claim** | **mandatory** (independent proof) |
 | E2 | guest `.so` in guest map table, absent from host `/proc/PID/maps` | RetroBug + `/proc` | mandatory |
 | E3 | `active_tier`, `translated_blocks > 0`, ARM EABI `svc` numbers, guest PC in module range | RetroBug telemetry | mandatory |
-| E5 | Thumb-2 `movw/movt` result correct; MIDR reads as the emulated ARMv7 part, not the host's | guest code | mandatory |
-| V | visible text `fib(20)=6765` rendered on screen | human + screenshot | mandatory |
+| E5 | Thumb-2 `movw/movt` result correct (`wide=50`); MIDR reads as the emulated ARMv7-A part — with no native comparator, since this hardware SIGILLs on the read (§3) | guest code, **expected values from an ARMv7 device** (`tools/run_armv7_oracle.sh`) | mandatory |
+| V | visible text `fib(20)=6765 wide=50` rendered on screen | human + screenshot, string from the same oracle | mandatory |
 | Z | no config required for the tap path; no "isolated" wording on T0 | human review | mandatory |
 
 **M1 passes only if every mandatory row passes on this device and the evidence archive is

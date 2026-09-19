@@ -549,11 +549,86 @@ closed, and Step 5b's `compat/` limitation is gone. What that lane still does **
 and is written in the script's header: dynarmic asserts what it asserts, and no guest app instruction has
 run yet — that is Step 6, `rb::exec`.
 
+## Step 5g — the ARMv7 hardware oracle, and what a real 32-bit process cannot read
+
+The Tab S9 was attached and it is the only machine here that executes AArch32, so the M0 exit test's
+expected numbers stopped being assumed and became measured: `tests/corpus/oracle_armv7.c` +
+`tools/run_armv7_oracle.sh` link **the fixture's own source** (`fixture_jni.c`, same flags:
+`-mthumb -mfloat-abi=softfp -mfpu=neon -Os`) into a static armeabi-v7a executable and run it. Its two
+JNI entry points discard `JNIEnv*` and `jclass`, so they are callable with no JVM.
+
+```
+# device=SM-X710 abilist32=armeabi-v7a,armeabi page=4096
+thumb=1 fib_addr=0x1b1ed
+fib(0)=0 fib(1)=1 fib(2)=1 fib(20)=6765 fib(20)again=6765
+wide(0)=52 wide(2)=50 wide(-1)=55
+string=fib(20)=6765 wide=50
+```
+
+Raw output, with the device model, ABI list, page size and source revision attached, is committed as
+[`tests/corpus/oracle-armv7.txt`](../tests/corpus/oracle-armv7.txt) — the script rewrites that path, so
+the numbers asserted against stay auditable rather than living only as a transcription here.
+
+`thumb=1` is the check that the oracle tested what it claims: bit 0 of an ARM function pointer is the
+ISA tag, and every function in a `-mthumb` image carries it. `wide` is `table_sum XOR 0x56`, so the
+three values also reproduce by hand (98^86=52, 100^86=50, 97^86=55) — hardware, the source's stated
+intent and x86 arithmetic agreeing is the point of an oracle. These are now the numbers Step 6/7 assert
+against, in `docs/20` §M0 and `docs/21` §3.
+
+**Then it crashed, and the crash is the more useful result.** The first version ended with a CP15 MIDR
+read and died with SIGILL after printing *nothing* — which looked like a broken build. It was not:
+stdout through `adb shell` into a pipe is block-buffered, and the buffer is lost when the process dies
+on a signal, so "crashed on line 1" and "crashed on the last line" are the same observable. Unbuffered,
+the truth appeared in order: every number above printed, then the CP15 read killed it.
+
+Run one process per register (`--cp15 <name>`, because a refusal takes the process with it and a single
+run would report only the first):
+
+| Read from an AArch32 EL0 process | SM-X710, native 32-bit |
+|---|---|
+| `mrc p15, 0, Rd, c0, c0, 0` — MIDR | **SIGILL** |
+| `mrc p15, 0, Rd, c0, c0, 1` — CTR | **SIGILL** |
+| `mrc p15, 0, Rd, c0, c0, 5` — MPIDR | **SIGILL** |
+| `vmrs Rd, fpsid` | **SIGILL** |
+| `mrc p15, 0, Rd, c13, c0, 3` — TPIDRURW | **works**, `0xf7450fe0` |
+
+The split is coherent: the ID registers are off-limits to EL0 on an ARMv8 core running AArch32 and this
+kernel does not emulate the read, while the thread-register bionic actually uses for TLS works normally.
+`[INFER]` that the four failures share that cause rather than four separate ones — what was *measured* is
+the pass/fail column, and the register numbers themselves come from reading the AArch32 encoding table,
+not from this run. `[UNVERIFIED]` whether any kernel does emulate EL0 MIDR for AArch32 (Linux's
+`armv8_deprecated` insn-emulation framework covers SETEND/SWPCP/legacy `LDREX`, and I have not confirmed
+either way that ID reads are or are not on that list); one CI job or one different vendor kernel answers
+it.
+
+Three consequences, all of which change a plan document:
+
+1. **`docs/21` §E5's MIDR assertion has no native comparator.** It was written expecting to compare
+   RetroBug's answer against "the host's" — but the host cannot produce an answer, because the read
+   faults. So the assertion is against the ARMv7-A *architecture*: RetroBug answering a MIDR read is
+   deliberately more permissive than the silicon it runs on, and that is the brief's requirement
+   (reproduce ARMv7 CPU semantics) rather than a divergence to apologise for. Recorded in `docs/21` §3.
+2. **The fixture becomes unusable as a native control on a 32-bit-capable device once it reads MIDR** —
+   it would die for a reason unrelated to emulation. E1's control stays on the 64-bit-only device, where
+   the kernel refuses the binary before any instruction runs. This is exactly the kind of trap that
+   looks like a milestone failure when it is a fixture property.
+3. **CP15 emulation has a cheap ground truth available for the part that matters.** TPIDRURW working
+   natively means a real 32-bit Android process's TLS traffic is observable on this device, which is the
+   behaviour `docs/research/01` says RetroBug must reproduce for `__get_tls()`. The ID-register half has
+   no native reference; the TLS half does.
+
+Also fixed in passing: `-llog` cannot link into a static 32-bit build (no `liblog.a`), and the first
+`mrc` attempt was rejected by the assembler for a missing comma — GNU ARM syntax needs
+`mrc p15, 0, Rd, c0, c0, 0`, commas and all, which is what `docs/21` §3 already had right.
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |
 |---|---|
-| Host compiler for Windows binaries | **none** (`gcc`/`cc`/`clang`/`cl` all absent) → M0 tests are x86_64 **Android** binaries in the emulator |
+| Host compiler for Windows binaries | **none** (`gcc`/`cc`/`clang`/`cl` all absent) → M0 tests are **Android** binaries: arm64 on a phone or tablet is the primary lane (fastest, real hardware, 4 KiB pages), x86_64 in the emulator is the 16 KiB-granule lane |
+| Devices available, and the difference that matters | **OnePlus 12** (`CPH2573`, SD 8 Gen 3): `abilist32` empty, kernel refuses a 32-bit ELF with ENOEXEC → M1's negative control. **SM-X710 Tab S9** (SD 8 Gen 2): `abilist32=armeabi-v7a,armeabi`, executes AArch32 → the only ARMv7 hardware oracle here. Two 2023 arm64 devices, opposite capability: never infer one from the other or from a spec sheet |
+| `adb push` and mtimes | the destination keeps the **source** file's mtime, so two binaries pushed in one second show different timestamps. Useful for attributing a run to a device, and the reason `ls -la /data/local/tmp` can look like a stale push when it is not |
+| A crashing device process loses its buffered stdout | `adb shell` pipes stdout, so it is block-buffered and `printf` output before a `SIGILL`/`abort` disappears. `setvbuf(stdout, NULL, _IONBF, 0)` in any probe that might die — without it, "crashed on line 1" and "crashed on the last line" are the same observable (this cost a cycle in Step 5g) |
 | Emulator acceleration | AEHD 2.2 **installed but stoppable**: it was "usable" for two boots, then the `aehd` service was found `Stopped` and the AVD refused to start. Re-arm with an elevated `net start aehd`; check `Get-Service aehd` before trusting `-accel-check`'s "not installed" wording. AVD `Medium_Phone` exists |
 | Emulator image | `android-37.1/google_apis_playstore_ps16k/x86_64`, `abilist=x86_64,arm64-v8a`, **`abilist32=` empty** |
 | `openat2`/`io_uring`/`landlock` from an app | unavailable (outside bionic's `SYSCALLS.TXT` allowlist) — see `docs/research/05` §1.4 |
