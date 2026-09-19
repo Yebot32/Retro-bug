@@ -353,6 +353,34 @@ Still open before the loader can be called verified: fix the test's resolver wir
 0 failures; re-run the same three suites on the OnePlus 12 when it is free; and the unresolved
 `compat/` limitation for the AArch64 backend (Step 5b), which blocks `dynarmic_tests` on arm64.
 
+## Step 5d — measurements only the OnePlus 12 can give (taken before it was put away)
+
+`tools/aarch32_el0_probe.c` and `tools/va_probe.c`, cross-built and pushed; run from `adb shell`
+(`shell` domain, so the executable-memory lines are indicative and the app-domain question stays open).
+
+**M1's E1 negative control is stronger than planned.** Instead of the anticipated "PackageManager
+refuses to install the APK", the kernel refuses to *start* a 32-bit binary at all:
+
+```
+/system/bin/sh: ./aarch32_probe: not executable: 32-bit ELF file     # ENOEXEC
+```
+
+That is a lower, harder level of evidence than a package-manager policy decision: on this SoC AArch32
+execution does not exist, so nothing about RetroBug's result can be explained by a native path. It also
+contrasts sharply with the Tab S9, where the same binary ran (see Step 5c) — two 2023 arm64 devices,
+opposite capability, which is precisely the fleet variance AD-1 refuses to build on.
+
+**U-2 closed on the real target device.** A contiguous 4 GiB `PROT_NONE` window reserves at hint
+`0x10000` (`addr=0x10000`), and address 0 is refused with `EPERM` exactly as on the emulator — so
+fastmem's low identity window is available where it matters, and the biased `GUEST_BASE` fallback stays
+in the design rather than becoming the default.
+
+**First U-13 data point, favourable:** anonymous `PROT_READ|PROT_WRITE|PROT_EXEC` succeeds on an OEM
+(OnePlus/ColorOS, Android 16) build, as does `RW` then `mprotect(RX)`. Still only the `shell` domain, so
+the app-domain case must be measured inside an installed RetroBug build — but it is the first evidence
+that OEM policy has not tightened beyond AOSP here. Device page size confirmed 4096, so both granule
+cases remain testable on this phone.
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |

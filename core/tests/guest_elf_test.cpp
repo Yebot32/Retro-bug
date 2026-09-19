@@ -182,6 +182,14 @@ Fixture parse_fixture() {
     }
   }
   f.ok = !f.loads.empty() && f.symtab && (f.rel || f.jmprel);
+  // Counts on stderr: when the loader and this disagree, the first question is which side parsed
+  // badly, and guessing cost two iterations already.
+  std::fprintf(stderr,
+               "[fixture] loads=%zu rel=0x%x relsz=%u jmprel=0x%x pltrelsz=%u symtab=0x%x symsz=%u "
+               "strtab=0x%x exports=%zu imports=%zu needed=%zu ok=%d\n",
+               f.loads.size(), f.rel, f.relsz, f.jmprel, f.pltrelsz, f.symtab, f.symsz, f.strtab,
+               f.export_funcs.size(), f.import_names.size(), f.needed.size(), f.ok ? 1 : 0);
+  std::fflush(stderr);
   if (!f.ok) fail("fixture parsing produced nothing to assert against", __LINE__);
   return f;
 }

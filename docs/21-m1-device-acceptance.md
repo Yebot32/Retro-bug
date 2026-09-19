@@ -79,6 +79,15 @@ adb -s SERIAL shell pm list packages | grep retrobug.m1fixture > $D/E1b_not_inst
 adb -s SERIAL shell dumpsys package com.retrobug.m1fixture     > $D/E1c_dumpsys.txt 2>&1
 #   PASS: install rejected (expect INSTALL_FAILED_NO_MATCHING_ABIS or an ABI-equivalent
 #   failure), no package entry, dumpsys finds nothing.
+#
+#   ALREADY MEASURED, AND STRONGER THAN ASSUMED (docs/30 §Step 5d): before any APK is involved,
+#   the kernel refuses to *start* a 32-bit ELF on this device —
+#       /system/bin/sh: ./aarch32_probe: not executable: 32-bit ELF file
+#   i.e. ENOEXEC at the execve boundary, not a package-manager policy decision. Evidence at this
+#   level cannot be explained by any native path, so keep both: the exec probe as the hard control
+#   and the install refusal as the user-visible one. Re-run tools/aarch32_el0_probe.c per device:
+#   the Tab S9 *does* execute the same binary, so this control is device-dependent and must never
+#   be assumed from a spec sheet.
 
 # Baseline: RetroBug's own APK is installed and the guest file is present on-device
 adb -s SERIAL install -r retrobug.apk
