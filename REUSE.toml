@@ -1,0 +1,62 @@
+# REUSE.toml — SPDX license manifest for RetroBug
+# Compliant with the REUSE Specification 3.2 (https://reuse.software).
+# RetroBug's own code is Apache-2.0; everything under external/ is permissive and recorded
+# at path granularity below rather than copying each upstream licence text, which stays
+# in-place alongside the source it covers.
+
+version = 1
+
+[[package]]
+path = "/*"
+SPDX-License-Identifier = "Apache-2.0"
+SPDX-FileCopyrightText = "2026 RetroBug contributors"
+
+[[package]]
+path = "external/dynarmic/*"
+SPDX-License-Identifier = "0BSD"
+SPDX-FileCopyrightText = "© 2017 merryhime <git@mary.rs> and dynarmic contributors"
+
+[[package]]
+path = "external/dynarmic/externals/oaknut/*"
+SPDX-License-Identifier = "MIT"
+SPDX-FileCopyrightText = "© 2022 merryhime <https://mary.rs>"
+
+[[package]]
+path = "external/dynarmic/externals/xbyak/*"
+SPDX-License-Identifier = "BSD-3-Clause"
+SPDX-FileCopyrightText = "© 2007-2021 herumi"
+
+[[package]]
+path = "external/dynarmic/externals/biscuit/*"
+SPDX-License-Identifier = "MIT"
+SPDX-FileCopyrightText = "© 2021 Lioncash/Lioncache"
+
+[[package]]
+path = "external/dynarmic/externals/mcl/*"
+SPDX-License-Identifier = "MIT"
+SPDX-FileCopyrightText = "© 2022 merryhime"
+
+[[package]]
+path = "external/dynarmic/externals/robin-map/*"
+SPDX-License-Identifier = "MIT"
+SPDX-FileCopyrightText = "© 2017 Thibaut Goetghebuer-Planchon <tessil@gmx.com>"
+
+[[package]]
+path = "external/dynarmic/externals/fmt/*"
+SPDX-License-Identifier = "MIT"
+SPDX-FileCopyrightText = "© 2012-present Victor Zverovich and {fmt} contributors"
+
+[[package]]
+path = "external/dynarmic/externals/catch/*"
+SPDX-License-Identifier = "BSL-1.0"
+SPDX-FileCopyrightText = "© Catch2 contributors"
+
+[[package]]
+path = "external/dynarmic/externals/zydis/*"
+SPDX-License-Identifier = "MIT"
+SPDX-FileCopyrightText = "© 2014-2024 Florian Bernd and Zydis contributors"
+
+[[package]]
+path = "external/dynarmic/externals/zycore/*"
+SPDX-License-Identifier = "MIT"
+SPDX-FileCopyrightText = "© 2018-2024 Florian Bernd and Zycore contributors"

@@ -312,6 +312,13 @@ probed, never assumed, and the probe result is recorded in the diagnostics repor
 architecturally forced to be a sandbox-created memfd, because the sandbox provably cannot execute any path it can
 name (**[1A]**, `private/app.te:731-746`) — which happens to give AD-8's instance tagging for free.
 
+**Update at vendoring time (was open risk U-6, now closed):** both non-interpretive backends already have
+MIT-licensed upstream implementations in the vendored tree. `externals/oaknut/include/oaknut/code_block.hpp`
+performs the anon `mmap(PROT_READ|PROT_EXEC)` and RWX forms (plus a Darwin `MAP_JIT` variant that iOS cannot use,
+and a Linux `PROT_MPROTECT` variant), and `dual_code_block.hpp` implements the `memfd_create` + dual `MAP_SHARED`
+RW/RX aliasing exactly as specified above. Only the `Interpreted` backend — the iOS path and the OEM-`execmem`
+fallback — is new work. See `external/PROVENANCE.md`.
+
 ---
 
 ## 9. AD-9 / AD-15 — graphics, audio, input
