@@ -870,6 +870,104 @@ decisions. Both are off unless set, and the IR dump is what turned a 20-minute g
 identification of the `push`-sets-flags bug — it showed the `#1` on an operand that could not have meant
 set-flags on a `push`.
 
+## Step 7 — `rb::abi` and the fake `JNIEnv`, which found Tier I's IT-block bug by measurement
+
+Three pieces, because the third was only reachable once the first two existed. Ten lanes green on the
+SM-X710: 33 · 12 · 131 · 81 · 101 · 41 · 80 · 78 · **41** checks, 0 failures, plus Dynarmic's 200,561
+assertions.
+
+**7a — the bridge (`core/abi/call.cpp`).** docs/20 §C08 names this file as where the ABI-correctness
+review pass concentrates, so the rules that hide are stated where they are applied:
+
+- An 8-byte integer needs a consecutive **even/odd core-register pair** — with one 4-byte argument
+  ahead of it, the pair goes to r2/r3 and **r1 is consumed by nothing**. Taking r1/r2 is the classic
+  `jlong` failure, invisible until a call has an odd number of preceding 32-bit arguments.
+- `-mfloat-abi=softfp` **passes** scalars in VFP registers; it merely computes them in software. A
+  `double` goes to `d0..d7` and consumes **no** core register, so `f(double, int)` leaves the int in
+  r0. Treating soft-float as "no VFP arguments" puts a `jdouble` in core registers and is wrong for
+  every floating call, which is most of the audio and geometry surface.
+- VFP allocation is counted in **32-bit units** (a float takes `s(n)`, a double takes an even unit
+  pair, so `s0,s1 == d0`), and a single write leaves the other half of its `D` register alone — the same
+  rule §Step 6d established for `SetExtendedRegister32`, for the same reason.
+- Spilled arguments go at **ascending** addresses (reversing them is invisible with one spill and wrong
+  with two), the frame keeps the 16-byte intra-procedure area below SP that AAPCS lets a leaf use
+  across a `bl`, and a frame too small to hold its spills **refuses before mutating any register**, so
+  there is no half-applied call to debug.
+
+**7b — a `JNIEnv` made of guest memory and host-call slots.** What the guest's own instructions say the
+type is, measured out of `jni_utf`:
+
+```
+ldr   r2, [r0]            ; r2 = *env        -> the function table
+ldr.w r2, [r2, #0x29c]    ; r2 = table->NewStringUTF
+blx   r2                  ; r0 = env, r1 = the char*
+```
+
+so `env` is a guest word holding a guest address, which is a table of guest addresses — and the entries
+are not code but `AbiContext` slots, which the executor recognises **before** translating. No page has
+to be executable for a host function to be callable, which is the same mechanism the return sentinel
+already used.
+
+- **All 233 entries are bound**, implemented or not. An unfilled entry is a guest branch to address 0:
+  a fault with nothing to say about itself. A bound-but-refusing entry names its index, which is the
+  difference between "this app needs FindClass" and a blank screen.
+- The indices are **measured, not transcribed**. `tests/corpus/jni_offsets.c` prints
+  `offsetof / sizeof(void*)` from the NDK's own header (so the number is pointer-width independent), and
+  `NewStringUTF`'s **167** is confirmed a second time by the `#0x29c` above (668 / 4). The four reserved
+  NULL slots at the head of the table are why counting function *declarations* gives 163 — an
+  off-by-four that would have the guest calling `ReleaseStringChars` when it meant `NewStringUTF`,
+  **successfully**.
+- `core/` may not include Android headers (`core/CMakeLists.txt` enforces it; it is what keeps the
+  engine buildable for an iOS host), so the indices are transcribed into `rb/abi/jni_env.h` *from a
+  measurement* and cross-checked against the guest's encoding rather than reached for `jni.h`.
+- A `jstring` handle is validated against the arena and its magic before being read. A handle is opaque
+  to the guest, so what arrives is ours, corrupted, or a pointer to something else — and reading that
+  last as text yields a plausible string out of arbitrary guest memory.
+- Unbound/refused host calls are a **`Fault` naming the slot**. `CallGuest` still hands back an `r0`, and
+  it is meaningless in that case — which is why one of my own assertions was deleted: it checked `r0`
+  after a refusal, i.e. it encoded the exact confusion the design exists to prevent.
+
+The oracle was extended to **build its own `JNIEnv`** on the tablet from the same header, so the offset
+is verified against silicon and not self-certified: `jni_utf(1)=115 jni_utf(0)=114 calls=2
+utf=retrobug`. If RetroBug's table put the function anywhere else, the oracle's stub would never fire.
+
+**7c — the finding: Tier I executed both legs of every IT block.** `it_probe(7,3)` returned **1012**
+where the same compiled Thumb-2 on the SM-X710 returns **42**. Across all six shapes the pattern was
+exact: both `addgt` and `addle` ran and the last one won, then both `addlt` and `orrge` ran. So
+`docs/32` §2.1 — which named IT-block handling the engine's single biggest correctness risk, on the
+strength of 8,387 IT instructions counted in bionic — has now predicted a real defect and had it
+confirmed by a measured value rather than by argument. After the fix all six agree:
+`42 1008 42 104 1005 1000`.
+
+The mechanism was missing entirely: Dynarmic's A32 translator splits an IT sequence into **one
+predicated block per leg**, carrying `Block::GetCondition()` and
+`Block::ConditionFailedLocation()` (`frontend/A32/translate/conditional_state.cpp:45-49`), and the
+AArch64 back end branches at the entry label so a failed leg executes **no** instructions
+(`backend/arm64/emit_arm64.cpp:205-217`). Tier I walked every block's instructions and consulted
+neither. `ConditionFailedLocation` already has `AdvancePC`/`AdvanceIT` applied by the translator, so
+following it is the whole fix and no IT bookkeeping belongs in the interpreter — which is also why
+`itstate` provably cannot leak: it is re-read from the descriptor each time.
+
+Two residuals from this, both for the differential rather than for argument:
+
+- `[UNVERIFIED]` A predicated block whose flags were set by an instruction **in the same block** would
+  read stale CPSR, because Tier I materialises flags into CPSR at each `SetCpsr*` and the JIT reads the
+  host flags register instead. Every case seen so far has the predecessor write CPSR first; whether the
+  translator can avoid splitting in some IT shape is a Tier J comparison question, and it is on the list.
+- An IT sequence **straddling a block boundary** is still untested. It cannot be forced from C or from
+  inline asm in a way that survives the translator's own splitting decision, so it needs either a
+  hand-assembled image or an app that produces it. `docs/32` §5 keeps it as the top lane.
+
+**Harness change that came out of two devices being attached.** `run_engine_tests.sh` now refuses to
+guess: `RB_SERIAL` names the device, one device is auto-selected, more than one without it is an error,
+and every run prints `model / abilist32 / sdk / page`. A green line means "green on *this* hardware",
+which is the entire content of the claim — and a silently-chosen device is how an arm64-only phone would
+eventually be reported as having run the ARMv7 lane.
+
+`it_probe` also recorded a small lesson in why the oracle exists: hand-derived, I expected `it_probe(101,1)`
+to return 136. The hardware says **104**, because `101+3 = 104` already has bit 5 set, so the `orrge`
+leg is a no-op. An expectation computed by reading the assembly is not the same thing as a measurement.
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |

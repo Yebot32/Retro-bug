@@ -39,6 +39,14 @@ Vector/FP top: `vldr` 2,290 · `vmov` 1,580 · `vst1.64` 815 · `vstr` 788 · `v
    adds the other half of the argument: bionic itself emits 8,387 IT-block instructions, so any engine
    defect there breaks system libraries before it breaks an app. This is now the highest-priority lane in
    the differential suite (§5), not a nice-to-have.
+   **Confirmed, then fixed: `docs/30` §Step 7c.** A purpose-built IT probe in the fixture returned
+   `it_probe(7,3) = 1012` on Tier I against `42` on the same compiled Thumb-2 on the SM-X710, and the
+   pattern across all six shapes was "both legs of every `ite` ran, last write wins". Tier I had never
+   consulted `Block::GetCondition()` / `ConditionFailedLocation()`, which is precisely how Dynarmic
+   represents a split IT sequence. The prediction was right, the defect was in RetroBug's code and not
+   in Dynarmic's, and the only thing that found it was a measured expectation — §4's warning that
+   "presence of a handler and semantic correctness are different claims" is now an example rather than a
+   caveat.
 2. **VFPv3 double precision is required, not optional.** `vmul.f64`/`vadd.f64`/`vmla.f64`/`vcmp.f64`
    all appear hundreds of times — libm's `double` paths. An engine scoped to single-precision-only FP
    (a plausible mistake when the reference target was a 3DS ARM11) fails here.

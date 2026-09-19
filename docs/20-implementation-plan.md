@@ -604,6 +604,12 @@ Progress and the findings that change this plan are tracked in
    carry-in never reaches its result. **Tier J behind `RbCodeCache` (C04) is still open**, and with it
    item 7's both-tiers exit test.
 7. `rb::abi` `CallGuest` + fake `JNIEnv`; **M0 exit test: `fib(20) == 6765`, both tiers, identical state**.
+   **Bridge and `JNIEnv` done** (`30` §Step 7a/7b): guest calls through AAPCS32 match the hardware
+   values, and the fake `JNIEnv`'s table is built from indices measured twice over (NDK `offsetof`, and
+   the fixture's own `ldr.w r2, [r2, #0x29c]`). Building it found Tier I's IT-block defect (`7c`), which
+   is now fixed against six measured values. **What remains of item 7 is its second half: `both tiers,
+   identical state`** — there is no Tier J yet, so the M0 exit test is asserted against silicon, not
+   against a second tier.
    One dependency note from Tier I: those exports are JNI methods, so `n` arrives in **r2** behind `env`
    and `clazz` — a call bridge that puts the first C argument in r0 will get `fib(0)` and look correct.
 8. `docs/research/01` corrections (stale `MemoryProcessor` API; no interpreter upstream) and `docs/00` §2 note that
