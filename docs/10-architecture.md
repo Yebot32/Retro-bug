@@ -43,7 +43,7 @@ verified.
 | AD-3 | Managed code runs on **host ART**; only native code is emulated | The only performant shape; matches the Houdini precedent; keeps the emulated surface to machine code | C9 |
 | AD-4 | The guest is **never an installed package** — RetroBug synthesises `ApplicationInfo`, resources, data dirs, permissions | An armeabi-v7a-only APK cannot install on a 64-bit-only device; this is *why* runtime reproduction is unavoidable rather than optional | C14 |
 | AD-5 | Native binding via **one pre-shipped agent `.so` + host-side `RegisterNatives`**; zero runtime-generated libraries, ever | Exec-from-app-data is `neverallow`-blocked and ART's fd-load path is unreachable | C1 |
-| AD-6 | Two build-time guest **address models** selected by startup probe: flat/identity on Android, biased `GUEST_BASE` on iOS | Fixed low-VA reservations fail intermittently on Darwin | C16 |
+| AD-6 | Two build-time guest **address models** selected by startup probe: **biased `GUEST_BASE` on Android *and* iOS** (amended by measurement — see §8.2; the original expected flat/identity on Android) | Low-VA reservations fail on Darwin, **and on Android app processes the low 4 GiB is not free at all** — measured, `docs/30` §Step 8 | C16 |
 | AD-7 | Guest page granule fixed at **4 KiB**, host granule queried; no `userfaultfd` | ARMv7 guests and their ELFs are 4 KiB; SMC detection must work where `userfaultfd` is absent | C6, C10 |
 | AD-8 | Three isolation **tiers T0/T1/T2** with enforced naming discipline; "isolated" reserved for T1 and gated on a runtime self-test | Brief (c)+(h); `:guestN` provides zero isolation and must not be sold as such | C5, C13 |
 | AD-9 | Graphics/audio exposed as **`RbGfxChannel` with `InProcessChannel` and `RingChannel`**, built from day one | T1 has no `gpu_device`; without the seam the sandbox tier forks the renderer | C5 |
@@ -297,12 +297,33 @@ The brief asks for this boundary explicitly.
   ships 16 KiB-page devices, so a guest 4 KiB mapping that straddles a host granule **leaves fastmem** (null PTE +
   fault-based slow path) rather than growing a soft TLB. Mixed-granule frequency is **[UNVERIFIED]** but bounded
   by the design's correctness either way.
-- Two address models, chosen at build time and *confirmed by probe at startup*: Android → flat/identity low 4 GiB
-  window, reservation verified and reported, never crashed on; iOS → biased `GUEST_BASE` with an OS-chosen base.
+- Two address models, chosen at build time and *confirmed by probe at startup*: **biased `GUEST_BASE` on
+  Android as well as iOS** (see the amendment below — the original expectation was flat/identity on
+  Android), reservation verified and reported, never crashed on. iOS keeps an OS-chosen base.
   `docs/research/08` item 7 measured that fixed-window reservations fail intermittently on iOS, which is the
   reason this is not "primary + fallback" but two real models (**C16**). **Every** pointer marshalling helper must
   take `guest_base` into account from the first commit — a `guest_base == 0` shortcut anywhere would be a latent
-  iOS-only bug.
+  iOS-only bug. It is no longer iOS-only; see below.
+- **Amendment, from measurement** (`docs/30` §Step 8, `tests/appdomain/results-*.txt`). The Android half of
+  that expectation was wrong: a contiguous 4 GiB window at a low address is **not obtainable in an
+  installed app process**. On two Android 16 devices, `MAP_FIXED_NOREPLACE` of `PROT_NONE` returns `EEXIST`
+  at `0x10000`, `0x10000000` and `0x80000000`, for sizes from 4 GiB down to 512 MiB. `/proc/self/maps`
+  explains it without any policy inference: 26 mappings, 1254 MiB, spanning `0x2000000..0xebad7000` — the
+  guest's future home is occupied by the ART heap and by the app's own mapped files. Largest free gap below
+  4 GiB: 1872 MiB; largest window actually resolvable in it: **1856 MiB**. Single low pages map fine (4 KiB
+  at `0x10000` and at `0x80000000` both succeed), so the obstacle is contiguity rather than prohibition;
+  `0x1000` is `EPERM`, the `mmap_min_addr` floor, and it is distinguished from `EEXIST` on purpose because
+  the two have different remedies.
+- **What that costs, and what it does not.** The design holds through its own mechanism: the startup probe
+  was always the authority, so "identity where a ≥4 GiB gap exists, bias otherwise" is still precisely what
+  is implemented — what changed is that the measured answer on every device tried so far is *otherwise*.
+  The performance concern is small: fastmem with a non-zero base is one addition, and dynarmic supports a
+  non-zero `fastmem_pointer` (U-2's own row already said so). The expensive part, host→guest pointer
+  crossing through a 32-bit handle table, was **already mandatory** for iOS, so Android now shares
+  machinery that had to exist rather than acquiring a new obligation.
+- Consequence to keep visible: `guest_base == 0` is now the *rare* case on Android rather than the normal
+  one, which inverts the reachability of the latent bug named above — a zero-bias shortcut is no longer an
+  iOS-only defect but one hit on essentially every Android device.
 - Pointer crossing is the hard part of a 64-bit host sharing its address space with a 32-bit guest: host→guest
   arguments (an ART heap pointer, a `jobject`) are **not truncatable**, so crossing uses a 32-bit handle table
   plus low-arena bounce buffers; guest→host pointers are validated against the page table. fastmem faults are
@@ -321,7 +342,12 @@ The brief asks for this boundary explicitly.
 `allow appdomain self:process execmem;` at `private/app.te:189` **[1L]**), `MemfdDualAlias` (W on the memfd, X on
 a second mapping — how ART's own JIT works, and permitted by `app_domain()`'s
 `appdomain_tmpfs:file { execute … }` **[1A]**), and `Interpreted` (no executable memory at all). Selection is
-probed, never assumed, and the probe result is recorded in the diagnostics report. In T1 the cache is
+probed, never assumed, and the probe result is recorded in the diagnostics report.
+**Measured as well as read now** (`docs/30` §Step 8, `tools/app_domain_probe.sh`): inside an installed
+`untrusted_app` process on two Android 16 devices, all four operations that matter — anon `RWX`,
+`RW`→`mprotect(RX)`, `RX`→`RW` again for patching, and a `memfd` executed both by dual-mapping and mapped
+`RWX` outright — succeed and *run the code written to them*. The policy reading and the behaviour agree, so
+the `AnonRwx` default is not a hope; what remains is OEM coverage, not principle. In T1 the cache is
 architecturally forced to be a sandbox-created memfd, because the sandbox provably cannot execute any path it can
 name (**[1A]**, `private/app.te:731-746`) — which happens to give AD-8's instance tagging for free.
 
@@ -724,11 +750,11 @@ Ordered by how much rework each would cause. **U-2** and **U-10** are the two th
 
 | # | Risk | Status | Experiment | If it fails |
 |---|---|---|---|---|
-| U-2 | A contiguous 4 GiB low reservation succeeds in a zygote-forked Android app process | **CLOSED for the VA layout** — measured on the OnePlus 12 itself: a 4 GiB `PROT_NONE` window reserves at hint `0x10000` (`addr=0x10000`); address 0 is `EPERM` from `mmap_min_addr`, which matches a real 32-bit Android leaving guest page 0 unmapped so a NULL deref faults. Still unproven: the same call from an `appdomain` process rather than `shell` | rerun the probe inside the installed RetroBug build at M1 and log it via `rb::diag` | Biased `GUEST_BASE`: JIT perf survives (dynarmic supports a nonzero `fastmem_pointer`), pointer aliasing gets slower and every host→guest crossing needs the handle table (§8.2) |
+| U-2 | A contiguous 4 GiB low reservation succeeds in a zygote-forked Android app process | **ANSWERED: NO.** Measured in the app domain on two Android 16 devices (`docs/30` §Step 8): `EEXIST` at `0x10000`/`0x10000000`/`0x80000000` for 4 GiB down to 512 MiB; `/proc/self/maps` shows 26 app mappings occupying 1254 MiB of the low 4 GiB, largest free gap 1872 MiB, largest window actually resolvable **1856 MiB**. The earlier shell-domain "yes, at `0x10000`" was real but not the domain that ships — the same `MAP_FIXED_NOREPLACE` call succeeded there. Consequence applied to AD-6: biased `GUEST_BASE` is the Android default | none left; re-run per OEM at M1 (`tools/app_domain_probe.sh`) | Biased `GUEST_BASE`, which §8.2 already required for iOS — so the handle table and the non-zero `fastmem_pointer` were already on the critical path and no new machinery is needed |
+| U-13 | `execmem` + memfd-exec survive on Samsung/Xiaomi/OPPO/vivo/Huawei | **ANSWERED for the app domain on 2 of the 5 OEMs**: inside an installed app (`u:r:untrusted_app`, Android 16, Enforcing) on **SM-X710 (Samsung)** and **CPH2573 (OnePlus/ColorOS)**, anon `RWX` executes, `RW`→`mprotect(RX)` executes, `RX`→`RW` re-patching works, and a `memfd` executes both via `RW`→`RX` and mapped `RWX` outright — each verified by *running* a written stub, not just by a successful `mmap`. Corroborates §8.3's reading of `allow appdomain self:process execmem;` and `appdomain_tmpfs:file { execute }` from policy. Xiaomi/vivo/Huawei still unmeasured | the same probe, installed per OEM; `AnonRwx` → `MemfdDualAlias` → `Interpreted` selection is already implemented as the answer | Fall to Tier I in that process — which is why Tier I is built early (AD-2) and why it is now green and differential-tested against hardware |
 | U-10 | `InMemoryDexClassLoader` over a host-brokered memfd works in an `isolated_app`, and `RegisterNatives` binds into it | **[UNVERIFIED]** | test APK: host memfd-writes a tiny dex, passes the fd over Binder, sandbox loads and calls a registered native | T1 covers **native code only**; DEX stays in T0, and the per-app FS isolation story weakens for managed code and must be disclosed |
 | U-8 | Dynarmic's A32 coverage of the ARMv7-A/VFPv3-D32/NEON subset real apps use, incl. misaligned access and FPSR accuracy | **DEMAND MEASURED, PRESENCE ANSWERED, ENGINE LANE GREEN ON BOTH BACK ENDS** — 325,541 instructions / 759 mnemonics from real bionic/libm/libc++/zlib ARMv7 code (8,387 IT-block, hundreds of `f64` VFP ops; the first published totals were wrong and `docs/32` §3.3–3.4 records the correction and one claim that turned out never to have been measured). The mnemonic→handler query now exists: **757 of 759 demanded mnemonics have an implemented translator, covering 100.00% of instructions** (`docs/32` §5.2). Dynarmic's own suite runs **200,561 assertions, all passing, with no Unicorn and therefore no GPL** on x86_64 (48 cases) *and* on **arm64 hardware** (47; the one-case gap is dynarmic's own x86-only, assertion-free `x64_cpu_info.cpp`), so the AArch64 backend that ships on Android is executed-and-green, which also closed `compat/`'s last known gap (`docs/30` §Step 5f). Still unverified: **semantic correctness** against a reference (its admitted "FPSR state is approximate"), and app-level `.so` corpora. One structural finding: `Term::Interpret` hands off to `UserCallbacks::InterpreterFallback`, which Dynarmic does not implement — so Tier I is required on the JIT path too (§5 consequence 3) | hand-written IT-block/FPSCR/ASIMD vectors ranked by measured demand; the §5.3 differential lane; repeat the survey on app `.so` files | Patch the ops (0BSD allows it) or route unimplemented encodings to `ExceptionRaised` → a per-instruction host helper; **not** to Capstone in the shipped binary |
 | U-11 | Hidden-API `Activity.attach` / `AssetManager.addAssetPath` / `HiddenApiBypass` still work at targetSdk 36 / Android 16 | **[UNVERIFIED]**, and it is the *runtime* layer's soft spot | one build on emulator + one OEM device | Designed fallback exists (v1a/v1b, §6); the listing must not promise "any APK" until green |
-| U-13 | `execmem` + memfd-exec survive on Samsung/Xiaomi/OPPO/vivo/Huawei | **ONE DEVICE GREEN, shell domain** — on OnePlus 12 / ColorOS / Android 16: anon `PROT_READ|WRITE|EXEC` succeeds, and `RW` then `mprotect(RX)` succeeds. `appdomain` is still unmeasured, and 4 of 5 OEM builds are untouched | 6-device probe matrix capturing `errno` (apps cannot read `dmesg`); run inside an installed RetroBug build | Fall to Tier I in that process — which is why Tier I is built early (AD-2) |
 | U-4 | Android 16 CDD still mandates GLES 1.1, i.e. host GLES1 forwarding exists | **[UNVERIFIED]** | grep the CDD; `dlopen("libGLESv1_CM.so")` + `glGetString(GL_VERSION)` on 5 devices | SwANGLE everywhere for GLES1, losing fps on old fixed-function apps |
 | U-5 | RetroBug can select ANGLE per app the way the platform does | **[UNVERIFIED]** | `dlopen("libGLESv2_angle.so")` from an app | Vendor ANGLE/SwANGLE in RetroBug (already needed for T1) |
 | U-7 | The AArch32 arm32 variants of `native_bridge_support/android_api` still build on `main` | **[UNVERIFIED]**, and three docs recommend reusing it | build one module in CI, or reimplement the generator against the NDK's 32-bit stub libs | Build guest libs from an `android15-release` tag, or generate the ~200 needed stubs ourselves from NDK stubs + `.map` (Apache-2.0) |

@@ -561,7 +561,7 @@ A profile for a **T0** app carrying `kReportNetworkAvailable` must work with no 
 | # | Risk | Gate / mitigation |
 |---|---|---|
 | R-1 | `rb::linker` effort unknown (own loader vs emulated AOSP linker, C06) | decide empirically inside M1 on the first corpus app that needs namespaces; time-box the own-loader attempt |
-| R-2 | U-2 reservation failure ⇒ biased mode on Android | `AddressModel` already parameterised; M0 runs `guest_base != 0` on x86_64 so no identity-only path survives |
+| R-2 | U-2 reservation failure ⇒ biased mode on Android | **TRIGGERED — measured, not hypothetical** (`30` §Step 8): no contiguous 4 GiB low window exists in an app process on either Android 16 device tested; largest obtainable is 1856 MiB, because ART and the app's own mappings occupy the low range. AD-6 amended to biased-by-default on Android as well as iOS. `AddressModel` was already parameterised and M0 already runs `guest_base != 0`, so no identity-only path survives — the mitigation was built before the risk landed, which is what it was for |
 | R-3 | U-10 (DEX load inside `isolated_app`) fails ⇒ T1 = native-only | M2 gate; disclosure wording pre-drafted (`docs/10` §10.5); does not block M1 |
 | R-4 | audio proxy surface larger than the 3-symbol stub suggests (§1) | re-estimate when C13 is scheduled; explicitly deferred out of M1/M2 |
 | R-5 | Tier I speed unknown (U-9) | M0 measures IR-ops-per-guest-instruction on a real `.so`; **no performance claim in any user-facing text before M0 numbers exist** |

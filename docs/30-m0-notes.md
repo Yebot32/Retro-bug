@@ -968,6 +968,79 @@ eventually be reported as having run the ARMv7 lane.
 to return 136. The hardware says **104**, because `101+3 = 104` already has bit 5 set, so the `orrge`
 leg is a no-op. An expectation computed by reading the assembly is not the same thing as a measurement.
 
+## Step 8 — the app-domain probe: `execmem` is granted, and the low 4 GiB is not
+
+Two of the plan's design-reversing risks (U-2, U-13) were blocked on the same thing: a measurement taken
+*inside an installed app*. From `adb shell` the answer describes the `shell` SELinux domain, which is not
+the domain RetroBug ships into, and both rows said so. The blocker was never elevation or the emulator —
+`net start aehd` was the wrong door. It needed a device attached and an APK.
+
+`tests/appdomain/` + `tools/app_domain_probe.sh`: an arm64 native library run by a minimal launcher
+Activity, built with the no-Gradle chain docs/20 §1 proved out (`javac → d8 → aapt2 → jar → zipalign →
+apksigner`), installed, launched, and read back out of `logcat`. Results are committed per device as
+`tests/appdomain/results-<model>.txt`.
+
+**Every "ok" in this file is an execution, not a permission.** Where a mapping comes back executable, the
+probe writes a real `mov w0, #42 ; ret`, calls it under a `SIGSEGV`/`SIGBUS`/`SIGILL`/`SIGSYS` guard, and
+reports what came back. A granted `mprotect(RX)` that faults on fetch is a completely different problem
+from a refused one, and `mmap` alone cannot tell them apart. The `SIGSYS` case came from the AOSP
+`SECCOMP_RET_TRAP` default — seccomp blocks kill the process rather than returning `EPERM`, so without it
+a blocked syscall looks like "the probe stopped answering".
+
+**U-13 — answered, positively, on two OEMs.** Inside `u:r:untrusted_app`, Android 16, `getenforce`
+Enforcing, on both SM-X710 (Samsung) and CPH2573 (OnePlus/ColorOS): anon `RWX` executes; `RW` →
+`mprotect(RX)` executes; `RX` → `RW` succeeds, so patching an existing block works; a `memfd` executes via
+`RW`→`RX` and also mapped `RWX` directly. This corroborates §8.3's *policy reading* (`allow appdomain
+self:process execmem;`, `appdomain_tmpfs:file { execute }`) with behaviour. **Tier J is not blocked on OEM
+policy.** Xiaomi / vivo / Huawei remain unmeasured — the row says 2 of 5 rather than "solved".
+
+**U-2 — answered, negatively, and it reverses AD-6's Android half.** A contiguous 4 GiB low window cannot
+be obtained: `MAP_FIXED_NOREPLACE` `PROT_NONE` is `EEXIST` at `0x10000`, `0x10000000` and `0x80000000`, for
+4 GiB down through 2 GiB, 1 GiB and 512 MiB. The reason is not policy. `/proc/self/maps`, printed by the
+probe before it asks anything: 26 mappings, **1254 MiB occupied**, spanning `0x2000000..0xebad7000` — ART's
+heap and the app's own mapped files sit exactly where the guest window would go. Largest free gap below
+4 GiB: 1872 MiB; largest window actually resolvable there, found by bisection: **1856 MiB**. Individual low
+pages map happily (4 KiB at `0x10000`, 4 KiB at `0x80000000`), so the wall is **contiguity, not
+permission** — and `0x1000` is `EPERM`, which is `mmap_min_addr` and a different error with a different
+remedy, so the two are reported separately rather than collapsed into "denied".
+
+The old shell-domain "yes" was not wrong; it was a different process. AD-6 already made the startup probe
+the authority, so the mechanism is unchanged and the expected answer is what moved: biased `GUEST_BASE` is
+now the Android default, exactly as on iOS. The consolation is real rather than rhetorical — the 32-bit
+handle table for host→guest crossing was already mandatory for iOS, so Android is now sharing machinery
+that had to exist anyway, and a non-zero `fastmem_pointer` is one addition. What does change: a
+`guest_base == 0` shortcut stops being a hypothetical iOS-only bug and becomes a defect hit on every
+Android device, which is worth stating plainly where the original warning lived.
+
+**Three bugs of mine, each caught by checking rather than by hoping.**
+
+1. The first U-2 test asked with a *bare hint* and reported `ok addr=0x7b00000000` as a success. A hint
+   without `MAP_FIXED*` is a suggestion; the kernel placed the window 480 GiB up and the test was
+   measuring something else entirely. The corrected test insists, and prints where a hint-only request
+   actually landed — "ok" at a high address is a *negative* result for identity addressing.
+2. The gap search looked only *between* mappings, missing the head and tail of the range, which under-read
+   the largest window.
+3. The bisection could not terminate: the midpoint is rounded to 16 MiB granularity, so once `hi - lo`
+   dropped below 32 MiB the rounded midpoint equalled `lo`, the map succeeded, `lo` never advanced, and the
+   loop condition stayed true. No signal, no tombstone — the app just stopped answering, which on an
+   unattended device is the least legible failure there is. Now it breaks on a step that makes no progress
+   (the iteration cap stayed, as a bound rather than as the fix).
+
+**Operational finding for M1, recorded because it will bite a runbook.** `adb install` on the CPH2573
+blocks on an on-device confirmation and never returns — so an unattended session cannot install there, and
+a script that does not bound the step simply stops doing anything. Every device step in
+`app_domain_probe.sh` is now wrapped in a `timeout`, and the failure message says what it thinks happened
+instead of blaming the device. Note that `timeout` cannot wrap a shell function (`timeout 30 adb shell …`
+fails with "No such file or directory"), so the bound lives inside the `adb()` wrapper.
+
+**What is still open here.** One device has the full low-window measurement (the OnePlus number could not
+be taken without a tap, and its earlier run predates the bisection); three of the five OEM families in
+U-13 have no data at all; and whether anything in the ART layout that causes this is version-dependent is
+unanswered — it is measured on Android 16 on both devices, and the reservation is app-content rather than
+policy, so it should get *worse* not better with a bigger runtime, but that is an inference and labelled as
+one. `rb::diag` (C17) should record the probe's answer per launch, which is what turns these into fleet
+data instead of bench data.
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |
@@ -975,6 +1048,8 @@ leg is a no-op. An expectation computed by reading the assembly is not the same 
 | Host compiler for Windows binaries | **none** (`gcc`/`cc`/`clang`/`cl` all absent) → M0 tests are **Android** binaries: arm64 on a phone or tablet is the primary lane (fastest, real hardware, 4 KiB pages), x86_64 in the emulator is the 16 KiB-granule lane |
 | Devices available, and the difference that matters | **OnePlus 12** (`CPH2573`, SD 8 Gen 3): `abilist32` empty, kernel refuses a 32-bit ELF with ENOEXEC → M1's negative control. **SM-X710 Tab S9** (SD 8 Gen 2): `abilist32=armeabi-v7a,armeabi`, executes AArch32 → the only ARMv7 hardware oracle here. Two 2023 arm64 devices, opposite capability: never infer one from the other or from a spec sheet |
 | `adb push` and mtimes | the destination keeps the **source** file's mtime, so two binaries pushed in one second show different timestamps. Useful for attributing a run to a device, and the reason `ls -la /data/local/tmp` can look like a stale push when it is not |
+| `adb install` on ColorOS (CPH2573) | **blocks on an on-device confirmation and never returns** — `Performing Streamed Install` is the last thing printed, with no timeout of its own. Unattended runs cannot install there; bound every device step (see `tools/app_domain_probe.sh`'s `adb()` wrapper) and say which device was skipped. `timeout` cannot wrap a shell *function*, so the bound has to live inside the wrapper |
+| Two devices attached at once | `adb` refuses any command that does not name one (`more than one device/emulator`), so every script takes `RB_SERIAL` / a serial argument and prints `model · abilist32 · sdk · page` per run. A silently-chosen device is how an arm64-only phone would end up "running" the ARMv7 lane |
 | A crashing device process loses its buffered stdout | `adb shell` pipes stdout, so it is block-buffered and `printf` output before a `SIGILL`/`abort` disappears. `setvbuf(stdout, NULL, _IONBF, 0)` in any probe that might die — without it, "crashed on line 1" and "crashed on the last line" are the same observable (this cost a cycle in Step 5g) |
 | Emulator acceleration | AEHD 2.2 **installed but stoppable**: it was "usable" for two boots, then the `aehd` service was found `Stopped` and the AVD refused to start. Re-arm with an elevated `net start aehd`; check `Get-Service aehd` before trusting `-accel-check`'s "not installed" wording. AVD `Medium_Phone` exists |
 | Emulator image | `android-37.1/google_apis_playstore_ps16k/x86_64`, `abilist=x86_64,arm64-v8a`, **`abilist32=` empty** |
