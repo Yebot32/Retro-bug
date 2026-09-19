@@ -49,14 +49,32 @@ coalescing. Cost: a day, plus the responsibility for a data structure on the SMC
 argument for owning it, since we would otherwise be trusting our correctness story to a container we
 cannot audit quickly.
 
-**Recommendation: B**, on the grounds that `patches/` exists exactly for this, that our own interval
-container is one of the few pieces of the SMC path we can unit-test exhaustively, and that it keeps the
-dependency set to what `external/PROVENANCE.md` already documents. **A is the right call if M0's first
-green build is needed urgently** — it can be reverted later without touching RetroBug code, whereas B
-must be redone if we ever re-import a Boost-using upstream. Either way this is an `AD-14` patch with a
-stated retirement condition: delete it if upstream drops Boost.
+**Resolution (step 2 done).** The owner chose "patch Boost out", and the implemented shape turned out to be
+better than either option above: instead of editing dynarmic at all, `compat/` provides the eight Boost
+names as headers on the include path, and `cmake/FindBoost.cmake` answers `find_package(Boost REQUIRED)`
+with an `IMPORTED` `Boost::boost` target pointing there. So **the vendored tree stays genuinely
+byte-identical** — no patch files to rebase — and `-DRB_USE_REAL_BOOST=ON` swaps back to real Boost with
+one flag. `external/dynarmic` builds clean for x86_64 Android: **114 MB `libdynarmic.a`**, A32 front end
+and x64 backend objects present, no Boost installed.
 
-Awaiting the owner's pick, since it changes what CI has to install and what the repo carries.
+Three things the shim needed that are worth knowing before touching it again:
+
+1. `boost::recursive_wrapper<T>` cannot alias to `T`. dynarmic's `ir/terminal.h` declares the `Terminal`
+   variant while `If`/`CheckBit`/`CheckHalt` are only forward-declared, and `std::variant` computes its
+   traits at that point. The shim holds a `unique_ptr<T>` and converts to `const T&` on use, exactly the
+   trick Boost uses.
+2. `boost::variant` needs to be a *derived* type, not an alias, because dynarmic calls the member
+   `which()`. Consequence: `std::visit` cannot deduce through a derived type, so `apply_visitor`
+   down-casts explicitly.
+3. Real Boost headers drag in `<map>`, `<set>`, `<tuple>`, `<array>`, `<functional>`, `<vector>`, and
+   dynarmic's backend headers rely on that without including them. Without the same transitive surface the
+   error is "too few template arguments for class template 'map'" in an unrelated header — confusing at a
+   distance, so the includes are there deliberately and commented as such.
+
+**Not yet done:** `core/tests/interval_compat_test.cpp` compiles and links but **has not been executed**,
+so the interval containers are unverified. They are on the SMC path, where the failure mode is stale
+translated code rather than a crash, so running them is the first thing this list owes. The emulator boot
+for it is in flight.
 
 ## Standing environment facts (so they are not re-derived)
 

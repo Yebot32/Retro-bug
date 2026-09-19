@@ -50,6 +50,13 @@ So both `RbCodeCache` backends named in the architecture (AD-6/§8.3) have worki
 may use, and `docs/10` §17's U-6 is closed. The `Interpreted` backend remains ours to write — it is the iOS
 path and the OEM-`execmem`-denied fallback, and it needs no executable memory at all.
 
+## Mechanical deviation from byte-identical (the only one)
+
+Submodules were flattened into ordinary files and every nested `.git` directory plus
+`dynarmic/.gitmodules` was deleted, because a gitlink would otherwise commit an empty directory. Source,
+headers, build files and licence texts are untouched. `diff -r` against a fresh upstream clone must
+therefore ignore `.git`/`.gitmodules` and nothing else.
+
 ## Re-import procedure
 
 1. Fetch the new upstream commit; record it here with its license check.
