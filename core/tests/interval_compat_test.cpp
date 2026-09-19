@@ -228,6 +228,35 @@ void map_registered_then_overlapping_invalidate_keeps_every_descriptor() {
   RB_CHECK(invalidate(m, patch) == Desc{11, 12, 13});
 }
 
+void map_stays_queryable_when_blocks_are_registered_out_of_order() {
+  // The realistic shape: blocks are registered in whatever order they get translated, not in
+  // address order. equal_range is a binary search over a sorted segment list, so an insert that
+  // appends out-of-order segments silently returns too few descriptors — stale translated code,
+  // not a crash.
+  Map<u32, Desc> m;
+  m.add(std::make_pair(Iv<u32>::closed(3000, 3099), Desc{30}));
+  m.add(std::make_pair(Iv<u32>::closed(1000, 1099), Desc{10}));
+  m.add(std::make_pair(Iv<u32>::closed(5000, 5099), Desc{50}));
+  m.add(std::make_pair(Iv<u32>::closed(2000, 2099), Desc{20}));
+  m.add(std::make_pair(Iv<u32>::closed(4000, 4099), Desc{40}));
+
+  for (u32 base = 1000; base <= 5000; base += 1000) {
+    Set<u32> probe;
+    probe.add(Iv<u32>::closed(base, static_cast<u32>(base + 99)));
+    const int expected = static_cast<int>(base / 100);
+    RB_CHECK(invalidate(m, probe) == Desc{expected});
+  }
+
+  Set<u32> all;
+  all.add(Iv<u32>::closed(0, 6000));
+  RB_CHECK(invalidate(m, all) == Desc{10, 20, 30, 40, 50});
+
+  // A single invalidation spanning two registered blocks must report both.
+  Set<u32> straddle;
+  straddle.add(Iv<u32>::closed(3050, 4050));
+  RB_CHECK(invalidate(m, straddle) == Desc{30, 40});
+}
+
 void map_iteration_yields_non_overlapping_sorted_segments() {
   Map<u32, Desc> m;
   m.add(std::make_pair(Iv<u32>::closed(300, 400), Desc{3}));
@@ -263,6 +292,7 @@ int main() {
   map_intersection_boundaries_are_exact();
   map_handles_max_address_and_wide_invalidation();
   map_registered_then_overlapping_invalidate_keeps_every_descriptor();
+  map_stays_queryable_when_blocks_are_registered_out_of_order();
   map_iteration_yields_non_overlapping_sorted_segments();
 
   std::printf("%d checks, %d failures\n", checks, failures);

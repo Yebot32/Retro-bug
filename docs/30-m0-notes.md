@@ -71,10 +71,28 @@ Three things the shim needed that are worth knowing before touching it again:
    error is "too few template arguments for class template 'map'" in an unrelated header — confusing at a
    distance, so the includes are there deliberately and commented as such.
 
-**Not yet done:** `core/tests/interval_compat_test.cpp` compiles and links but **has not been executed**,
-so the interval containers are unverified. They are on the SMC path, where the failure mode is stale
-translated code rather than a crash, so running them is the first thing this list owes. The emulator boot
-for it is in flight.
+**Step 2 tests: green.** `core/tests/interval_compat_test.cpp` runs on the local x86_64 emulator —
+**33 checks, 0 failures** — after the second pass fixed two real defects the tests found:
+
+1. `insert()` never created a segment for the part of a new interval that lay past or between existing
+   segments, so `[10,20]∪[15,25]` produced two segments instead of three and an invalidation at `[23,23]`
+   reported nothing.
+2. Worse, out-of-order registration broke the **sorted invariant** that `equal_range` binary-searches
+   over: adding `[1000,1099]` after `[3000,3099]` appended it out of position, so queries silently
+   under-reported. Both failure modes are stale translated code executing unnoticed, not a crash — which is
+   the argument for these tests existing before any guest runs.
+
+A third test (`map_stays_queryable_when_blocks_are_registered_out_of_order`) was added specifically to
+pin defect 2, since blocks are registered in translation order, not address order.
+
+**Also settled by booting the emulator: it is a 16 KiB-page Android.** `getconf PAGESIZE` → `16384`, and
+`abilist32` is empty there too. So AD-7's 4 KiB-guest / 16 KiB-host mixed-granule path **is** testable
+locally, not only on a future Android 16 device — see the correction in `docs/21` §1.
+
+Practical notes for re-running, both of which cost a cycle:
+- `adb push` **clears the execute bit**; `chmod 755` after every push.
+- Under Git Bash a device path like `/data/local/tmp/x` is rewritten to `C:/Program Files/Git/data/...`;
+  set `MSYS_NO_PATHCONV=1` for every `adb push`/`pull` with an absolute device path.
 
 ## Standing environment facts (so they are not re-derived)
 

@@ -69,21 +69,51 @@ class interval_map {
     if (iv.empty()) {
       return;
     }
+    // After splitting at both boundaries, every segment that touches iv lies entirely inside it,
+    // so the loop below never has to reason about partial overlap.
     split_at(iv.lower());
     if (iv.upper() != std::numeric_limits<Type>::max()) {
       split_at(static_cast<Type>(iv.upper() + 1));
     }
 
-    auto first = std::lower_bound(segs_.begin(), segs_.end(), iv.lower(),
-                                  [](const value_type& a, Type b) { return a.first.lower() < b; });
-    bool covered = false;
-    for (auto it = first; it != segs_.end() && it->first.lower() <= iv.upper(); ++it) {
-      icl_combine(it->second, value);
-      covered = true;
+    // Rebuild in three ascending phases rather than inserting in place: the sorted, disjoint
+    // invariant is what lets equal_range return a contiguous iterator pair, and appending the
+    // before/after segments as they are encountered breaks it whenever a new interval lands
+    // outside the existing range. That is a silent-under-reporting bug, not a cosmetic one.
+    container_type out;
+    out.reserve(segs_.size() + 4);
+    auto it = segs_.begin();
+
+    for (; it != segs_.end() && it->first.upper() < iv.lower(); ++it) {
+      out.push_back(*it);
     }
-    if (!covered) {
-      segs_.insert(first, value_type{iv, value});
+
+    Type cursor = iv.lower();
+    bool consumed_to_max = false;
+    for (; it != segs_.end() && it->first.lower() <= iv.upper(); ++it) {
+      if (cursor < it->first.lower()) {
+        // Gap inside iv but before this segment: it belongs to the new value alone.
+        out.emplace_back(rb::compat::Interval<Type>::closed(
+                             cursor, static_cast<Type>(it->first.lower() - 1)),
+                         value);
+      }
+      value_type merged{it->first, it->second};
+      icl_combine(merged.second, value);
+      out.push_back(std::move(merged));
+      if (it->first.upper() == std::numeric_limits<Type>::max()) {
+        consumed_to_max = true;
+      } else {
+        cursor = static_cast<Type>(it->first.upper() + 1);
+      }
     }
+    if (!consumed_to_max && cursor <= iv.upper()) {
+      out.emplace_back(rb::compat::Interval<Type>::closed(cursor, iv.upper()), value);
+    }
+
+    for (; it != segs_.end(); ++it) {
+      out.push_back(*it);
+    }
+    segs_.swap(out);
   }
 
   void clear() { segs_.clear(); }
