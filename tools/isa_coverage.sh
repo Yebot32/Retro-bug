@@ -46,13 +46,32 @@ for f in "$OUT/objs"/*; do
     > "$OUT/asm/$(printf '%04d' "$n").txt" || true
 done
 
-# One mnemonic per line, with its raw count. The regex anchors on objdump's
-# "  addr:\tmnemonic ..." shape so address/data bytes are not mistaken for opcodes.
-cat "$OUT"/asm/*.txt \
-  | grep -oE "^[[:space:]]*[0-9a-f]+:[[:space:]]+[a-z][a-z0-9.]*" \
-  | awk '{print $2}' | sort | uniq -c | sort -rn > "$OUT/mnemonics.txt"
+# One mnemonic per line, with its raw count. objdump's AArch32 output has three shapes to get right:
+#
+#     142c:	movw	r0, #0x456        an instruction (--no-show-raw-insn drops the encoding column)
+#      418:	01 00 00 00             .word / undecodable bytes inside an executable section
+#      3c:	e0 0f 00 00 	and r0, r0, r0   bytes and a mnemonic on one line
+#     Disassembly of section .text:   a section header, which also has to be excluded
+#
+# The first version anchored on "address, whitespace, lowercase" and so mistook the *byte column* of
+# the third shape for the opcode (96 two-hex-digit rows entered the histogram, 3,481 instructions),
+# while counting the instruction total with a looser separate pattern that included the second shape
+# (docs/32 therefore published 338,034 instructions and 855 mnemonics; the corpus is 325,541 and
+# 759). The second version dropped the anchor and picked up the fourth shape instead, which showed up
+# as 2,686 instructions of a mnemonic called `of` — the word after "Disassembly".
+#
+# Both properties are needed together, so one awk does both: require an address-prefixed line, then
+# skip any leading run of two-hex-digit byte columns, then take what is left. TOTAL is the sum of the
+# histogram rather than an independent count, which is what stops the two disagreeing again.
+cat "$OUT"/asm/*.txt | awk '{
+  if ($0 ~ /^[[:space:]]*[0-9a-f]+:/) {
+    for (i = 2; i <= NF && $i ~ /^[0-9a-f][0-9a-f]$/; i++) {}
+    tok = $i
+    if (tok ~ /^[a-z][a-z0-9.]*$/) print tok
+  }
+}' | sort | uniq -c | sort -rn > "$OUT/mnemonics.txt"
 
-TOTAL=$(cat "$OUT"/asm/*.txt | grep -cE "^[[:space:]]*[0-9a-f]+:" || true)
+TOTAL=$(awk '{s += $1} END {print s + 0}' "$OUT/mnemonics.txt")
 DISTINCT=$(wc -l < "$OUT/mnemonics.txt" | tr -d ' ')
 VF=$(awk '$2 ~ /^v/ {s+=$1; n++} END {printf "%d %d", n+0, s+0}' "$OUT/mnemonics.txt")
 IT=$(awk '$2 ~ /^it/ {s+=$1} END {print s+0}' "$OUT/mnemonics.txt")

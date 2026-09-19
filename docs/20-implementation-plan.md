@@ -568,13 +568,15 @@ Progress and the findings that change this plan are tracked in
    (no Windows host build is possible here — §1), plus a Linux CI job carrying the `qemu-arm` oracle.
    **Done except the CI job.** The tests were re-homed to run on arm64 **phones** as well, which turned out to be
    the better lane: three of this step's findings (Step 5c, 5e) only reproduce on 4 KiB hardware.
-3. `rb::isa` wrapper + `CoverageReport`; corpus disassembly job → coverage gap list (**closes U-8**).
-   **Half done, and the halves turned out to be unrelated work.** The corpus measurement landed as
-   `docs/32-isa-coverage.md` and settled the demand question. The `rb::isa` wrapper is now built and
-   hardware-tested (`30` §Step 6a: 101 checks, and it is what `TranslatedBlock::ops` — the list Tier I
-   dispatches on — comes from); it also caught a latent load-bias bug in C05 on the way in. What is
-   still missing is the mnemonic→handler query itself, i.e. the "which of the 855 mnemonics real code
-   uses are unhandled" half.
+3. `rb::isa` wrapper + `CoverageReport`; corpus disassembly job → coverage gap list (**closes U-8's
+   presence half**). **Done, and the halves turned out to be unrelated work.** The corpus measurement
+   landed as `docs/32-isa-coverage.md`; the `rb::isa` wrapper is built and hardware-tested (`30` §Step 6a:
+   101 checks, and it also caught a latent load-bias bug in C05); the mnemonic→handler query is
+   `tools/mnemonic_handlers.sh` and answers it — **757 of 759 demanded mnemonics have an implemented
+   translator, 100.00% of instructions** (`docs/32` §5.2). Building the two tools also corrected the
+   survey's own totals (`325,541`/`759`, not `338,034`/`855`) and removed one claim that had never been
+   measured; see `docs/32` §3.3–3.4 before reusing any figure older than that note.
+   What U-8 still means: **semantic** correctness against a reference, which is item 4's differential lane.
 4. `rb::mem` with both address models + mixed-granule tests. **Done** — 131 checks, 0 failures, executed on a
    OnePlus 12. The injected 16 KiB cases run on any host; the *native* 16 KiB ones still need the emulator.
 5. `rb::loader` → load the §1 `.so`. **Done** — 71 checks, 0 failures on hardware, with `llvm-readelf` as the

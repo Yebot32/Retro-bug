@@ -94,11 +94,12 @@ Practical notes for re-running, both of which cost a cycle:
 - Under Git Bash a device path like `/data/local/tmp/x` is rewritten to `C:/Program Files/Git/data/...`;
   set `MSYS_NO_PATHCONV=1` for every `adb push`/`pull` with an absolute device path.
 
-## Step 3 — coverage audit, demand half **(done: `docs/32-isa-coverage.md`)**
+## Step 3 — coverage audit, demand half **(done: `docs/32-isa-coverage.md`; totals corrected in Step 6c)**
 
 `tools/isa_coverage.sh` measures what real ARMv7 Android code actually demands, from the NDK's own
-AArch32 archives: **711 objects, 338,034 instructions, 855 distinct mnemonics**. Three results that
-change assumptions rather than merely confirming them:
+AArch32 archives: **711 objects, 325,541 instructions, 759 distinct mnemonics**. (This line originally
+read 338,034 / 855; §Step 6c explains the tokenizer bug and the second claim of mine it caught.) Three
+results that change assumptions rather than merely confirming them:
 
 - **8,387 IT-block instructions** in bionic itself — the IT-block risk named in `docs/research/01` is now
   backed by demand, not just subtlety, so it leads the differential queue.
@@ -106,10 +107,13 @@ change assumptions rather than merely confirming them:
   mandatory**; a single-precision-scoped engine fails here.
 - `movw` 3,284 and `cbz` 3,271 — the concrete ARMv7-only forms the ARMv6-vs-ARMv7 question hinged on.
 
-Two self-corrections are recorded in that doc, because both would otherwise be re-cited as evidence: the
-§4.1 "file listing proves coverage" argument was the wrong kind of proof (dispatched ≠ correct), and a
+Four self-corrections are now recorded in that doc, because each would otherwise be re-cited as evidence:
+the §4.1 "file listing proves coverage" argument was the wrong kind of proof (dispatched ≠ correct); a
 `UndefinedInstruction()` I initially flagged as a NEON gap turned out to be the architecturally-correct
-rejection of undefined `VST4/VLD4 .64` encodings. Grep-found gaps have to be read before being reported.
+rejection of undefined `VST4/VLD4 .64` encodings; the totals above were inflated by the measurement
+tool's own tokenizer; and "SDIV/UDIV are used too" had never been measured at all — neither mnemonic
+occurs in this corpus. Grep-found gaps have to be read before being reported, and so do numbers that
+come out of a tool I wrote.
 
 **Still open in U-8:** semantic correctness. Next is Dynarmic's own `test_generator`/`test_reader` lanes on
 the emulator, with two named constraints — its reference is GPL Unicorn (test-side only, never linked), and
@@ -731,6 +735,52 @@ Three things the walk has to get right, each with a test rather than an assuranc
 TLS, IT state carried explicitly) with the width invariant asserted rather than commented: guest
 addresses are 4 bytes, and `tp` — the one field that could plausibly be mistaken for a host pointer —
 is checked to be one.
+
+## Step 6c — the mnemonic→handler survey, two corrections to my own numbers, and a finding about Tier I
+
+`tools/mnemonic_handlers.sh` answers docs/32 §5.2 by joining objdump's mnemonic to Dynarmic's decoder
+cases and then to the translator body that implements each. **Result: 757 of 759 demanded mnemonics have
+an implemented translator, covering 325,532 of 325,541 instructions (100.00%)**; the 2 unmatched rows are
+9 instructions of objdump pseudo-tokens (`trap`, `rrx`), not encodings. So the *presence* half of U-8 is
+closed and what remains is semantics.
+
+Three things worth recording about how it was produced:
+
+1. **A premise of mine was wrong and the tool caught it.** I specified that a translator body consisting
+   of `return false;` should count as "declared but unimplemented". It is the opposite: `false` is
+   Dynarmic's ordinary "the block ended here" — `arm_B` returns `false` after setting the terminal. The
+   real refusal idiom is `return UndefinedInstruction();`, of which there are 11 decoder cases (`arm_LDRT`
+   at `load_store.cpp:33`, `arm_UDF`, `thumb16_UDF`, …), and the correct bucket for the `return false`
+   shape is *implemented*. Had I classified it my way the report would have claimed dozens of ARM
+   instructions were unimplemented — a gap that does not exist, produced by an assumption I wrote into a
+   task specification rather than checked. Verified by reading `arm_B` and `arm_LDRT` directly.
+2. **The survey forced a re-look at Step 3's numbers, which were wrong.** The corpus is **325,541
+   instructions across 759 mnemonics**, not 338,034 across 855: objdump prints a byte column on
+   data-bearing lines, and the old tokenizer took that column as the opcode (96 bogus rows, 3,481
+   instructions) while a separately-written looser count for the total included `.word` data lines. The
+   first repair then dropped the address anchor and began counting objdump's `Disassembly of section
+   .text:` headers, which appeared as 2,686 instructions of a mnemonic called `of` — caught only because
+   that number was queried instead of accepted. Full write-up in `docs/32` §3.3. Per-mnemonic counts never
+   changed, so no §2 conclusion moved; the corrected totals are in §1.
+3. **One claim of mine had never been measured.** "`SDIV`/`UDIV` are used too" — `grep` of both the old
+   and the corrected histogram: zero occurrences of either. It was an inference from "ARMv7-A has divide"
+   plus "this is ARMv7-A code", and NDK clang's `armv7a` target without `+div` evidently never emitted
+   them. Corrected in `docs/32` §2.3/§3.4 with the reason, since the inference is plausible enough to be
+   worth flagging rather than just deleting.
+
+**The architectural finding, which changes C02's status.** `InterpretThisInstruction()` sets
+`IR::Term::Interpret`, and the back ends implement that terminal by calling
+`UserCallbacks::InterpreterFallback(pc, num_instructions)` (`interface/A32/config.h:104`,
+`backend/x64/a32_emit_x64.cpp:1133`) — **Dynarmic ships no interpreter**; the embedder is expected to
+execute those instructions itself. The translator routes `arm_LDM_usr`, `arm_STM_usr`, `arm_CPS`,
+`arm_RFE`, `arm_SRS` there, and the survey shows those paths carry 509 instructions of bionic
+(`ldm`, `stm`, `ldm.w`, `stm.w`, `ldmge`, `stmge`). So Tier I is not only the iOS build and the
+`execmem`-denied fallback — **a Tier-J Android build has nowhere to go without it**, which is now AD-2's
+third consequence in `docs/10` §5 and is part of why the census in Step 6b keyed on real translated code
+rather than on the op list I would have guessed.
+
+Also from the same source: `docs/10`'s U-8 row is rewritten to "presence answered, semantics open", and
+`docs/20` §9 item 3 closes.
 
 ## Standing environment facts (so they are not re-derived)
 

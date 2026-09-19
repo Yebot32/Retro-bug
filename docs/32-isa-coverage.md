@@ -2,27 +2,33 @@
 
 Measured 2026-09-19 with [`../tools/isa_coverage.sh`](../tools/isa_coverage.sh). Reproducible: the script
 re-extracts and re-disassembles the corpus and prints the same summary. Raw histogram:
-`build/isa-coverage/mnemonics.txt` (855 lines, not committed — regenerate).
+`build/isa-coverage/mnemonics.txt` (759 lines, not committed — regenerate).
+
+**The totals in the first published version of this document were wrong** — 338,034 instructions and
+855 mnemonics, from a tokenizer that mistook objdump's data bytes for opcodes and a separate
+instruction count that included data lines. §3.3 has the details, and §3.4 records a claim that turned
+out never to have been measured at all. The per-mnemonic numbers below, and every conclusion in §2, are
+unchanged by the correction.
 
 ## 1. What was measured, and why it is the right corpus
 
 The NDK's own AArch32 archives, extracted member by member: `libc.a` (549 objects), `libm.a`,
-`libc++_shared.so`, `libz.a` — **711 objects, 338,034 instructions, 855 distinct mnemonics** of real
+`libc++_shared.so`, `libz.a` — **711 objects, 325,541 instructions, 759 distinct mnemonics** of real
 compiled ARMv7 machine code. This is the code every guest app links against, so its instruction mix is
 the demand curve the engine has to satisfy before any app-level `.so` is even considered. It is analysis
 input on this machine only, never redistributed.
 
 | Metric | Value |
 |---|---|
-| Instructions disassembled | 338,034 |
-| Distinct mnemonics | 855 |
-| Thumb-2 32-bit wide (`.w`) | 47,894 (14.2%) |
-| **IT-block instructions (`it`, `itt`, `ite`, …)** | **8,387** |
-| Vector/FP mnemonics | 166 distinct / 14,723 instructions (4.4%) |
+| Instructions disassembled | 325,541 |
+| Distinct mnemonics | 759 |
+| Thumb-2 32-bit wide (`.w`) | 47,894 (14.7%) |
+| **IT-block instructions (`it`, `itt`, `ite`, …)** | **8,387** (2.6%) |
+| Vector/FP mnemonics | 166 distinct / 14,723 instructions (4.5%) |
 
 Top of the demand curve: `mov` 32,371 · `ldr` 32,183 · `cmp` 20,800 · `add` 18,542 · `str` 13,484 ·
-`movs` 12,967 · `bl` 11,254 · `b` 10,967 · `add.w` 7,923 · `blx` 7,532 · `ldr.w` 5,977 · `beq` 5,687 ·
-`it` 4,955 · `movw` 3,284 · `cbz` 3,271 · `itt` 2,609.
+`movs` 12,967 · `bl` 11,254 · `b` 10,967 · `add.w` 7,923 · `blx` 7,532 · `adds` 7,306 · `ldr.w` 5,977 ·
+`beq` 5,687 · `bne` 5,248 · `it` 4,955 · `mov.w` 3,997 · `movw` 3,284 · `cbz` 3,271 · `itt` 2,609.
 Vector/FP top: `vldr` 2,290 · `vmov` 1,580 · `vst1.64` 815 · `vstr` 788 · `vmul.f64` 786 ·
 `vadd.f64` 744 · `vmrs` 725 · `vmla.f64` 651 · `vst1.32` 481 · `vcmp.f64` 470.
 
@@ -36,15 +42,19 @@ Vector/FP top: `vldr` 2,290 · `vmov` 1,580 · `vst1.64` 815 · `vstr` 788 · `v
 2. **VFPv3 double precision is required, not optional.** `vmul.f64`/`vadd.f64`/`vmla.f64`/`vcmp.f64`
    all appear hundreds of times — libm's `double` paths. An engine scoped to single-precision-only FP
    (a plausible mistake when the reference target was a 3DS ARM11) fails here.
-3. **ARMv7-only encodings are unavoidable.** `movw` (3,284) and `cbz` (3,271) are ARMv7-era; SDIV/UDIV
-   are used too. This is the concrete form of the ARMv6-vs-ARMv7-A question the architecture had to
-   answer before committing to Dynarmic (`docs/10` §4.1).
+3. **ARMv7-only encodings are unavoidable.** `movw` (3,284) and `cbz` (3,271) are ARMv7-era, and
+   bitfield/leading-zero access is real: `clz` 516, `ubfx` 173, `sbfx` 9, `mrc` 132. This is the
+   concrete form of the ARMv6-vs-ARMv7-A question the architecture had to answer before committing to
+   Dynarmic (`docs/10` §4.1). **`sdiv`/`udiv` are not** — see §3.4; this corpus does not contain them,
+   so divide support is an ARMv7-A capability RetroBug must have for *app* code rather than something
+   bionic's own build demonstrates a need for.
 4. **`vst1.64`/`vst1.32` register-list forms are common** (815/481), so the ASIMD load-store-structure
    group must be right including its alignment and register-count edge cases.
 
 ## 3. Corrections to how U-8 was argued before this measurement
 
-Two earlier claims were weaker than they looked, and saying so keeps them from being reused as evidence.
+Four things this document asserted that did not survive checking. Listed because the failure modes are
+distinct, and three of the four are the kind that *looks* like a working measurement.
 
 1. **`docs/10` §4.1's "file listing proves ARMv7-A coverage" was the wrong kind of evidence.** Seeing
    `divide.cpp`, `barrier.cpp`, `asimd_*.cpp` in a tree proves those groups are *dispatched*, not that
@@ -58,6 +68,30 @@ Two earlier claims were weaker than they looked, and saying so keeps them from b
    implements the multi-register `v8_VST_multiple`/`v8_VLD_multiple` families. Recorded because the
    near-miss is the failure mode worth documenting: a plausible-looking gap found by grep is exactly
    what must be read before being reported.
+3. **The measurement tool was wrong, in two directions at once.** The totals published here first
+   (338,034 instructions, 855 mnemonics) came from a tokenizer anchored on "address, whitespace,
+   lowercase" plus a *separate* looser instruction count. Where objdump printed a byte column and a
+   mnemonic on the same line, the anchor matched the **bytes**, so 96 two-hex-digit tokens entered the
+   histogram as opcodes carrying 3,481 instructions; and the separate count matched `.word` data lines,
+   inflating the total. Corrected: **325,541 instructions, 759 mnemonics**. Every per-mnemonic count in
+   §1 was unaffected — the bytes-prefixed lines are a different 3,481 instructions each time — which is
+   why §2's conclusions stand while its headline numbers did not. Worth the detail because the failure
+   was invisible in the output: an inflated total and 96 nonsense rows look like a corpus that merely
+   has odd instructions in it.
+   Found while building §5.2's tool, which reported "855 rows, 329,022 attributed, 98 unmatched" and
+   forced the reconciliation. The first repair then dropped the address anchor and picked up objdump's
+   `Disassembly of section .text:` headers instead, which surfaced as 2,686 instructions of a mnemonic
+   called `of` — caught only because that number was queried rather than accepted. Both properties
+   (anchor, then skip byte columns) are now in one `awk`, and `instructions` is the *sum of the
+   histogram* rather than an independent count, so the two cannot drift apart again.
+4. **A claim that was never measured.** "`SDIV`/`UDIV` are used too" appeared in §2.3 of the first
+   version. Neither mnemonic occurs anywhere in this corpus, in the broken histogram or the corrected
+   one — checked by direct grep of both. It was an inference from "this is ARMv7-A code, ARMv7-A has
+   divide", and NDK clang targeting `armv7a` without `+div` evidently never emitted them. The
+   capability still matters (app `.so` files built with `-mfpu=neon -march=armv7-a` do use `sdiv`, and
+   Dynarmic implements it), but it is not something this measurement showed, and the sentence now says
+   so in those terms. Recorded because the inference is *plausible*, which is exactly what makes it
+   dangerous to leave in a document that is otherwise full of numbers.
 
 ## 4. What this does *not* establish
 
@@ -86,9 +120,30 @@ identified; correctness against a reference is not yet measured.
    What stays open: it asserts what Dynarmic chose to assert, so anything outside its test set — plus its
    own "FPSR state is approximate" admission — is uncovered, and **item 2 is what turns "green on its own
    tests" into "covers what real code demands"**.
-2. **Mnemonic→handler mapping tool.** Automate the presence half: map each histogram entry onto the
-   `Translate*` group that implements it, so "which of the 855 mnemonics real code uses are unhandled" is
-   a query rather than a grep. Small, and it turns §4 into a number.
+2. **Mnemonic→handler mapping tool. Done** —
+   [`../tools/mnemonic_handlers.sh`](../tools/mnemonic_handlers.sh), joining objdump's mnemonic to
+   Dynarmic's decoder cases (759 `INST` entries across `frontend/A32/decoder/*.inc`) and then to the
+   translator body that implements each one. On the corrected histogram: **757 of 759 rows are
+   implemented, covering 325,532 of 325,541 instructions — 100.00%**; the 2 unmatched rows are 9
+   instructions of objdump pseudo-tokens (`trap` 7, `rrx` 2), not encodings. So §4's presence half is
+   answered: **the demand side is covered by the vendored engine**, and U-8's remaining content is
+   semantic correctness plus the two §4 items, not missing instructions.
+
+   Two qualifications the tool prints rather than hides, both of which matter more than the headline:
+
+   - **`ldm`, `stm`, `ldm.w`, `stm.w`, `ldmge`, `stmge` (509 instructions) partly route to
+     interpretation, not compilation.** The matched decoder cases include `arm_LDM_usr`, `arm_STM_usr`,
+     `arm_CPS`, `arm_RFE`, `arm_SRS`, whose bodies end in `InterpretThisInstruction()`. Dynarmic's
+     `IR::Term::Interpret` is not an interpreter: the back ends emit a call to
+     **`UserCallbacks::InterpreterFallback(pc, num_instructions)`** — the *embedder* is expected to
+     execute those instructions (`interface/A32/config.h:104`). Dynarmic ships no such interpreter, so
+     RetroBug's Tier I is not only the iOS/`execmem`-denied path: it is load-bearing on the Android JIT
+     path too, for register-list and PSR-writing instructions that appear in bionic 509 times. Recorded
+     against AD-2 (`docs/10` §5), which argued for Tier I's priority on other grounds.
+   - Attribution is per **mnemonic**, not per encoding: bare `add` has ARM, Thumb-16 and Thumb-32
+     decoder cases, and a rollup of "best bucket among its cases" is mildly optimistic. The tool says so
+     in its own output, and per-encoding numbers would need objdump's encoding column, which
+     `--no-show-raw-insn` currently suppresses.
 3. **IT-block and FP-status vectors first.** Ranked by §2: IT-blocks, `f64` VFP paths, `vmrs`/FPSCR,
    ASIMD structures — these are where Dynarmic's own suite is thinnest relative to measured demand.
 4. Repeat on the **app-level** corpus once `docs/research/10`'s APK fixtures are downloaded, since
