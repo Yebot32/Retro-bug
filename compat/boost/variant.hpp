@@ -56,8 +56,12 @@ class recursive_wrapper {
     return *this;
   }
 
+  /// Only the const conversion, as Boost does. Adding a non-const `operator T&()` makes every
+  /// by-value `EmitA32Terminal(..., IR::Term::If terminal, ...)` call ambiguous — the compiler has
+  /// two equally-ranked user-defined conversions and cannot prefer one, which is exactly what
+  /// Dynarmic's AArch64 backend hit at emit_arm64_a32.cpp:153.
   operator const T&() const { return *held_; }
-  operator T&() { return *held_; }
+  T& mutate() { return *held_; }
   const T* get() const { return held_.get(); }
 
   friend bool operator==(const recursive_wrapper& a, const recursive_wrapper& b) {

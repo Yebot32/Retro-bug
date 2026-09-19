@@ -265,6 +265,55 @@ within 15 minutes, as expected for an x86_64 guest on an x86_64 host with no hyp
 Also fixed in the runner: `[ -x "$BIN" ]` is the wrong test on Windows for an extension-less ELF
 output — the linker produced an 85 MB `dynarmic_tests` that `-x` called non-executable. It is now `-f`.
 
+## Step 5b — arm64 host build: the Boost shim does not cover Dynarmic's AArch64 backend
+
+Trying to build the suite for `arm64-v8a` — which is the whole point of that ABI, since it is the only
+way to exercise Dynarmic's **AArch64** A32 backend — failed on `compat/`:
+
+```
+backend/arm64/emit_arm64_a32.cpp:153: error: call to 'EmitA32Terminal' is ambiguous
+   boost::apply_visitor([&](const auto& t) { EmitA32Terminal(code, ctx, t, ...); }, terminal);
+```
+
+same at `emit_arm64_a64.cpp:136`. The x86_64 build never showed this because its x64 backend does not
+use that overload pattern.
+
+Cause, confirmed by reading the call site: Dynarmic declares `EmitA32Terminal` overloads taking each
+terminal **by value** *and* one taking `Terminal` (the variant). For a wrapper alternative there are then
+two equally-ranked user-defined conversions — `recursive_wrapper<If>` → `const If&` for the by-value
+overload, and `recursive_wrapper<If>` → `Terminal` through the inherited converting constructor — so
+resolution cannot choose. Removing the non-const `operator T&()` did **not** fix it, which is worth
+recording because it was the obvious guess and it was wrong.
+
+**Status: unresolved, and it is a real limitation of `compat/`, not of any device.** Options, none of
+them cheap or silent: give the wrapper a conversion set that makes the variant path non-viable; make
+`variant`'s inherited converting constructor reject wrapper sources; or use real Boost headers for the
+AArch64 lane only. Deciding this needs a proper look, so it is written down rather than patched blind.
+
+It does not block the tests that matter today. **`rb::mem` and `rb::loader` have no engine dependency**
+(docs/20 §3 lists their dependencies as none), so `core/CMakeLists.txt` is split into `rb_mem`,
+`rb_loader`, and an aggregate `rb_core`, and the memory and loader suites now build and run on a target
+without compiling the DBT at all. All three binaries cross-build clean for `arm64-v8a`:
+`rb_guest_elf_tests`, `rb_guest_memory_tests`, `rb_interval_compat_tests`.
+
+Two side effects of the split worth keeping: a component that does not need the engine can no longer
+accidentally pull it in through a header, and an engine-side breakage can no longer hide the fact that
+the memory model and loader were never exercised. The arm64 attempt also caught a config bug of mine —
+`foreach(t RB_MEM RB_LOADER)` named nonexistent targets and broke the whole configure.
+
+### Device facts from the OnePlus 12 (`CPH2573`, Android 16 / SDK 36), read directly
+
+| Property | Value | Why it matters |
+|---|---|---|
+| `ro.product.cpu.abilist` | `arm64-v8a` | confirms the owner's statement |
+| `ro.product.cpu.abilist32` | **empty** | no native route for an `armeabi-v7a` APK → M1's E1 negative control is sound |
+| `getconf PAGESIZE` | **4096** | the mixed-granule cases the 16 KiB emulator must `SKIP` run natively here, and an injected coarser granule is still legal |
+| cores / RAM | 8, ~15.2 GB (`MemAvailable` ~4.4 GB) | a 4 GiB `PROT_NONE` `MAP_NORESERVE` reservation is unremarkable |
+
+So this single device covers **both** page-granule cases, which the emulator could not — reinforcing the
+`docs/30` §Step 4 finding that granule simulation can go coarser than the kernel's page size but never
+finer.
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |

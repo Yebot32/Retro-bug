@@ -9,9 +9,9 @@ target_include_directories(rb_interval_compat_tests PRIVATE
   "${CMAKE_SOURCE_DIR}/compat")   # this test exercises the Boost-API shims themselves
 
 add_executable(rb_guest_memory_tests guest_memory_test.cpp)
-target_link_libraries(rb_guest_memory_tests PRIVATE rb_core)
+target_link_libraries(rb_guest_memory_tests PRIVATE rb_mem)
 
 add_executable(rb_guest_elf_tests guest_elf_test.cpp)
-target_link_libraries(rb_guest_elf_tests PRIVATE rb_core)
+target_link_libraries(rb_guest_elf_tests PRIVATE rb_loader)
 # Path the fixture is pushed to on the device by tools/run_engine_tests.sh.
 target_compile_definitions(rb_guest_elf_tests PRIVATE RB_FIXTURE_PATH="/data/local/tmp/librb_fixture.so")
