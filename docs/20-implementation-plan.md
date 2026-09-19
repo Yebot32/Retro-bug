@@ -547,9 +547,15 @@ A profile for a **T0** app carrying `kReportNetworkAvailable` must work with no 
 
 ## 9. M0 task breakdown (the immediate next work, all local)
 
+Progress and the findings that change this plan are tracked in
+[`30-m0-notes.md`](30-m0-notes.md) — item 1 is done (`419fe9f`), item 2 is blocked on one dependency
+decision documented there with a recommendation.
+
 1. `core/` + `external/dynarmic` vendoring with `patches/` layout and `NOTICE.md`/`LICENSES/`/`REUSE.toml` in the
    same commit (AD-16: obligations start now).
-2. `rb_core_host_tests` target on desktop + CI (Linux job with `qemu-arm`, since it can't run here).
+2. `rb_core_tests` target, cross-compiled for x86_64 Android and run in the local emulator via `adb shell`
+   (no Windows host build is possible here — §1), plus a Linux CI job carrying the `qemu-arm` oracle.
+   **Blocked on the Boost decision in `30-m0-notes.md` §Step 2.**
 3. `rb::isa` wrapper + `CoverageReport`; corpus disassembly job → coverage gap list (**closes U-8**).
 4. `rb::mem` with both address models + mixed-granule tests.
 5. `rb::loader` → load the §1 `.so`.
