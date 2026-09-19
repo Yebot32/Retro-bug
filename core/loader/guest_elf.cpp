@@ -41,6 +41,7 @@ using elf::DT_STRTAB; using elf::DT_STRSZ; using elf::DT_SYMTAB; using elf::DT_S
 using elf::DT_INIT; using elf::DT_FINI; using elf::DT_SONAME;
 using elf::DT_REL; using elf::DT_RELSZ; using elf::DT_RELENT;
 using elf::DT_RELA; using elf::DT_RELASZ; using elf::DT_RELAENT; using elf::DT_JMPREL;
+using elf::DT_PLTREL;
 using elf::DT_RELACOUNT; using elf::DT_RELCOUNT; using elf::DT_FLAGS;
 using elf::NT_GNU_BUILD_ID;
 
@@ -71,7 +72,7 @@ struct Dynamic {
   std::uint32_t strtab = 0, symtab = 0, symsz = 0, strsz = 0;
   std::uint32_t rel = 0, relsz = 0, relent = 0;
   std::uint32_t rela = 0, relasz = 0, relaent = 0;
-  std::uint32_t jmprel = 0, pltrelsz = 0, pltgot = 0;
+  std::uint32_t jmprel = 0, pltrelsz = 0, pltgot = 0, pltrel_kind = 0;
   std::uint32_t init = 0, fini = 0, soname = 0;
   std::vector<std::uint32_t> needed;
   bool present = false;
@@ -271,6 +272,11 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
         case DT_RELASZ: dyn.relasz = d->d_val; break;
         case DT_RELAENT: dyn.relaent = d->d_val; break;
         case DT_JMPREL: dyn.jmprel = d->d_val; break;
+        // DT_PLTRELSZ is the length of the JMPREL table. Missing it is not a cosmetic omission:
+        // `if (jmprel && pltrelsz)` below then applies nothing, every imported function stays null in
+        // the GOT, the refuse-unknown-imports path never runs, and a bad image loads "cleanly".
+        case DT_PLTRELSZ: dyn.pltrelsz = d->d_val; break;
+        case DT_PLTREL: dyn.pltrel_kind = d->d_val; break;
         case DT_PLTGOT: dyn.pltgot = d->d_val; break;
         case DT_INIT: dyn.init = d->d_val; break;
         case DT_FINI: dyn.fini = d->d_val; break;
@@ -365,6 +371,14 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
         if (type != R_ARM_RELATIVE && type != R_ARM_NONE) {
           have_sym = symbol_at(sidx, sym);
           sname = have_sym ? sym_name(sym.st_name) : std::string{};
+          // A relocation that names a symbol we cannot read must stop the load. Without this the
+          // code below treats sym_addr as 0 and writes a null into the GOT: the guest then branches
+          // to address 0 at some later, unrelated moment, and the crash points nowhere near here.
+          if (!have_sym) {
+            if (err) *err = "relocation " + std::to_string(sidx) + " references an unreadable symbol" +
+                            " (symtab located: " + (symtab ? "yes" : "no") + ")";
+            return false;
+          }
         }
         std::uint32_t sym_addr = 0;
         if (have_sym && sym.st_shndx != SHN_UNDEF) {
@@ -423,9 +437,20 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
 
     if (!apply(dyn.rel, dyn.relsz, dyn.relent, false)) return std::nullopt;
     if (!apply(dyn.rela, dyn.relasz, dyn.relaent, true)) return std::nullopt;
-    // DT_PLTREL says which form the JMPREL table uses; both fixtures seen so far are REL.
+    // DT_PLTREL declares whether the JMPREL table is REL (17) or RELA (7) form. Guessing here would
+    // read each 8-byte entry with the wrong stride, so an unknown or unsupported kind is refused
+    // rather than half-applied.
     if (dyn.jmprel && dyn.pltrelsz) {
-      if (!apply(dyn.jmprel, dyn.pltrelsz, dyn.relent ? dyn.relent : sizeof(Rel32), false)) {
+      const bool rela_form = (dyn.pltrel_kind == static_cast<std::uint32_t>(DT_RELA));
+      const bool rel_form = (dyn.pltrel_kind == static_cast<std::uint32_t>(DT_REL));
+      if (!rela_form && !rel_form) {
+        return fail("PLT relocation table has unsupported DT_PLTREL kind " +
+                    std::to_string(dyn.pltrel_kind));
+      }
+      if (!apply(dyn.jmprel, dyn.pltrelsz,
+                 rela_form ? (dyn.relaent ? dyn.relaent : sizeof(Rela32))
+                            : (dyn.relent ? dyn.relent : sizeof(Rel32)),
+                 rela_form)) {
         return std::nullopt;
       }
     }

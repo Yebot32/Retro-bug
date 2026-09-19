@@ -133,6 +133,10 @@ Fixture parse_fixture() {
     if (p->p_type == elf::PT_DYNAMIC) {
       const auto* d = reinterpret_cast<const elf::Dyn32*>(f.bytes.data() + p->p_offset);
       for (std::size_t o = 0; o < p->p_filesz / sizeof(elf::Dyn32); ++o) {
+        // Must stop at DT_NULL: the segment is padded past the terminator, and continuing reads the
+        // filler as tags — which is what produced relocation entries at addresses the image does not
+        // have and made this test report the loader as broken when the test itself was wrong.
+        if (d[o].d_tag == elf::DT_NULL) break;
         switch (d[o].d_tag) {
           case elf::DT_STRTAB: f.strtab = d[o].d_val; break;
           case elf::DT_STRSZ: f.strsz = d[o].d_val; break;
@@ -291,7 +295,7 @@ void applies_every_relocation_the_image_declares() {
     if (!addend) continue;
     const std::uint32_t want = *addend + base;
     CHECK_CTX(read_word(*gm, base + r->r_offset) == want,
-              "R_ARM_RELATIVE at vaddr 0x" + std::to_string(r->r_offset));
+              "R_ARM_RELATIVE at guest vaddr (decimal) " + std::to_string(r->r_offset));
   }
   CHECK(relative_seen > 0);
 

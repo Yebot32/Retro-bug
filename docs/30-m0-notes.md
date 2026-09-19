@@ -314,6 +314,45 @@ So this single device covers **both** page-granule cases, which the emulator cou
 `docs/30` §Step 4 finding that granule simulation can go coarser than the kernel's page size but never
 finer.
 
+## Step 5c — first real device run (Samsung Tab S9, SM-X710, Android 16)
+
+Device read directly: `abilist=arm64-v8a,armeabi-v7a,armeabi`, **`abilist32` populated**, `PAGESIZE` 4096, 8 cores, ~11 GB.
+
+**Suitability:** this tablet is **not** usable for M1's acceptance run. That step's independent
+negative control is the platform *refusing* to install an `armeabi-v7a` APK, and here the platform
+advertises 32-bit support. The OnePlus 12, whose `abilist32` is empty, remains the M1 device.
+
+**Three things established by running on it:**
+
+1. **Hardware AArch32 at EL0 is real on a 2023 flagship.** A statically-linked `armeabi-v7a` binary
+   (`tools/aarch32_el0_probe.c`) executed: `rc=0`, `hwcap=0x37b0d6` with SWP/HALF/VFP/NEON/VFPv3 set.
+   This settles the question `docs/research/01` left open, and it *strengthens* rather than weakens
+   AD-1's reasoning: AArch32 EL0 survives on some ARMv9 parts (Cortex-X3 keeps it; A715/A510 drop it),
+   and the devices that have it are the ones that can already run 32-bit apps natively — a fair-weather
+   path by construction, so not worth building on. (The probe's per-bit labels are my reading of
+   `HWCAP_*` positions and at least one, `thumb`, is wrong — `HWCAP_THUMB` is bit 7, not 8. The
+   execution result is the finding; the decoded flags are not to be trusted.)
+2. **Memory model: 99 checks, 0 failures, 0 skipped**, on a native 4 KiB host — including the
+   granule-specific cases the 16 KiB emulator had to skip. Interval containers 33/33 here too.
+3. **The loader had a genuine, serious bug, found only by running it.** `DT_PLTRELSZ` was never
+   parsed, so `if (jmprel && pltrelsz)` skipped the entire `.rel.plt` table. Consequences, in the
+   order that matters: imported functions stayed null in the GOT, and the refuse-unresolved-imports
+   path never executed, so an image with unresolvable imports **loaded successfully** — exactly the
+   silent null-pointer failure mode the loader was written to prevent. The earlier "17 failures" were
+   mostly this, plus two of my own test bugs: the test's own `PT_DYNAMIC` scan also failed to stop at
+   `DT_NULL`, and a `sed` I used to relabel a diagnostic corrupted the expression instead.
+
+After the `DT_PLTRELSZ` fix plus refusing an unknown `DT_PLTREL` form rather than assuming REL, the
+device run is **13 checks, 3 failures**, and the 3 are one cause: the loader now correctly aborts with
+`unresolved symbol: __cxa_finalize` while the test does not populate its own resolver map in time. The
+loader's behaviour is the desired one; the remaining failures are test wiring, and are **not** counted
+as a pass. Recorded here rather than tidied away, because "the loader refuses unresolved imports" is now
+load-bearing for M1 and must be re-demonstrated by a green run, not inferred from a correct-looking abort.
+
+Still open before the loader can be called verified: fix the test's resolver wiring and re-run to
+0 failures; re-run the same three suites on the OnePlus 12 when it is free; and the unresolved
+`compat/` limitation for the AArch64 backend (Step 5b), which blocks `dynarmic_tests` on arm64.
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |
