@@ -1,0 +1,37 @@
+# sizeof(void*)=8; offset32 is what a 32-bit guest's ldr immediate must contain
+GetVersion                       index=  4 offset32=  16
+DefineClass                      index=  5 offset32=  20
+FindClass                        index=  6 offset32=  24
+GetObjectRefType                 index=232 offset32= 928
+NewWeakGlobalRef                 index=226 offset32= 904
+GetStringUTFLength               index=168 offset32= 672
+NewGlobalRef                     index= 21 offset32=  84
+DeleteGlobalRef                  index= 22 offset32=  88
+DeleteLocalRef                   index= 23 offset32=  92
+IsSameObject                     index= 24 offset32=  96
+NewLocalRef                      index= 25 offset32= 100
+AllocObject                      index= 27 offset32= 108
+NewObjectV                       index= 29 offset32= 116
+GetObjectClass                   index= 31 offset32= 124
+IsInstanceOf                     index= 32 offset32= 128
+GetMethodID                      index= 33 offset32= 132
+CallIntMethod                    index= 49 offset32= 196
+CallStaticIntMethod              index=129 offset32= 516
+GetFieldID                       index= 94 offset32= 376
+GetIntField                      index=100 offset32= 400
+SetIntField                      index=109 offset32= 436
+GetStringLength                  index=164 offset32= 656
+GetStringChars                   index=165 offset32= 660
+GetStringUTFChars                index=169 offset32= 676
+ReleaseStringUTFChars            index=170 offset32= 680
+GetArrayLength                   index=171 offset32= 684
+NewByteArray                     index=176 offset32= 704
+GetByteArrayElements             index=184 offset32= 736
+ReleaseByteArrayElements         index=192 offset32= 768
+ExceptionOccurred                index= 15 offset32=  60
+ExceptionDescribe                index= 16 offset32=  64
+ExceptionClear                   index= 17 offset32=  68
+FatalError                       index= 18 offset32=  72
+NewStringUTF                     index=167 offset32= 668
+GetJavaVM                        index=219 offset32= 876
+GetDirectBufferAddress           index=230 offset32= 920

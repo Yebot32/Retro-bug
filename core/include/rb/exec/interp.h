@@ -20,12 +20,15 @@
  *   1. `IR::Opcode::A32GetRegister` is the enumerator; `IR::GetNameOf` returns `"GetRegister"`. Dispatch
  *      is on the enumerator, diagnostics use the name, and the census output in docs/30 uses the same
  *      names — so mixing the two would look consistent right up until an op silently never matched.
- *   2. Flags are an ephemeral channel, not just CPSR. `Add32`/`Sub32`/the shifts take a `setflags` U1
- *      and the flag-consuming ops (`GetNZCVFromOp`, `GetNZFromOp`, `GetCarryFromOp`) are handed *the
- *      value the flagged op produced* — Dynarmic's x64 and AArch64 back ends emit `TST v, v`, which
- *      takes N and Z from the value and leaves C and V as they were. So the interpreter has to carry a
- *      flag state per producing instruction as well as the architectural CPSR bits, and reading the
- *      wrong one for C or V produces a plausible fib that is wrong in exactly one branch.
+ *   2. **Flags belong to the instruction that produced them, not to the machine.** `Add32`/`Sub32` and
+ *      the shift family take a **`carry_in`** U1 — *not* a set-flags bit, which is what this file
+ *      believed until `docs/30` §Step 6d — and flags are read back by pseudo-operations naming the value
+ *      they were computed from (`GetNZCVFromOp`, `GetNZFromOp`, `GetCarryFromOp`, `GetOverflowFromOp`).
+ *      Where the producer has no flag-form, the AArch64 back end emits `TST v, v`, which **clears** C and
+ *      V rather than leaving them as they were. So dispatch carries a flag record per IR instruction and
+ *      resolves a pseudo-op against it. One mutable `Flags` shared by the whole block is how `push` came
+ *      to "set" C and every recursive `fib` call returned an arithmetic series instead — a wrong answer
+ *      with a plausible shape, which is the failure mode worth writing down.
  */
 #pragma once
 
@@ -44,12 +47,16 @@ namespace rb::exec {
  * `return_address` ends a call: guest code returns there via `BX` of LR, and stopping on the address
  * (rather than on an unmapped fetch) is what keeps a call bridge in C08 from having to map a page it
  * does not own. Checked before translation, so a sentinel in unmapped memory is a clean return.
+ *
+ * `host_dispatch` is optional and checked the same way — before translation, so host entry points need
+ * no page behind them either. It is what makes a fake `JNIEnv` callable by real guest code.
  */
 class InterpExecutor : public Executor {
  public:
   /// The guest memory is mutable because executing writes to it; reads go through the const path.
-  InterpExecutor(mem::GuestMemory& memory, GuestAddr return_address)
-      : memory_{memory}, return_address_{return_address} {}
+  InterpExecutor(mem::GuestMemory& memory, GuestAddr return_address,
+                 const HostDispatch* host_dispatch = nullptr)
+      : memory_{memory}, return_address_{return_address}, dispatch_{host_dispatch} {}
 
   RunResult Run(MachineState& state, unsigned max_instructions) override;
 
@@ -63,6 +70,7 @@ class InterpExecutor : public Executor {
  private:
   mem::GuestMemory& memory_;
   GuestAddr return_address_;
+  const HostDispatch* dispatch_;
 };
 
 }  // namespace rb::exec

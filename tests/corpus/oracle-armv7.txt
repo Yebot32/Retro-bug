@@ -1,10 +1,12 @@
 # device=SM-X710 abilist32=armeabi-v7a,armeabi page=4096
-# built from 0be4470 2026-09-19T23:45:54+04:00
+# built from 0acb9cc 2026-09-20T00:40:25+04:00
 --- numeric oracle
-thumb=1 fib_addr=0x1b21d
+thumb=1 fib_addr=0x1b365
 fib(0)=0 fib(1)=1 fib(2)=1 fib(20)=6765 fib(20)again=6765
 fib-curve: 0 1 1 2 3 5 8 13 21 34 55 89 144
 wide(0)=52 wide(2)=50 wide(-1)=55
+it_probe: 42 1008 42 104 1005 1000
+jni_utf(1)=115 jni_utf(0)=114 calls=2 utf=retrobug
 string=fib(20)=6765 wide=50
 cp15: run `--cp15 <name>` per register; a refused one kills this process
 rc=0
@@ -19,7 +21,7 @@ mpidr: attempting
 rc=132
 Illegal instruction 
 tpidrurw: attempting
-tpidrurw: 0xf25befe0
+tpidrurw: 0xef81bfe0
 rc=0
 fpsid: attempting
 rc=132

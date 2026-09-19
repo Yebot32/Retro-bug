@@ -53,6 +53,8 @@ static_assert(sizeof(GuestAddr) == 4, "guest addresses are 32-bit by definition"
 enum class StopReason {
   Budget,        ///< max_instructions reached; state is consistent and Run can continue.
   Returned,      ///< the guest returned from the entry (Tier I: popped the link stack empty).
+  HostCall,      ///< a `bl`/`blx` reached a host entry point. `host_slot` says which; resume after the
+                 ///< handler has run and left PC at the link, exactly as a guest callee would.
   Syscall,       ///< an SVC reached the syscall monitor, which will resume us.
   Suspended,     ///< the caller stopped us (thread park, debugger).
   Unimplemented, ///< an IR op with no Tier I semantics. Never silent: `detail` names the op.
@@ -65,11 +67,33 @@ struct RunResult {
   /// Op name or address involved, for `Unimplemented`/`Fault`. Empty otherwise.
   std::string detail;
   unsigned instructions_executed = 0;
+  /// Meaningful only for `HostCall`: the index the `HostDispatch` reported, which is the host
+  /// function's identity. Zero is a valid slot, so it is the reason code that says this is set, not
+  /// the value.
+  std::uint32_t host_slot = 0;
 };
 
 /// Which execution path a block went through. Naming discipline is AD-8's, so the strings a user can
 /// see are decided here rather than at the call site.
 enum class CodeTier { Interp, Translate };
+
+/**
+ * A guest address that means "hand control back to the host" rather than "execute the code here".
+ *
+ * JNI's `JNIEnv` is a table of *guest function pointers*, and the guest reaches an entry with
+ * `ldr r3, [r0]; ldr r3, [r3, #off]; blx r3` — measured in the fixture at docs/30 §Step 7, not taken
+ * from the spec. So a host-implemented JNI function has to be *branchable to*, and the way it does
+ * that is by being an address the executor recognises before it translates anything: the same trick
+ * `return_address` uses for a normal return, which is why neither needs a mapped or executable page.
+ *
+ * Deliberately in `rb::exec` and deliberately ignorant of JNI: the executor asks "is this pc a host
+ * entry", and `rb::abi` owns what the answer means.
+ */
+class HostDispatch {
+ public:
+  virtual ~HostDispatch() = default;
+  virtual bool IsHostEntry(GuestAddr pc, std::uint32_t* slot) const = 0;
+};
 
 /// What an instance is allowed to do. `enable_jit` false is the iOS shape and the OEM-denies-execmem
 /// shape, which is why Tier I has to be a complete path rather than a bootstrap (AD-2).

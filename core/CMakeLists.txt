@@ -47,9 +47,16 @@ add_library(rb_exec STATIC exec/census.cpp exec/interp.cpp)
 target_compile_features(rb_exec PUBLIC cxx_std_20)
 target_link_libraries(rb_exec PUBLIC rb_isa rb_mem)
 
+# rb::abi (C08): the call bridge. It consumes an executor rather than knowing which tier it is — the
+# marshalling in abi/call.cpp is register arithmetic over MachineState, and the only executor coupling
+# is Run/resume around a host call, so Tier J inherits the bridge unchanged (docs/20 §C08).
+add_library(rb_abi STATIC abi/call.cpp abi/jni_env.cpp)
+target_compile_features(rb_abi PUBLIC cxx_std_20)
+target_link_libraries(rb_abi PUBLIC rb_exec rb_mem)
+
 # rb_core is the aggregate the engine-facing components will hang off.
 add_library(rb_core INTERFACE)
-target_link_libraries(rb_core INTERFACE rb_mem rb_loader rb_isa rb_exec dynarmic)
+target_link_libraries(rb_core INTERFACE rb_mem rb_loader rb_isa rb_exec rb_abi dynarmic)
 
 if(DEFINED RB_COMPAT_INCLUDE_DIR)
   target_include_directories(rb_core INTERFACE "${RB_COMPAT_INCLUDE_DIR}")

@@ -36,3 +36,13 @@ target_compile_definitions(rb_exec_census_tests PRIVATE RB_FIXTURE_PATH="/data/l
 add_executable(rb_exec_interp_tests exec_interp_test.cpp)
 target_link_libraries(rb_exec_interp_tests PRIVATE rb_exec rb_loader)
 target_compile_definitions(rb_exec_interp_tests PRIVATE RB_FIXTURE_PATH="/data/local/tmp/librb_fixture.so")
+
+# C08's bridge is mostly register arithmetic, so most of its cases need no guest program at all; the
+# ones that do run the real fixture and assert the hardware-oracle values.
+add_executable(rb_abi_jni_tests abi_jni_test.cpp)
+target_link_libraries(rb_abi_jni_tests PRIVATE rb_abi rb_exec rb_loader)
+target_compile_definitions(rb_abi_jni_tests PRIVATE RB_FIXTURE_PATH="/data/local/tmp/librb_fixture.so")
+
+add_executable(rb_abi_call_tests abi_call_test.cpp)
+target_link_libraries(rb_abi_call_tests PRIVATE rb_abi rb_exec rb_loader)
+target_compile_definitions(rb_abi_call_tests PRIVATE RB_FIXTURE_PATH="/data/local/tmp/librb_fixture.so")

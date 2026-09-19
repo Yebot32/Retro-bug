@@ -27,6 +27,7 @@
 #      has been executed yet.
 #
 # Usage: tools/run_engine_tests.sh [abi]        # abi defaults to x86_64; arm64-v8a runs on a phone
+# Pick the device with RB_SERIAL=<serial> when more than one is attached (`adb devices`).
 
 set -euo pipefail
 ABI="${1:-x86_64}"
@@ -41,7 +42,7 @@ ADB="$SDK/platform-tools/adb.exe"
 
 # One list for build, push and run: a suite that is missing here silently does not execute, which is
 # the least useful kind of green.
-SUITES="rb_interval_compat_tests rb_variant_compat_tests rb_guest_memory_tests rb_guest_elf_tests rb_isa_front_end_tests rb_exec_census_tests rb_exec_interp_tests dynarmic_tests"
+SUITES="rb_interval_compat_tests rb_variant_compat_tests rb_guest_memory_tests rb_guest_elf_tests rb_isa_front_end_tests rb_exec_census_tests rb_exec_interp_tests rb_abi_call_tests rb_abi_jni_tests dynarmic_tests"
 
 "$CM" -S "$ROOT" -B "$BUILD" -G Ninja -DCMAKE_MAKE_PROGRAM="$NJ" \
   -DCMAKE_TOOLCHAIN_FILE="$SDK/ndk/$NDK_VER/build/cmake/android.toolchain.cmake" \
@@ -67,20 +68,50 @@ to_host() {
   if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi
 }
 
-"$ADB" wait-for-device
+# Which device, and said out loud.
+#
+# Two are attached in normal use now: the SM-X710 (armeabi-v7a, so it can *execute* the guest ISA and
+# is the oracle) and the OnePlus 12 (abilist32 empty, so it is M1's negative control). `adb` refuses to
+# guess when more than one is present, and a silently-chosen device would be worse than an error: a
+# green run means "green *on this hardware*", which is the whole content of the claim (docs/30's
+# standing facts make the same point about attributing a run to a device).
+SERIAL="${RB_SERIAL:-}"
+if [ -z "$SERIAL" ]; then
+  n="$("$ADB" devices | awk 'NR>1 && $2=="device"' | wc -l | tr -d ' ')"
+  if [ "$n" = "1" ]; then
+    SERIAL="$("$ADB" devices | awk 'NR>1 && $2=="device"{print $1}')"
+  elif [ "$n" = "0" ]; then
+    echo "no device attached (adb devices is empty)" >&2
+    exit 1
+  else
+    echo "$n devices attached; name one with RB_SERIAL=<serial>" >&2
+    "$ADB" devices | awk 'NR>1 && $2=="device"' >&2
+    exit 1
+  fi
+fi
+adb() { MSYS_NO_PATHCONV=1 "$ADB" -s "$SERIAL" "$@"; }
+
+adb wait-for-device
 # Device paths must not be rewritten by MSYS, and adb push clears the execute bit — both bit us once
 # already (docs/30-m0-notes.md).
-MSYS_NO_PATHCONV=1 "$ADB" push "$(to_host "$FIXTURE")" /data/local/tmp/librb_fixture.so >/dev/null
+{
+  echo "# device=$SERIAL model=$(adb shell getprop ro.product.model | tr -d '\r')" \
+       "abilist32=$(adb shell getprop ro.product.cpu.abilist32 | tr -d '\r')" \
+       "sdk=$(adb shell getprop ro.build.version.sdk | tr -d '\r')" \
+       "page=$(adb shell getconf PAGE_SIZE | tr -d '\r')"
+} >&2
+
+adb push "$(to_host "$FIXTURE")" /data/local/tmp/librb_fixture.so >/dev/null
 for t in $SUITES; do
   src="$BUILD/core/tests/$t"
   [ -f "$src" ] || src="$BUILD/external/dynarmic/tests/$t"
   [ -f "$src" ] || { echo "no binary for $t under $BUILD" >&2; exit 1; }
-  MSYS_NO_PATHCONV=1 "$ADB" push "$(to_host "$src")" "/data/local/tmp/$t" >/dev/null
+  adb push "$(to_host "$src")" "/data/local/tmp/$t" >/dev/null
 done
 
 status=0
 for t in $SUITES; do
   echo "=== $t ==="
-  MSYS_NO_PATHCONV=1 "$ADB" shell "chmod 755 /data/local/tmp/$t; /data/local/tmp/$t" || status=1
+  adb shell "chmod 755 /data/local/tmp/$t; /data/local/tmp/$t" || status=1
 done
 exit $status

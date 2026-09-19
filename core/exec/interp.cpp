@@ -1003,6 +1003,16 @@ RunResult InterpExecutor::Run(MachineState& state, unsigned max_instructions) {
       result.reason = StopReason::Returned;
       break;
     }
+    if (dispatch_ != nullptr) {
+      // Before translation, like the return sentinel: a host entry has no code to translate, and
+      // mapping a page for it would be inventing guest memory to represent a host function.
+      std::uint32_t slot = 0;
+      if (dispatch_->IsHostEntry(location.PC(), &slot)) {
+        result.reason = StopReason::HostCall;
+        result.host_slot = slot;
+        break;
+      }
+    }
     std::string err;
     auto block = isa::TranslateOne(memory_, location, &err);
     if (!block) {
@@ -1010,6 +1020,40 @@ RunResult InterpExecutor::Run(MachineState& state, unsigned max_instructions) {
       result.detail = std::move(err);
       break;
     }
+
+    // A predicated *block*, not merely a predicated terminal. Dynarmic's A32 translator splits an IT
+    // sequence into one block per leg: the block carries `GetCondition()` and a
+    // `ConditionFailedLocation()`, and the AArch64 back end branches on the condition at the entry
+    // label so a failed leg jumps to that location without executing a single instruction
+    // (backend/arm64/emit_arm64.cpp:205-217). `frontend/A32/translate/conditional_state.cpp:45-49` is
+    // where the pair is built, and the location it stores has already had `AdvancePC` and `AdvanceIT`
+    // applied — so following it is all that is needed, and no IT bookkeeping belongs here.
+    //
+    // This was the missing piece, and the measured values are what found it: `it_probe(7,3)` returned
+    // 1012 where silicon returns 42, which is precisely "both legs of `ite gt` ran, and the last one
+    // won". `docs/32` §2.1 predicted this class of defect from bionic's 8,387 IT instructions; it is no
+    // longer a prediction.
+    const Dynarmic::IR::Cond entry_cond = block->ir.GetCondition();
+    if (entry_cond != Dynarmic::IR::Cond::AL) {
+      if (!Holds(entry_cond, Flags::from_cpsr(state.cpsr))) {
+        if (!block->ir.HasConditionFailedLocation()) {
+          result.reason = StopReason::Internal;
+          result.detail = "a predicated block arrived with no condition-failed location";
+          break;
+        }
+        // The leg is skipped whole. It still costs the loop a step, because a chain of skipped blocks
+        // would otherwise spin inside one Run call without consuming any budget.
+        location = LocationDescriptor{block->ir.ConditionFailedLocation()};
+        state.mode = location.TFlag() ? isa::Mode::Thumb : isa::Mode::Arm;
+        state.pc = location.PC();
+        state.r[15] = location.PC();
+        state.itstate = location.IT().Value();
+        ++steps;
+        result.reason = StopReason::Budget;
+        continue;
+      }
+    }
+
     BlockRunner runner{memory_, state, location};
     LocationDescriptor successor{location};
     const bool contd = trace && ++shown <= 25;

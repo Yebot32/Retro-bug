@@ -25,6 +25,30 @@
 
 extern jint Java_com_retrobug_fixture_MainActivity_fib(JNIEnv* env, jclass clazz, jint n);
 extern jint Java_com_retrobug_fixture_MainActivity_wide(JNIEnv* env, jclass clazz, jint seed);
+extern jint Java_com_retrobug_fixture_MainActivity_it_probe(JNIEnv* env, jclass clazz, jint a,
+                                                            jint b);
+extern jint Java_com_retrobug_fixture_MainActivity_jni_utf(JNIEnv* env, jclass clazz, jint seed);
+
+/*
+ * A JNIEnv for the guest to call out through, so the oracle can measure the *JNI call path* on real
+ * silicon and not only the arithmetic.
+ *
+ * The table is initialised by member name, which means the C compiler resolves NewStringUTF's byte
+ * offset from jni.h and the guest resolves it again from its own `ldr [r2, #0x29c]`. Two independent
+ * derivations of the same number, agreeing, is what makes the offset evidence rather than a transcription.
+ */
+static int g_utf_calls;
+static const char* g_last_utf;
+
+static jstring oracle_NewStringUTF(JNIEnv* env, const char* utf) {
+  (void)env;
+  ++g_utf_calls;
+  g_last_utf = utf; /* still the guest's own bytes; the oracle shares their address space */
+  return (jstring)(intptr_t)0x7ac0ffee;
+}
+
+static const struct JNINativeInterface g_oracle_table = {.NewStringUTF = oracle_NewStringUTF};
+static const struct JNINativeInterface* g_oracle_env = &g_oracle_table;
 
 /// CP15 reads, one per invocation because a refused one kills the process and the useful answer is
 /// *which* ones an AArch32 EL0 process may perform on this hardware. `mrc p15, 0, Rd, c0, c0, 0`
@@ -111,6 +135,31 @@ int main(int argc, char** argv) {
          Java_com_retrobug_fixture_MainActivity_wide(NULL, NULL, 0),
          Java_com_retrobug_fixture_MainActivity_wide(NULL, NULL, 2),
          Java_com_retrobug_fixture_MainActivity_wide(NULL, NULL, -1));
+
+  // it_probe: real IT blocks, narrow and 32-bit, taken on both sides of each condition. The values are
+  // the arithmetic `docs/30` §Step 7 needs to assert against, and the four shapes are chosen so each of
+  // the four predicated slots is exercised by at least one of them.
+  printf("it_probe:");
+  static const jint it_cases[][2] = {{7, 3}, {3, 7}, {5, 5}, {101, 1}, {0, 0}, {-5, 3}};
+  for (unsigned i = 0; i < sizeof it_cases / sizeof it_cases[0]; ++i) {
+    printf(" %d", Java_com_retrobug_fixture_MainActivity_it_probe(NULL, NULL, it_cases[i][0],
+                                                                  it_cases[i][1]));
+  }
+  printf("\n");
+
+  // jni_utf, against a JNIEnv built right here.
+  //
+  // The table is initialised by *member name*, so the compiler resolves NewStringUTF's offset from the
+  // same header the fixture was compiled against; the guest then reaches it through its own
+  // `ldr [r2, #0x29c]`. If RetroBug's own table put the function anywhere else, its guest would call a
+  // different slot, this counter would stay at zero, and the returned value would differ — which makes
+  // the offset a measured fact on both sides rather than a number transcribed from a specification.
+  g_utf_calls = 0;
+  g_last_utf = NULL;
+  const jint u1 = Java_com_retrobug_fixture_MainActivity_jni_utf(&g_oracle_env, NULL, 1);
+  const jint u0 = Java_com_retrobug_fixture_MainActivity_jni_utf(&g_oracle_env, NULL, 0);
+  printf("jni_utf(1)=%d jni_utf(0)=%d calls=%d utf=%s\n", u1, u0, g_utf_calls,
+         g_last_utf != NULL ? g_last_utf : "(null)");
 
   // The exact string M1 renders on screen, from the same snprintf the guest will run.
   char buf[128];
