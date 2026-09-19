@@ -440,6 +440,14 @@ and the guest's text appears on the host-rendered screen; `rb::diag` shows activ
 backend; the T1 option is present via long-press but **does nothing yet**. `U-2` (4 GiB reservation) and `U-11`
 (hidden-API hosting) are answered on real hardware here, and their fallbacks are already designed (§10.7, `docs/10` §6).
 
+**M1's device step is defined, not deferred** — see [`21-m1-device-acceptance.md`](21-m1-device-acceptance.md).
+Agreed device: **OnePlus 12 / Snapdragon 8 Gen 3, confirmed to have no 32-bit ARM support at all**, which makes it
+the target class exactly (ARMv9.2 cores drop AArch32 at EL0) and lets the acceptance test rest on an *OS-level*
+negative control: the platform itself cannot install the guest APK. The runbook's governing rule is that at least one
+piece of evidence must come from something other than RetroBug's own logs, since a buggy build could otherwise
+report a tier it was not running. Two gaps are recorded rather than papered over: this device has 4 KiB pages, so
+AD-7's mixed-granule path stays host-tested-only, and one OEM build is device #1 of the U-13 matrix, not the matrix.
+
 ### M2 — one app inside the isolated environment, **isolation verified not assumed**
 Required: C16, `RingChannel` (C12), SwANGLE in-sandbox executor, self-test battery, T1 UI (badge, first-run
 contract, exit affordance), leak-probe fixtures.
