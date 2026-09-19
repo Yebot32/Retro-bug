@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
+
+  The app-domain probe's manifest. Deliberately the smallest thing that installs and launches as a
+  real third-party app: no permissions, no services, no resources beyond the launcher category that
+  `am start` needs. Every permission would be a reason for the answer to differ from the app RetroBug
+  eventually ships, and the point of this APK is to be in the same SELinux domain as that one.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.retrobug.probe"
+    android:versionCode="1"
+    android:versionName="1">
+
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />
+
+    <application android:label="RetroBug Probe" android:debuggable="false">
+        <activity
+            android:name=".ProbeActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

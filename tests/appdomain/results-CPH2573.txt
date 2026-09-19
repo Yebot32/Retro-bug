@@ -1,0 +1,44 @@
+# device=CPH2573 serial=75ff8cd3
+# release=16 sdk=36 abilist32=''
+# ran 2026-09-20T01:59:50+04:00 with apk built from 83e4845
+java: release=16 sdk=36 targetSdk=34 minSdk=26 flags=0x30a8be44 nativeLibraryDir=/data/app/~~lG14unCt1zf2H8NYm6K8Vg==/com.retrobug.probe-tpspGtppspKTFOL6_ruqoA==/lib/arm64 dataDir=/data/user/0/com.retrobug.probe
+java: product=OnePlus CPH2573 abiList=[arm64-v8a]
+=== app-domain probe: what a JIT may do inside an installed app ===
+selinux=u:r:untrusted_app:s0:c255,c257,c512,c768
+selinux_enforce=(unreadable) (1=Enforcing, 0=Permissive, empty=app cannot read it)
+uid=10511 gid=10511 pid=2505 comm=localhost
+machine=aarch64 release=6.1.141-android14-11-o-g9bf0b7a7c4cb pagesize=4096 at_pagesz=4096
+mmap anon PROT_READ|WRITE|EXEC                       ok      addr=0x7db7078000
+  anon RWX: call the stub                            EXECUTED returned=42 ok
+mmap anon PROT_READ|WRITE (for later mprotect RX)    ok      addr=0x7db7078000
+mprotect RW -> RX                                    ok
+  after RW->RX: call the stub                        EXECUTED returned=42 ok
+mprotect RX -> RW again (patching an existing block) ok errno=0
+memfd_create(MFD_CLOEXEC)                        ok      fd=124
+mmap memfd PROT_READ|WRITE (MAP_SHARED)              ok      addr=0x7db7078000
+mprotect memfd RW -> RX                              ok
+  memfd RX: call the stub                            EXECUTED returned=42 ok
+mmap memfd PROT_READ|WRITE|EXEC (MAP_SHARED)         ok      addr=0x7db7078000
+  memfd RWX: call the stub                           EXECUTED returned=42 ok
+mmap 4 GiB PROT_NONE at 0x10000, MAP_FIXED_NOREPLACE DENIED  errno=17 (File exists)
+mmap 4 GiB PROT_NONE at 0x10000000, MAP_FIXED_NOREPLACE DENIED  errno=17 (File exists)
+mmap 4 GiB PROT_NONE at 0x80000000, MAP_FIXED_NOREPLACE DENIED  errno=17 (File exists)
+mmap 4 GiB PROT_NONE at 0x10000, hint only           ok      addr=0x7ac0000000
+  ^ where it actually went                           HINT NOT HONORED: got 0x7ac0000000, wanted 0x10000
+  entirely below 4 GiB (identity-addressable)        no
+  commit 4 KiB RWX inside the reservation            ok      addr=0x7ac0000000
+    stub inside the reservation                      EXECUTED returned=42 ok
+mmap 4 GiB PROT_NONE anywhere                        ok      addr=0x7ac0000000
+  ^ where it actually went                           HINT NOT HONORED: got 0x7ac0000000, wanted 0x0
+  entirely below 4 GiB (identity-addressable)        no
+  commit 4 KiB RWX inside the reservation            ok      addr=0x7ac0000000
+    stub inside the reservation                      EXECUTED returned=42 ok
+mmap 2 GiB PROT_NONE at 0x10000, MAP_FIXED_NOREPLACE DENIED  errno=17 (File exists)
+mmap 1 GiB PROT_NONE at 0x10000, MAP_FIXED_NOREPLACE DENIED  errno=17 (File exists)
+mmap 512 MiB PROT_NONE at 0x10000, MAP_FIXED_NOREPLACE DENIED  errno=17 (File exists)
+=== totals: ok=11 denied=6 faulted_or_wrong=0 ===
+note: 'DENIED' is an answer, not a crash. The surprising outcome is an ok that cannot execute.
+load-from-writable: copied 15592 bytes to /data/user/0/com.retrobug.probe/cache/librbprobe_copy.so
+load-from-writable: LOADED from app-writable storage
+=== app-domain probe complete ===
+# seccomp/avc denials visible to the shell domain, if any:
