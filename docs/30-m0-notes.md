@@ -1158,8 +1158,9 @@ a `buildTypes.debug.packaging` block "silently ignored by AGP 8" — and "every 
 That wording is what `docs/research/08` says; where `docs/20` had been citing it as *"the most expensive
 lesson"* it now cites the list, because the superlative was mine and the source makes no ranking.
 
-`core/include/rb/diag/diag.h` + `core/diag/diag.cpp` + `core/tests/diag_test.cpp`: 105 checks, 0 failures,
-on both devices, no fixture and no guest program — the recorder is pure string work, which is also the
+`core/include/rb/diag/diag.h` + `core/diag/diag.cpp` + `core/tests/diag_test.cpp`: 105 checks as written
+here, 108 now that §Step 11's `syscall-policy` field exists. 0 failures on both devices, no fixture and no
+guest program — the recorder is pure string work, which is also the
 point: what reports on a launch must be testable without one.
 
 **Three decisions that carry the rule, each with a test that fails if it is removed.**
@@ -1207,6 +1208,105 @@ path has to call it from the address-model probe (AD-6), the app-domain probes (
 `unrecorded` name rather than as a plausible-looking report, which is the asymmetry this component was
 built to create. The privacy surface is also still unstated by any doc: the report is copyable from the UI,
 so *what may not go in it* wants a decision before M1's export button exists, not after.
+
+## Step 11 — the SVC channel, what it found in Tier I, and a syscall ABI that is not the textbook one
+
+C07 cannot be built on guesses about what a guest syscall looks like, and the first thing it produced was
+two Tier I bugs plus three measurements that contradict things written down in this project's own docs.
+
+### 11a — the channel, and the latent PC-write bug
+
+An SVC has to reach the monitor with the same frame from both tiers. Tier I notes Dynarmic's
+`A32CallSupervisor` and surfaces it at the block's `CheckHalt` terminal — which is where Dynarmic's own
+back ends test the halt flag, and where the translator has already put `BranchWritePC(pc+n)` — so both
+tiers stop *after* the instruction. Stopping mid-block would have given the two tiers different resume
+addresses for one instruction.
+
+Then the differential disagreed, and the cause was in Tier I. Dynarmic's `BranchWritePC` masks its own
+target and emits `A32SetRegister(PC)` (`frontend/A32/a32_ir_emitter.cpp:101-110`); only `BXWritePC` is the
+interworking one that reads bit 0 as the ISA tag (`backend/arm64/emit_arm64_a32.cpp:551-577`). Tier I
+applied the `BX` rule to **every** PC write. `bx lr` and `ldr pc, [sp]` all arrive with a tag-bearing
+value, so fifteen differential cases, three hardware curves and 8,387 census instructions never reached the
+difference — and the first guest construct that does is a syscall continuation at an even address, which
+Tier I read as "switch to ARM" and then decoded its own Thumb bytes with the ARM decoder, reporting an
+exception at an instruction that had executed correctly moments earlier. `[1L]`
+
+The same run exposed a representational inconsistency: CPSR bit 5 *is* the mode, Tier J reads its mode out
+of that bit and Tier I carries it on the location descriptor, so Tier I returned `cpsr = 0x0` with
+`mode = Thumb` — a struct containing a contradiction, and one guest-visible difference waiting for the
+first `mrs r0, cpsr`. Both tiers now normalise it through one `CpsrWithMode`, following the `ItStateFromCpsr`
+precedent; what neither tier models is an `MSR CPSR` that writes bit 5, and that is named in the comment
+rather than assumed away. `[INFER]` (no test reaches it yet).
+
+`svc_probe` in the fixture keeps `r7` (248 = `__NR_exit_group`, read from the NDK's own
+`arm-linux-androideabi/asm/unistd-eabi.h:214`) different from the encoding's immediate (0x9c), because
+bionic uses `svc #0` and a probe that conflated the two would pass every test anyone thinks to write. The
+resume is proved by guest arithmetic: `adds r0, r2, #1` after the SVC, so `41 → 42` only if execution
+continued at exactly the right address — two halfwords early runs the tail of a `movw` as code, two late
+gives 43. `[1A]` Tier diff is 80 checks with both tiers identical at the stop *and* after the resume.
+
+### 11b — measuring the ABI instead of recalling it
+
+`tests/corpus/syscall_abi.c` + `tools/syscall_abi_probe.sh`: one source, built as `armeabi-v7a` and
+`arm64`, run on the Tab S9, and the guest/host map **computed** from the two outputs rather than typed.
+Three results, and each one changes something:
+
+1. **Every shared syscall number differs.** `read` 3↔63, `write` 4↔64, `close` 6↔57, `openat` 322↔56,
+   `gettid` 224↔178, `exit_group` 248↔94 — fourteen shared names, fourteen divergences, plus `mmap2` and
+   `sigaction` and the three `__ARM_NR_*` with no host counterpart at all. `[1L]` So "translate by name,
+   never reuse the number" is not a guard against an occasional clash; a forwarded call that skips the
+   translation is wrong every time.
+2. **Errno values are identical — and that contradicts this project's own invariant.** `docs/20` §C07 says
+   guest errnos are ARM-EABI numbers "not host ones", which is the received story (`ENAMETOOLONG` 62 vs
+   36). All 47 sampled names agree between the ABIs, and the discriminating case was executed rather than
+   looked up: `openat` of a 300-character name from a real 32-bit process returned **-36**, so this kernel
+   already speaks bionic's numbers. The *rule* survives — resolve by name, keep one function for the
+   translation — but the premise as written is false for the pair RetroBug actually runs, and `docs/20`
+   now says so where someone would otherwise re-assume it. `[1L]`
+3. **CPSR.C is not the error flag on this kernel.** The textbook ARM EABI return is "negative errno in r0,
+   C set; success clears C" — and that sentence was in the probe's own header comment *before* the probe
+   ran, which is exactly how an assumption becomes documentation. Measured: `getpid` → C=1, `sched_yield`
+   returning **0** → C=1, both failures → C=1. `[1L]` So the flag carries nothing, the discriminator is the
+   `-4095..-1` range, and `ApplyReturn` writes r0 and leaves CPSR alone. Had the comment been trusted, every
+   guest stub that tests the flag would have disagreed with real hardware.
+
+Two tooling mistakes in that step, both of the "green and wrong" kind: the probe's `%-18s` padding meant a
+`grep` expecting one space after a name matched only the names long enough not to be padded, so the first
+version of the map reported *one* divergence out of fifteen and looked plausible (`__NR_clock_gettime` is
+exactly 18 characters; `EPERM` is 5); and the first `openat` failure case passed a null pathname, which the
+kernel rejects with EFAULT before it ever validates the dirfd — so it "measured EBADF" while measuring
+something else. Both are fixed where they were, and the second is why the probe now passes a valid pointer.
+
+### 11c — the monitor, with an allowlist that is empty on purpose
+
+`core/include/rb/syscall/monitor.h` + `core/syscall/monitor.cpp`, 77 checks, green on both devices.
+`Frame::Capture` (masked r7, the immediate kept separate, r0-r5, the PC), `Outcome`, `Verdict`,
+`LooksLikeError` as the discriminator, and handlers for what can be answered with components that exist:
+`getpid`/`gettid` from ids the launcher supplies (refused rather than invented, and refused rather than
+asked from the host kernel), `exit_group` as a verdict, `arm_cacheflush` handed to an injectable invalidator
+— the AD-7 self-modifying-code story reached through the *guest's own* instruction rather than a host call —
+and `arm_set_tls`/`arm_get_tls` through `MachineState::tp`, which is the syscall half of TLS while the
+`mrc` half waits on a `Coprocessor` hook.
+
+The forwarding allowlist is empty and `Verdict::kForward` is a state with no rows behind it, so the posture
+"is data, and the data is empty" rather than "no such concept". `Monitor::Echo` writes it into C17's new
+`syscall-policy` field — the first component to populate a recorder — as
+`requested = no forwarding: nothing reaches the host kernel` / `active = … the guest asked for getpid x1,
+openat x2`. Refusals name the missing component (`openat is not forwarded: this build has an empty
+allowlist and no handler yet`), because a bare ENOSYS in a support report describes a gap nobody can triage.
+Unknown numbers answer `-ENOSYS`, which is also what the measured device kernel answers for an r7 above its
+table, so at least the shape of a refusal matches silicon. `[1A]`
+
+### What this does not do yet
+
+* Nothing calls `Monitor::Handle` — the executor→monitor loop is the next slice, and until then the channel
+  is tested and the monitor is tested and the two are not connected.
+* `docs/20` §C07's review focus still has no answer for `execve`/`fork`: what `docs/10` §10.2 actually lists
+  for them is a **seccomp denial**, which is `SIGSYS`, not an errno — so "refused with the same errno a real
+  32-bit Android would give" may be a question with no errno as its answer. Needs the same treatment as
+  above: a handler-equipped probe that runs them and reports what comes back. `[UNVERIFIED]`
+* Signals, `clone`/`futex`, and the 32-bit `ucontext` layout: untouched.
+* Forwarding rows, and with them the first thing that must not be able to escape C10's resolver.
 
 ## Standing environment facts (so they are not re-derived)
 

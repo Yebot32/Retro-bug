@@ -277,6 +277,36 @@ through an explicit allowlist here**, because on T1 that same function *is* the 
 address inside the guest window only; `execve`/`fork` refused with the *same* errno a real 32-bit Android would give
 (§17 of docs/10 lists which).
 
+**As built, first slice** (`30` §Step 11; `core/syscall/monitor.cpp`, 77 checks) — one invariant above was
+stated as a fact and turned out to be only half right, so it is corrected here rather than left to be
+re-discovered:
+
+- **Syscall *numbers*: as claimed, and worse than expected.** Measured from both ABIs' own headers on the
+  SM-X710: **every** name shared between the guest's ARM EABI table and the host's AArch64 table differs
+  (`read` 3↔63, `write` 4↔64, `gettid` 224↔178, `openat` 322↔56, fourteen of fourteen), and five guest
+  numbers have no host counterpart at all (`mmap2`, `sigaction`, and the three `__ARM_NR_*`). A forwarded
+  call that reuses a number rather than translating by name is wrong in every case, not some.
+- **Errno *values*: identity today, measured.** The classic claim is that ARM EABI errnos differ from the
+  generic ones (`ENAMETOOLONG` 62 vs 36, `EOVERFLOW` 75 vs …), so all 47 sampled names were printed from
+  both ABIs: they agree on every one, and a real `openat` of an over-long name from a 32-bit process
+  returned **-36**, i.e. the kernel this runs on already speaks bionic's numbers. So the invariant's
+  *conclusion* holds — resolve errnos by name, never copy a number across — but its premise ("not host
+  ones") is false for this ABI pair. `err::ToGuest` is therefore an identity function that exists as a
+  place, and the test asserts the numbers came from a measurement rather than from the history book.
+- **The return convention is not the textbook one.** The usual statement — "negative errno in r0 with
+  CPSR.C set, clear on success" — is wrong on the measured device: C is set after *every* return tried,
+  including `sched_yield` succeeding with 0. The discriminator is the `-4095..-1` range, which is what
+  `LooksLikeError` implements and what `ApplyReturn` relies on, leaving CPSR alone. Synthesising the flag
+  would be a silent behavioural difference from every real 32-bit Android process.
+- **Nothing is forwarded.** `Verdict::kForward` exists with no allowlist row behind it, so the posture is
+  data-shaped rather than absent-shaped, and `Monitor::Echo` records it as C17's `syscall-policy` field
+  ("requested: no forwarding; active: nothing reached the host kernel — the guest asked for getpid x1,
+  openat x2"). Refusals name the component that is missing (`openat … C10 lands first`), because a bare
+  ENOSYS in a support report describes a gap nobody can triage.
+- **`__ARM_NR_set_tls`/`get_tls` work now**, through `MachineState::tp`. That is the syscall half of TLS;
+  the `mrc` read of `tpidrurw` still needs the `Coprocessor` hook (`30` §Step 9), and guests from different
+  toolchain generations use one path or the other, so both have to exist before "TLS works" is true.
+
 ### C08 `rb::abi`
 ```cpp
 namespace rb::abi {
@@ -423,7 +453,7 @@ Stage recorder with the `>>> INITIALIZATION FAILED AT: <stage> <<<` shape and ma
 serialised into the instance dir and copyable from the UI. Every other component's "must be reviewed" line above is
 expressed as a `diag` field, because that is what makes review findings mechanical rather than aspirational.
 
-**As built** (`30` §Step 10, 105 checks green on both devices). Three properties make the sentence above
+**As built** (`30` §Step 10, 108 checks green on both devices). Three properties make the sentence above
 enforceable rather than aspirational, and each has a test that fails if it is removed: `Record` **cannot
 discard** a malformed echo (it stores a failure naming the field instead, which is the only version that is
 not itself a silent-ignore interface); a `kFailed` entry does **not** satisfy a required field, so a field
@@ -653,9 +683,14 @@ Progress and the findings that change this plan are tracked in
 8. `docs/research/01` corrections (stale `MemoryProcessor` API; no interpreter upstream) and `docs/00` §2 note that
    the no-Gradle build path is verified.
 9. `rb::diag` (C17) — the recorder the "echo requested vs active" invariants all hang off. **Core is done**
-   (`30` §Step 10): 105 checks, and M1's "shows active tier + address model + code-cache backend" is now
+   (`30` §Step 10): 108 checks, and M1's "shows active tier + address model + code-cache backend" is now
    `MissingRequired().empty()` rather than a review note. Populating it is M1's launch-path work, listed
    there rather than assumed here.
+10. `rb::syscall` (C07) — first slice **done** (`30` §Step 11): the SVC channel, identical in both tiers and
+    proved with guest arithmetic rather than a log line, and a monitor whose forwarding allowlist is empty
+    by design and echoes itself through C17. Its syscall numbers, errno values and return convention are
+    measured on hardware per ABI (`tools/syscall_abi_probe.sh`), which corrected two things this plan had
+    stated as fact — see C07's "As built" above. Signals, threads and forwarding are not.
 
 Sequencing constraint the owner should know before M1: **M1's end-to-end acceptance step cannot be verified on this
 machine at all** — it needs a physical 64-bit-only arm64 phone. Everything in §9 and most of M1's code can be written

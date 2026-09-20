@@ -57,3 +57,8 @@ target_compile_definitions(rb_exec_tier_diff_tests PRIVATE RB_FIXTURE_PATH="/dat
 # part of the point: the component whose job is to say what a launch did must be testable without one.
 add_executable(rb_diag_tests diag_test.cpp)
 target_link_libraries(rb_diag_tests PRIVATE rb_diag)
+
+# C07's monitor is a decision table, so its test needs no guest program: frames are built by hand from
+# the numbers measured on hardware, and the results are checked against those same measurements.
+add_executable(rb_syscall_monitor_tests syscall_monitor_test.cpp)
+target_link_libraries(rb_syscall_monitor_tests PRIVATE rb_syscall rb_diag rb_exec)

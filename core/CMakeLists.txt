@@ -61,9 +61,16 @@ add_library(rb_diag STATIC diag/diag.cpp)
 target_compile_features(rb_diag PUBLIC cxx_std_20)
 target_include_directories(rb_diag PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
+# rb::syscall (C07): the monitor. It consumes an executor's state and a diag recorder, and owns no memory
+# of its own — which is the shape that keeps "no syscall reaches the host kernel except through the
+# allowlist" reviewable in one file rather than grep'd across the engine.
+add_library(rb_syscall STATIC syscall/monitor.cpp)
+target_compile_features(rb_syscall PUBLIC cxx_std_20)
+target_link_libraries(rb_syscall PUBLIC rb_exec rb_diag)
+
 # rb_core is the aggregate the engine-facing components will hang off.
 add_library(rb_core INTERFACE)
-target_link_libraries(rb_core INTERFACE rb_mem rb_loader rb_isa rb_exec rb_abi rb_diag dynarmic)
+target_link_libraries(rb_core INTERFACE rb_mem rb_loader rb_isa rb_exec rb_abi rb_diag rb_syscall dynarmic)
 
 if(DEFINED RB_COMPAT_INCLUDE_DIR)
   target_include_directories(rb_core INTERFACE "${RB_COMPAT_INCLUDE_DIR}")

@@ -44,6 +44,7 @@ const char* Name(Field f) {
     case Field::kProfileApplied: return "profile-applied";
     case Field::kRevivalLayer: return "revival-layer";
     case Field::kPatchMatch: return "patch-match";
+    case Field::kSyscallPolicy: return "syscall-policy";
     case Field::kCount: break;
   }
   // Unreachable for a caller holding a valid Field, and worth a line anyway: the test that walks every

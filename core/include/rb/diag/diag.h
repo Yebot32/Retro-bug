@@ -79,6 +79,11 @@ enum class Field : std::uint8_t {
   /// A declared patch that did not match: `inert`, with the reason. The `docs/10` §12.3 wording names
   /// this case specifically, and it is the one an "unknown key" warning would still miss.
   kPatchMatch,
+  /// C07: which syscalls the build *forwards* to the host kernel versus which it emulates or refuses.
+  /// The plan's invariant is that nothing reaches the host kernel except through an explicit allowlist,
+  /// and an allowlist nobody can read is the same as no allowlist — so the monitor echoes its own policy
+  /// here, including the tally of what the guest actually asked for.
+  kSyscallPolicy,
   kCount,
 };
 

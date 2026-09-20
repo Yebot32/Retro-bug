@@ -262,7 +262,9 @@ void every_field_has_a_unique_name() {
     CHECK(std::find(names.begin(), names.end(), n) == names.end());
     names.push_back(n);
   }
-  CHECK_CTX(names.size() == 12u, std::to_string(names.size()));
+  // Every enumerator, and no duplicates: a field added to the enum without a name would otherwise render
+  // as `unknown-field` and be invisible in the one artifact whose job is to be read.
+  CHECK_CTX(names.size() == static_cast<std::size_t>(Field::kCount), std::to_string(names.size()));
   CHECK_CTX(std::string{Name(Outcome::kInert)} == "inert", Name(Outcome::kInert));
 }
 
