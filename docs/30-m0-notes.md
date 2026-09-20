@@ -2045,6 +2045,45 @@ to be six, so "the lane covers `docs/32` §7's enumeration" is a checked fact ra
 
 `docs/20` §9 item 14 closes; `docs/10` §5 consequence 3's **[OPEN]** is resolved by it.
 
+## Step 22 — the six documentation conflicts `docs/34` flagged, reconciled rather than left
+
+`docs/34` ended with six contradictions against committed docs and deliberately resolved none of them. The
+owner's instruction was "do what's needed", so this pass reconciles them. **Docs-only: no code changed, so
+the 1,402-check both-device run at `1535b2d` is the verification that still stands, and none is claimed here.**
+
+**The one worth the trip: `docs/10` contradicted itself about Berberis, and both halves were in the same
+document.** §8's guest-library table recommended "generated proxies from the **Berberis**
+`native_bridge_support/android_api` machinery (Apache-2.0, genuinely AArch32)", while §17's "read myself" list
+had already established that Berberis' README first line says riscv64→x86_64, "**not** an ARM32 translator".
+Checked directly: the gitiles root of `frameworks/libs/native_bridge_support` has **no README and never
+mentions Berberis** **[1L]**. The `android_api/` generator is real and AArch32 — only the attribution was
+wrong — so the cell now says which half was.
+
+**`android_api/`'s own listing turned a correction into a work list [1L].** It contains no `libz`, no `liblog`,
+no `libm`, no `libc++`, which upgrades `docs/34`'s `[1A]` claims and settles two bucket errors at once: `libz`
+is not proxied by AOSP (and the NDK's real 32-bit `libz.a` makes the question moot — `docs/34` measured
+93/93), and `liblog` is a *dependency* of AOSP's own guest `libGLESv1_CM`, not a generated proxy. What it
+*does* list — 22 directories from `libEGL` to `vdso` — is the scope C11 should actually be cut against, and
+is now written out in `docs/20` §C11 in place of the guessed bucket.
+
+**Licensing granularity, and a trap worth naming.** `docs/10` AD-10's "AOSP bionic is BSD-3" is too coarse to
+attribute from: bionic has no root `LICENSE`, only per-directory `MODULE_LICENSE_*` markers. The trap is that
+gitiles prints "Licensed under the Apache License, Version 2.0" as **page chrome on every AOSP directory**, and
+a content fetch will hand it back as though it were the file — it did exactly that for
+`bionic/libc/MODULE_LICENSE_BSD`, whose "content" came back as the Apache text. Confirmed [1L] that the marker
+*exists*; the licence is read from the filename. AD-16's per-component obligation is therefore per-marker, and
+the row now says so, because a future reader who fetches that page will otherwise be told bionic is Apache.
+
+Also corrected in place: `docs/20` C11's `libdl` entry (the NDK's `libdl.a` is one 4,908-byte member, and the
+guest `libdl.so`'s content is really the guest linker's, so it belongs to the C12 decision), and `docs/10`
+§8's bionic row, which now carries the three-way split measured in §Step 20b — `libm`/`libz` need no AOSP
+checkout, `libc` needs its version script, `libdl` needs the linker.
+
+**Left alone deliberately:** `docs/32` §5 item 2's superseded "509 instructions" text. It is a measurement log
+entry, and §7 already carries the pointer "§7 shows this claim is false and supersedes it" — rewriting a
+log's findings in place would destroy the record of having been wrong, which is the more useful half of it.
+
+
 
 
 ## Standing environment facts (so they are not re-derived)

@@ -445,7 +445,30 @@ real escapes), and that synthetic `/proc` returns **guest** paths from `readlink
 Build-time artefacts, not runtime codegen. Two kinds: **built from AOSP source** (`libc.so`, `libm`, `libdl`,
 `libc++` — BSD-3/Apache-2.0, AD-10) and **generated proxies** (`libEGL`, `libGLESv1_CM`, `libGLESv2`, `libandroid`,
 `liblog`, `libz`, `libjnigraphics`, `libmediandk`).
-> **Two of those three buckets are wrong as written**, per `docs/33` §6: `libc++.so` in the NDK stub dirs is a
+> **Three corrections to those buckets, so read them as labelled rather than as the plan.**
+> **(1) `liblog` is not a proxy.** AOSP's own guest `libGLESv1_CM` declares `shared_libs: ["libcutils", "liblog",
+> "libnative_bridge_guest_libEGL"]` — `liblog` is a *dependency* of the guest build, i.e. AOSP links against it
+> rather than generating it **[1L]**, and the directory listing of `native_bridge_support/android_api/` shows
+> no `liblog`, no `libz`, no `libm` and no `libc++` at all **[1L]**. It belongs
+> with `libm`: a small, stable export surface (18 `FUNC` in the API-34 32-bit stub, counted here **[1L]**) that
+> forwards to the host's logging.
+> **(2) `libz` is neither a proxy nor a problem.** `android_api/` has no `libz` — AOSP's answer to "proxy libz?"
+> is *no* **[1L]** — and the NDK ships a real compiled 32-bit `libz.a` that relinks to a genuine `libz.so`
+> (227,544 B, 93/93 parity with the stub **[1A]**, and the same relink was reproduced here for `libm` **[1L]**).
+> So it moves to the "already built, just link it" bucket with `libm`, which is where the struct-by-value
+> `z_stream` problem in the next quote never arises.
+> **(3) `libdl` cannot come from the NDK.** Its `libdl.a` is one 4,908-byte member **[1A]**, and the guest
+> `libdl.so`'s real content is the *guest linker's* — so it depends on the C12 / §8 `linker` decision, not on a
+> library build. And "BSD-3" above is the wrong granularity for attribution: bionic has no root `LICENSE`, only
+> per-directory `MODULE_LICENSE_*` markers (§8's table, AD-10).
+> **What the generated-proxy bucket actually is, from that same listing [1L]:** `android_api/` ships
+> `libEGL`, `libGLESv1_CM`, `libGLESv2`, `libGLESv3`, `libandroid`, `libaaudio`, `libamidi`, `libbinder_ndk`,
+> `libcamera2ndk`, `libc`, `libjnigraphics`, `libmediandk`, `libnativehelper`, `libnativewindow`,
+> `libneuralnetworks`, `libOpenMAXAL`, `libOpenSLES`, `libvulkan`, `libwebviewchromium_plat_support`,
+> `app_process`, `linker`, `vdso` — so C11's proxy scope should be cut against that list rather than against a
+> guess, and the four absences above (`liblog`, `libz`, `libm`, `libc++`) are as much of the answer as the
+> presences.
+> The two original bucket errors stand as written: `libc++.so` in the NDK stub dirs is a
 > 19-byte `INPUT(-lc++_shared)` linker script with no `.dynsym`, so it is a symbol authority for nothing and the
 > C++ ABI surface has to come from `libc++_shared.so`'s own `.dynsym` or from AOSP **[1L]**; and `libz` and
 > `libmediandk` are not generatable from an export list at all — `z_stream` is laid out by the guest, carries
