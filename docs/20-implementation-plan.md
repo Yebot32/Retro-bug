@@ -877,6 +877,17 @@ Progress and the findings that change this plan are tracked in
     translation and end the block as a halt. Deliberately not done as part of §Step 20: the hook makes the
     callee responsible for the terminal, and mis-setting it converts a loud abort into a silent *skip* —
     which is worse. Needs its own test asserting Tier J returns a reason naming the pc.
+    **The mechanism, found but not yet built:** `Dynarmic::A32::Jit::HaltExecution(HaltReason)` is
+    embedder-facing and documented "Can be called at any time. Halts execution if called within a callback"
+    (`interface/A32/a32.h:59`, with `ClearHalt` at :65), and `PreCodeReadHook` *is* such a callback. So the
+    veto is four moves inside it, in this order: match the word at `pc` against the six decoder masks
+    (`decoder/arm.inc:184,185,190,310,315,316` — ARM state only, since all six are `arm_*` bodies);
+    `HaltExecution()`; `ir.SetTerm(Term::CheckHalt{Term::ReturnToDispatch{}})`, which is what makes the
+    emitted code *observe* the halt rather than run past it; then return false. `CheckHalt` before
+    `ReturnToDispatch` is the part that must not be omitted — returning to dispatch alone re-translates the
+    same pc, which is the §Step 20 hang on the other tier. `Run` then maps the `HaltReason` to
+    `StopReason::Unimplemented` carrying the pc, and the existing `--interpret-probe jit` becomes an
+    assertion instead of a measurement.
 
 Sequencing constraint the owner should know before M1: **M1's end-to-end acceptance step cannot be verified on this
 machine at all** — it needs a physical 64-bit-only arm64 phone. Everything in §9 and most of M1's code can be written
