@@ -97,9 +97,35 @@ bool LooksLikeAArch32Elf(const std::uint8_t* data, std::size_t len) {
   return (h->e_machine & ~EF_ARM_MASK) == EM_ARM;
 }
 
+namespace {
+/// A dynamic symbol name without its version: `strcmp@@LIBC` and `strcmp` are the same caller's
+/// question, and the device's `libc.so` uses the suffixed form in `.dynsym` while the relocations that
+/// name it do not always.
+[[nodiscard]] std::string BaseName(const std::string& name) {
+  const auto at = name.find('@');
+  return at == std::string::npos ? name : name.substr(0, at);
+}
+}  // namespace
+
 std::optional<CodeAddress> GuestModule::FindExport(const std::string& name) const {
+  /**
+   * An IFUNC export is the trap in this file.
+   *
+   * `st_value` for `strcmp`, `memcpy`, `strlen` and the rest is the **resolver**, so handing it back as
+   * "the address of strcmp" makes a caller run the resolver and take its return value — a *pointer to code*
+   * — as the result of the call. Measured, not predicted: with the slot resolved and the export still read
+   * naively, `strcmp("abc","abd")` came back as `612033` (`0x95601`, inside libc's text) and `memcpy`
+   * copied nothing at all, while both looked like successful returns. The answer a caller wants is the
+   * implementation the resolver chose, so if a slot for this name has been resolved, that is what gets
+   * returned; the resolver stays reachable through `ifunc_slots` for anything that still needs it.
+   */
+  const std::string base = BaseName(name);
+  for (const auto& s : ifunc_slots) {
+    if (s.implementation == 0 || s.name.empty() || BaseName(s.name) != base) continue;
+    return CodeAddress{s.implementation & ~1u, (s.implementation & 1u) != 0};
+  }
   for (const auto& s : exports) {
-    if (s.name != name) continue;
+    if (s.name != name && BaseName(s.name) != base) continue;
     // `exports` holds defined symbols and `imports` the rest, but a name can appear in both — an
     // image may reference a symbol it also defines, and returning the undefined one's value (0) as
     // an entry point is how a guest ends up jumping to the null page.
@@ -591,6 +617,26 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
       what += " — loading would leave those slots holding file data the guest treats as an address. "
               "Resolve them through the linker, or pass tolerate_unresolved_relocs to say you will";
       return fail(what);
+    }
+  }
+
+  // ---- IFUNC resolution, while the image is still writable
+  //
+  // This is the only place it can happen: the RELRO pass below strips write from exactly the segments the
+  // GOT entries live in, which `docs/30` §Step 27 measured by trying to write them after the load and
+  // being refused all eight times. The loader still runs no guest code of its own — it asks, and the
+  // caller who owns an executor answers — so C05's "no execution needed" invariant survives for every
+  // caller that leaves the hook unset.
+  if (opts.resolve_ifunc) {
+    for (auto& s : mod.ifunc_slots) {
+      const std::optional<std::uint32_t> answer = opts.resolve_ifunc(s);
+      if (!answer) continue;
+      if (!mem.Write(s.where, &*answer, 4)) {
+        return fail("could not write the resolved IFUNC implementation into guest 0x" +
+                    std::to_string(s.where) + " (" + (s.name.empty() ? "<R_ARM_IRELATIVE>" : s.name) +
+                    ")");
+      }
+      s.implementation = *answer;
     }
   }
 

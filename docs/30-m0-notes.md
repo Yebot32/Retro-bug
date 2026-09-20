@@ -2531,12 +2531,81 @@ that was loading cleanly before: nothing in the corpus has an unapplied relocati
 `libc.so`.
 
 
+## Step 28 — the second oracle, and IFUNC resolving for real
+
+**The fleet changed.** The OnePlus 12 left and an **Oppo Reno 5 (CPH2145, Snapdragon 720G/`lito`, Android
+13 / SDK 33, `abilist32=armeabi-v7a,armeabi`, 4 KiB pages)** arrived. That is a *second device that executes
+32-bit ARM*, which the project has never had, and it answers the question the Tab S9 could not: are the
+hardware constants device-bound?
+
+**They are not — so far.** Every value in `oracle_libc` (35 rows: string scanning, `atoi`/`strtol`/`strtod`
+including the subnormal `1e-320` at `0x00000000000007e8`, `qsort`, `strtok_r`, `snprintf`) and every value in
+`oracle_linked` — the `mathProbe` seeds, the five softfp argument rows — is **identical on the two devices**,
+across two different SoCs and two different bionic major versions. The one exception in quality, not value:
+`strcmp("abc","abd")` is `-32` on both, so that oddity is bionic's and not one chip's. What this does *not*
+yet establish is the case it was bought for — #26's Tier I divergence has no device value to compare against,
+and a timing or EL0-behaviour claim still needs the Reno 5 run. M1's install-refusal evidence also needs a
+**64-bit-only** device again, which is now in the drawer, not on the desk.
+
+**A bonus measurement, immediately useful:** `/dev/cpu_variant:arm` exists on both and reports *different*
+strings — `cortex-a9` on the Reno 5, `cortex-a75` on the Tab S9 (the arm32 node reports the 32-bit-side
+identity, not the SoC's real cores). So the two devices select **different IFUNC bodies** and still agree on
+every result above, which is the evidence that RetroBug does not have to reproduce a phone's variant choice
+to reproduce its answers — the bodies differ in tuning, not in what they compute.
+
+**IFUNC resolves now, and the load is where it had to go.** `LoadOptions::resolve_ifunc` is a callback the
+loader invokes for each `IfuncSlot` **before** RELRO strips write — the shape §Step 27's measurement
+demanded, and it keeps C05's "no executor needed" invariant intact for every caller that leaves it unset.
+Three of the eight resolved on the first try, exactly the three that need no syscall:
+
+```
+strcmp  -> 0x956c1 (Tier J)      memcpy -> 0x94ac0      memmove -> 0x94ac0
+still needing an answer: <IRELATIVE> strlen memset __strcpy_chk __memset_chk
+```
+
+and with them, for the first time, real bionic string and move code runs: `strcmp("abc","abd")` returns
+negative in 30 steps, and the overlapping `memmove` produces `ABABCDEFGH` — the device's answer, byte for
+byte, including the case that distinguishes `memmove` from `memcpy`.
+
+**Two findings from the attempt, both bigger than the rows they came out of.**
+
+1. **`FindExport` on an IFUNC name is a trap, and it was quietly returning the resolver.** With the slot
+   resolved and the export read naively, `strcmp` "returned" `612033` — `0x95601`, an address inside libc's
+   own text — with `reason=Returned` and nothing odd about it at all. `st_value` for an IFUNC *is* the
+   resolver, so a caller that enters it gets the resolver's answer as its own result. `FindExport` now
+   prefers a resolved implementation, and a lane row asserts the export is never the resolver again. This
+   one nearly shipped as a green test of the wrong thing.
+2. **Named GOT slots are not the whole of IFUNC: so is `.iplt`.** The non-overlapping `memcpy`/`memmove`
+   fail on both tiers with `SVC #0x0`, and it is fully explained: `0x94ac0` is `memmove_a15`, its
+   forward-copy path ends in `b 0xd2b00`, and `llvm-objdump` puts that address in **`.iplt`** —
+   `add r12, pc, …; ldr pc, [r12, #0xed8]!`. The IPLT's target is another IFUNC slot that was never filled,
+   so the stub branches to file data and both tiers faithfully execute what decodes as `svc #0`.
+   The general lesson is the one this project keeps relearning: **two tiers agreeing is not evidence of
+   correctness** — here it is evidence that both ran the same bad pointer. #30's scope is now eight slots
+   *plus* the `.iplt` relocations.
+
+**Also new:** Tier I's gap list grew a fifth named opcode, `PackedAddU8`, from bionic's `strcmp_a15` — so the
+interpreted tier's distance to real system code is now five specific names (`Mul64`, `ByteReverseWord`,
+`ConditionalSelect64`, `CountLeadingZeros32`, `PackedAddU8`) rather than a vibe.
+
+`rb_guest_libc_tests` is **99 checks, 19 failures** and `rb_guest_apk_tests` **92 checks, 4 failures**,
+*identically* on both hosts — the same three IFUNC resolutions (`0x956c1`, `0x94ac0`), the same unresolved
+five, the same `__errno` answer. That equality is itself a result: the engine is deterministic across an
+8 Gen 2 and a 720G host, so a divergence found later is in the code, not the silicon.
+
+One trap that came out of it, and it is the classic one: the first Reno 5 run reported **98** checks, not
+99, and nothing failed differently. The cause was that the new device had not been pushed the probe APK yet.
+A missing input artifact changed the *number of assertions* — which is precisely how a silently-skipped test
+looks, and the reason a fresh device has to receive the full artifact set before its first run rather than
+being trusted on a green count.
+
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |
 |---|---|
 | Host compiler for Windows binaries | **none** (`gcc`/`cc`/`clang`/`cl` all absent) → M0 tests are **Android** binaries: arm64 on a phone or tablet is the primary lane (fastest, real hardware, 4 KiB pages), x86_64 in the emulator is the 16 KiB-granule lane |
-| Devices available, and the difference that matters | **OnePlus 12** (`CPH2573`, SD 8 Gen 3): `abilist32` empty, kernel refuses a 32-bit ELF with ENOEXEC → M1's negative control. **SM-X710 Tab S9** (SD 8 Gen 2): `abilist32=armeabi-v7a,armeabi`, executes AArch32 → the only ARMv7 hardware oracle here. Two 2023 arm64 devices, opposite capability: never infer one from the other or from a spec sheet |
+| Devices available, and the difference that matters | **OnePlus 12** (`CPH2573`, SD 8 Gen 3): `abilist32` empty, kernel refuses a 32-bit ELF with ENOEXEC → M1's negative control. **SM-X710 Tab S9** (SD 8 Gen 2): `abilist32=armeabi-v7a,armeabi`, executes AArch32 → the hardware oracle. **Oppo Reno 5** (CPH2145, `lito`/SD 720G, Android 13 / SDK 33, `abilist32=armeabi-v7a,armeabi`, 4 KiB pages) joined **2026-09-20, replacing the OnePlus on the desk** — a second AArch32 host, and every `oracle_libc`/`oracle_linked` value so far is identical between the two tablets/phones despite different SoCs and bionic majors. **M1's install-refusal evidence needs the 64-bit-only device back**; ask for it rather than assuming it. Two 2023 arm64 devices, opposite capability: never infer one from the other or from a spec sheet |
 | `adb push` and mtimes | the destination keeps the **source** file's mtime, so two binaries pushed in one second show different timestamps. Useful for attributing a run to a device, and the reason `ls -la /data/local/tmp` can look like a stale push when it is not |
 | `adb install` on ColorOS (CPH2573) | **blocks on an on-device confirmation and never returns** — `Performing Streamed Install` is the last thing printed, with no timeout of its own. Unattended runs cannot install there; bound every device step (see `tools/app_domain_probe.sh`'s `adb()` wrapper) and say which device was skipped. `timeout` cannot wrap a shell *function*, so the bound has to live inside the wrapper |
 | Two devices attached at once | `adb` refuses any command that does not name one (`more than one device/emulator`), so every script takes `RB_SERIAL` / a serial argument and prints `model · abilist32 · sdk · page` per run. A silently-chosen device is how an arm64-only phone would end up "running" the ARMv7 lane |

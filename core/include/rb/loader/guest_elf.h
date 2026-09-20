@@ -86,6 +86,10 @@ struct IfuncSlot {
   CodeAddress resolver;
   std::uint32_t slot_value = 0;
   std::string name;  ///< the exported name for a GOT entry, empty for a symbolless `R_ARM_IRELATIVE`
+  /// Filled in by `LoadOptions::resolve_ifunc`: the implementation the resolver chose, or 0 when the slot
+  /// is still unresolved. Recorded rather than dropped, because "which of these did we finish" is the
+  /// question a launch has to answer, and `where` alone cannot tell a resolved slot from a placeholder.
+  std::uint32_t implementation = 0;
 };
 
 /// The linker-facing facts about one loaded module.
@@ -148,6 +152,28 @@ struct LoadOptions {
    * recorded, and `rb_guest_libc_tests` asserts on the exact multiset either way.
    */
   bool tolerate_unresolved_relocs = false;
+
+  /**
+   * Called for each `ifunc_slots` entry **while the image is still writable**, and returning an address
+   * writes it into the slot.
+   *
+   * The timing is not a preference. `docs/30` §Step 27 measured the alternative on a real `libc.so`: all
+   * eight of its IFUNC slots are in memory that the RELRO pass has already made read-only by the time
+   * `LoadFromBytes` returns, so a caller that tries to resolve afterwards gets its write refused. bionic
+   * resolves inside `relocate()`, before `protect_relro()`, for the same reason.
+   *
+   * This is also the narrow form of the exception C05 needs. The component's stated invariant is that it
+   * works on guest memory *without an executor* — that is what makes M0 testable with no syscall layer —
+   * and an IFUNC answer requires running guest code. So the loader runs no code itself and takes no
+   * dependency on `rb::exec`: it asks a callback the caller owns. Leaving this unset keeps the invariant
+   * whole, and slots stay recorded with `implementation == 0` for the linker to finish later.
+   *
+   * Returning nullopt is not an error; it is "not resolved yet", and the module loads with the resolver
+   * still in the slot. That state is measurably not inert, though: calling such a symbol *runs* the
+   * resolver and hands the guest its return value as if it were the answer, so a half-resolved library is
+   * worse than a refused load. Assert on `implementation != 0` before you trust an IFUNC export.
+   */
+  std::function<std::optional<std::uint32_t>(const IfuncSlot&)> resolve_ifunc;
 };
 
 /// Reads a whole image from `fd` (seekable) and maps it into `mem`.

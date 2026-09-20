@@ -220,6 +220,9 @@ struct Rig {
   std::unique_ptr<exec::JitExecutor> jit;
   std::vector<std::string> libc_asked;   ///< names `libc.so` itself asked the host for
   std::vector<std::string> probe_asked;  ///< and the same for the probe library
+  std::size_t ifunc_resolved = 0;
+  std::vector<std::string> ifunc_unresolved;  ///< names whose resolver would not return
+  std::vector<std::string> ifunc_log;         ///< name -> implementation, with the tier that got it
   bool ok = false;
 };
 
@@ -367,6 +370,32 @@ Rig build() {
     rig.libc_asked.push_back(name);
     return kUnimplemented;
   };
+  // The bridge and both tiers exist *before* the load now, which is the whole point of the hook's shape:
+  // C05 still runs no guest code, it asks somebody who does. Resolution happens inside the load because
+  // RELRO would otherwise make the slot unwritable.
+  rig.abi_ctx = std::make_unique<abi::AbiContext>(*rig.mem, kStackTop, kReturnAddress);
+  rig.abi_ctx->state().tp = kTp;  // see the note above: no row should fail on a missing thread pointer
+  rig.interp = std::make_unique<exec::InterpExecutor>(*rig.mem, kReturnAddress);
+  rig.jit = std::make_unique<exec::JitExecutor>(*rig.mem, kReturnAddress);
+  opts.resolve_ifunc = [&](const loader::IfuncSlot& s) -> std::optional<std::uint32_t> {
+    for (exec::Executor* engine : {static_cast<exec::Executor*>(rig.jit.get()),
+                                   static_cast<exec::Executor*>(rig.interp.get())}) {
+      rig.abi_ctx->set_executor(*engine);
+      exec::RunResult out{};
+      exec::MachineState exit_state{};
+      const abi::Ret32 r = rig.abi_ctx->CallGuest(
+          s.resolver.tagged(), {abi::Value32::U32(s.slot_value)}, abi::Shorty::For("ILI"), 200'000,
+          &out, &exit_state);
+      if (out.reason != exec::StopReason::Returned) continue;
+      ++rig.ifunc_resolved;
+      rig.ifunc_log.push_back(std::string{s.name.empty() ? "<IRELATIVE>" : s.name} + " -> 0x" +
+                              Hex(static_cast<std::uint32_t>(r.bits)) + " on Tier " +
+                              (engine->tier() == exec::CodeTier::Interp ? "I" : "J"));
+      return static_cast<std::uint32_t>(r.bits);
+    }
+    rig.ifunc_unresolved.push_back(s.name.empty() ? "<IRELATIVE>" : s.name);
+    return std::nullopt;
+  };
   rig.libc = loader::LoadFromBytes(*rig.mem, image, "libc.so", opts, &err);
   if (!rig.libc) {
     ++checks;
@@ -402,12 +431,8 @@ Rig build() {
     }
   }
 
-  rig.abi_ctx = std::make_unique<abi::AbiContext>(*rig.mem, kStackTop, kReturnAddress);
-  // Every call this lane makes goes through the bridge's own state, so that is where the thread pointer
-  // lives. `PlaceArgs` never touches `tp`, so it survives into the callee and back out unchanged.
-  rig.abi_ctx->state().tp = kTp;
-  rig.interp = std::make_unique<exec::InterpExecutor>(*rig.mem, kReturnAddress);
-  rig.jit = std::make_unique<exec::JitExecutor>(*rig.mem, kReturnAddress);
+  // The bridge and both tiers were built before the load, not here — IFUNC resolution happens inside it, so
+  // an executor has to exist first. See the note at `opts.resolve_ifunc`.
   rig.ok = true;
   return rig;
 }
@@ -984,7 +1009,8 @@ void a_load_without_that_flag_refuses_and_names_the_slots() {
 void the_ifunc_slots_are_recorded_for_the_linker() {
   Rig rig = build();
   if (!rig.ok) return;
-  std::fprintf(stderr, "[libc] %zu IFUNC slot(s) left to resolve:\n", rig.libc->ifunc_slots.size());
+  std::fprintf(stderr, "[libc] %zu IFUNC slot(s) left to resolve (module base 0x%s):\n",
+               rig.libc->ifunc_slots.size(), Hex(rig.libc->base).c_str());
   std::size_t in_text = 0;
   for (const auto& s : rig.libc->ifunc_slots) {
     const bool inside = s.resolver.addr >= rig.libc->base &&
@@ -1016,26 +1042,152 @@ void the_ifunc_slots_are_recorded_for_the_linker() {
   // resolving all eleven is a strict superset of "call a guest function": it also needs the syscall path.
   std::size_t refused = 0;
   for (const auto& s : rig.libc->ifunc_slots) {
-    rig.abi_ctx->set_executor(*rig.jit);
-    exec::RunResult out{};
-    exec::MachineState exit_state{};
-    const abi::Ret32 r = rig.abi_ctx->CallGuest(
-        s.resolver.tagged(), {abi::Value32::U32(s.slot_value)}, abi::Shorty::For("ILI"), 200'000,
-        &out, &exit_state);
-    const std::uint32_t answer = static_cast<std::uint32_t>(r.bits);
-    const bool writable = rig.mem->Write(s.where, &answer, 4);
-    if (!writable) ++refused;
-    std::fprintf(stderr,
-                 "[libc] resolve %-30s reason=%d steps=%u r0=0x%s  slot write %s\n",
-                 s.name.empty() ? "<IRELATIVE>" : s.name.c_str(), static_cast<int>(out.reason),
-                 out.instructions_executed, Hex(answer).c_str(), writable ? "ok" : "REFUSED");
+    const std::uint32_t probe = 0x5a5a'5a5au;
+    if (!rig.mem->Write(s.where, &probe, 4)) ++refused;
   }
   CHECK_CTX(refused == rig.libc->ifunc_slots.size(),
             std::to_string(rig.libc->ifunc_slots.size() - refused) +
-                " IFUNC slot(s) were writable after the load — resolution is supposed to be impossible at "
-                "this point, which is what puts it inside LoadFromBytes. If this became writable because "
-                "RELRO stopped being enforced, that is a regression elsewhere, not permission to resolve "
-                "here.");
+                " IFUNC slot(s) were writable after the load — resolution at that point is impossible on a "
+                "real image, which is what puts the call inside LoadFromBytes. If this became writable "
+                "because RELRO stopped being enforced, that is a regression elsewhere, not permission to "
+                "resolve here.");
+}
+
+/**
+ * The resolvers that ran, and what their implementations actually compute.
+ *
+ * Three of the eleven IFUNC resolvers answer with no syscall at all — `strcmp`, `memcpy`, `memmove`
+ * returned an implementation pointer in four steps, the set low bit marking it Thumb — and five stop at the
+ * `openat("/dev/cpu_variant:arm")` probe, which this build has no answer for. The latter is a
+ * guest-filesystem question (C10's VFS), not a loader one, so the unresolved list is printed as the size
+ * of the next piece of work rather than worked around.
+ *
+ * What is asserted is only what each API licenses. `strcmp`'s contract is the **sign**: the devices return
+ * a word-derived difference (`-32` for `"abc"`/`"abd"`, on *both* SoCs), and RetroBug may select a
+ * different IFUNC body than a phone does, so comparing magnitudes there would eventually be reported as an
+ * engine bug. `memcpy` and `memmove` are compared byte for byte because that is what their standard pins —
+ * including the overlapping case, the one behaviour that distinguishes `memmove` from `memcpy`.
+ *
+ * **Why the non-overlapping rows still fail, traced rather than left as a mystery.** They reach `SVC #0x0`
+ * on *both* tiers, and the reason is in the resolved body: `0x94ac0` is `memmove_a15` (bionic uses the
+ * memmove body for `memcpy` too), and its forward-copy path ends in `b 0xd2b00`, which
+ * `llvm-objdump` places inside **`.iplt`** — bionic's IFUNC PLT, whose stub is
+ * `add r12, pc, …; ldr pc, [r12, #0xed8]!`. That slot is yet another IFUNC target, and the loader fills
+ * only the relocations it was shown, so the stub loads a program counter out of file data and both tiers
+ * faithfully execute whatever decodes as `svc #0`. Two conclusions, both worth more than the row:
+ * tiers agreeing is evidence they ran the same bad pointer, not evidence of correctness; and resolving the
+ * named GOT slots is not the whole of IFUNC — `.iplt` belongs to the same job, which is now #30's scope.
+ * The overlapping `memmove` passes because its backward path never touches the IPLT.
+ */
+void resolved_ifunc_implementations_compute_what_hardware_does() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  using abi::Value32;
+  for (const auto& line : rig.ifunc_log) std::fprintf(stderr, "[libc] %s\n", line.c_str());
+  std::fprintf(stderr, "[libc] %zu of %zu IFUNC slot(s) resolved; still needing an answer: %s\n",
+               rig.ifunc_resolved, rig.libc->ifunc_slots.size(), Join(rig.ifunc_unresolved).c_str());
+  CHECK_CTX(rig.ifunc_resolved >= 3u,
+            "fewer than the three no-syscall resolvers resolved: " + std::to_string(rig.ifunc_resolved));
+  CHECK_CTX(rig.ifunc_unresolved.size() + rig.ifunc_resolved == rig.libc->ifunc_slots.size(),
+            "slots went missing: resolved + unresolved does not equal the recorded count");
+  for (const auto& s : rig.libc->ifunc_slots) {
+    if (s.implementation == 0) continue;
+    const std::uint32_t impl = s.implementation & ~1u;
+    CHECK_CTX(impl >= rig.libc->base && impl < rig.libc->base + rig.libc->extent,
+              (s.name.empty() ? std::string{"<IRELATIVE>"} : s.name) +
+                  "'s resolved implementation is outside the module: 0x" + Hex(s.implementation));
+  }
+
+  /**
+   * And the trap this whole row nearly fell into, now asserted instead of rediscovered: for a resolved
+   * IFUNC, `FindExport` must return the *implementation*, because `st_value` is the resolver and calling
+   * it returns a code pointer that looks exactly like an answer. That is what `strcmp` first reported —
+   * `0x95601`, inside libc's own text, with `reason=Returned` and no sign of trouble.
+   */
+  for (const auto& s : rig.libc->ifunc_slots) {
+    if (s.implementation == 0 || s.name.empty()) continue;
+    const auto fn = rig.libc->FindExport(s.name);
+    CHECK_CTX(fn.has_value() && fn->tagged() == s.implementation,
+              s.name + ": FindExport still returns the resolver (0x" +
+                  Hex(fn ? fn->tagged() : 0u) + ") instead of the implementation (0x" +
+                  Hex(s.implementation) + ")");
+  }
+
+  const auto call_libc = [&](const char* name, const abi::Args32& args, const char* shorty,
+                              exec::Executor& e) {
+    Outcome o;
+    const auto fn = rig.libc->FindExport(name);
+    if (!fn) {
+      o.detail = std::string{"libc.so does not export "} + name;
+      return o;
+    }
+    rig.abi_ctx->set_executor(e);
+    exec::RunResult out{};
+    exec::MachineState exit_state{};
+    const abi::Ret32 r = rig.abi_ctx->CallGuest(fn->tagged(), args, abi::Shorty::For(shorty),
+                                                4'000'000, &out, &exit_state);
+    o.reason = out.reason;
+    o.bits = r.bits;
+    o.detail = out.detail;
+    o.steps = out.instructions_executed;
+    return o;
+  };
+
+  constexpr exec::GuestAddr kAbc2 = kData + 0x900;
+  constexpr exec::GuestAddr kAbd2 = kData + 0x940;
+  constexpr exec::GuestAddr kCopySrc = kData + 0x980;
+  constexpr exec::GuestAddr kCopyDst = kData + 0x9c0;
+  constexpr exec::GuestAddr kOverlap = kData + 0xa00;
+  write_cstr(*rig.mem, kAbc2, "abc");
+  write_cstr(*rig.mem, kAbd2, "abd");
+  write_cstr(*rig.mem, kCopySrc, "0123456789abcdef0123456789abcdef");
+
+  for (auto* engine : {static_cast<exec::Executor*>(rig.jit.get()),
+                       static_cast<exec::Executor*>(rig.interp.get())}) {
+    const Outcome cmp =
+        call_libc("strcmp", {Value32::Ptr(kAbc2), Value32::Ptr(kAbd2)}, "ILL", *engine);
+    if (!cmp.ok()) {
+      ++checks;
+      fail("strcmp", __LINE__, std::string{"Tier "} + Tier(*engine) + ": " + cmp.detail);
+    } else {
+      const std::int32_t v = static_cast<std::int32_t>(cmp.bits);
+      CHECK_CTX(v < 0, "strcmp(\"abc\",\"abd\") on Tier " + std::string(Tier(*engine)) + " = " +
+                           std::to_string(v) + ", hardware said negative (both devices gave -32)");
+      std::fprintf(stderr, "[libc] %-22s hardware=-32(sign-) Tier %s=%d  steps=%u\n", "strcmp",
+                   Tier(*engine), v, cmp.steps);
+    }
+
+    for (const char* fn : {"memcpy", "memmove"}) {
+      write_cstr(*rig.mem, kCopyDst, "XXXXXXXXX");
+      const Outcome got =
+          call_libc(fn, {Value32::Ptr(kCopyDst), Value32::Ptr(kCopySrc), Value32::U32(9)}, "LLLL",
+                    *engine);
+      if (!got.ok()) {
+        ++checks;
+        fail(fn, __LINE__, std::string{"Tier "} + Tier(*engine) + ": " + got.detail);
+        continue;
+      }
+      char out[16] = {};
+      rig.mem->Read(kCopyDst, out, sizeof out - 1);
+      CHECK_CTX(std::strcmp(out, "012345678") == 0,
+                std::string{fn} + " on Tier " + Tier(*engine) + " produced \"" + out +
+                    "\", hardware produced \"012345678\"");
+      std::fprintf(stderr, "[libc] %-22s Tier %s -> \"%s\"\n", fn, Tier(*engine), out);
+    }
+
+    // The overlapping move, which is the one thing `memmove` promises that `memcpy` does not: the source
+    // and destination share four bytes, and a forward copy corrupts the tail.
+    write_cstr(*rig.mem, kOverlap, "ABCDEFGH");
+    const Outcome moved =
+        call_libc("memmove", {Value32::Ptr(kOverlap + 2), Value32::Ptr(kOverlap), Value32::U32(8)},
+                  "LLLL", *engine);
+    char out[16] = {};
+    if (moved.ok()) rig.mem->Read(kOverlap, out, sizeof out - 1);
+    CHECK_CTX(moved.ok() && std::string{out} == "ABABCDEFGH",
+              std::string{"memmove overlap on Tier "} + Tier(*engine) + " gave \"" + out +
+                  "\" (ok=" + (moved.ok() ? "yes" : "no") + "), hardware gave \"ABABCDEFGH\"");
+    std::fprintf(stderr, "[libc] %-22s Tier %s -> \"%s\"\n", "memmove overlap", Tier(*engine), out);
+  }
 }
 
 }  // namespace
@@ -1044,6 +1196,7 @@ int main() {
   the_load_reports_exactly_what_retrobug_cannot_yet_do();
   a_load_without_that_flag_refuses_and_names_the_slots();
   the_ifunc_slots_are_recorded_for_the_linker();
+  resolved_ifunc_implementations_compute_what_hardware_does();
   string_scanning_matches_bionic();
   numeric_conversion_matches_bionic();
   libc_calls_back_into_a_guest_function();

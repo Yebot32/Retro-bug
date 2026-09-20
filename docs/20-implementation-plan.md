@@ -1009,6 +1009,15 @@ Progress and the findings that change this plan are tracked in
     "nameless import" was really this loader asking the resolver to resolve `""`, because `R_ARM_IRELATIVE`
     and the `r_sym == 0` TLS kinds have no symbol and used to be looked up anyway.
 
+    **Gap 1 is now partly closed** (`30` §Step 28): `LoadOptions::resolve_ifunc` runs inside the load before
+    RELRO, three of the eight resolve, and real bionic `strcmp`/`memmove` code executes — the overlapping
+    `memmove` is byte-exact against hardware. Two additions to that gap's true scope, both measured:
+    `FindExport` on an IFUNC name returns the *resolver*, so a caller takes a code pointer as its "result"
+    with a clean `Returned` (now fixed, and asserted), and `.iplt` stubs belong to the same job — bionic's
+    `memmove_a15` forward path branches into one whose slot was never filled, which is why non-overlapping
+    `memcpy` reaches an `svc` on both tiers. Both hosts now report identical counts, so the emulator is
+    deterministic across them.
+
 Sequencing constraint the owner should know before M1: **M1's end-to-end acceptance step cannot be verified on this
 machine at all** — it needs a physical 64-bit-only arm64 phone. Everything in §9 and most of M1's code can be written
 and tested without one, so the device gates only the final launch assertion, not the work.
