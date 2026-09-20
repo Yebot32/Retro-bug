@@ -2020,8 +2020,23 @@ bool BlockRunner::Take(const Term::Terminal& terminal, LocationDescriptor& succe
       }
       return Take(t.else_, successor);  // a halt request stops the executor, not the guest
     } else if constexpr (std::is_same_v<T, Term::ReturnToDispatch>) {
-      stop.reason = StopReason::Returned;
-      return false;
+      // Not a return, and treating it as one was task #26. The only things that produce this terminal are
+      // the ALU-writes-PC forms — `arm_ADD_reg` with `Rd == PC`, which is how a compiler's switch or
+      // position-independent call reaches a jump table (`add pc, r1, r0` after `ldr r0, [r1, r0, lsl #2]`)
+      // — and in ARM state at v7 `ALUWritePC` lowers to `BXWritePC`, so the `A32BXWritePC` above has
+      // already moved `location_` to the target by the time this branch runs. Continuing is what the
+      // AArch64 back end does with the same IR: it branches to its dispatcher, which re-tests the halt
+      // flag and otherwise translates and jumps to the new PC (`a32_address_space.cpp:305-334`), and the
+      // loop below re-checks the return sentinel and the host-entry table on the way — so this is also
+      // the branch where a computed jump into a host entry stops correctly instead of silently returning.
+      //
+      // What stopping with `Returned` did, measured on a device before this line changed: guest libm's
+      // `sin` handed its caller `r0:r1 = 0x0001f3ac00000058` where hardware and Tier J both said
+      // `0xbfe03425b78c4db8` — the reduction table's address (`0x2000` load bias + `0x1d3ac`) and its
+      // first entry, in the two registers a double result is read from. Tier I was not computing sin
+      // wrongly; it was never computing sin.
+      successor = location_;
+      return true;
     } else {
       stop.reason = StopReason::Internal;
       stop.detail = "a block ended in a terminal this interpreter does not leave through";
