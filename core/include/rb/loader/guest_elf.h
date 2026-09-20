@@ -110,6 +110,19 @@ struct GuestModule {
   CodeAddress entry;           ///< e_entry, already biased by `base`.
   CodeAddress init;            ///< DT_INIT, biased. Absent (addr 0) on NDK images, which use init_array.
   CodeAddress fini;            ///< DT_FINI, biased.
+  /**
+   * `DT_INIT_ARRAY`'s function pointers, biased and Thumb-tagged, in the order the image lists them.
+   *
+   * Recorded, **not called**: constructors run after the dependency scope exists (C06), or a module
+   * whose init code calls into a library that is not loaded yet gets a null branch instead of a
+   * refusal. Empty when the image has neither tag.
+   *
+   * It lives beside `init` rather than replacing it because the two are independent tags and real
+   * images use only the array: `DT_INIT` is zero on every NDK and bionic image measured here, which is
+   * why an unrecorded array read as "this module has no startup work" instead of "the loader did not
+   * look".
+   */
+  std::vector<CodeAddress> init_array;
   std::vector<std::string> needed;
   std::vector<Symbol> exports;
   std::vector<Symbol> imports;

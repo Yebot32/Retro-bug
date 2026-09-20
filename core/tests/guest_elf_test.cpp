@@ -95,6 +95,7 @@ struct Fixture {
   std::uint32_t sym_index_high_water = 0;
   std::uint32_t rel = 0, relsz = 0, relent = 0;
   std::uint32_t jmprel = 0, pltrelsz = 0;
+  std::uint32_t init_array = 0, init_array_sz = 0;
   std::vector<std::string> needed;
   std::vector<std::uint32_t> needed_off;  ///< raw DT_NEEDED values, before .dynstr is located
   std::vector<std::string> import_names;
@@ -185,6 +186,8 @@ Fixture parse_fixture() {
           case elf::DT_JMPREL: f.jmprel = d[o].d_val; break;
           case elf::DT_PLTRELSZ: f.pltrelsz = d[o].d_val; break;
           case elf::DT_NEEDED: f.needed_off.push_back(d[o].d_val); break;
+          case elf::DT_INIT_ARRAY: f.init_array = d[o].d_val; break;
+          case elf::DT_INIT_ARRAYSZ: f.init_array_sz = d[o].d_val; break;
           default: break;
         }
       }
@@ -337,6 +340,32 @@ void applies_every_relocation_the_image_declares() {
   CHECK(mod->entry == loader::CodeAddress{f.entry ? base + (f.entry & ~1u) : 0, (f.entry & 1u) != 0});
   CHECK_CTX(mod->needed == f.needed,
             "loader=[" + Join(mod->needed) + "] fixture=[" + Join(f.needed) + "]");
+
+  // DT_INIT_ARRAY, entry by entry against an independent read of the same image. The array is the tag
+  // every real image actually uses — `DT_INIT` is zero on the NDK and device images measured here, so
+  // before the loader had a case for it a module with constructors reported that it had none.
+  //
+  // On *this* fixture the loop below is vacuous and the count is `0 == 0`: `llvm-readelf -d` reports no
+  // `DT_INIT_ARRAY` for `librb_fixture.so`, which the printed line at the end makes visible rather than
+  // leaving a green row implying coverage it does not have. The case that can fail lives in
+  // `rb_guest_libc_tests`, where the loaded image is a real libc with five entries.
+  CHECK_CTX(mod->init_array.size() == f.init_array_sz / 4u,
+            "loader recorded " + std::to_string(mod->init_array.size()) + " init entries, DT_INIT_ARRAYSZ "
+            "says " + std::to_string(f.init_array_sz / 4u));
+  for (std::size_t i = 0; i < mod->init_array.size(); ++i) {
+    const auto raw = f.at_vaddr<std::uint32_t>(
+        f.init_array + static_cast<std::uint32_t>(i * 4u));
+    CHECK_CTX(raw.has_value(), "init_array[" + std::to_string(i) +
+                                   "] is not readable in the image, so the loader's entry cannot be "
+                                   "checked against anything");
+    if (!raw) break;
+    const loader::CodeAddress want{*raw ? base + (*raw & ~1u) : 0u, (*raw & 1u) != 0u};
+    CHECK_CTX(mod->init_array[i] == want,
+              "init_array[" + std::to_string(i) +
+                  "] differs from an independent read of the image — the bias or the Thumb tag is wrong");
+  }
+  std::fprintf(stderr, "[fixture] init_array=%u sz=%u entries=%zu\n", f.init_array, f.init_array_sz,
+               mod->init_array.size());
 
   // The symbol table's extent, cross-checked against something other than the section header table
   // the loader read: the largest symbol index any relocation names has to be inside it.

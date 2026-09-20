@@ -2352,7 +2352,7 @@ the device that shipped them.
 | The four special relocs' `r_sym` | **0** in every case — libc's own TLS block and its own function pointer |
 | `DT_FLAGS` / `DT_FLAGS_1` | `BIND_NOW STATIC_TLS` / `NOW` |
 | `DT_NEEDED` | `ld-android.so`, `libdl.so` |
-| `DT_INIT_ARRAY` | 20 bytes — recorded by C05, **not run** |
+| `DT_INIT_ARRAY` | parsed and recorded by C05 as of §Step 32; **not run**. Until then the loader had no `.dynamic` case for it at all, while `DT_INIT` is zero on every NDK and device image measured — so a module with constructors read as a module with none |
 | Undefined, non-weak, named | **9**: `__loader_shared_globals`, `android_dlopen_ext`, `android_get_application_target_sdk_version`, `dl_unwind_find_exidx`, `dladdr`, `dlclose`, `dlerror`, `dlopen`, `dlsym` |
 | Undefined, weak | 3 (`__loader_add_thread_local_dtor`, `__loader_android_get_exported_namespace`, `__loader_remove_thread_local_dtor`) plus one nameless LOCAL entry |
 
@@ -2459,7 +2459,9 @@ engine suite is unchanged at **1,418 checks, 0 failures** on the tablet plus dyn
    *records* them and moves on, and bionic writes those words unconditionally during relocation — so a guest
    that later reads them gets whatever the mapping held. That is silent corruption, not a fault, and whether
    C05 should refuse the load instead is an owner decision, recorded in `docs/20` §9 rather than made here.
-5. **`DT_INIT_ARRAY` is parsed and never run**, and `malloc` is what would notice first.
+5. **`DT_INIT_ARRAY` was not even parsed** — §Step 32's own correction of this line, which previously
+   read "is parsed and never run". `malloc` is what would notice first, and every real image uses the
+   array rather than `DT_INIT`.
 
 **Also in this step, separately useful:** `Symbol::ifunc` and `GuestModule::unsupported_reloc_types` are new
 on C05's face — the first so a caller can tell a resolver from a routine, the second because an assertion
@@ -2881,6 +2883,66 @@ the pin is currently **decorative**: it cannot be the thing that stops the emula
 instruction no armeabi-v7a binary may contain, which was the reason for setting it. Either the pin becomes
 enforced — and then real bionic's `atoi` refuses to run — or it is documented as a tie-breaker for the
 cases Dynarmic *does* gate on. Deciding that is a question for the owner, not a thing to quietly pick.
+
+
+## Step 32 — Tier I's jump tables, what `DT_INIT_ARRAY` really was, and the actual distance to a launchable APK
+
+**#26 was never an arithmetic bug.** Two hours of "Tier I mis-executes ARM-state libm" resolved to one
+line: `Term::ReturnToDispatch` was mapped to `StopReason::Returned`. That terminal is produced only by
+the ALU-writes-PC forms — `add pc, r1, r0`, which is how a compiler's `switch` or a
+position-independent call reaches a jump table — so every computed branch in ARM-state code ended the
+call where it should have continued. The garbage proves the mechanism on its own: guest libm's `sin`
+came back as `r0:r1 = 0x0001f3ac00000058`, which is `0x2000` load bias + `0x1d3ac` (the reduction
+table's address) and `0x58` (its first entry) in exactly the two registers a double return is read
+from. §Step 24's written conclusion — "Tier I mis-executes ARM-state libm code", with both tiers
+reaching the sentinel — is wrong on both halves, and that is why it survived this long: it was a
+correct reading of a symptom whose cause was never tested. Tier I was not computing `sin` wrongly, it
+was never computing `sin`, and it never reached the sentinel.
+
+Continuing at the location `A32BXWritePC` already moved is what Dynarmic's own back end does with the
+same IR (branch to its dispatcher, re-test the halt flag, translate at the new PC), and it also means a
+computed jump into a host entry now stops at the host-entry check instead of reporting a return. The
+result: **`rb_guest_apk_tests` is 92 checks, 0 failures on both devices** — guest libm `sin`/`cos`/`sqrt`
+and every `mathProbe` argument match hardware on both tiers. Nothing else moved: engine still green,
+libc lane still 8/9, so no lane was leaning on the early return.
+
+**`DT_INIT_ARRAY` was not parsed.** Three places in these notes and `docs/20` §9 said it was "parsed /
+recorded, never run". The `.dynamic` switch had cases for `DT_STRTAB` through `DT_PLTGOT`, `DT_INIT` and
+`DT_FINI` — and none for `DT_INIT_ARRAY` or `DT_INIT_ARRAYSZ`, which are not even in the `using` list,
+and the parser struct had no field for them. So the array was not read at all. That matters more than a
+missing feature, because `DT_INIT` is **zero on every image measured here** (both devices' `libc.so` and
+the NDK's): the array is the only constructor tag real images use, so a module with startup work was
+reporting that it had none. Recorded now (biased, Thumb-tagged, in image order), and the gated lane
+cross-checks it entry by entry against an independent read of the same file — a parse the loader got
+wrong cannot agree with a parse that reads the bytes twice through a different path. **Still not run**:
+constructors have to run after a dependency scope exists, which is #32's next step, not this one.
+
+**The distance to "an APK installs and a guest JNI method runs", measured rather than estimated.** Each
+claim below is file:line against the tree, not against the plan:
+
+| what | status | evidence |
+|---|---|---|
+| APK read, `.so` extracted, loaded, JNI export called, result compared to hardware | **works today**, as a command-line lane | `core/tests/guest_apk_test.cpp:105-217,278,310,363,673` |
+| Guest bytes never handed to the OS linker | **holds, and is checkable** | loader is `ifstream` → memfd → own `MapFile` (`guest_elf.cpp:145-191`); no `dlopen`/`android_dlopen` anywhere in `core/` |
+| `DT_NEEDED` walked | **no** — parsed into `mod.needed` and never used; no cross-module symbol scope exists | `guest_elf.cpp:350,680`; the APK lane hand-builds a name→address map "standing in for the C06 linker" (`guest_apk_test.cpp:285-309`) |
+| Installable RetroBug app carrying the engine | **absent** — the only `.java` in the repo is the app-domain probe, whose native library runs as *host* code | `tests/appdomain/ProbeActivity.java:30-37`, `probe.cpp:439` |
+| `JNIEnv` a real app could use | 7 of 233 slots bound; no `RegisterNatives`, no `Call*Method`, no `JavaVM`; the APK lane passes `env = 0` | `core/abi/jni_env.cpp:118-186`, `guest_apk_test.cpp:646,743` |
+| Syscalls a running app needs | only `getpid`/`gettid`/`exit_group`/`cacheflush`/`arm_get_tls`/`arm_set_tls`; `openat`/`read`/`mmap2`/`mprotect`/`futex` are refused, and `clone` unhandled → **guest threads cannot exist** | `core/syscall/monitor.cpp:98-169` |
+| TLS relocations applied | refused, recorded, not applied (the `tp` register path and `errno` chain do work) | `guest_elf.cpp:480,568-595` |
+
+Ordered, that is: **C06-lite** (walk `DT_NEEDED`, one global symbol scope, then run `DT_INIT`/the array,
+apply the static TLS slots) → **the nine host symbols and a shippable `libc.so`** (#29) → **a host
+`.so` plus a one-method Activity** so Java really calls in → **the syscall/VFS minimum**
+(`openat`/`read`/`mmap2`/`futex`), which is by far the largest unknown and the one that decides whether
+*a third-party* app can run at all. The first three are buildable and device-verifiable; the fourth is a
+component, not an evening.
+
+**And the thing that cannot be verified on this desk.** Both attached devices run 32-bit ARM natively
+(re-confirmed tonight by executing a static `EM_ARM` binary on each, `rc=0`), so a green APK lane proves
+the emulator produced the values — the two tiers agree and the guest bytes were mapped by our loader —
+but it cannot prove that a 32-bit-incapable device would launch anything. That claim needs the OnePlus 12
+attached, and until then every launch statement in this project has to carry the words "on 32-bit-capable
+hardware" in front of it.
 
 
 ## Standing environment facts (so they are not re-derived)

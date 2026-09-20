@@ -992,7 +992,8 @@ Progress and the findings that change this plan are tracked in
     `ByteReverseWord`, `ConditionalSelect64`, `CountLeadingZeros32` — the list that stands between the
     interpreted tier and real system code), two unexplained Tier J `undefined instruction encoding` refusals
     inside `strtod` and `malloc`, three unfilled TLS slots whose silent-corruption semantics are an owner
-    decision (§Step 26 item 4), and `DT_INIT_ARRAY` parsed but never run.
+    decision (§Step 26 item 4), and `DT_INIT_ARRAY` — which §Step 32 found was not parsed at all, despite
+    being the only constructor tag any real image uses. It is now recorded, and still not run.
     **And the number that changes a plan:** the host-provided surface a real `libc.so` needs is **nine
     names** — `dlopen`, `dlsym`, `dlclose`, `dladdr`, `dlerror`, `dl_unwind_find_exidx`, `android_dlopen_ext`,
     `android_get_application_target_sdk_version`, `__loader_shared_globals` — not the ~1,300 it exports. C11's

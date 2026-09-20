@@ -600,6 +600,35 @@ void the_load_reports_exactly_what_retrobug_cannot_yet_do() {
   CHECK_CTX(types.size() >= 1u,
             "nothing was refused, which contradicts the TLS relocations every Android libc.so has; the "
             "loader is silently applying, or silently dropping, what it should hand to the linker");
+
+  // DT_INIT_ARRAY, which the loader had no `.dynamic` case for until §Step 32 — while `DT_INIT` is zero
+  // on this image, so the array is the *only* path by which libc's constructors could ever have been
+  // noticed. `llvm-readelf -d` says 20 bytes (5 entries) on both devices' builds; that number is printed
+  // rather than asserted, because the assertion that survives a different bionic is the structural one:
+  // there is at least one entry, and every entry is a real, executable address inside this module. An
+  // array read from the wrong offset or the wrong endianness fails that immediately — it would name file
+  // headers, or memory outside the mapping.
+  CHECK_CTX(rig.libc->init.addr == 0u,
+            "this libc sets DT_INIT after all, so the claim above needs re-deriving rather than being "
+            "quietly kept");
+  CHECK_CTX(!rig.libc->init_array.empty(),
+            "DT_INIT_ARRAY recorded nothing for an image whose only constructor tag is that array — the "
+            "same silent 'this module has no startup work' that the missing .dynamic case produced");
+  for (std::size_t i = 0; i < rig.libc->init_array.size(); ++i) {
+    const auto fn = rig.libc->init_array[i];
+    // Executable-and-mapped, which is what an array read from the wrong offset or the wrong
+    // endianness fails at once: it would name file headers, or a data page, or nothing at all. A
+    // page-count bound was the tempting version of this check and would have been wrong on its own
+    // numbers — this libc is ~300 pages, so any small constant turns a passing load into a failure.
+    const unsigned prot = rig.mem->ProtAt(fn.addr);
+    CHECK_CTX(fn.addr >= rig.libc->base && (prot & mem::kExec) != 0u,
+              "init_array[" + std::to_string(i) + "] = 0x" + Hex(fn.addr) +
+                  " is not an executable address above this module's base (prot=0x" + Hex(prot) +
+                  "), so the array was read from the wrong place");
+  }
+  std::fprintf(stderr, "[libc] init_array: DT_INIT=0x%s entries=%zu first=0x%s\n",
+               Hex(rig.libc->init.addr).c_str(), rig.libc->init_array.size(),
+               rig.libc->init_array.empty() ? "0" : Hex(rig.libc->init_array[0].addr).c_str());
   CHECK_CTX(other == 0, "the loader refused " + std::to_string(other) +
                             " kinds beyond the four expected. A new kind is a new feature and should be "
                             "named here before it is implemented.");

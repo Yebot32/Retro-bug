@@ -42,6 +42,7 @@ using elf::R_ARM_TLS_TPOFF32;
 using elf::DT_NULL; using elf::DT_NEEDED; using elf::DT_PLTGOT; using elf::DT_PLTRELSZ;
 using elf::DT_STRTAB; using elf::DT_STRSZ; using elf::DT_SYMTAB; using elf::DT_SYMENT;
 using elf::DT_INIT; using elf::DT_FINI; using elf::DT_SONAME;
+using elf::DT_INIT_ARRAY; using elf::DT_INIT_ARRAYSZ;
 using elf::DT_REL; using elf::DT_RELSZ; using elf::DT_RELENT;
 using elf::DT_RELA; using elf::DT_RELASZ; using elf::DT_RELAENT; using elf::DT_JMPREL;
 using elf::DT_PLTREL;
@@ -77,6 +78,7 @@ struct Dynamic {
   std::uint32_t rela = 0, relasz = 0, relaent = 0;
   std::uint32_t jmprel = 0, pltrelsz = 0, pltgot = 0, pltrel_kind = 0;
   std::uint32_t init = 0, fini = 0, soname = 0;
+  std::uint32_t init_array = 0, init_array_sz = 0;
   std::vector<std::uint32_t> needed;
   bool present = false;
 };
@@ -346,6 +348,8 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
         case DT_PLTGOT: dyn.pltgot = d->d_val; break;
         case DT_INIT: dyn.init = d->d_val; break;
         case DT_FINI: dyn.fini = d->d_val; break;
+        case DT_INIT_ARRAY: dyn.init_array = d->d_val; break;
+        case DT_INIT_ARRAYSZ: dyn.init_array_sz = d->d_val; break;
         case DT_SONAME: dyn.soname = d->d_val; break;
         case DT_NEEDED: dyn.needed.push_back(d->d_val); break;
         default: break;
@@ -676,6 +680,40 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
     mod.entry = code(h->e_entry);
     mod.init = code(dyn.init);
     mod.fini = code(dyn.fini);
+    /**
+     * `DT_INIT_ARRAY` points at an array of function pointers and `DT_INIT_ARRAYSZ` gives its byte size.
+     * Recorded here, still not *called* — that is C06's job, and it needs a dependency scope to run in
+     * the right order. What this closes is the gap between what the notes claimed and what the code did:
+     * the array was described as "parsed but never run" when the `.dynamic` loop had no case for it at
+     * all, so a module whose startup work lives there (every NDK and bionic image, since none of them
+     * sets `DT_INIT` — see `CodeAddress init`'s comment) was silently reporting that it had none.
+     *
+     * Read from live guest memory rather than the file image, because the array sits in a RELRO segment
+     * and an image whose entries were relocated before this point would otherwise have stale file
+     * contents recorded. A pointer that does not resolve is a malformed image, and refusing with the
+     * index that failed is what makes that visible instead of loading a module whose constructors are
+     * whatever the next page happened to hold.
+     */
+    if (dyn.init_array != 0 && dyn.init_array_sz != 0) {
+      if (dyn.init_array_sz % 4u != 0u) {
+        return fail(Stage("reading DT_INIT_ARRAY",
+                          "size " + std::to_string(dyn.init_array_sz) +
+                              " is not a multiple of a 32-bit entry"));
+      }
+      const std::size_t count = dyn.init_array_sz / 4u;
+      mod.init_array.reserve(count);
+      for (std::size_t i = 0; i < count; ++i) {
+        std::uint32_t fn = 0;
+        if (!read32(dyn.init_array + static_cast<std::uint32_t>(i * 4u), fn)) {
+          return fail(Stage("reading DT_INIT_ARRAY",
+                            "entry " + std::to_string(i) + " of " + std::to_string(count) +
+                                " is at an unmapped vaddr"));
+        }
+        // A zero entry is a gap some linkers leave, not a function to call; the runner skips it, and
+        // recording it here keeps the count comparable against `readelf`'s.
+        mod.init_array.push_back(code(fn));
+      }
+    }
     if (dyn.soname && strtab) mod.soname = std::string(strtab + dyn.soname);
     for (auto n : dyn.needed) {
       if (strtab) mod.needed.emplace_back(strtab + n);
