@@ -263,7 +263,7 @@ void both_tiers_agree_and_match_hardware() {
 /// 786 times, `vldr` 2,290) and §5 item 3 ranked this lane next after IT-blocks. What it did not
 /// answer is what RetroBug *does* about them, and this lane is that answer in units of real code: what
 /// began as one vector IR opcode (`VectorAdd32`) out of the 725-entry table now covers the scalar VFP
-/// group (§Step 17) and the integer ASIMD lane group (§Step 18). What is still refused is *vector
+/// group (§Step 17) and the integer ASIMD lane group (§Step 19). What is still refused is *vector
 /// floating-point* (`FPVectorAdd` and friends), the widening/narrowing and saturating ASIMD forms,
 /// shifts by a register, and the table lookups — so the example this comment used to give, a scalar
 /// `dadd`, is now answered rather than refused, and the refusal belongs to `vadd.f32`.
@@ -831,11 +831,126 @@ void unmapped_code_faults_in_both_tiers() {
                rj.detail.c_str());
 }
 
+/**
+ * The ARM-state instructions Dynarmic's A32 front end *declines* to translate.
+ *
+ * Their translators end in `InterpretThisInstruction()`, which produces `IR::Term::Interpret` rather
+ * than code. That terminal is not a control-flow edge: its `next` is the location at which
+ * interpretation was to start, meaning the instruction that was just refused. A tier that follows it as
+ * if it were a `LinkBlock` re-translates the same instruction and returns here forever — which is what
+ * this file did until `docs/32` §7 found it, and it is a hang with no step counted, no reason returned
+ * and no PC to report.
+ *
+ * The encodings were assembled from source and read back out of the disassembly, not copied out of a
+ * manual (`docs/30`'s standing rule about facts recalled from a specification):
+ *
+ *   $TC/bin/clang.exe --target=armv7-none-linux-androideabi26 -marm -c bank.S
+ *   $TC/bin/llvm-objdump.exe -d bank.o
+ *
+ * with `bank.S` holding the seven mnemonics below. Two things came out of doing that rather than
+ * writing them down: LLVM's own diagnostic calls `stmdb r0!, {...}^` a *"system STM"* and rejects the
+ * writeback, and the banked `^` goes **after** the register list in LLVM's syntax, which is not where
+ * the ARM manual's pseudocode suggests to look for it.
+ *
+ * Tier J is not run here on purpose. On an ARM64 host its handling of this terminal is
+ * `ASSERT_FALSE("Interpret should never be emitted.")`, and mcl's `ASSERT` is not `NDEBUG`-gated, so it
+ * reaches `std::terminate`: a suite that dies is not a suite that failed. `--interpret-probe <tier>`
+ * exercises one tier at a time for that measurement, and exits before any other lane runs.
+ */
+struct Declined {
+  std::uint32_t encoding;
+  const char* asm_text;
+};
+constexpr Declined kDeclined[] = {
+    {0xe8d0'0030u, "ldmia r0, {r4, r5}^"},   // arm_LDM_usr
+    {0xe950'8030u, "ldmdb r0, {r4, r5, pc}^"},  // arm_LDM_eret — the one §5 of docs/32 omitted
+    {0xe940'0006u, "stmdb r0, {r1, r2}^"},   // arm_STM_usr
+    {0xf102'001fu, "cps #0x1f"},             // arm_CPS
+    {0xf108'0040u, "cpsie f"},               // arm_CPS, the enable/disable form
+    {0xf8b0'0a00u, "rfeia r0!"},             // arm_RFE
+    {0xf96d'0504u, "srsdb sp!, #4"},         // arm_SRS
+};
+
+/// Map one page of guest memory holding `kDeclined` and return its address, or 0 on failure.
+exec::GuestAddr PlantDeclined(Rig& rig) {
+  constexpr exec::GuestAddr kPage = 0x0180'0000u;
+  std::string err;
+  if (!rig.mem->Map(kPage, mem::kGuestPage, kRead | kWrite | kExec, &err)) {
+    ++checks;
+    fail("could not map a page for the declined encodings", __LINE__, err);
+    return 0;
+  }
+  for (unsigned i = 0; i < sizeof kDeclined / sizeof kDeclined[0]; ++i) {
+    const std::uint32_t word = kDeclined[i].encoding;
+    if (!rig.mem->Write(kPage + i * 4, &word, 4)) {
+      ++checks;
+      fail("could not write a declined encoding into guest memory", __LINE__, kDeclined[i].asm_text);
+      return 0;
+    }
+  }
+  return kPage;
+}
+
+void declined_instructions_refuse_by_name() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  const exec::GuestAddr page = PlantDeclined(rig);
+  if (page == 0) return;
+
+  for (unsigned i = 0; i < sizeof kDeclined / sizeof kDeclined[0]; ++i) {
+    const exec::GuestAddr where = page + i * 4;
+    exec::MachineState s = EntryState(where, 0, 0, /*thumb=*/false);
+    // A small budget, because the regression this guards is a livelock rather than a crash: without
+    // the refusal this returns `Budget` after burning the lot, and 100k steps says so in milliseconds
+    // instead of after four million.
+    const exec::RunResult r = rig.interp->Run(s, 100'000);
+    const std::string want_pc = Hex(where);
+    CHECK_CTX(r.reason == exec::StopReason::Unimplemented,
+              std::string{kDeclined[i].asm_text} + " on Tier I: reason=" +
+                  std::to_string(static_cast<int>(r.reason)) + " steps=" +
+                  std::to_string(r.instructions_executed) + " detail=" + r.detail);
+    // The *named* part matters as much as the refusal: an "unimplemented" that cannot say which
+    // instruction is the one a reader cannot act on.
+    CHECK_CTX(r.detail.find("declined to translate") != std::string::npos &&
+                  r.detail.find(want_pc) != std::string::npos,
+              std::string{kDeclined[i].asm_text} +
+                  " refused without naming the instruction and its pc 0x" + want_pc +
+                  ": " + r.detail);
+    std::fprintf(stderr, "[declined] %-26s -> %s\n", kDeclined[i].asm_text, r.detail.c_str());
+  }
+}
+
+/// `--interpret-probe jit|interp`: one tier, one declined encoding, nothing else. Exists so the
+/// arm64-host question (`does the back end abort, and where?`) can be asked once without the answer
+/// taking the rest of the lane down with it.
+int interpret_probe(const char* which) {
+  const bool want_jit = std::string_view{which} == "jit";
+  if (!want_jit && std::string_view{which} != "interp") {
+    std::fprintf(stderr, "usage: %s --interpret-probe jit|interp\n", which);
+    return 2;
+  }
+  Rig rig = build();
+  if (!rig.ok) return 1;
+  const exec::GuestAddr page = PlantDeclined(rig);
+  if (page == 0) return 1;
+  std::fprintf(stderr, "[probe] entering Tier %s on %s at 0x%s\n", want_jit ? "J" : "I",
+               kDeclined[0].asm_text, Hex(page).c_str());
+  std::fflush(stderr);
+  exec::MachineState s = EntryState(page, 0, 0, false);
+  const exec::RunResult r = want_jit ? rig.jit->Run(s, 100'000) : rig.interp->Run(s, 100'000);
+  std::fprintf(stderr, "[probe] survived: reason=%d steps=%u detail=%s\n",
+               static_cast<int>(r.reason), r.instructions_executed, r.detail.c_str());
+  return 0;
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+  if (argc > 2 && std::string_view{argv[1]} == "--interpret-probe") return interpret_probe(argv[2]);
+
   both_tiers_agree_and_match_hardware();
   fp_groups_are_accurate_or_explicitly_refused();
+  declined_instructions_refuse_by_name();
   invalidation_reaches_the_compiled_code();
   both_tiers_stop_at_the_same_svc();
   a_guest_cacheflush_reaches_the_tier_that_owns_the_cache();

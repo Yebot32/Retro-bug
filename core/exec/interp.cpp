@@ -10,11 +10,18 @@
  *     covers what a real toolchain's ARMv7 code actually emits, and refuses anything else by name
  *     rather than guessing at a semantics it does not have — a guessed flag bit or shift-carry rule
  *     would produce a plausible fib that is wrong in exactly one branch.
- *   - **Dynarmic has no interpreter to reuse.** Its `IR::Term::Interpret` terminal is emitted for
- *     instructions it declines to translate (`arm_LDM_usr`, `arm_CPS`, `arm_RFE`…), and every back end
- *     implements that terminal by calling `UserCallbacks::InterpreterFallback`, handing the problem to
- *     the embedder. This class is that hand-back, which is why Tier I is required on the JIT path too
- *     and not only where a JIT is unavailable (`docs/10` §5, AD-2 consequence 3).
+ *   - **Dynarmic has no interpreter to reuse, and no hand-back on the host we ship on.** Its
+ *     `IR::Term::Interpret` terminal marks instructions it declines to translate — six
+ *     banked-register and privileged ARM-state forms, enumerated in `docs/32` §7. Only the **x64** back
+ *     end turns that into a call to `UserCallbacks::InterpreterFallback` (`a32_emit_x64.cpp:1124-1134`,
+ *     and `InterpreterFallback` appears nowhere else in `backend/`). The AArch64 back end's entire
+ *     handling is `ASSERT_FALSE("Interpret should never be emitted.")` (`emit_arm64_a32.cpp:36-38`), and
+ *     mcl's `ASSERT` is not `NDEBUG`-gated — it reaches `std::terminate`
+ *     (`externals/mcl/src/assert.cpp:14-20`). So on
+ *     arm64 a declined instruction ends the process during block emission: not a `StopReason`, not a
+ *     resumable stop. Tier I therefore is *not* the JIT path's safety net here — it stands on its own,
+ *     and this class refuses `Term::Interpret` by name rather than following it. The x64-only premise
+ *     behind `docs/10` AD-2 consequence 3 is corrected there.
  *
  * Two traps are worth naming because neither shows up as a build failure:
  *
@@ -1006,8 +1013,8 @@ bool BlockRunner::Step(const Inst* inst) {
     /**
      * `IsZero32` — and with it, Thumb-16 `CBZ`/`CBNZ`.
      *
-     * It arrived as an incidental on the ASIMD lane (`docs/30` §Step 18), but it is worth naming for
-     * what it actually is: `thumb16.cpp:894` lowers `CBZ`/`CBNZ` to `SetCheckBit(IsZero(rn))`, so until
+     * It arrived as an incidental on the ASIMD lane (`docs/30` §Step 19), but it is worth naming for
+     * what it actually is: `thumb16.cpp:903` lowers `CBZ`/`CBNZ` to `SetCheckBit(IsZero(rn))`, so until
      * this line Tier I could not run a compare-and-branch-on-zero at all, which is one of the most
      * common control-flow instructions in compiled ARM code. The `If`/`CheckBit` *terminal* was already
      * handled, so the missing half was only ever this predicate.
@@ -1119,7 +1126,7 @@ bool BlockRunner::Step(const Inst* inst) {
      * These exist because the AArch32 guest reaches them without a 64-bit shift instruction: the ASIMD
      * structure paths insert and extract an element out of a 64-bit word with exactly these ops
      * (`asimd_load_store_structures.cpp:161` for the store side), so `vst1`/`vld1` need them. The first
-     * demand was measured, not guessed — `docs/30` §Step 18's ASIMD probes refused on
+     * demand was measured, not guessed — `docs/30` §Step 19's ASIMD probes refused on
      * `LogicalShiftLeft64` while Tier J ran them fine.
      *
      * `ArithmeticShiftRight64` and `RotateRight64` are deliberately absent: their back-end forms take a
@@ -1738,10 +1745,32 @@ bool BlockRunner::Step(const Inst* inst) {
 bool BlockRunner::Take(const Term::Terminal& terminal, LocationDescriptor& successor) {
   return Dynarmic::Common::VisitVariant<bool>(terminal, [&](const auto& t) -> bool {
     using T = std::remove_cvref_t<decltype(t)>;
-    if constexpr (std::is_same_v<T, Term::LinkBlock> || std::is_same_v<T, Term::LinkBlockFast> ||
-                  std::is_same_v<T, Term::Interpret>) {
+    if constexpr (std::is_same_v<T, Term::LinkBlock> || std::is_same_v<T, Term::LinkBlockFast>) {
       successor = LocationDescriptor{t.next};
       return true;
+    } else if constexpr (std::is_same_v<T, Term::Interpret>) {
+      /**
+       * `Term::Interpret` is not a control-flow edge: it is the A32 front end saying "I declined to
+       * translate the instruction at `next`", and the only things that produce it are the six
+       * banked-register and privileged forms — `docs/32` §7 enumerates them against `decoder/arm.inc`.
+       * Following it, which is what this branch used to do by being folded in with `LinkBlock`, cannot
+       * make progress: the block never *executed* that instruction, so `next` names the same PC the
+       * block stopped at, re-dispatch translates it the same way, and the loop is endless with no step
+       * counted, no reason returned and no PC to report. A hang with no diagnostics is strictly worse
+       * than the refusal below.
+       *
+       * Refusing by name is also the only honest option available, because actually interpreting a
+       * banked `LDM` needs a banked register file that neither tier has — dynarmic's own arm64 guest
+       * state omits it too (`a32_jitstate.h:18-31`), which is why the front end declines in the first
+       * place. Supplying one is the M3-scale question, not a branch here.
+       */
+      stop.reason = StopReason::Unimplemented;
+      // `t.next` is the generic IR descriptor; the program counter is a property of the A32 one, so it
+      // is converted the same way dynarmic's own x64 back end converts it before calling its fallback.
+      stop.detail = "the A32 front end declined to translate the instruction at 0x" +
+                    Hex(LocationDescriptor{t.next}.PC()) +
+                    " (banked-register or privileged load/store)";
+      return false;
     } else if constexpr (std::is_same_v<T, Term::PopRSBHint> ||
                          std::is_same_v<T, Term::FastDispatchHint>) {
       successor = location_;  // whatever BXWritePC put here is the next location

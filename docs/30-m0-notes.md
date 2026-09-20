@@ -1817,6 +1817,170 @@ test that two IT states at one pc get two slots, and that dropping one leaves th
 string, which held only while the key had four fields — so that assertion now checks presence and
 distinguishability instead of position. 95 checks in the C04 lane, up from 86.
 
+## Step 19 — integer ASIMD in Tier I, and the Thumb `CBZ` that fell out of chasing a refusal
+
+**Run 2026-09-20 on the SM-X710 (`R52Y106BECZ`), engine lane 1,357 checks green across 14 suites plus
+200,561 dynarmic assertions.** The FP differential went from *40 rows, Tier I refusing 5* to **50 rows,
+Tier I refusing none**: every row now equals hardware on both tiers.
+
+The handlers are one loop over a 16-byte view of the vector rather than four per-width copies, for the
+reason that class of bug keeps producing: `VectorAdd32` existed alone, so "the D form" and "the Q form"
+were one implementation apart from being two. Widths come from `LaneBits(op)`, an exhaustive `switch`
+whose `default` is 0 and whose callers turn 0 into a named refusal — parsed from the opcode's *name*
+would silently accept `VectorSignedSaturatedAdd8` and do arithmetic on the wrong lane width, which is a
+plausible wrong answer rather than a fault.
+
+**A probe has to be shown to reach the thing it probes.** §Step 16's three nearly-worthless FP probes
+were the lesson, and ASIMD reproduced it within one cycle: the first draft's `simd_int` covered
+`vmul.i32`/`vadd.i32` and two lane reads, so "0 refused" would have meant *the only width tested was 32*.
+The new rows therefore fold **all 16 result bytes** into the return value instead of reading one lane
+back — a lane loop of the wrong width carries into its neighbour, so the register's *shape* is in the
+measured number. What proves the compiler did not scalarise them is the disassembly, not the pass rate:
+
+```
+$TC/bin/clang.exe --target=armv7-… -mthumb -mfpu=neon -Os -shared -o /tmp/f.so tests/corpus/fixture_jni.c
+$TC/bin/llvm-objdump.exe -d --no-show-raw-insn /tmp/f.so | sed -n '/<_simd_lane>:/,/<_simd_bits>:/p'
+```
+
+which shows `vadd.i8/16/32/64`, `vsub.i8/16/32/64`, `vmul.i8/16/32`, `vabs.s8/16/32`, `vdup.8/16/32`,
+`vmov.i64`, `vorr`/`vand`/`veor`/`vbic` (both operand orders, Q **and** D forms), `vorn`, `vneg.s8`. Four
+things came out of reading it that no amount of thinking about the ISA would have produced:
+
+- `vdupq_lane_u64` does **not** emit `VDUP`. It emits two `vmov.32 d[0]`/`d[1]`, because `vdup.64 q, d[l]`
+  is not an ARMv7 encoding — assembled `vdup.8/.16/.32` with the same bracketed-lane spelling and all
+  three are accepted while `.64` is rejected. A 64-bit element cannot be lane-duplicated into a Q register.
+- Reaching `VectorBroadcast64` at all needs `VMOV (immediate)` with the Q bit set
+  (`asimd_one_reg_modified_immediate.cpp:24`), whose `.i64` immediate is restricted to 0 and all-ones —
+  `vmov.i64 q9, #1` is refused, `#-1` assembles. All-ones is the better probe anyway: fed through an `eor`
+  it complements the register, so a broadcast that wrongly yielded 0 leaves the fold *unchanged*.
+- `VectorNot` is reached by `VORN`, not `VMVN` (`asimd_three_regs.cpp:334` lowers it as
+  `VectorOr(n, VectorNot(m))` — the *second* operand is the inverted one), and `ZeroVector` by `VNEG`
+  (`asimd_two_regs_misc.cpp:452`, `VectorSub(esize, ZeroVector(), m)`). Neither is obvious from the names,
+  and the `vbic` rows carry an explicit operand-order pair because `A & ~B` versus `~A & B` passes every
+  symmetric test.
+- One row came back as `29791` when its neighbours were ~10⁹. That is a register that is mostly zero — the
+  16-bit case masked every lane with a 3-bit constant. Low entropy is a weak probe wearing a green badge,
+  so the mask became `0xfff0 + a` and the row re-captured as `-1185945012`.
+
+**The refusals were the work list, and the most valuable one was not an ASIMD op.** Each build named
+exactly one missing handler, and the chain ran `LogicalShiftLeft64` → `Or64` → `IsZero32`. The first two
+exist because an AArch32 guest reaches 64-bit scalar ops through the ASIMD structure paths that assemble a
+`d` register out of elements — there is no 64-bit scalar shift or OR in ARMv7 itself — and the 64-bit
+shifts turned out to take **two** operands where the 32-bit family takes three (`opcodes.inc:111-113`): no
+carry-in, no shifter carry published, and an amount ≥ 64 yielding zero rather than the 32-bit forms'
+wrap. Copied the 32-bit rules across and these would have been wrong in the quiet direction.
+
+Then `IsZero32`, which is **Thumb-16 `CBZ`/`CBNZ`** (`thumb16.cpp:903`: `SetCheckBit(IsZero(rn))`). Tier I
+could not execute a compare-and-branch-on-zero at all — the `CheckBit` *terminal* was handled and only its
+predicate producer was missing — and that is one of the most common control-flow instructions in compiled
+ARM code. It arrived as an incidental and was nearly landed without being named as what it was.
+
+**Two latent defects found by reading the code back rather than by a failing test:**
+
+1. `SignedAt` evaluated `1ull << 64` for a 64-bit lane, which is undefined, and hardware masks the shift
+   count so it yields `1ull << 0`. Net effect: `vabs` on a 64-bit lane computing from a lane of zero —
+   silently wrong, not a fault. Fixed with a `bits >= 64` branch. **Not covered by any hardware row**,
+   because `vabs.I64` has no ARMv7 encoding; it is labelled defensive, and the same is true of
+   `VectorMultiply64`/`VectorAbs64`, which are named as unreachable in `interp.cpp` rather than left to
+   look covered.
+2. `VectorGetElement`/`SetElement` take their index as an IR `U8` and nothing bounded it, so an
+   out-of-range one read — and for a set, **wrote** — past the end of a 16-byte value on the stack. The
+   translator supplies immediates today, so no test exercises it, but the index is data and this component
+   consumes untrusted app binaries: an OOB write there is guest-controlled host memory corruption, not a
+   wrong answer. Now refused by name, with the index and lane width in the message.
+
+**Negative control, run before believing any of it.** Two mutations applied at once to `interp.cpp` — the
+8-bit lane loop stepping in 16s, and `VectorAndNot` as `~x & y` — produced **all ten ASIMD rows failing,
+20 checks**, then all passed again on revert. "0 of 50 refused" alone does not show that a row can fail.
+
+C05's differential lane is now 267 checks (from 253). `docs/10` U-8 and `docs/32` §5 item 3 updated; the
+§5.3 header comment that still described Tier I as implementing "one vector arithmetic opcode" and gave
+`dadd` as its example of a refusal is corrected — a scalar `dadd` is answered now, and the refusals
+belong to `vadd.f32`, `FPVectorAdd` being what the A32 front end emits for it.
+
+## Step 20 — two research threads, and the process abort neither of them could have measured alone
+
+Two sub-agents ran in parallel through this session; this step is what survived checking them.
+
+**20a — `Term::Interpret` on the shipping host.** The claim returned was that Dynarmic's AArch64 back end
+does not hand the terminal to the embedder at all but asserts. Checked directly, and it is worse than the
+text in `docs/10` §5 consequence 3 said: `emit_arm64_a32.cpp:36-38` is
+`ASSERT_FALSE("Interpret should never be emitted.")` with no other body, `InterpreterFallback` appears in
+`backend/` **only** under `x64/`, and mcl's `ASSERT` is not `NDEBUG`-gated (`externals/mcl/src/assert.cpp:14-20`
+reaches `std::terminate`). Then measured rather than reasoned about, using the seven encodings assembled in
+§Step 19 and a one-shot `--interpret-probe <tier>` mode so the crash could not take the suite with it:
+
+```
+$ adb shell /data/local/tmp/rb_exec_tier_diff_tests --interpret-probe interp
+[probe] entering Tier I on ldmia r0, {r4, r5}^ at 0x1800000
+[probe] survived: reason=5 steps=0 detail=the A32 front end declined to translate the instruction at 0x1800000
+PROBE_RC=0
+$ adb shell /data/local/tmp/rb_exec_tier_diff_tests --interpret-probe jit
+[probe] entering Tier J on ldmia r0, {r4, r5}^ at 0x1800000
+assertion failed: false
+Message:Interpret should never be emitted.libc++abi: terminating
+PROBE_RC=134        # 128 + 6 = SIGABRT
+```
+
+Tier I's side of that is now a lane: seven encodings, each asserted to stop `Unimplemented` **naming its
+own pc**, 14 checks. It had been following the terminal as a control edge, which cannot make progress —
+`Term::Interpret::next` is the declined instruction's own address, so re-dispatch translates it again
+forever, a hang with no step, reason or PC. The budget on that lane is deliberately small (100k) because
+the regression it guards is a livelock: without the refusal it fails as `Budget` in milliseconds instead of
+after four million steps.
+
+Severity, honestly: all six producers are privileged-mode instructions and the corpus has **zero** of them
+in 325,541 instructions, so M1 is unlikely to meet one. Consequence is an uncapturable process abort, and
+hand-written assembly in an app's `.so` can ship one. Cheap mitigation exists and is **not** what the
+sub-agent proposed it to be — I went to check and my first reading was wrong: `UserConfig` is not the
+`TranslateCallbacks`, but `UserCallbacks` is, and `JitExecutor` *is* a `UserCallbacks`
+(`jit.h:52`), so `PreCodeReadHook` is ours to override on the JIT path with no patch to upstream. Recorded
+as C02 work, deliberately not done here: turning an abort into a *continuation* by mis-setting the block
+terminal would be strictly worse than the abort, and that trade deserves its own test.
+
+Also corrected, in place and labelled as a correction: `docs/10` §5 consequence 3 and U-8, and
+`interp.cpp`'s own file header, all of which asserted that every back end calls `InterpreterFallback` and
+that the group carried "509 instructions of bionic". The decision that Tier I is required stands; the
+argument for it was false twice over, on mechanism and on demand.
+
+**20b — building real 32-bit guest libraries from the NDK, with no AOSP checkout.** The returned headline
+was that `libm.a`/`libz.a`/`libc++_static.a` in the NDK's `arm-linux-androideabi/` are genuine compiled
+ELF32-ARM code and can be relinked into real `.so` files. That determines M1's shape, so it was re-run
+here rather than accepted:
+
+```
+$TC/bin/clang.exe --target=armv7-none-linux-androideabi26 -mthumb -mfpu=neon -shared -nostdlib \
+    -Wl,-soname,libm.so -Wl,--whole-archive,$L/libm.a -Wl,--no-whole-archive -o /tmp/libm_guest.so
+-rw-r--r-- 545928 libm_guest.so
+Type: DYN (Shared object file)     Machine: ARM
+SONAME: libm.so      FLAGS: BIND_NOW      (no .rel.text, no DT_TEXTREL)
+202: 0001d160  1204 FUNC  GLOBAL DEFAULT  9 sin      # the API-34 stub's sin is Size 2
+```
+
+Then the parity claim, which is the one that decides whether it can stand in for the device library: **all
+284 `FUNC` symbols the API-34 `libm.so` stub exports are defined by the relink — 0 missing, 31 extra.**
+242 of 330 exports carry a body over 64 bytes. `pow` resolves to `0x0000a099`, whose low bit is the Thumb
+marker, corroborating the bionic-is-A32-dominant reading independently of the symbol tables.
+
+This is the concrete form of "Android is open source, so take the source": the first guest library M1 needs
+is not written by hand and not proxied, it is *already built*, 32-bit, on this machine. Two blockers came
+with it and are recorded rather than discovered later: `libc.a` will not link as a `.so` without AOSP's
+version script (`bionic/libc/libc.map.txt` — `symbol __aeabi_memclr8@@LIBC_N has undefined version`), and
+`libdl.a` is one 4,908-byte member and is unusable as a guest `libdl.so`. Both go in `docs/34` with their
+error text.
+
+`docs/34-aosp-source-assets.md` is that agent's report, committed with its `[1L]/[1A]/[INFER]/[UNVERIFIED]`
+tags intact and two claims downgraded to `[1L]` here after re-running them. It also flags six conflicts with
+committed docs, listed with file:line on both sides and left for the owner rather than silently resolved:
+`docs/20:445-447` mis-buckets `liblog`/`libz`; `docs/10:289` attributes generated proxies to Berberis and
+treats them as the plan (`frameworks/libs/native_bridge_support` is not Berberis, and the bridge moved to
+`art/libnativebridge`); `docs/10:772` and `docs/20:464` both stale on U-7; `docs/10:50/:288`'s "bionic is
+BSD-3" imprecise (bionic has no root `LICENSE`; licences are per-directory); `docs/20:445-446` listing
+`libdl` as an AOSP build without the guest-linker dependency that makes it false. Its most useful non-obvious
+finding for later is that AOSP's own `libGLESv1_CM` declares `liblog` as a *dependency*, never a proxy — and
+that AOSP's answer to "proxy `libz`?" is, from `android_api/` containing no `libz` at all, *no*.
+
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |

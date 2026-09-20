@@ -758,7 +758,7 @@ A profile for a **T0** app carrying `kReportNetworkAvailable` must work with no 
 ## 9. M0 task breakdown (the immediate next work, all local)
 
 Progress and the findings that change this plan are tracked in
-[`30-m0-notes.md`](30-m0-notes.md). Status as of `30` §Step 9:
+[`30-m0-notes.md`](30-m0-notes.md). Status as of `30` §Step 20:
 
 1. `core/` + `external/dynarmic` vendoring with `patches/` layout and `NOTICE.md`/`LICENSES/`/`REUSE.toml` in the
    same commit (AD-16: obligations start now). **Done** (`419fe9f`), with the one mechanical deviation recorded in
@@ -830,6 +830,8 @@ Progress and the findings that change this plan are tracked in
     `execmem`-denied host needs either the vector group implemented or a visible per-app gate in C17 — the
     gate is a day, the vector group is M1-sized, and `vmov`-only ASIMD (a `vmul.i32` in a codec's setup
     path) is the part most likely to be reached for first.
+    **Closed by §Step 19, which is item 13 below.** The "still cannot run NEON" half no longer holds, and
+    the part "most likely to be reached for" turned out not to be `vmul.i32` but `CBZ`.
     **Verified rather than assumed, and the way it was verified matters:** the FPSCR compare field both
     tiers produce (`0x8` less, `0x6` equal, `0x2` greater, `0x3` unordered, as NV:Z:C:GE) was first
     written from a recalled manual table, disagreed with hardware on three of four, and was documented as
@@ -840,6 +842,41 @@ Progress and the findings that change this plan are tracked in
     **Related, and cheap:** the guest's cumulative FP flags are the *host's* on both tiers (native
     `FDIV`/`FMADD` raise them; Tier I folds the same `<cfenv>` state in), so an app that branches on
     FPSCR's exception bits inherits its host. `FPDoubleToSingle` honours round-to-nearest only.
+
+13. **Integer ASIMD on the interpreted path: done, and it closed item 12.** `30` §Step 19. The differential
+    is now **50 hardware-anchored rows with Tier I refusing none**, the lane group being one loop over a
+    16-byte view at 8/16/32/64-bit lanes rather than four per-width copies, plus the width-independent
+    logical group and lane get/set. Ten new rows, one per lane width and per logical operation, each a fold
+    over all 16 result bytes so a wrong lane width carries into its neighbour and moves the number; the
+    negative control (lane loop stepping in 16s, `vbic` as `~A & B`) failed all ten.
+    **What this changes:** `Kind::Interpreted` is now a configuration that can run ordinary compiled ARMv7
+    code, not only scalar code — integer NEON is what codecs, graphics blits and string routines compile to
+    on `armeabi-v7a`, so the `execmem`-denied fallback and the iOS/M3 case both stop being "scalar only".
+    Chasing the refusals also landed two things that were missing for less obvious reasons: `IsZero32`,
+    which is Thumb-16 `CBZ`/`CBNZ` and whose absence meant Tier I could not execute a compare-and-branch on
+    zero at all; and `LogicalShiftLeft64`/`Or64`, which an AArch32 guest reaches only through the ASIMD
+    structure paths, with a **two**-operand shift form that publishes no shifter carry and zeroes at an
+    amount ≥ 64 rather than wrapping like the 32-bit family.
+    **Named, not hidden:** `VectorMultiply64` and `VectorAbs64` have no ARMv7 encoding and no hardware row,
+    and `VectorBroadcast64` is reached only through `VMOV (immediate)` whose `.i64` form permits 0 and
+    all-ones. The still-unimplemented vector groups are floating-point (`FPVectorAdd` and friends —
+    `vadd.f32` refuses), the widening/narrowing and saturating forms, register shifts, and table lookups.
+14. **`Term::Interpret` must stop aborting the process on an ARM64 host. [OPEN]** `30` §Step 20a, and it
+    corrects §5 AD-2 consequence 3. Six ARM-state bodies (`arm_LDM_usr`, `arm_LDM_eret`, `arm_STM_usr`,
+    `arm_CPS`, `arm_RFE`, `arm_SRS`) end in `InterpretThisInstruction()`; on the AArch64 back end that
+    terminal is `ASSERT_FALSE("Interpret should never be emitted.")`, mcl's `ASSERT` is not `NDEBUG`-gated,
+    and it was **measured on the SM-X710**: `--interpret-probe jit` dies with SIGABRT, rc=134, inside
+    `jit->Run()` — no `StopReason`, no C17 record, nothing the caller can catch. Tier I now refuses the same
+    seven encodings by name with their pc (`docs/32` §7's enumeration, re-verified here).
+    **Severity is low and consequence is high**, and both halves belong in the record: zero occurrences in
+    the 325,541-instruction corpus, because all six are privileged-mode instructions and the guest is EL0 —
+    but the NDK assembler accepts every one, so hand-written assembly in an app's `.so` can ship it, and the
+    failure mode is a crash rather than a diagnostic.
+    **The fix has a seam and does not need a patch:** `JitExecutor` *is* a `Dynarmic::A32::UserCallbacks`,
+    which derives from `TranslateCallbacks`, so `PreCodeReadHook` can veto those encodings before
+    translation and end the block as a halt. Deliberately not done as part of §Step 20: the hook makes the
+    callee responsible for the terminal, and mis-setting it converts a loud abort into a silent *skip* —
+    which is worse. Needs its own test asserting Tier J returns a reason naming the pc.
 
 Sequencing constraint the owner should know before M1: **M1's end-to-end acceptance step cannot be verified on this
 machine at all** — it needs a physical 64-bit-only arm64 phone. Everything in §9 and most of M1's code can be written
