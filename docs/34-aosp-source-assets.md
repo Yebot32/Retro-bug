@@ -142,6 +142,33 @@ missing** (built `libz_guest.so` = 227 544 B, with `deflateInit_`, `inflateInit_
 present as real code). [1L] This is the finding that upgrades the stubs from "names only" to "a verifiable
 requirement list against a real implementation."
 
+> **Correction, 2026-09-20, re-measured by `tools/build-guest-libs.sh`: the `libm` half holds and the `libz`
+> half does not.** `libm` is 284/284 with **0 missing** — reproduced independently **[1L]**, and `sin` is
+> 1,204 bytes where the stub's is 2, `sqrt` 16 where the stub's is 2. `libz` is **85 of 93**: eight
+> `FUNC` the stub exports are not importable from the built library — `_dist_code`, `_length_code`,
+> `_tr_align`, `_tr_flush_bits`, `_tr_flush_block`, `_tr_init`, `_tr_stored_block`, `_tr_tally`.
+>
+> They are not *absent*, which is what makes the original comparison wrong rather than merely optimistic:
+> all eight are in the image, as `LOCAL HIDDEN`. `llvm-readelf --dyn-syms` shows `.dynsym`, where a hidden
+> symbol does not appear, so a name-set comparison silently treats "present and unreachable" as either
+> present or absent depending on which table it happened to read. The distinction is load-bearing for
+> C11 — a guest cannot import a hidden symbol — but it is also **inconsequential in practice**, because
+> all eight are zlib's own internals (`trees.c`, the fixed Huffman tables) and nothing outside zlib
+> declares them. The public surface the file names (`deflateInit_` 32 B, `inflateInit_` 10 B, `inflate`
+> 6,196 B, `deflate` 2,584 B, `inflateEnd` 82 B) is present with real bodies **[1L]**, so the verdict
+> `BUILD-AS-GUEST` is right and only the parity number was not.
+>
+> Two of the eight are a separate error in the same direction: `_dist_code` and `_length_code` are
+> **`OBJECT`** data tables in the real build, which the names-only stub advertises as `FUNC`. So the
+> stubs are not authoritative about symbol *kind* either, only about *name* — which is the correct
+> reading of `docs/33` §2 and worth stating before anyone builds a generator that trusts the type.
+>
+> The script now encodes this as eight named entries in a `KNOWN_HIDDEN` allowlist rather than as a
+> relaxed check, so a ninth unexplained gap fails the build, and it re-reports any allowlisted name that
+> later becomes resolvable so the list cannot rot. Every other measurement in this section was
+> reproduced and stands.
+
+
 **(c) The two things that do *not* fall out of the NDK.**
 
 1. **`libc.so` needs AOSP's version script.** `ld.lld --shared --whole-archive libc.a

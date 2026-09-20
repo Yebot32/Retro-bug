@@ -2083,6 +2083,66 @@ checkout, `libc` needs its version script, `libdl` needs the linker.
 entry, and §7 already carries the pointer "§7 shows this claim is false and supersedes it" — rewriting a
 log's findings in place would destroy the record of having been wrong, which is the more useful half of it.
 
+## Step 23 — `tools/build-guest-libs.sh`: the guest's real math and zlib, and two claims it disproved
+
+**Tooling + docs only; no engine code changed, so §Step 21's 1,402-check both-device run at `1535b2d` is
+still the verification and no new one is claimed.** `docs/34` §7's step 1 was "ship the recipe, not a code
+generator"; this is that recipe with its two parity gates as checks rather than prose.
+
+```
+libm.so  defined 315/284 stub FUNC; 0 known-hidden, 0 unexplained
+         no DT_TEXTREL, no .rel.text      relocations: 149 JUMP_SLOT + 2 GLOB_DAT
+         sin 1204 B, cos 1204 B, pow 1152 B, fmod 820 B, sqrt 16 B   (the stub's: 2 B each)
+         imports needed: __stack_chk_fail, __stack_chk_guard, isnanf, ldexp, memset   (five)
+         546,748 B -> 131,776 B stripped
+libz.so  defined 88/93; 8 known-hidden, 0 unexplained; inflate 6196 B, deflate 2584 B
+         imports needed: twenty, including malloc, free, open, close, strlen, pthread_once, __errno
+         226,560 B -> 65,780 B stripped
+```
+
+**Correction 1 — `docs/34`'s "93 of 93 for `libz`" is wrong; it is 85 of 93.** Not absent: all eight
+(`_tr_*`, `_dist_code`, `_length_code`, …) are in the image as `LOCAL HIDDEN`, so they are not in
+`.dynsym` and a guest cannot import them by name. Practically harmless — they are zlib's own internals and
+nothing outside zlib declares them, and the public surface is present with real bodies — but the parity
+number as written was not reproducible, and the gate now names all eight individually so a ninth gap fails
+while a stale allowlist entry is reported. The same comparison also caught the stubs lying about symbol
+*kind*: `_dist_code` and `_length_code` are `OBJECT` data tables in the real build and `FUNC` in the stub.
+The stubs are authoritative about names only, which matters for C11's generator design.
+
+**Correction 2 — `libz` is behind `libc`, not beside it.** `docs/34` grouped `libm`/`libz` as the two
+archive-to-`.so` wins, but the undefined sets separate them sharply: `libm` needs **five** symbols
+compiler-rt does not already supply, and `sqrt` needs none of those five. `libz` needs **twenty**, among
+them `malloc`, `free`, `open`, `close`, `lseek`, `strlen`, `pthread_once` and `__errno` — i.e. file I/O,
+an allocator and threading. So the ordering `docs/34` argued ("`libm` before `libc`") is stronger than it
+stated: `libm` is the self-contained first target, and `libz` follows `libc`, not `libm`. Recorded in
+`docs/20` §C11.
+
+**Four bugs the writing of this script produced, each caught before it could mislead:**
+
+1. `awk '$3=="FUNC"'` — readelf's `--dyn-syms` columns are Num Value Size **Type** Bind Vis Ndx Name, so
+   Type is `$4`. With `$3` both symbol lists come back empty, `comm` finds nothing missing and **the gate
+   passes while checking nothing**. Fixed, and a "the stub list must be non-empty" condition is now part of
+   the gate itself, because that vacuous-pass shape recurs.
+2. The same trap in the *comparison*, subtler: stub symbols carry `@@LIBC` (`sin@@LIBC`) and built ones
+   don't, so `$NF == "sin"` matched nothing and every probe reported absent in both libraries — a gate that
+   fails uniformly is at least suspicious, which is how it got caught. The strip-size discriminator underneath
+   is real, though: stub `sin` is 2 bytes, the guest build's is 1,204.
+3. My first "close the hole" attempt added a post-strip re-check of parity on the theory that stripping
+   might remove `.dynsym`. Tested against `--strip-all`: dynamic symbols survive every strip mode, so the
+   check **could not have failed**. Replaced with the body-size probe above, which can, and whose negative
+   control is the NDK stub itself.
+4. (Small but the cause of a confusing first run) `${@:-$(printf '%s\n' "${!ARCHIVES[@]}")}` keeps newlines
+   inside one word, so "build every target" iterated once with a two-line name.
+
+**Not done, deliberately:** `docs/34` §7 step 3 — load the built `libm.so` through C05 and call `sqrt`/
+`fmod`/`sin` on both tiers against the host's own `libm`. That is the increment that closes "no instruction
+of a real guest library has been executed yet", and everything it needs is now measured: the loader already
+applies `R_ARM_JUMP_SLOT`/`GLOB_DAT`/`ABS32`/`RELATIVE` (`guest_elf.cpp:487-493`), `PlaceArgs` does full
+AAPCS incl. 8-byte-aligned spill and `I64` pair alignment, `Value32::Kind::F64` carries `d0` results, and
+`sqrt`'s 16-byte body touches none of the five imports. It wants its own pass rather than the tail of this
+one, because a false "we can run real system libraries" claim is the expensive kind.
+
+
 
 
 
