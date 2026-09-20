@@ -2791,6 +2791,98 @@ so ARM-state `LDAEX` remains unexecuted code), and no **two-core contention** ro
 from code rather than tested.
 
 
+## Step 31 — the seven IR ops between Tier I and bionic, and the lane that had never been built
+
+§Step 30 took out the last Tier J refusal on real `libc.so`; the lane then showed what was left, and it
+was one family: instructions whose IR ops Tier I declines. Measured on both devices, the refusals are
+`SignedDiv32`, `UnsignedDiv32`, `Mul64`, `ByteReverseWord`, `CountLeadingZeros32`,
+`ConditionalSelect64`, `PackedAddU8` — three more than `docs/20` §9 listed, because that list was counted
+against **one** device's image.
+
+**Six implemented, one deliberately not.** `PackedAddU8` stays a named refusal: in Dynarmic it carries a
+`GetGEFromOp` pseudo-operation (`backend/arm64/emit_arm64_packed.cpp:48`, which writes the per-lane
+`GE` result alongside the sum), so implementing the sum without the `GE` half would make Tier I answer
+half of `ADD8` and invent nothing for the other half. That is a separate piece of work, not a shortcut
+to take now.
+
+**Values measured, not recalled.** `tests/guest/divprobe.c` runs each instruction on both devices and
+prints the result — 26 rows, **identical on the Reno 5 and the Tab S9** — because the interesting cases
+are exactly the ones where C++ and ARM disagree and an implementation written from the C++ operator
+would not notice:
+
+| case | hardware | why it is a row |
+|---|---|---|
+| `sdiv 5/0`, `udiv 5/0` | `0`, and **CPSR unchanged** | ARM defines a zero result; `/` is UB, and an x86 `idiv` traps |
+| `sdiv INT_MIN/-1` | `0x80000000` | ARM saturates; C++ is undefined here |
+| `clz 0` | `32` | the one input `__builtin_clz` refuses to define |
+| `rev 0x12345678` | `0x78563412` | a byte in every position, so a half-swap cannot pass it |
+| `umull MAX × 0x03000000` | `0x02ffffff'fd000000` | the only case with a non-zero high half — the only one that can tell a real 64-bit multiply from a 32-bit one |
+| `smull -1 × 0x10000` | `0xffffffff'ffff0000` | the high half is *sign extension*, which is all that separates `Smull` from `Umull` |
+
+The lane rows are planted as raw Thumb (`ldr r1,[r0]; ldr r2,[r0,#4]; <op>; …; bx lr`, every encoding
+from `clang` + `llvm-objdump --triple=thumbv8`), so the inputs are per-row constants and nothing outside
+the instruction under test is load-bearing — an earlier version used `mvns` to build `-1`, and Tier I's
+refusal of *that* op turned a row about `sdiv` into a row about `mvns`.
+
+**What the differential caught: Tier I was the wrong tier.** The first run came back with exactly one
+red row on both devices, `sdiv INT_MIN/-1`, and Tier J agreed with hardware while Tier I returned **0**.
+The divide case had been special-cased to avoid invoking C++'s undefined behaviour and the special case
+forgot to assign the result — a guard that prevents the bad computation without supplying the right one.
+Fixed, and the row is the fix's evidence. One observation stays open rather than settled: with the
+divisor built by `movs` instead of loaded, Tier J reported CPSR `V=1` after a divide by zero where Tier I
+reported no change (hardware: no change). Both tiers now agree with the operands loaded, so the leak is
+reachable only behind a preceding flag-setting instruction, and it is **not** proven to be fixed — the
+repro is in this paragraph's first sentence.
+
+**The lane nobody built, which cost an hour of wrong conclusions.** `rb_guest_libc_tests` and
+`rb_guest_apk_tests` were absent from `tools/run_engine_tests.sh`'s `SUITES`, and that list drives the
+build as well as the run — so `ninja` never rebuilt them, and every "the libc lane still says 17
+failures" I read today was a **stale binary from before the fix**. Building the target explicitly moved
+the Tab S9 lane from **116 checks / 17 failures** to **125 / 9**, and the Reno 5's from **119 / 25** to
+**128 / 8** (the check counts rose because rows that used to stop at a refusal now run further and
+assert more). The script now has a second list, `ADVISORY`: built, pushed, run, reported — and not
+gating, which needs an explicit `|| true` because `set -o pipefail` otherwise lets a lane that exits
+non-zero to *say* it is red abort the script before the next lane runs. A failure that cannot be seen is
+worse than a failure that fails.
+
+**Three rows were asserting one phone's image as if it were libc's.** All three failed only on the Reno
+5, and all three were mine-or-predecessor literals rather than engine faults:
+
+- `__errno`'s expected address was `block + 0x29c`, read out of the Tab S9's disassembly. The Reno 5's
+  bionic adds **`0x298`**. Both tiers now assert the property that survives a different build — the
+  answer is inside the seeded block, not its base, word-aligned, and the same address on both tiers and
+  both reads — and *print* the offset, so a human sees the number the row no longer hard-codes. What the
+  row can no longer catch is written in its comment: an offset that is wrong but still lands inside the
+  mapping now passes.
+- The strict-refusal row listed three slot addresses (`0xd67e8`, `0xd68e8`, `0xd68f0`). It now loads the
+  same image twice — once tolerantly, to count what the loader refused, and once strictly — and requires
+  the refusal text to name **that** many slots, so the assertion is about the loader's own consistency
+  rather than about a build.
+- `dtpmod == 2` / `dtpoff == 0` / `tpoff == 1`, justified by a comment claiming it compared against
+  `llvm-readelf` when it compared against a transcription of one image. The Reno 5 has **no**
+  `R_ARM_TLS_DTPMOD32` at all. What is universal is kept (nothing but TLS kinds is refused; the kinds
+  sum to the refusals; `R_ARM_IRELATIVE` is recorded not refused; an unrecognised kind is named before it
+  is implemented) and the per-image distribution became a printed value plus the command that checks it
+  by hand, written into the comment.
+
+**What the libc lane still refuses, by family** (now nearly the same list on both devices): `strcmp` on
+Tier I's `PackedAddU8`; `memcpy`/`memmove` where Tier I's front end raises an exception, and the
+overlapping `memmove` that hardware answers byte-exactly; `strtod` and `qsort` faulting at **low absolute
+addresses** (`0xb49` read on the Tab S9, `0x2b45` written on the Reno) with **both tiers agreeing** — a
+guest-side pointer derived from a null base, which is a probe-construction question and not a tier
+divergence; and the guest-APK lane's 4 standing failures.
+
+**An architecture question worth more than it looks.** Thumb-state `SDIV`/`UDIV` do not exist in
+ARMv7-A — the NDK rejects them under `-march=armv7-a` ("instruction requires: divide in THUMB") and they
+arrive with ARMv8-A. The device bionics contain them, so they were built for v8 in Thumb. RetroBug pins
+`UserConfig::arch_version = v7` precisely so the two tiers agree on the architecture, and Dynarmic
+accepts these encodings regardless (no gate anywhere consults `ArchVersion()` before translating). So
+the pin is currently **decorative**: it cannot be the thing that stops the emulator executing an
+instruction no armeabi-v7a binary may contain, which was the reason for setting it. Either the pin becomes
+enforced — and then real bionic's `atoi` refuses to run — or it is documented as a tie-breaker for the
+cases Dynarmic *does* gate on. Deciding that is a question for the owner, not a thing to quietly pick.
+
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |

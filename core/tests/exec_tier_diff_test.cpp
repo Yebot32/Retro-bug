@@ -1245,6 +1245,45 @@ constexpr std::uint16_t kOneLoadOneStoreNoExclusive[] = {
     0x205a,  ///< movs r0, #0x5a
     0x4770,  ///< bx lr
     0};
+/// The arithmetic blobs below are the seven IR ops Tier I was refusing on real `libc.so`. Each loads its
+/// operand from the row's seeded slot, so the input is a per-row constant rather than a register the
+/// harness happens to hold, and each ends by putting something in `r0` so the row claims a result even
+/// where `r3`/`r4` are the interesting ones. Every encoding is LLVM's (`clang --target=arm-linux-
+/// androideabi21 -mthumb -c x.s`, then `llvm-objdump -d --triple=thumbv8`), and every expectation is
+/// `tests/guest/divprobe.c` printed on both the Reno 5 and the Tab S9 — the two devices agreed on all
+/// 26 values, including the ones where C++'s operator and ARM's instruction disagree.
+///
+/// The `nop` after `ldr` is the alignment convention stated above the exclusive blobs: the 32-bit
+/// forms must not straddle a word, or a red row would not say whether the arithmetic or the fetch did
+/// it.
+/// The arithmetic blobs below are the seven IR ops Tier I was refusing on real `libc.so`. Each loads both
+/// operands from the row's seeded slot — the low half in `r1`, the divisor or multiplicand in `r2` — so
+/// every input is a per-row constant that the row itself can state, and nothing depends on an
+/// instruction outside the one under test (`mvns`, which Tier I also refuses, was in an earlier version of
+/// these blobs and turned a row about `sdiv` into a row about `mvns`).
+///
+/// Every encoding is LLVM's (`clang --target=arm-linux-androideabi21 -mthumb -c x.s`, then
+/// `llvm-objdump -d --triple=thumbv8`), and every expectation is `tests/guest/divprobe.c` printed on both
+/// the Reno 5 and the Tab S9 — the two devices agreed on all 26 values, including the ones where C++ and
+/// ARM disagree. `want_mem` is the seed unchanged because none of these instructions writes memory.
+///
+/// The `nop` after the two loads is the alignment convention stated above the exclusive blobs: the
+/// 32-bit forms must not straddle a word, or a red row would not say whether the arithmetic or the fetch
+/// did it. The multiply blobs end in different registers on purpose — `kNoCheck` is `0xffffffff`, so a
+/// blob whose result happened to be that value could not also claim it in `r0`, which is the guard every
+/// row here satisfies.
+constexpr std::uint16_t kClzBlob[] = {0x6801, 0xbf00, 0xfab1, 0xf381, 0x4618, 0x4770,  ///< ldr r1,[r0]; clz r3,r1; mov r0,r3; bx lr
+                                      0};
+constexpr std::uint16_t kRevBlob[] = {0x6801, 0xba0b, 0x4618, 0x4770,  ///< ldr r1,[r0]; rev r3,r1; mov r0,r3; bx lr
+                                      0};
+constexpr std::uint16_t kSdivBlob[] = {0x6801, 0x6842, 0xbf00, 0xfb91, 0xf3f2, 0x4618, 0x4770,  ///< + ldr r2,[r0,#4]; sdiv r3,r1,r2
+                                       0};
+constexpr std::uint16_t kUdivBlob[] = {0x6801, 0x6842, 0xbf00, 0xfbb1, 0xf3f2, 0x4618, 0x4770,  ///< udiv r3,r1,r2
+                                       0};
+constexpr std::uint16_t kUmullBlob[] = {0x6801, 0x6842, 0xbf00, 0xfba1, 0x3402, 0x4620, 0x4770,  ///< umull r3,r4,r1,r2; mov r0,r4
+                                        0};
+constexpr std::uint16_t kSmullBlob[] = {0x6801, 0x6842, 0xbf00, 0xfb81, 0x3402, 0x4618, 0x4770,  ///< smull r3,r4,r1,r2; mov r0,r3
+                                        0};
 constexpr std::uint16_t kControl[] = {0x202a, 0x4770,  ///< movs r0, #42 ; bx lr
                                       0};
 
@@ -1505,6 +1544,164 @@ constexpr ExclRow kExclRows[] = {
      .want_r0 = 0x5a,
      .want_r3 = 0x1111,
      .want_mem = 0x2222'0077ull,
+     .mem_mask = 0xFFFF'FFFF'FFFF'FFFFull},
+
+    // ---------------------------------------------------------------- the seven IR ops Tier I refused
+    //
+    // One comment for the group, because the provenance is identical: the encoding is LLVM's, the value
+    // is `tests/guest/divprobe.c` as printed by the Reno 5 and the Tab S9 (both devices, all 26 rows, no
+    // disagreement), and `want_mem` is the seed unchanged because none of these instructions writes.
+    // What each row pins is stated only where the value is the one that distinguishes a correct
+    // implementation from a plausible one.
+    {.name = "clz 0x100",
+     .asm_text = "ldr r1,[r0]; clz r3,r1; mov r0,r3",
+     .proof = ExclProof::kMeasured,
+     .source = "measured both devices: clz 0x100 = 23",
+     .code = kClzBlob,
+     .seed_lo = 0x0000'0100u,
+     .want_r0 = 23,
+     .want_r3 = 23,
+     .want_mem = 0x100ull,
+     .mem_mask = 0xFFFF'FFFF'FFFF'FFFFull},
+    {.name = "clz 0",
+     .asm_text = "ldr r1,[r0]; clz r3,r1; mov r0,r3",
+     .proof = ExclProof::kMeasured,
+     .source = "measured both devices: the one case the host __builtin_clz leaves undefined",
+     .code = kClzBlob,
+     .seed_lo = 0u,
+     .want_r0 = 32,
+     .want_r3 = 32,
+     .want_mem = 0ull,
+     .mem_mask = 0xFFFF'FFFF'FFFF'FFFFull},
+    {.name = "clz 0x80000000",
+     .asm_text = "ldr r1,[r0]; clz r3,r1; mov r0,r3",
+     .proof = ExclProof::kMeasured,
+     .source = "measured both devices: the other end of the range",
+     .code = kClzBlob,
+     .seed_lo = 0x8000'0000u,
+     .want_r0 = 0,
+     .want_r3 = 0,
+     .want_mem = 0x8000'0000ull,
+     .mem_mask = 0xFFFF'FFFF'FFFF'FFFFull},
+    {.name = "rev 0x12345678",
+     .asm_text = "ldr r1,[r0]; rev r3,r1; mov r0,r3",
+     .proof = ExclProof::kMeasured,
+     .source = "measured both devices: a byte in each position, so a half-swap cannot pass it",
+     .code = kRevBlob,
+     .seed_lo = 0x1234'5678u,
+     .want_r0 = 0x7856'3412u,
+     .want_r3 = 0x7856'3412u,
+     .want_mem = 0x1234'5678ull,
+     .mem_mask = 0xFFFF'FFFF'FFFF'FFFFull},
+    {.name = "sdiv 7/2",
+     .asm_text = "ldr r1,[r0]; ldr r2,[r0,#4]; sdiv r3,r1,r2; mov r0,r3",
+     .proof = ExclProof::kMeasured,
+     .source = "measured both devices: the pair every divide-by-zero row below is read against",
+     .code = kSdivBlob,
+     .seed_lo = 7u,
+     .seed_hi = 2u,
+     .want_r0 = 3,
+     .want_r3 = 3,
+     .want_mem = 0x0000'0002'0000'0007ull,
+     .mem_mask = 0xFFFF'FFFF'FFFF'FFFFull},
+    {.name = "sdiv 5/0",
+     .asm_text = "ldr r1,[r0]; ldr r2,[r0,#4]; sdiv r3,r1,r2; mov r0,r3",
+     .proof = ExclProof::kMeasured,
+     .source = "measured both devices: a zero divisor is a defined 0 result, not a fault — C++'s `/` is "
+               "UB there, so an implementation written from the operator gets this wrong unnoticed",
+     .code = kSdivBlob,
+     .seed_lo = 5u,
+     .seed_hi = 0u,
+     .want_r0 = 0,
+     .want_r3 = 0,
+     .want_mem = 5ull,
+     .mem_mask = 0xFFFF'FFFF'FFFF'FFFFull},
+    {.name = "sdiv INT_MIN/-1",
+     .asm_text = "ldr r1,[r0]; ldr r2,[r0,#4]; sdiv r3,r1,r2; mov r0,r3",
+     .proof = ExclProof::kMeasured,
+     .source = "measured both devices: ARM saturates to INT_MIN where C++ is undefined and an x86 `idiv` "
+               "traps, which is why the case is spelled out before the operator is reached",
+     .code = kSdivBlob,
+     .seed_lo = 0x8000'0000u,
+     .seed_hi = 0xffff'ffffu,
+     .want_r0 = 0x8000'0000u,
+     .want_r3 = 0x8000'0000u,
+     .want_mem = 0xffff'ffff'8000'0000ull,
+     .mem_mask = 0xFFFF'FFFF'FFFF'FFFFull},
+    {.name = "udiv MAX/2",
+     .asm_text = "ldr r1,[r0]; ldr r2,[r0,#4]; udiv r3,r1,r2; mov r0,r3",
+     .proof = ExclProof::kMeasured,
+     .source = "measured both devices: 0xffffffff/2 = 0x7fffffff unsigned, where a signed reading gives "
+               "0xc0000000 — the one pair that tells the two divides apart at the same operands",
+     .code = kUdivBlob,
+     .seed_lo = 0xffff'ffffu,
+     .seed_hi = 2u,
+     .want_r0 = 0x7fff'ffffu,
+     .want_r3 = 0x7fff'ffffu,
+     .want_mem = 0x0000'0002'ffff'ffffull,
+     .mem_mask = 0xFFFF'FFFF'FFFF'FFFFull},
+    {.name = "udiv 5/0",
+     .asm_text = "ldr r1,[r0]; ldr r2,[r0,#4]; udiv r3,r1,r2; mov r0,r3",
+     .proof = ExclProof::kMeasured,
+     .source = "measured both devices: same defined-zero rule, unsigned form",
+     .code = kUdivBlob,
+     .seed_lo = 5u,
+     .seed_hi = 0u,
+     .want_r0 = 0,
+     .want_r3 = 0,
+     .want_mem = 5ull,
+     .mem_mask = 0xFFFF'FFFF'FFFF'FFFFull},
+    {.name = "umull 0x55555555*3",
+     .asm_text = "ldr r1,[r0]; ldr r2,[r0,#4]; umull r3,r4,r1,r2; mov r0,r4",
+     .proof = ExclProof::kMeasured,
+     .source = "measured both devices: high half 0 here, 0x02ffffff in the next row — the pair that "
+               "separates a real 64-bit multiply from a 32-bit one with a zero high half",
+     .code = kUmullBlob,
+     .seed_lo = 0x5555'5555u,
+     .seed_hi = 3u,
+     .want_r0 = 0u,
+     .want_r3 = 0xffff'ffffu,
+     .want_r4 = 0u,
+     .want_mem = 0x0000'0003'5555'5555ull,
+     .mem_mask = 0xFFFF'FFFF'FFFF'FFFFull},
+    {.name = "umull MAX*0x03000000",
+     .asm_text = "ldr r1,[r0]; ldr r2,[r0,#4]; umull r3,r4,r1,r2; mov r0,r4",
+     .proof = ExclProof::kMeasured,
+     .source = "measured both devices: 0x02ffffff'fd000000 — the only row whose high half is non-zero, so "
+               "the only one that fails if the operands are not widened before multiplying",
+     .code = kUmullBlob,
+     .seed_lo = 0xffff'ffffu,
+     .seed_hi = 0x0300'0000u,
+     .want_r0 = 0x02ff'ffffu,
+     .want_r3 = 0xfd00'0000u,
+     .want_r4 = 0x02ff'ffffu,
+     .want_mem = 0x0300'0000'ffff'ffffull,
+     .mem_mask = 0xFFFF'FFFF'FFFF'FFFFull},
+    {.name = "smull -1*0x10000",
+     .asm_text = "ldr r1,[r0]; ldr r2,[r0,#4]; smull r3,r4,r1,r2; mov r0,r3",
+     .proof = ExclProof::kMeasured,
+     .source = "measured both devices: 0xffffffff'ffff0000 — the high half is sign extension, not the top "
+               "of an unsigned product, which is all that separates `Smull` from `Umull`",
+     .code = kSmullBlob,
+     .seed_lo = 0xffff'ffffu,
+     .seed_hi = 0x0001'0000u,
+     .want_r0 = 0xffff'0000u,
+     .want_r3 = 0xffff'0000u,
+     .want_r4 = 0xffff'ffffu,
+     .want_mem = 0x0001'0000'ffff'ffffull,
+     .mem_mask = 0xFFFF'FFFF'FFFF'FFFFull},
+    {.name = "smull MIN*MIN",
+     .asm_text = "ldr r1,[r0]; ldr r2,[r0,#4]; smull r3,r4,r1,r2; mov r0,r3",
+     .proof = ExclProof::kMeasured,
+     .source = "measured both devices: (-2^31)^2 = +2^62 = 0x40000000'00000000 — positive and entirely "
+               "in the high half, where a signed 32-bit product reads as zero",
+     .code = kSmullBlob,
+     .seed_lo = 0x8000'0000u,
+     .seed_hi = 0x8000'0000u,
+     .want_r0 = 0u,
+     .want_r3 = 0u,
+     .want_r4 = 0x4000'0000u,
+     .want_mem = 0x8000'0000'8000'0000ull,
      .mem_mask = 0xFFFF'FFFF'FFFF'FFFFull},
 };
 

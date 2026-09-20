@@ -43,12 +43,17 @@ ADB="$SDK/platform-tools/adb.exe"
 # One list for build, push and run: a suite that is missing here silently does not execute, which is
 # the least useful kind of green.
 SUITES="rb_interval_compat_tests rb_variant_compat_tests rb_guest_memory_tests rb_guest_elf_tests rb_isa_front_end_tests rb_exec_census_tests rb_exec_interp_tests rb_abi_call_tests rb_abi_jni_tests rb_exec_tier_diff_tests rb_diag_tests rb_syscall_monitor_tests rb_codecache_tests rb_profile_tests dynarmic_tests"
+# Lanes that are red on purpose because every failure names a real gap (a Tier I refusal, an unlinked
+# loader step), so they cannot gate a green run. They are still built and run here: before this list
+# existed they were in no build at all, which let a stale binary report the same failure count for hours
+# and make a fix that had changed everything look like it had changed nothing.
+ADVISORY="rb_guest_libc_tests rb_guest_apk_tests"
 
 "$CM" -S "$ROOT" -B "$BUILD" -G Ninja -DCMAKE_MAKE_PROGRAM="$NJ" \
   -DCMAKE_TOOLCHAIN_FILE="$SDK/ndk/$NDK_VER/build/cmake/android.toolchain.cmake" \
   -DANDROID_ABI="$ABI" -DANDROID_PLATFORM=android-26 -DCMAKE_BUILD_TYPE=Release \
   -DDYNARMIC_TESTS=ON -DDYNARMIC_TESTS_USE_UNICORN=OFF -DRB_BUILD_TESTS=ON >/dev/null
-"$NJ" -C "$BUILD" $SUITES
+"$NJ" -C "$BUILD" $SUITES $ADVISORY
 
 # The armeabi-v7a fixture. Built for the guest ISA, not the test host's: the loader and the
 # execution tiers have to consume real ARMv7 bytes, and these are the same bytes M1 launches on
@@ -102,7 +107,7 @@ adb wait-for-device
 } >&2
 
 adb push "$(to_host "$FIXTURE")" /data/local/tmp/librb_fixture.so >/dev/null
-for t in $SUITES; do
+for t in $SUITES $ADVISORY; do
   src="$BUILD/core/tests/$t"
   [ -f "$src" ] || src="$BUILD/external/dynarmic/tests/$t"
   [ -f "$src" ] || { echo "no binary for $t under $BUILD" >&2; exit 1; }
@@ -113,5 +118,12 @@ status=0
 for t in $SUITES; do
   echo "=== $t ==="
   adb shell "chmod 755 /data/local/tmp/$t; /data/local/tmp/$t" || status=1
+done
+# Reported, not gated: these lanes carry named gaps, and a green engine must not hide them either. The
+# `|| true` is load-bearing — under `set -o pipefail` a lane that exits non-zero to say "red" would
+# otherwise abort the script before the next one ran, which is gating with extra steps.
+for t in $ADVISORY; do
+  echo "=== $t (advisory) ==="
+  { adb shell "chmod 755 /data/local/tmp/$t; /data/local/tmp/$t" || true; } 2>&1
 done
 exit $status

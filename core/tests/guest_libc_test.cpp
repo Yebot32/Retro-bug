@@ -585,12 +585,21 @@ void the_load_reports_exactly_what_retrobug_cannot_yet_do() {
                types.size(), irelative, dtpmod, dtpoff, tpoff, other);
   // `R_ARM_IRELATIVE` is no longer in this list, and that is the change, not an omission: it is handled
   // now (recorded into `ifunc_slots`, slot written with the resolver as the placeholder), so a refusal
-  // count of zero for it is the assertion that says so. The three TLS slots are what remains.
+  // count of zero for it is the assertion that says so.
   CHECK_CTX(irelative == 0, "R_ARM_IRELATIVE was refused rather than recorded; " +
                                 std::to_string(irelative) + " slot(s)");
-  CHECK_CTX(dtpmod == 2, "R_ARM_TLS_DTPMOD32 count is " + std::to_string(dtpmod) + "; readelf said 2");
-  CHECK_CTX(dtpoff == 0, "R_ARM_TLS_DTPOFF32 count is " + std::to_string(dtpoff) + "; readelf said 0");
-  CHECK_CTX(tpoff == 1, "R_ARM_TLS_TPOFF32 count is " + std::to_string(tpoff) + "; readelf said 1");
+  // What remains is TLS, and only TLS. The per-kind counts are deliberately *not* asserted: `2 DTPMOD /
+  // 0 DTPOFF / 1 TPOFF` is the Tab S9's `libc.so`, and the Reno 5's older bionic has none of the first
+  // and the same one of the last — a literal here is a claim about a phone. Checking a new image's
+  // distribution is a manual step against that image, and the command belongs with it:
+  //   llvm-readelf -r /path/to/libc.so | awk '$3 ~ /^R_ARM_TLS/ {print $3}' | sort | uniq -c
+  CHECK_CTX(dtpmod + dtpoff + tpoff == types.size(),
+            std::to_string(types.size()) + " relocation(s) were refused but only " +
+                std::to_string(dtpmod + dtpoff + tpoff) +
+                " are TLS-family, so something is being refused that this row does not account for");
+  CHECK_CTX(types.size() >= 1u,
+            "nothing was refused, which contradicts the TLS relocations every Android libc.so has; the "
+            "loader is silently applying, or silently dropping, what it should hand to the linker");
   CHECK_CTX(other == 0, "the loader refused " + std::to_string(other) +
                             " kinds beyond the four expected. A new kind is a new feature and should be "
                             "named here before it is implemented.");
@@ -878,28 +887,46 @@ void the_thread_pointer_reaches_a_guest_tls_block() {
     fail("the bridge carries a thread pointer into the callee", __LINE__,
          "tp is 0x" + Hex(rig.abi_ctx->state().tp));
   }
-  // The offset bionic's own code adds, lifted from the `add.w` above rather than from a struct definition
-  // nobody has checked against this build.
-  const std::uint32_t want = kTlsBlock + 0x29c;
-  both_tiers(rig, "__errno", "ILL", {}, [&](exec::Executor& e, const Outcome& got) {
-    CHECK_CTX(static_cast<std::uint32_t>(got.bits) == want,
-              std::string{"__errno on Tier "} + Tier(e) + " = 0x" + Hex64(got.bits) +
-                  ", the disassembly says 0x" + Hex(want));
-    std::fprintf(stderr, "[libc] %-22s Tier %s: tp=0x%s -> 0x%s (expected 0x%s)  %s\n", "__errno",
-                 Tier(e), Hex(kTp).c_str(), Hex64(got.bits).c_str(), Hex(want).c_str(),
+  // The offset bionic's own code adds is a property of *this build*, and asserting a remembered one was
+  // the mistake: `+0x29c`, lifted from the Tab S9's disassembly, is wrong by 4 bytes on the Reno 5's
+  // older bionic, and both tiers failed a row that was about the engine's fidelity to a constant in a
+  // header. So the claim here is the one that holds for any bionic: the answer is inside the block that
+  // was seeded for it, it is not the block's base (an implementation that drops the `add` returns the
+  // base), it is word-aligned, and it is the same address on both tiers and on both reads.
+  //
+  // What that can no longer catch is stated so nobody mistakes the row for what it was: an offset that is
+  // wrong but still lands inside the mapping passes. The actual number is printed for a human to read.
+  const exec::GuestAddr tls_end = kData + kDataBytes;
+  std::uint32_t seen[4] = {0, 0, 0, 0};
+  int observations = 0;
+  const auto once = [&](exec::Executor& e, const Outcome& got) {
+    const auto addr = static_cast<exec::GuestAddr>(got.bits);
+    ++observations;
+    if (observations <= 4) seen[observations - 1] = addr;
+    CHECK_CTX(addr > kTlsBlock && addr < tls_end,
+              std::string{"__errno on Tier "} + Tier(e) + " = 0x" + Hex64(addr) +
+                  ", outside the seeded TLS block (0x" + Hex(kTlsBlock) + "..0x" + Hex(tls_end) +
+                  ") — either the tp chain broke or this build's offset runs past the mapping");
+    CHECK_CTX((addr & 3u) == 0u,
+              std::string{"__errno on Tier "} + Tier(e) + " = 0x" + Hex64(addr) +
+                  ", not word-aligned — `errno` is an `int`");
+    std::fprintf(stderr, "[libc] %-22s Tier %s: tp=0x%s -> 0x%s (offset +0x%s)  %s\n", "__errno",
+                 Tier(e), Hex(kTp).c_str(), Hex(addr).c_str(), Hex(addr - kTlsBlock).c_str(),
                  got.detail.c_str());
-  });
+  };
+  both_tiers(rig, "__errno", "ILL", {}, once);
   // A second read, to show the register is not consumed by being read — ARM gives TPIDRURW no read-to-clear
   // behaviour, and an implementation that treated it as a handshake would pass the row above and fail this
   // one. `mcr p15, #0, rX, c13, c0, #3` is modelled for symmetry with the read (`__ARM_NR_set_tls` writes
   // that register in the kernel, and a guest that sets its own TLS must not find a hole), but `[UNVERIFIED]`
   // and deliberately unasserted: `llvm-objdump` over the whole of libc.so counts **zero** `mcr`
   // instructions in it, so there is no corpus evidence yet about what a real one expects.
-  both_tiers(rig, "__errno", "ILL", {}, [&](exec::Executor& e, const Outcome& got) {
-    CHECK_CTX(static_cast<std::uint32_t>(got.bits) == want,
-              std::string{"__errno's second read on Tier "} + Tier(e) + " = 0x" + Hex64(got.bits) +
-                  ", but the first said 0x" + Hex(want));
-  });
+  both_tiers(rig, "__errno", "ILL", {}, once);
+  // Both tiers, both reads: four addresses that have to be one address. This is where the cross-tier claim
+  // lives, since neither `both_tiers` call compares the two on its own.
+  CHECK_CTX(observations == 4 && seen[0] == seen[1] && seen[0] == seen[2] && seen[0] == seen[3],
+            "the four __errno observations differ: I=0x" + Hex(seen[0]) + " J=0x" + Hex(seen[1]) +
+                " I=0x" + Hex(seen[2]) + " J=0x" + Hex(seen[3]));
 }
 
 /**
@@ -988,15 +1015,29 @@ void a_load_without_that_flag_refuses_and_names_the_slots() {
                 " unapplied relocations. It should refuse");
   if (mod) return;
   std::fprintf(stderr, "[libc] strict load refused: %s\n", err.c_str());
-  // Three TLS slots are the reason, and each has to appear with its address.
-  CHECK_CTX(err.find("0x11") != std::string::npos, "the refusal does not name the DTPMOD32 type: " + err);
-  CHECK_CTX(err.find("0x13") != std::string::npos, "the refusal does not name the TPOFF32 type: " + err);
+  // Every slot the loader refused has to appear in the refusal with its address — that is the rule this
+  // path exists to satisfy, since a refusal that names nothing is only a slightly quieter corruption.
+  // The count is derived from the image rather than written out: the Tab S9's bionic has three TLS
+  // relocations and the Reno 5's has one, so literal addresses from either image would be a claim about a
+  // phone rather than about the loader, and that mistake has already cost this project a red row.
+  loader::LoadOptions tolerant;
+  tolerant.tolerate_unresolved_relocs = true;
+  tolerant.resolve = strict.resolve;
+  std::string terr;
+  const auto allowed = loader::LoadFromBytes(*mem, image, "libc.so", tolerant, &terr);
+  ++checks;
+  if (!allowed) fail("the tolerant load refused as well", __LINE__, terr);
+  const std::size_t refused = allowed ? allowed->unsupported_reloc_types.size() : 0;
+  CHECK_CTX(refused > 0,
+            "the tolerant load left nothing unapplied, so this row cannot tell a named refusal from a "
+            "clean load and would pass vacuously");
   std::size_t named = 0;
-  for (const char* a : {"0xd67e8", "0xd68e8", "0xd68f0"}) {
-    if (err.find(a) != std::string::npos) ++named;
+  for (auto at = err.find("at guest 0x"); at != std::string::npos; at = err.find("at guest 0x", at + 1)) {
+    ++named;
   }
-  CHECK_CTX(named == 3u, "only " + std::to_string(named) +
-                             " of the three TLS slot addresses appear in the refusal: " + err);
+  CHECK_CTX(named == refused, "only " + std::to_string(named) + " of the " +
+                                   std::to_string(refused) +
+                                   " refused slot(s) are named in the refusal: " + err);
   // And the IRELATIVE must *not* be in there: it is handled, recorded, and left for the linker.
   CHECK_CTX(err.find("0xa0") == std::string::npos,
             "R_ARM_IRELATIVE was refused as if it were unknown, rather than recorded as needing a call: " +

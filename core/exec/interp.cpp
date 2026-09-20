@@ -958,6 +958,21 @@ bool BlockRunner::Step(const Inst* inst) {
       Put(inst, V{f.c ? 1u : 0u, 0});
       return true;
     }
+    /**
+     * `ConditionalSelect64` — the back end loads `cpsr_nzcv` and emits `CSEL Xd, Xn, Xm, cond`
+     * (emit_arm64_data_processing.cpp:220), so the choice reads the guest's architectural NZCV, which
+     * `A32SetCpsrNZCV` writes into `state_.cpsr`. An AArch32 guest reaches this op from one place only:
+     * `VSEL` on a D register (vfp.cpp:353), whose FP compare (`A32SetCpsrNZCV`) is the flag write that
+     * feeds it — hence the same read `Term::If` below uses.
+     */
+    case Opcode::ConditionalSelect64: {
+      if (!HasArgs(inst, 3)) return false;
+      std::uint64_t a = 0, b = 0;
+      if (!W64(inst, 1, a) || !W64(inst, 2, b)) return false;
+      const bool then_arm = Holds(inst->GetArg(0).GetCond(), Flags::from_cpsr(state_.cpsr));
+      Put(inst, V{then_arm ? a : b, 0});
+      return true;
+    }
 
     // ---------------------------------------------------------------- memory
     //
@@ -1220,6 +1235,51 @@ bool BlockRunner::Step(const Inst* inst) {
       Put(inst, V{static_cast<std::uint32_t>(static_cast<std::uint64_t>(a) * b), 0});
       return true;
     }
+    /**
+     * `Mul64` is AArch64's `MUL Xd, Xn, Xm` (emit_arm64_data_processing.cpp:1047): the low 64 bits of
+     * the 64x64 product, which is what `SMULL`/`UMULL` reach after widening their operands with
+     * `SignExtendWordToLong`/`ZeroExtendWordToLong` (multiply.cpp:114, :182). No flag record: their
+     * flag form would be `SETS`, which nothing in an ARMv7 guest emits from this path.
+     */
+    case Opcode::Mul64: {
+      std::uint64_t a = 0, b = 0;
+      if (!W64(inst, 0, a) || !W64(inst, 1, b)) return false;
+      Put(inst, V{a * b, 0});
+      return true;
+    }
+    /**
+     * ARM's integer divide, which the AArch64 back end lowers to native `SDIV`/`UDIV`
+     * (emit_arm64_data_processing.cpp:1076-1101) — so the two defined-result cases are ARM's, not C++'s:
+     *
+     *   - divisor 0 → 0, not a trap. `SignedDivide`/`UnsignedDivide` in the ARM ARM return 0 and
+     *     AArch64's SDIV/UDIV implement that; C++'s `/` is UB there, so this branch has to be explicit.
+     *   - `SDIV INT_MIN, -1` → `INT_MIN` (the truncation of `+2^31` to 32 bits), which is what Dynarmic
+     *     asserts on its own A32 path (`tests/A32/test_arm_instructions.cpp:586-602`). C++ would trap
+     *     or produce UB, so it too is spelled out before the operator runs.
+     *
+     * Every other case is `a / b` on the signed or unsigned interpretation, and C++'s truncation
+     * toward zero matches ARM's.
+     */
+    case Opcode::SignedDiv32:
+    case Opcode::UnsignedDiv32: {
+      std::uint32_t a = 0, b = 0;
+      if (!W32(inst, 0, a) || !W32(inst, 1, b)) return false;
+      const bool sdiv = op == Opcode::SignedDiv32;
+      std::uint32_t r = 0;
+      if (b == 0) {
+        r = 0;  // ARM's defined result for a zero divisor, both forms.
+      } else if (sdiv && a == 0x8000'0000u && b == 0xffff'ffffu) {
+        // Saturates to INT_MIN — the truncation of +2^31 into 32 bits, which is `a` itself. Spelled out
+        // because C++ would be evaluating undefined behaviour here, not merely a different number.
+        r = a;
+      } else {
+        r = sdiv ? static_cast<std::uint32_t>(static_cast<std::int32_t>(a) /
+                                              static_cast<std::int32_t>(b))
+                 : a / b;
+      }
+      Put(inst, V{r, 0});
+      return true;
+    }
     // Bitwise ops need no flag record at all: their flag-form on AArch64 is `ANDS`/`ORS`/`EORS`, which
     // leaves N and Z from the result and clears C and V — exactly what the `TST v, v` fallback
     // `FlagsFromOp` already computes. A shifted *operand* carries a shifter C, but the translator
@@ -1431,6 +1491,22 @@ bool BlockRunner::Step(const Inst* inst) {
       std::uint32_t a = 0, b = 0;
       if (!W32(inst, 0, a) || !W32(inst, 1, b)) return false;
       Put(inst, V{(static_cast<std::uint64_t>(b) << 32) | a, 0});
+      return true;
+    }
+    /// AArch64 `REV Wd, Wn` and `CLZ Wd, Wn` (emit_arm64_data_processing.cpp:1367,1388). CLZ's 0→32 is
+    /// ARM's defined result and is what `__builtin_clz` refuses to be, so the zero case is spelled out
+    /// rather than left to the host.
+    case Opcode::ByteReverseWord: {
+      std::uint32_t a = 0;
+      if (!W32(inst, 0, a)) return false;
+      Put(inst, V{__builtin_bswap32(a), 0});
+      return true;
+    }
+    case Opcode::CountLeadingZeros32: {
+      std::uint32_t a = 0;
+      if (!W32(inst, 0, a)) return false;
+      const std::uint32_t r = a == 0 ? 32u : static_cast<std::uint32_t>(__builtin_clz(a));
+      Put(inst, V{r, 0});
       return true;
     }
 
