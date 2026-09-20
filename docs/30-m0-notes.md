@@ -1980,6 +1980,72 @@ BSD-3" imprecise (bionic has no root `LICENSE`; licences are per-directory); `do
 finding for later is that AOSP's own `libGLESv1_CM` declares `liblog` as a *dependency*, never a proxy — and
 that AOSP's answer to "proxy `libz`?" is, from `android_api/` containing no `libz` at all, *no*.
 
+## Step 21 — the veto: Tier J now names a declined instruction instead of killing the process
+
+**Run 2026-09-20 on both devices.** §Step 20 measured the failure; this is the fix, and the whole of it is
+one override:
+
+```cpp
+bool JitExecutor::PreCodeReadHook(bool is_thumb, GuestAddr pc, Dynarmic::A32::IREmitter& ir) {
+  if (is_thumb) return true;                       // all six are `arm_*` bodies
+  std::uint32_t word = 0;
+  if (!memory_.Read(pc, &word, 4)) return true;    // let NoExecuteFault report an unmapped fetch
+  … match kDeclinedForms, most-specific-mask first …
+  SetPending(Pending::Unimplemented, "…declined to translate the instruction at 0x… ; arm_LDM_usr)");
+  jit_->HaltExecution(Dynarmic::HaltReason::UserDefined1);
+  ir.SetTerm(Dynarmic::IR::Term::CheckHalt{Dynarmic::IR::Term::ReturnToDispatch{}});
+  return false;
+}
+```
+
+Before and after, same binary minus the hook, on the SM-X710: `--interpret-probe jit` went from
+`assertion failed: false / Interpret should never be emitted / libc++abi: terminating`, **rc=134**, to
+`reason=5 (Unimplemented) steps=0` , **rc=0**, naming the pc and the translator body. One veto covers both
+hosts, because `PreCodeReadHook` lives in `translate_arm.cpp` which every back end shares — so the
+x86_64 emulator lane's variant of the bug (the callback firing into Tier I at an unchanged pc, livelocking)
+is pre-empted by the same lines.
+
+Three details in that order are load-bearing and none is guesswork:
+
+- **`CheckHalt` wrapping `ReturnToDispatch`, not the dispatch terminal alone.** Returning to dispatch on an
+  unmodified pc re-translates the same instruction — that is exactly the hang Tier I had, rebuilt on the
+  other tier. The halt flag is what makes emitted code leave instead of arriving back here. This was the
+  §Step 20 risk of "turn a loud abort into a silent skip", and it is why the fix waited for its own pass.
+- **`steps == 0` is the assertion that makes that safe.** A veto that let the instruction be skipped would
+  still report a clean stop with guest state advanced past it. The lane now requires zero executed steps
+  from both tiers, so "refused" cannot quietly mean "executed then refused".
+- **`SetPending` before the halt**, because it is first-write-wins and the halt provokes further callbacks
+  (`ExceptionRaised` among them) that would otherwise get to name the reason.
+
+**The masks are dynarmic's own pattern strings, and reading them taught two things.** They are copied
+verbatim from `decoder/arm.inc` into a `constexpr` conversion (`MakeForm`) rather than transcribed by hand
+into `(mask, value)` hex pairs — a misplaced bit in that transcription either vetoes a legal instruction
+forever or lets a declined one reach the abort, and neither is a build failure, so the conversion is done
+by the compiler from the same literal and a `static_assert` on the 32-character length turns a truncated
+paste into an error.
+
+Then the new assertion caught a mistake that was mine, in the sequence it was supposed to prove:
+`ldmdb r0, {r4, r5, pc}^` was labelled `arm_LDM_eret`, and dynarmic says `arm_LDM_usr`. Its
+`decoder/arm.h:45-47` sorts by `count_ones` of the **mask**, not of the value bits, and those two patterns
+both pin six bits — so they tie, `arm.inc` declaration order decides, and `arm_LDM_usr` wins any encoding
+where both match. Adding the writeback bit is what separates them, which is why row 2 is now
+`ldm r0!, {r4, r5, pc}^` (`0xe8f08030`, from the assembler): an encoding where exactly one pattern
+matches, so the name is forced rather than inferred. Worth stating plainly, because it bounds what the
+diagnostic can claim: **which of the six bodies an instruction "was" is not observable from the embedder
+side at all** — every one of them ends in the same `Term::Interpret` — so the body in a refusal message is
+an inference from this table, and the lane restricts itself to the encodings where the inference has one
+answer.
+
+**Over-fire control:** an ordinary ARM `mov r0, #42` + `bx lr` (assembler-verified, not recalled) must still
+execute to 42 on both tiers, so what the lane proves is six refusals at six addresses rather than a veto
+over the ARM-state translator. The real check on that is the rest of the suite, every lane of which
+translates and runs real ARMv7 code through the hook on every instruction. C05 is now **298 checks** (from
+267); the six bodies are asserted individually named, and the count of *distinct* bodies named is asserted
+to be six, so "the lane covers `docs/32` §7's enumeration" is a checked fact rather than a sentence.
+
+`docs/20` §9 item 14 closes; `docs/10` §5 consequence 3's **[OPEN]** is resolved by it.
+
+
 
 ## Standing environment facts (so they are not re-derived)
 

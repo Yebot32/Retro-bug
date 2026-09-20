@@ -31,6 +31,7 @@
 #include <cstring>
 #include <fstream>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -852,26 +853,42 @@ void unmapped_code_faults_in_both_tiers() {
  * writeback, and the banked `^` goes **after** the register list in LLVM's syntax, which is not where
  * the ARM manual's pseudocode suggests to look for it.
  *
- * Tier J is not run here on purpose. On an ARM64 host its handling of this terminal is
- * `ASSERT_FALSE("Interpret should never be emitted.")`, and mcl's `ASSERT` is not `NDEBUG`-gated, so it
- * reaches `std::terminate`: a suite that dies is not a suite that failed. `--interpret-probe <tier>`
- * exercises one tier at a time for that measurement, and exits before any other lane runs.
+ * Tier J used to be excluded from this lane, because on an ARM64 host its handling of the terminal is
+ * `ASSERT_FALSE("Interpret should never be emitted.")` and mcl's `ASSERT` is not `NDEBUG`-gated, so
+ * running it terminated the process and a suite that dies is not a suite that failed. `docs/30` §Step 20
+ * measured that (SIGABRT, rc=134) and §Step 21 vetoes the six encodings before the back end can be
+ * asked, which is why both tiers are asserted here. `--interpret-probe <tier>` remains for re-deriving
+ * the host-level behaviour from scratch.
  */
 struct Declined {
   std::uint32_t encoding;
   const char* asm_text;
+  const char* body;  ///< the translator dynarmic should name, by its own specificity rule
 };
 constexpr Declined kDeclined[] = {
-    {0xe8d0'0030u, "ldmia r0, {r4, r5}^"},   // arm_LDM_usr
-    {0xe950'8030u, "ldmdb r0, {r4, r5, pc}^"},  // arm_LDM_eret — the one §5 of docs/32 omitted
-    {0xe940'0006u, "stmdb r0, {r1, r2}^"},   // arm_STM_usr
-    {0xf102'001fu, "cps #0x1f"},             // arm_CPS
-    {0xf108'0040u, "cpsie f"},               // arm_CPS, the enable/disable form
-    {0xf8b0'0a00u, "rfeia r0!"},             // arm_RFE
-    {0xf96d'0504u, "srsdb sp!, #4"},         // arm_SRS
+    {0xe8d0'0030u, "ldm r0, {r4, r5}^", "arm_LDM_usr"},
+    // Writeback as well as R15 in the list. That combination is what makes this row reach
+    // `arm_LDM_eret` and nothing else: `arm_LDM_usr` asks for bit 21 (W) to be clear, so the two
+    // patterns are disjoint here, and only `arm_LDM_eret` matches. The first draft used
+    // `ldmdb r0, {r4, r5, pc}^` (0xe9508030) and expected `arm_LDM_eret` — the assertion below failed
+    // it, because that encoding matches both patterns and dynarmic's `count_ones` ranking ties at six
+    // mask bits, so its `arm.inc` declaration order leaves `arm_LDM_usr` first. Which body a
+    // declined instruction "was" is not observable from the embedder side — every one of them ends in
+    // the same `Term::Interpret` — so an encoding has to be chosen where only one answer exists.
+    {0xe8f0'8030u, "ldm r0!, {r4, r5, pc}^", "arm_LDM_eret"},
+    {0xe940'0006u, "stmdb r0, {r1, r2}^", "arm_STM_usr"},
+    {0xf102'001fu, "cps #0x1f", "arm_CPS"},
+    {0xf108'0040u, "cpsie f", "arm_CPS"},
+    {0xf8b0'0a00u, "rfeia r0!", "arm_RFE"},
+    {0xf96d'0504u, "srsdb sp!, #4", "arm_SRS"},
 };
 
-/// Map one page of guest memory holding `kDeclined` and return its address, or 0 on failure.
+/// Mapped just past the declined encodings. A veto wide enough to catch these would take the whole
+/// suite down, so the cheapest control is an ordinary ARM instruction that has to still run.
+constexpr std::uint32_t kLegalArmPair[] = {0xe3a0'002au,  // mov r0, #42
+                                           0xe12f'ff1eu};  // bx lr
+
+/// Map one page of guest memory holding `kDeclined` and `kLegalArmPair`, or 0 on failure.
 exec::GuestAddr PlantDeclined(Rig& rig) {
   constexpr exec::GuestAddr kPage = 0x0180'0000u;
   std::string err;
@@ -888,6 +905,13 @@ exec::GuestAddr PlantDeclined(Rig& rig) {
       return 0;
     }
   }
+  for (unsigned i = 0; i < 2; ++i) {
+    if (!rig.mem->Write(kPage + 0x80 + i * 4, &kLegalArmPair[i], 4)) {
+      ++checks;
+      fail("could not write the legal control pair", __LINE__, "");
+      return 0;
+    }
+  }
   return kPage;
 }
 
@@ -897,26 +921,72 @@ void declined_instructions_refuse_by_name() {
   const exec::GuestAddr page = PlantDeclined(rig);
   if (page == 0) return;
 
+  // A small budget, because one of the regressions this guards is a livelock rather than a crash:
+  // following `Term::Interpret` as a control edge re-translates the same pc forever, and 100k steps
+  // says so in milliseconds instead of after four million.
+  constexpr unsigned kBudget = 100'000;
+  std::set<std::string> named_bodies;
+
   for (unsigned i = 0; i < sizeof kDeclined / sizeof kDeclined[0]; ++i) {
     const exec::GuestAddr where = page + i * 4;
-    exec::MachineState s = EntryState(where, 0, 0, /*thumb=*/false);
-    // A small budget, because the regression this guards is a livelock rather than a crash: without
-    // the refusal this returns `Budget` after burning the lot, and 100k steps says so in milliseconds
-    // instead of after four million.
-    const exec::RunResult r = rig.interp->Run(s, 100'000);
     const std::string want_pc = Hex(where);
-    CHECK_CTX(r.reason == exec::StopReason::Unimplemented,
+
+    exec::MachineState si = EntryState(where, 0, 0, /*thumb=*/false);
+    const exec::RunResult ri = rig.interp->Run(si, kBudget);
+    CHECK_CTX(ri.reason == exec::StopReason::Unimplemented,
               std::string{kDeclined[i].asm_text} + " on Tier I: reason=" +
-                  std::to_string(static_cast<int>(r.reason)) + " steps=" +
-                  std::to_string(r.instructions_executed) + " detail=" + r.detail);
-    // The *named* part matters as much as the refusal: an "unimplemented" that cannot say which
+                  std::to_string(static_cast<int>(ri.reason)) + " steps=" +
+                  std::to_string(ri.instructions_executed) + " detail=" + ri.detail);
+    exec::MachineState sj = EntryState(where, 0, 0, /*thumb=*/false);
+    const exec::RunResult rj = rig.jit->Run(sj, kBudget);
+    CHECK_CTX(rj.reason == exec::StopReason::Unimplemented,
+              std::string{kDeclined[i].asm_text} + " on Tier J: reason=" +
+                  std::to_string(static_cast<int>(rj.reason)) + " steps=" +
+                  std::to_string(rj.instructions_executed) + " detail=" + rj.detail);
+    // Both tiers name the instruction and its address, because a refusal that cannot say which
     // instruction is the one a reader cannot act on.
-    CHECK_CTX(r.detail.find("declined to translate") != std::string::npos &&
-                  r.detail.find(want_pc) != std::string::npos,
-              std::string{kDeclined[i].asm_text} +
-                  " refused without naming the instruction and its pc 0x" + want_pc +
-                  ": " + r.detail);
-    std::fprintf(stderr, "[declined] %-26s -> %s\n", kDeclined[i].asm_text, r.detail.c_str());
+    const std::pair<const char*, const exec::RunResult&> both[] = {{"I", ri}, {"J", rj}};
+    for (const auto& [which, r] : both) {
+      CHECK_CTX(r.detail.find("declined to translate") != std::string::npos &&
+                    r.detail.find(want_pc) != std::string::npos,
+                std::string{kDeclined[i].asm_text} + " refused on Tier " + which +
+                    " without naming the instruction and its pc 0x" + want_pc + ": " + r.detail);
+    }
+    // **The load-bearing one.** A veto that instead let the instruction be *skipped* would report a
+    // clean stop with guest state advanced past it — a silent wrong answer dressed as a refusal, and
+    // strictly worse than the abort this replaced. Zero steps says nothing executed.
+    CHECK_CTX(ri.instructions_executed == 0 && rj.instructions_executed == 0,
+              std::string{kDeclined[i].asm_text} + " ran " +
+                  std::to_string(ri.instructions_executed) + " Tier I and " +
+                  std::to_string(rj.instructions_executed) +
+                  " Tier J steps before refusing; a refused instruction must not also be executed");
+    // Tier J names the translator body it vetoed; checking it against dynarmic's own specificity rule
+    // is what turns "these seven encodings cover all six bodies" from prose into a checked fact.
+    CHECK_CTX(rj.detail.find(kDeclined[i].body) != std::string::npos,
+              std::string{kDeclined[i].asm_text} + " was vetoed as something other than " +
+                  kDeclined[i].body + ": " + rj.detail);
+    named_bodies.insert(kDeclined[i].body);
+    std::fprintf(stderr, "[declined] %-26s I: %s\n%*s J: %s\n", kDeclined[i].asm_text,
+                 ri.detail.c_str(), 27, "", rj.detail.c_str());
+  }
+
+  // The enumeration in `docs/32` §7 is six bodies. If the lane only ever reaches five of them, the
+  // sixth is untested and the sentence "all six are refused" would be about the table, not the tests.
+  CHECK_CTX(named_bodies.size() == 6,
+            "the seven encodings named " + std::to_string(named_bodies.size()) +
+                " distinct translator bodies; docs/32 §7 enumerates six");
+
+  // Control: an ordinary ARM `mov`+`bx lr` still executes on both tiers, so what the loop above proves
+  // is a refusal at six addresses rather than a veto over the whole ARM-state translator.
+  const std::pair<const char*, exec::Executor*> engines[] = {
+      {"I", rig.interp.get()}, {"J", rig.jit.get()}};
+  for (const auto& [which, engine] : engines) {
+    exec::MachineState s = EntryState(page + 0x80, 0, 0, /*thumb=*/false);
+    const exec::RunResult r = engine->Run(s, kBudget);
+    CHECK_CTX(r.reason == exec::StopReason::Returned && s.r[0] == 42,
+              std::string{"the legal ARM control pair on Tier "} + which + ": reason=" +
+                  std::to_string(static_cast<int>(r.reason)) + " r0=" + std::to_string(s.r[0]) +
+                  " detail=" + r.detail);
   }
 }
 

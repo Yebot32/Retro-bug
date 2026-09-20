@@ -11,8 +11,12 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <utility>
+
+#include "dynarmic/frontend/A32/a32_ir_emitter.h"
+#include "dynarmic/ir/terminal.h"
 
 #include "rb/exec/interp.h"
 #include "rb/isa/front_end.h"
@@ -81,6 +85,76 @@ const char* ExceptionName(Dynarmic::A32::Exception e) {
   }
   return "unknown exception";
 }
+
+/// Lowercase hex, no prefix — the same shape `interp.cpp` uses, so a refusal from either tier prints an
+/// address a reader can compare across the two without converting it.
+std::string Hex(std::uint32_t v) {
+  char buf[9];
+  std::snprintf(buf, sizeof(buf), "%x", v);
+  return buf;
+}
+
+/**
+ * The six ARM-state encodings whose translators end in `InterpretThisInstruction()`, written as the
+ * pattern strings Dynarmic's own decoder uses.
+ *
+ * Copied verbatim from `frontend/A32/decoder/arm.inc` rather than transcribed into hex `(mask, value)`
+ * pairs, because that conversion is exactly the kind of work that produces a plausible wrong answer: one
+ * bit misplaced here either vetoes a legal instruction forever or lets a declined one reach the back-end
+ * abort, and neither outcome shows up as a failing build. `MakeForm` performs the conversion at compile
+ * time from the same literal, and the length `static_assert` is what turns a truncated copy-paste into a
+ * compiler error instead of a narrow mask.
+ *
+ * All six are ARM state (`arm_*`), which is why the veto below can skip Thumb outright.
+ */
+struct DeclinedForm {
+  std::uint32_t mask;
+  std::uint32_t value;
+  unsigned ones;  ///< bits set in `mask`, which is how Dynarmic ranks decoder specificity
+  const char* body;
+};
+
+constexpr unsigned OnesOf(std::uint32_t m) {
+  unsigned n = 0;
+  for (; m; m &= m - 1) ++n;
+  return n;
+}
+
+template <std::size_t N>
+constexpr DeclinedForm MakeForm(const char (&pattern)[N], const char* body) {
+  static_assert(N - 1 == 32, "a Dynarmic decoder pattern is 32 characters of 0/1/-");
+  std::uint32_t mask = 0, value = 0;
+  for (unsigned i = 0; i < 32; ++i) {
+    const char c = pattern[i];
+    if (c == '-') continue;
+    mask |= 1u << (31 - i);
+    if (c == '1') value |= 1u << (31 - i);
+  }
+  return {mask, value, OnesOf(mask), body};
+}
+
+/**
+ * Verbatim from `decoder/arm.inc`. The order here is *not* what decides which body a message names:
+ * `decoder/arm.h:45-47` stable-sorts dynarmic's table by `count_ones` of each **mask** — not of the
+ * value bits — and first match wins, so the loop in `PreCodeReadHook` applies the same rule (more mask
+ * bits first, ties keeping `arm.inc` order).
+ *
+ * That distinction is not pedantry: `arm_LDM_usr` and `arm_LDM_eret` both pin six mask bits, so they
+ * tie and `arm_LDM_usr` is reached first for any encoding where both match. Concretely,
+ * `ldmdb r0, {r4, r5, pc}^` is `arm_LDM_usr` as far as dynarmic is concerned, and only adding the
+ * writeback bit separates the two. Which body a declined instruction "was" is not observable from the
+ * embedder side either way — all six end in the same `Term::Interpret` — so the name below is an
+ * inference from this table, and the C05 lane pins it down by using only encodings where exactly one
+ * pattern matches.
+ */
+constexpr DeclinedForm kDeclinedForms[] = {
+    MakeForm("----100--101--------------------", "arm_LDM_usr"),
+    MakeForm("----100--1-1----1---------------", "arm_LDM_eret"),
+    MakeForm("----100--100--------------------", "arm_STM_usr"),
+    MakeForm("111100010000---00000000---0-----", "arm_CPS"),
+    MakeForm("1111100--0-1----0000101000000000", "arm_RFE"),
+    MakeForm("1111100--1-0110100000101000-----", "arm_SRS"),
+};
 
 }  // namespace
 
@@ -392,11 +466,61 @@ std::uint64_t JitExecutor::GetTicksRemaining() {
   return executed_ >= budget_ ? 0 : budget_ - executed_;
 }
 
+bool JitExecutor::PreCodeReadHook(bool is_thumb, GuestAddr pc, Dynarmic::A32::IREmitter& ir) {
+  /**
+   * The ARM64 back end cannot represent `Term::Interpret`, so the six declined encodings have to be
+   * stopped before the translator reaches it — see `docs/30` §Step 20a for the SIGABRT this replaces.
+   *
+   * Three details are load-bearing, and the order among them is not interchangeable:
+   *
+   *   - `SetPending` before the halt, because it is first-write-wins and the halt provokes further
+   *     callbacks (`ExceptionRaised` among them) that would otherwise get to name the reason.
+   *   - `CheckHalt` *around* `ReturnToDispatch`, not the dispatch terminal alone: returning to dispatch
+   *     on an unmodified pc re-translates the same instruction, which is precisely the hang Tier I had.
+   *     The halt flag is what makes the emitted code leave instead of arriving back here.
+   *   - A failed word read returns true rather than vetoing, so an unmapped or non-executable fetch keeps
+   *     reporting itself through `MemoryReadCode`/`NoExecuteFault` instead of being relabelled here.
+   *
+   * The message keeps Tier I's wording and pc base so the differential can compare the two tiers'
+   * accounts of the same instruction directly; the translator's own function name is added, because the
+   * one thing a reader needs next is which of the six this was.
+   */
+  if (is_thumb) return true;  // all six are `arm_*` bodies
+  std::uint32_t word = 0;
+  if (!memory_.Read(pc, &word, 4)) return true;
+  const DeclinedForm* match = nullptr;
+  for (const auto& form : kDeclinedForms) {
+    if ((word & form.mask) != form.value) continue;
+    // Most ones in the mask wins, which is dynarmic's own ranking; ties keep table order, as its stable
+    // sort does. Naming the wrong body would not change the refusal, but it would put a wrong function
+    // name in a log someone is about to debug from.
+    if (match == nullptr || form.ones > match->ones) match = &form;
+  }
+  if (match != nullptr) {
+    SetPending(Pending::Unimplemented,
+               std::string{"the A32 front end declined to translate the instruction at 0x"} +
+                   Hex(pc) + " (banked-register or privileged load/store; " + match->body + ")");
+    jit_->HaltExecution(Dynarmic::HaltReason::UserDefined1);
+    ir.SetTerm(Dynarmic::IR::Term::CheckHalt{Dynarmic::IR::Term::ReturnToDispatch{}});
+    return false;
+  }
+  return true;
+}
+
 void JitExecutor::InterpreterFallback(GuestAddr pc, std::size_t num_instructions) {
   /**
-   * Dynarmic has no interpreter. Its `Term::Interpret` terminal hands the problem to the embedder
-   * (`docs/30` §Step 6c), which is why Tier I exists on the JIT path as well as where no JIT is
-   * allowed, and why this is a *correctness* path rather than a performance one.
+   * Dynarmic has no interpreter of its own, and on the host we ship on it has no hand-back either:
+   * `Term::Interpret` reaches `UserCallbacks::InterpreterFallback` **only** in the x64 back end, while
+   * the AArch64 one answers it with `ASSERT_FALSE` and terminates the process (`docs/30` §Step 20a). So
+   * this function is dead code on ARM64 — kept because it is correct, because the same class of embedder
+   * on an x64 host does reach it, and because `PreCodeReadHook` above is what makes it unnecessary here
+   * rather than the reverse. It is *not* why Tier I exists: Tier I is the `execmem`-denied fallback and
+   * the differential oracle, and stands on its own.
+   *
+   * Two hosts, one veto: `PreCodeReadHook` lives in `translate_arm.cpp`, which every back end shares, so
+   * the same six lines also pre-empt the x86_64 emulator lane's version of this failure — there the
+   * callback does fire, and it used to re-enter Tier I at the same pc with no progress. The arm64 host
+   * aborts and the x64 host hangs; both are now a refusal that names the instruction.
    *
    * The contract is exact: "execute exactly num_instructions starting from PC". So each iteration
    * advances one real encoding's worth of PC — measured in bytes with the Thumb-32 test above, not by a

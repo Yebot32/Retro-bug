@@ -96,6 +96,21 @@ class JitExecutor : public Executor, public Dynarmic::A32::UserCallbacks {
   void AddTicks(std::uint64_t ticks) override;
   std::uint64_t GetTicksRemaining() override;
 
+  /**
+   * Vetoes the six ARM-state instructions Dynarmic declines to translate, before it can ask for them.
+   *
+   * Their translators end in `InterpretThisInstruction()`, and on an ARM64 host the resulting
+   * `IR::Term::Interpret` is not a hand-back to Tier I: the AArch64 back end answers it with
+   * `ASSERT_FALSE("Interpret should never be emitted.")`, which is not `NDEBUG`-gated, so the process
+   * dies inside `Run()`. Measured, and the enumeration is `docs/32` §7; see `docs/30` §Step 20a.
+   *
+   * This is the one place that stop can be turned into a reason, because the hook is called before the
+   * word is decoded and the embedder — here, explicitly — owns the block terminal when it declines to
+   * translate. Returns false to preclude, after asking for a halt and setting `CheckHalt`, which is what
+   * makes the emitted code observe the stop rather than run on past the instruction.
+   */
+  bool PreCodeReadHook(bool is_thumb, GuestAddr pc, Dynarmic::A32::IREmitter& ir) override;
+
  private:
   void SyncIn(const MachineState& state);
   void SyncOut(MachineState& state);

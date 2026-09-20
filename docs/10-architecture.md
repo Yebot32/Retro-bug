@@ -209,13 +209,15 @@ Two consequences that are easy to miss and are therefore decided here:
    is worse than the old one: "nowhere to go" was a design gap, whereas this is an uncatchable process abort on
    the shipping tier, reachable from hand-written assembly in an app's `.so` (`docs/32` §7.1). Two consequences
    follow. (i) Tier I is **not** Tier J's safety net on arm64 — the tiers are independent, which is how `docs/30`
-   §Step 19's measurements read them and why the differential lane is a comparison rather than a fallback chain.
+   §Step 20's measurements read them and why the differential lane is a comparison rather than a fallback chain.
    Tier I stays required for consequence 2 and as the correctness oracle that produced every FPSCR/ASIMD
    correction in this project. (ii) A veto seam does exist, and unlike the block-event hooks `docs/30` §Step 18
    looked for it is on the JIT path: `JitExecutor` *is* a `Dynarmic::A32::UserCallbacks`, which derives from
    `TranslateCallbacks`, so `PreCodeReadHook` can refuse those six encodings before translation and end the block
-   as a halt instead of letting the back end assert. Converting abort→halt must not become abort→*continue*, so it
-   is C02 work with its own test, not a clause here (**[OPEN]**).
+   as a halt instead of letting the back end assert. Converting abort→halt must not become abort→*continue*,
+   so it got its own assertion rather than riding in on the measurement: **done**, `docs/30` §Step 21, with
+   `PreCodeReadHook` vetoing the six patterns and the lane requiring zero executed steps from both tiers so
+   a refusal cannot mean "skipped it and carried on" (same binary minus the hook: rc=134 → rc=0).
 
 ---
 

@@ -861,8 +861,9 @@ Progress and the findings that change this plan are tracked in
     and `VectorBroadcast64` is reached only through `VMOV (immediate)` whose `.i64` form permits 0 and
     all-ones. The still-unimplemented vector groups are floating-point (`FPVectorAdd` and friends —
     `vadd.f32` refuses), the widening/narrowing and saturating forms, register shifts, and table lookups.
-14. **`Term::Interpret` must stop aborting the process on an ARM64 host. [OPEN]** `30` §Step 20a, and it
-    corrects §5 AD-2 consequence 3. Six ARM-state bodies (`arm_LDM_usr`, `arm_LDM_eret`, `arm_STM_usr`,
+14. **`Term::Interpret` no longer aborts the process on an ARM64 host — Done** (`30` §Step 21). What
+    follows is the finding as it was measured; the paragraph after it is the fix that closed it.
+    It corrects §5 AD-2 consequence 3. Six ARM-state bodies (`arm_LDM_usr`, `arm_LDM_eret`, `arm_STM_usr`,
     `arm_CPS`, `arm_RFE`, `arm_SRS`) end in `InterpretThisInstruction()`; on the AArch64 back end that
     terminal is `ASSERT_FALSE("Interpret should never be emitted.")`, mcl's `ASSERT` is not `NDEBUG`-gated,
     and it was **measured on the SM-X710**: `--interpret-probe jit` dies with SIGABRT, rc=134, inside
@@ -888,6 +889,22 @@ Progress and the findings that change this plan are tracked in
     same pc, which is the §Step 20 hang on the other tier. `Run` then maps the `HaltReason` to
     `StopReason::Unimplemented` carrying the pc, and the existing `--interpret-probe jit` becomes an
     assertion instead of a measurement.
+    **Built, `30` §Step 21.** Exactly that, in `JitExecutor::PreCodeReadHook`, with the six patterns copied
+    verbatim out of `decoder/arm.inc` into a `constexpr` conversion rather than transcribed to hex by hand.
+    Same binary minus the hook, on the SM-X710: `rc=134` → `rc=0` with `reason=Unimplemented` naming the pc
+    and the body, and **`steps == 0` asserted on both tiers**, which is what stops "refused" from quietly
+    meaning "skipped it and carried on". Because the hook is in `translate_arm.cpp`, which every back end
+    shares, the one veto also pre-empts the x86_64 emulator lane's variant of the bug. No over-fire: the
+    lane carries an ordinary ARM `mov`+`bx lr` control that must still execute to 42, and every other suite
+    in the 1,402-check engine lane now runs real ARMv7 code through the hook on every instruction, on both
+    devices.
+    **One limit on the new diagnostic, stated because it is not observable:** which of the six bodies an
+    instruction "was" cannot be seen from the embedder side — all six end in the same terminal — so the
+    name in the message is an inference from this table. dynarmic ranks matches by `count_ones` of the
+    **mask**, and `arm_LDM_usr` and `arm_LDM_eret` both pin six bits, so they tie and declaration order
+    decides; the first draft of the lane asserted the wrong one for an encoding where both matched, the new
+    assertion caught it, and the row is now `ldm r0!, {r4, r5, pc}^` — an encoding where exactly one pattern
+    matches, so the name is forced rather than inferred.
 
 Sequencing constraint the owner should know before M1: **M1's end-to-end acceptance step cannot be verified on this
 machine at all** — it needs a physical 64-bit-only arm64 phone. Everything in §9 and most of M1's code can be written
