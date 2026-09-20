@@ -60,9 +60,22 @@
 
 namespace {
 
-/// The 42-returning arm64 stub, and the guard that lets a faulting execute be *reported* rather than
-/// being the last thing the probe ever says.
+/// The 42-returning stub, for whichever ABI this is built as.
+///
+/// The 32-bit form matters more than it looks: this library is normally built arm64 because RetroBug's
+/// *host* is arm64, but the page being executed here is the page a *guest* would run, and `armeabi-v7a`
+/// is the only thing that answers U-13 for the shape the code cache actually has to serve.
+#if defined(__arm__)
+/// `movs r0, #42 ; bx lr`, Thumb encoding.
+constexpr unsigned char kReturn42[] = {0x2Au, 0x20u, 0x70u, 0x47u};
+/// A Thumb function is entered with bit 0 of the target set — `BX` reads it, and a caller that passes an
+/// even address asks for ARM code, which in a Thumb-only page is an illegal instruction rather than a
+/// wrong answer. Every other bit of the address is the address.
+constexpr std::uintptr_t kThumbTag = 1u;
+#else
 constexpr std::uint32_t kReturn42[2] = {0x5280'0540u, 0xD65F'03C0u}; /* mov w0, #42 ; ret */
+constexpr std::uintptr_t kThumbTag = 0u;
+#endif
 
 volatile sig_atomic_t faulted = 0;
 // Bionic declares these in the global namespace only — `std::setjmp` does not exist here even in a C++
@@ -101,7 +114,8 @@ bool TryExecute(const char* label, void* at) {
   bool good = false;
   if (setjmp(fault_jmp) == 0) {
     faulted = 0;
-    const auto fn = reinterpret_cast<int (*)()>(reinterpret_cast<std::uintptr_t>(at));
+    const auto fn = reinterpret_cast<int (*)()>(
+        reinterpret_cast<std::uintptr_t>(at) | kThumbTag);
     const int got = fn();
     good = (got == 42);
     if (!good) ++total_faulted;
@@ -129,17 +143,23 @@ void Report(const char* label, void* p) {
   }
 }
 
-constexpr std::uintptr_t kGiB = 1024u * 1024u * 1024u;
-
 /**
  * What occupies the low 4 GiB of this process, and how large the biggest free gap there is.
  *
+ * Defined only for the arm64 build, along with the ladder that calls it. A 32-bit process's entire
+ * address space *is* the 4 GiB, so "can a contiguous 4 GiB window be had below 4 GiB" answers itself, and
+ * every comparison against `1 << 32` in here is tautologically true or false once addresses are 32 bits —
+ * including the one that would print "guest 32-bit space reachable without a bias: all of it". A
+ * tautology in a measurement file is worse than a gap, because it reads like a result.
  * `MAP_FIXED_NOREPLACE` answered `EEXIST` at 0x10000, 0x10000000 and 0x80000000 — for sizes down to 512
  * MiB — in the app domain, while the same binary from `adb shell` reserved at 0x10000 without trouble.
  * `EEXIST` says "something is there"; it does not say what, how much, or whether it can be given back.
  * Those are precisely the questions the identity-vs-biased address model turns on, so this reads
  * `/proc/self/maps` and answers them directly instead of leaving the inference to a reader.
  */
+#if !defined(__arm__)
+constexpr std::uint64_t kGiB = 1024ull * 1024ull * 1024ull;
+
 void DescribeLowAddressSpace() {
   FILE* f = std::fopen("/proc/self/maps", "re");
   if (f == nullptr) {
@@ -147,22 +167,26 @@ void DescribeLowAddressSpace() {
     return;
   }
   char line[512];
-  std::uintptr_t lowest = ~0ull, highest_low_end = 0, count_low = 0, bytes_low = 0;
-  std::uintptr_t prev_end = 0;
-  std::uintptr_t biggest_gap = 0, biggest_gap_at = 0;
+  // `unsigned long long` throughout rather than `uintptr_t`: the map file's addresses are 64-bit on an
+  // arm64 kernel, and in the 32-bit build of this file `uintptr_t` is 32 bits, which makes every
+  // comparison against `1 << 32` below either always true or always false. Parsing with `%lx` into a
+  // 32-bit `unsigned long` on arm would also have been a format mismatch.
+  unsigned long long lowest = ~0ull, highest_low_end = 0, count_low = 0, bytes_low = 0;
+  unsigned long long prev_end = 0;
+  unsigned long long biggest_gap = 0, biggest_gap_at = 0;
   bool first = true;
   int printed = 0;
   /** Considers one candidate gap; kept as a lambda so the space *before* the first mapping and
    * *after* the last is measured the same way as the spaces between them. Leaving the tail out is how
    * a 324 MiB window below 4 GiB would go uncounted, and the tail is a real candidate. */
-  auto consider = [&](std::uintptr_t from, std::uintptr_t to) {
+  auto consider = [&](unsigned long long from, unsigned long long to) {
     if (to <= from || to - from <= biggest_gap) return;
     biggest_gap = to - from;
     biggest_gap_at = from;
   };
   while (std::fgets(line, sizeof line, f) != nullptr) {
-    std::uintptr_t start = 0, end = 0;
-    if (std::sscanf(line, "%lx-%lx", &start, &end) != 2) continue;
+    unsigned long long start = 0, end = 0;
+    if (std::sscanf(line, "%llx-%llx", &start, &end) != 2) continue;
     if (start >= (1ull << 32)) continue;  // only the identity-addressable half matters here
     ++count_low;
     bytes_low += (end > (1ull << 32) ? (1ull << 32) : end) - start;
@@ -213,12 +237,12 @@ void DescribeLowAddressSpace() {
   LOG("  %-50s %llu MiB at 0x%lx", "largest free gap below 4 GiB",
       static_cast<unsigned long long>(biggest_gap / (1024u * 1024u)),
       static_cast<unsigned long>(biggest_gap_at));
-  const std::uintptr_t gap = biggest_gap_at;
-  const std::uintptr_t gap_size = biggest_gap;
+  const unsigned long long gap = biggest_gap_at;
+  const unsigned long long gap_size = biggest_gap;
   if (gap != 0 && gap_size >= (16u << 20)) {
     // Bounded by the gap the search found, not by 4 GiB: bisecting past it would just rediscover that
     // the neighbouring mapping is there, and the answer would be the same but slower.
-    std::uintptr_t lo = 0, hi = gap_size > (4u * kGiB) ? (4u * kGiB) : gap_size;
+    unsigned long long lo = 0, hi = gap_size > (4ull * kGiB) ? (4ull * kGiB) : gap_size;
     // Logged every step, because the first version of this loop never terminated: `mid` is rounded down
     // to a 16 MiB granularity, so once `hi - lo` got below 32 MiB the rounded midpoint equalled `lo`,
     // the map succeeded, `lo` did not move, and the `while` condition stayed true forever. The process
@@ -226,9 +250,9 @@ void DescribeLowAddressSpace() {
     // hang to debug on a device nobody is watching. A search must break when a step stops making
     // progress, not merely be capped.
     for (int step = 0; lo + (16u << 20) < hi; ++step) {
-      const std::uintptr_t mid = (lo + hi) / 2u & ~((16u << 20) - 1u);
+      const unsigned long long mid = (lo + hi) / 2ull & ~((16ull << 20) - 1ull);
       if (mid == lo || mid == hi) break;
-      void* t = mmap(reinterpret_cast<void*>(gap), mid, PROT_NONE,
+      void* t = mmap(reinterpret_cast<void*>(static_cast<std::uintptr_t>(gap)), mid, PROT_NONE,
                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
       if (t == MAP_FAILED) {
         hi = mid;
@@ -239,18 +263,178 @@ void DescribeLowAddressSpace() {
         munmap(t, mid);
       }
     }
-    LOG("  %-50s %llu MiB at 0x%lx", "largest contiguous low window obtainable",
-        static_cast<unsigned long long>(lo / (1024u * 1024u)), static_cast<unsigned long>(gap));
+    LOG("  %-50s %llu MiB at 0x%llx", "largest contiguous low window obtainable",
+        static_cast<unsigned long long>(lo / (1024u * 1024u)), gap);
     LOG("  %-50s %s", "guest 32-bit space reachable without a bias",
-        lo >= (4u * kGiB) ? "all of it" : "PARTIAL — biased guest base is required on Android");
+        lo >= (4ull * kGiB) ? "all of it" : "PARTIAL — biased guest base is required on Android");
   }
 }
+#endif  // !__arm__: see the note on the definition above
 
 int MemfdCreate(const char* name, unsigned flags) {
   return static_cast<int>(syscall(SYS_memfd_create, name, flags));
 }
 
 }  // namespace
+
+#if defined(__arm__)
+/**
+ * One ARM EABI syscall, raw, with the seccomp answer classified rather than assumed.
+ *
+ * `docs/20` §C07 requires `execve`/`fork` to be refused "with the same errno a real 32-bit Android would
+ * give", and `docs/10` §10.2 lists them as seccomp denials — which, depending on the filter's action, is
+ * either an errno (`SECCOMP_RET_ERRNO`) or a signal that kills the process (`SECCOMP_RET_TRAP`). Those
+ * are different implementations, and which one applies is not readable from a document: from `adb shell`
+ * the answer is "neither, nothing is filtered here", because the shell is not the app domain. So each
+ * number is asked once inside the app, with the same `SIGSYS`/`SIGILL`/`SIGSEGV` guard the execute tests
+ * use, and the row says which of the three happened.
+ *
+ * One bit of that answer generalises: if a *single* number traps, the filter's action is TRAP and the
+ * others trap too — which is why the list avoids anything that would fork, exec or attach. `ptrace` is
+ * asked last and with an invalid request, because `PTRACE_TRACEME` succeeds in some domains and a
+ * traced process behaves differently from that point on. `fork`/`vfork`/`clone` are not asked at all: a
+ * child inherits this process's stdio buffer and prints the whole probe twice, which is a confusing
+ * artifact to leave in a measurement file when the same conclusion is available from calls that cannot
+ * have side effects.
+ */
+std::uint32_t RawEabi(unsigned nr, std::uint32_t a0, std::uint32_t a1, std::uint32_t a2,
+                      std::uint32_t* r0out, std::uint32_t* cpsrout) {
+  register unsigned r0 asm("r0") = a0;
+  register unsigned r1 asm("r1") = a1;
+  register unsigned r2 asm("r2") = a2;
+  register unsigned r3 asm("r3") = 0;
+  unsigned cpsr = 0;
+  // r7 is the syscall-number register in ARM EABI *and* clang's Thumb frame pointer, so it cannot be an
+  // asm operand at all — "write to reserved register". Parked and restored inside the block, which is
+  // also what the guest's own stubs do. `svc` and `mrs` stay in one statement because the carry bit is
+  // one of the things being reported and any C expression between them can set flags.
+  //
+  // r2 is passed explicitly rather than left alone because the first version of the `execve` case did
+  // exactly that, and the garbage it held was an invalid `envp` pointer: `execve` then answered EFAULT
+  // about the argument instead of the EACCES answer about the *file* that the whole test was there to
+  // get. A syscall probe that leaks a register into the call it is measuring is not measuring the call.
+  asm volatile("mov r3, r7\n"
+               "mov r7, %[nr]\n"
+               "svc #0\n"
+               "mrs %[c], cpsr\n"
+               "mov r7, r3\n"
+               : "+r"(r0), "+r"(r3), [c] "=r"(cpsr)
+               : [nr] "r"(nr), "r"(r1), "r"(r2)
+               : "memory", "cc");
+  *r0out = r0;
+  *cpsrout = cpsr;
+  return 0;
+}
+
+void AskGuest(std::uint32_t nr, std::uint32_t a0, std::uint32_t a1, const char* label,
+              std::uint32_t a2 = 0) {
+  struct sigaction sa{};
+  sa.sa_handler = OnFault;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = SA_NODEFER;  // the mask is restored by the longjmp below, so no double-block wedge
+  struct sigaction old_sys{}, old_segv{}, old_ill{};
+  sigaction(SIGSYS, &sa, &old_sys);
+  sigaction(SIGSEGV, &sa, &old_segv);
+  sigaction(SIGILL, &sa, &old_ill);
+  if (setjmp(fault_jmp) == 0) {
+    faulted = 0;
+    std::uint32_t r0 = 0, cpsr = 0;
+    RawEabi(nr, a0, a1, a2, &r0, &cpsr);
+    LOG("  r7=0x%05x %-26s RETURNED r0=0x%08x (%d) C=%d", nr, label, r0, static_cast<int>(r0),
+        (cpsr >> 29) & 1);
+  } else {
+    LOG("  r7=0x%05x %-26s TRAPPED signal=%d%s", nr, label, static_cast<int>(faulted),
+        faulted == SIGSYS ? "  <- SECCOMP_RET_TRAP: there is no errno for this refusal" : "");
+  }
+  sigaction(SIGSYS, &old_sys, nullptr);
+  sigaction(SIGSEGV, &old_segv, nullptr);
+  sigaction(SIGILL, &old_ill, nullptr);
+}
+
+void GuestAbiProbe() {
+  LOG("=== the guest ABI itself, inside the app domain ===");
+  // TLS, the way a 32-bit bionic reads it. `docs/30` §Step 5g measured this from an adb-shell 32-bit
+  // process; the app domain can refuse the coprocessor read even where the shell allows it, and `tp` is
+  // the one MachineState field no tier can currently supply (no Coprocessor hook, §Step 9) — so this line
+  // says whether that gap is worth closing before any bionic-dependent guest is loaded.
+  if (setjmp(fault_jmp) == 0) {
+    faulted = 0;
+    unsigned tls = 0;
+    asm volatile("mrc p15, 0, %0, c13, c0, 3\n" : "=r"(tls));
+    LOG("  tpidrurw via mrc = 0x%08x %s", tls, tls ? "" : "(zero)");
+  } else {
+    LOG("  tpidrurw via mrc TRAPPED signal=%d — the emulator would have to supply it",
+        static_cast<int>(faulted));
+  }
+  // ARM EABI numbers, from tests/corpus/syscall-abi-arm.txt. getpid is the control: if *it* traps, the
+  // filter is not the app policy and the rest of the block is uninterpretable.
+  LOG("  --- seccomp action per syscall (control first)");
+  AskGuest(20, 0, 0, "getpid (control)");
+  AskGuest(6, 0x7fffffffu, 0, "close(bad fd)");
+  AskGuest(322, 0x7fffffffu, 0, "openat(bad dirfd)");
+  AskGuest(337, 0, 0, "unshare(0)");
+  AskGuest(375, -1u, 0, "setns(-1)");
+  AskGuest(386, 0, 0, "bpf");
+  AskGuest(388, 0, 0, "userfaultfd");
+  AskGuest(377, 0, 0, "process_vm_writev");
+  AskGuest(11, 0, 0, "execve(NULL)");
+  AskGuest(136, 0xffffffffu, 0, "personality(invalid)");
+  AskGuest(26, 0x1000u, 0, "ptrace(invalid request, last)");
+
+  // ---- the one denial question that has a *policy* answer, asked with a path that exists.
+  //
+  // `execve(NULL)` above returns -EFAULT, which is an argument-checking answer and tells RetroBug
+  // nothing: `docs/20` §C07 wants "the same errno a real 32-bit Android would give", and what a real one
+  // gives for a *real* file the app owns is the SELinux answer — `app_data_file:file execute_no_trans`
+  // is neverallowed for a targetSdk >= 29 app, so the expected value is EACCES(13). Saying "expected" is
+  // not measuring it, and the measurement needs a path the app can write, which is why the package name
+  // is read out of `/proc/self/cmdline` rather than hardcoded: it is this process's own directory, and a
+  // copy of a shared object is not an executable file anyway, so the worst case is `ENOEXEC` — which
+  // would itself be the finding, because it would mean the execute check had already been passed.
+  char pkg[128] = {};
+  if (FILE* c = std::fopen("/proc/self/cmdline", "re")) {
+    if (std::fread(pkg, 1, sizeof pkg - 1, c) <= 0) pkg[0] = '\0';
+    std::fclose(c);
+  }
+  pkg[sizeof pkg - 1] = '\0';
+  char path[256] = {};
+  if (pkg[0] != '\0' && std::strchr(pkg, '/') == nullptr) {
+    std::snprintf(path, sizeof path, "/data/user/0/%s/cache/rb-exec-probe.so", pkg);
+    bool wrote = false;
+    if (FILE* w = std::fopen(path, "we")) {
+      std::fputs("not an executable, and not meant to be one\n", w);
+      wrote = std::fclose(w) == 0;
+    }
+    if (!wrote) {
+      // The cache directory may not exist yet on a first run; make it and try once more, then say so
+      // rather than reporting a denial that never happened.
+      char dir[256] = {};
+      std::snprintf(dir, sizeof dir, "/data/user/0/%s/cache", pkg);
+      if (mkdir(dir, 0700) == 0 || errno == EEXIST) {
+        if (FILE* w = std::fopen(path, "we")) {
+          std::fputs("not an executable, and not meant to be one\n", w);
+          wrote = std::fclose(w) == 0;
+        }
+      }
+    }
+    if (wrote) {
+      const char* empty[1] = {nullptr};
+      AskGuest(11, static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(path)),
+               static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(empty)),
+               "execve(own file) <- the policy answer",
+               static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(empty)));
+      LOG("    (an ok/ENOEXEC here would mean the execute permission check was passed: report it)");
+      remove(path);
+    } else {
+      LOG("  execve(own file): SKIPPED, could not write %s (errno=%d %s) — the policy answer is "
+          "unmeasured, not assumed",
+          path, errno, std::strerror(errno));
+    }
+  } else {
+    LOG("  execve(own file): SKIPPED, no usable package name in /proc/self/cmdline");
+  }
+}
+#endif  // __arm__
 
 extern "C" JNIEXPORT void JNICALL Java_com_retrobug_probe_ProbeActivity_runNative(JNIEnv*, jobject) {
   LOG("=== app-domain probe: what a JIT may do inside an installed app ===");
@@ -281,6 +465,18 @@ extern "C" JNIEXPORT void JNICALL Java_com_retrobug_probe_ProbeActivity_runNativ
       static_cast<int>(getpid()), u.nodename);
   LOG("machine=%s release=%s pagesize=%ld at_pagesz=%lu", u.machine, u.release,
       sysconf(_SC_PAGESIZE), getauxval(AT_PAGESZ));
+  // Which ABI this binary was built as, said out loud. The same source answers U-13 for the host ABI and
+  // for the guest ABI, and a results file that does not say which one produced it cannot be used for
+  // either — `uname -m` says aarch64 in a 32-bit process running under an arm64 kernel.
+  LOG("build_abi=%s",
+#if defined(__arm__)
+      "armeabi-v7a (thumb-2, the guest ISA)"
+#elif defined(__aarch64__)
+      "arm64-v8a (the host ISA)"
+#else
+      "other"
+#endif
+  );
 
   // ---- the executable-memory battery
   void* p = mmap(nullptr, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
@@ -360,6 +556,15 @@ extern "C" JNIEXPORT void JNICALL Java_com_retrobug_probe_ProbeActivity_runNativ
   // that said `0x10000` — a 4 GiB reservation *somewhere in the 47-bit space*, which is not the thing
   // AD-6 needs. So the tests that matter insist, with `MAP_FIXED_NOREPLACE` (Linux 4.17+; this kernel
   // reports 5.15): either the window lands exactly there, or it is a denial.
+#if defined(__arm__)
+  // The whole low-4 GiB battery is skipped in the 32-bit build, and it is worth saying why in the output
+  // rather than leaving an absence to be interpreted. U-2 asks whether a *64-bit* process can get a
+  // contiguous 4 GiB window out of the low end of its address space; a 32-bit process has no address
+  // space above 4 GiB to ask about, and `4 * kGiB` in a `size_t` on that build is not a 4 GiB request but
+  // an arithmetic overflow to zero. The answers that *are* about this build — may a 32-bit app process
+  // execute memory it mapped, and what does the app's seccomp filter do to an ARM EABI `svc` — are below.
+  LOG("--- low 4 GiB reservation: skipped, see the arm64 report (U-2 is a 64-bit-host question)");
+#else
   LOG("--- the low 4 GiB, described before it is tested");
   DescribeLowAddressSpace();
 
@@ -420,6 +625,12 @@ extern "C" JNIEXPORT void JNICALL Java_com_retrobug_probe_ProbeActivity_runNativ
       munmap(r, s.len);
     }
   }
+
+#endif  // the low-4 GiB battery, arm64-only
+
+#if defined(__arm__)
+  GuestAbiProbe();
+#endif
 
   LOG("=== totals: ok=%llu denied=%llu faulted_or_wrong=%llu ===", static_cast<unsigned long long>(total_ok),
       static_cast<unsigned long long>(total_denied), static_cast<unsigned long long>(total_faulted));

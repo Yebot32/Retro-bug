@@ -222,6 +222,28 @@ void the_names_are_what_the_headers_call_them() {
   CHECK_CTX(sc::kArmNrBase == 0xf0000u, std::to_string(sc::kArmNrBase));
 }
 
+/// The one refusal whose errno is a measurement rather than a default. `execve` from an app process on
+/// real Android answers `EACCES` because SELinux will not let an app execute a file in its own data
+/// directory, and the distinction the guest sees matters: `ENOSYS` says "RetroBug has no handler", which
+/// an app developer reads as an emulator gap and reports as one, while `EACCES` says "the platform
+/// refuses this everywhere", which is the truth and sends them to the right document.
+void execve_is_denied_with_the_measured_errno() {
+  sc::Monitor m;
+  exec::MachineState s = State(sc::nr::kExecve);
+  const sc::Outcome o = m.Handle(s, 0);
+  CHECK_CTX(o.verdict == sc::Verdict::kDenied, sc::Name(o.verdict));
+  CHECK_CTX(o.r0 == -13, std::to_string(o.r0) + " want -13 (EACCES), measured on SM-X710");
+  CHECK_CTX(s.r[0] == static_cast<std::uint32_t>(-13), "the refusal never reached the guest");
+  CHECK_CTX(o.detail.find("EACCES") != std::string::npos, o.detail);
+  CHECK_CTX(o.detail.find("measured") != std::string::npos, o.detail);
+  // And the default for an unmeasured number is still ENOSYS, so the two cases stay distinguishable —
+  // a policy that answers everything the same way is not measuring anything.
+  exec::MachineState u = State(0x0fff0u);
+  const sc::Outcome d = m.Handle(u, 0);
+  CHECK_CTX(d.verdict == sc::Verdict::kUnsupported, sc::Name(d.verdict));
+  CHECK_CTX(d.r0 == -38, std::to_string(d.r0));
+}
+
 // ------------------------------------------------------- the C17 hook
 
 void the_policy_is_echoed_not_assumed() {
@@ -280,6 +302,7 @@ int main() {
   guest_numbers_are_not_host_numbers();
   the_error_range_is_the_discriminator();
   the_names_are_what_the_headers_call_them();
+  execve_is_denied_with_the_measured_errno();
   the_policy_is_echoed_not_assumed();
   the_tally_is_per_monitor_and_in_first_seen_order();
 

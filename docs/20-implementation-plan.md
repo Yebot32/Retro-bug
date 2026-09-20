@@ -303,6 +303,16 @@ re-discovered:
   ("requested: no forwarding; active: nothing reached the host kernel — the guest asked for getpid x1,
   openat x2"). Refusals name the component that is missing (`openat … C10 lands first`), because a bare
   ENOSYS in a support report describes a gap nobody can triage.
+- **`execve`'s refusal errno is measured, and it is not `ENOSYS`.** A 32-bit app process on the SM-X710
+  executing a file it had written itself into its own `cache/` got **`-EACCES`** (`30` §Step 12), which is
+  the SELinux `app_data_file:file execute_no_trans` rule. The monitor answers `Verdict::kDenied` with 13
+  and names the measurement in the `detail`, because `ENOSYS` and `EACCES` tell an app developer two
+  different stories and only one of them is true here. `fork`/`vfork`/`clone` remain `ENOSYS`-refused and
+  say they are unmeasured: asking them means forking inside the probe, and the last time that was done the
+  child's inherited stdio buffer duplicated half the report.
+- **The seccomp half of this component's premise changed.** `docs/10` §10.2's filter is now justified by
+  measurement rather than by policy reading: none of twelve ARM EABI numbers trapped in the app domain on
+  this build, so nothing the platform does can be relied on to refuse anything for a guest.
 - **`__ARM_NR_set_tls`/`get_tls` work now**, through `MachineState::tp`. That is the syscall half of TLS;
   the `mrc` read of `tpidrurw` still needs the `Coprocessor` hook (`30` §Step 9), and guests from different
   toolchain generations use one path or the other, so both have to exist before "TLS works" is true.

@@ -1336,19 +1336,110 @@ Twelve lanes, 1,022 engine checks, 0 failures on the Tab S9; dynarmic's 200,561 
 * `/proc/self`-shaped identities, `clock_gettime`, and anything with an errno that is *policy* rather
   than a gap — the monitor answers `ENOSYS` for everything it has no handler for, which is a decision the
   launcher can revisit per app but is not one this component should make up.
-* `docs/20` §C07's review focus still has no answer for `execve`/`fork`: what `docs/10` §10.2 actually
-  lists for them is a **seccomp denial**, which is `SIGSYS`, not an errno — so "refused with the same errno
-  a real 32-bit Android would give" may be a question with no errno as its answer. Tried, and the attempt
-  is why the question is still open: from `adb shell` the domain is `u:r:shell`, whose filter is not the
-  app's, and nothing trapped (`execve` → `-EFAULT` having reached the kernel body, `ptrace(0,…)` → 0,
-  `bpf` → `-EACCES`, `userfaultfd` → `-EPERM`, `fork` → a child process, whose inherited stdio buffer then
-  duplicated the output — see the standing facts). An AArch64 process cannot ask the ARM EABI numbers at
-  all, so the measurement needs a **32-bit library inside `tests/appdomain`**, which is the one place both
-  the domain and the ABI are right. Until then the monitor says `ENOSYS` and its `detail` says the answer
-  is unmeasured. `[UNVERIFIED]`
+* `docs/20` §C07's review focus is answered for `execve` (`EACCES`, measured in the app domain in §Step 12,
+  and implemented as the monitor's first `kDenied` row) and still open for `fork`/`vfork`/`clone`, which
+  cannot be asked without forking inside the probe. What §Step 12 did establish about them is the
+  precondition: the app-domain filter does not `SECCOMP_RET_TRAP` these calls at all, so "the platform
+  refuses it" is not available as an answer and every refusal has to be RetroBug's own. `[UNVERIFIED]` for
+  the three calls, `[1L]` for the filter.
 * Signals, `clone`/`futex`, and the 32-bit `ucontext` layout: untouched.
 * Forwarding rows, and with them the first thing that must not be able to escape C10's resolver. One
   monitor per guest instance, which is already how `Monitor` is written.
+
+## Step 12 — the probe runs in the guest's own ABI, and answers three questions the arm64 build could not
+
+`tests/appdomain` grew a second build of the same source: `armeabi-v7a`, installed as its own APK after the
+arm64 round, reporting into `results-<model>-armv7.txt`. The reason is that three of this project's open
+questions are not questions about an arm64 process pretending to be a guest — they are questions about what
+a 32-bit ARM process may do:
+
+```
+# device=SM-X710 … apk=probe32.apk
+java: … nativeLibraryDir=/data/app/…/com.retrobug.probe-…/lib/arm …
+selinux=u:r:untrusted_app:s0:c8,c258,c512,c768
+build_abi=armeabi-v7a (thumb-2, the guest ISA)
+```
+
+`nativeLibraryDir` and `build_abi` are two independent statements that the process was 32-bit, which
+matters because `uname -m` says `armv8l` for exactly that process — the machine string describes the
+kernel, not the personality. Without those two lines a report cannot be attributed to an ABI at all.
+
+**U-13, for the guest ABI: answered, positively, on the SM-X710.** Anon `RWX` executes; `RW` →
+`mprotect(RX)` executes; `RX` → `RW` succeeds; a `memfd` executes via `RW`→`RX` **and** mapped `RWX`
+directly — every one of them by calling a real `movs r0, #42 ; bx lr` and getting 42 back, under the same
+`SIGSEGV`/`SIGBUS`/`SIGILL`/`SIGSYS` guard. So the code-cache permission answer does not depend on which
+ABI the process is running, at least where both answers are available; the arm64 report is otherwise
+byte-identical apart from uids, pids, SELinux categories and mapping addresses. **One device, one OEM
+family** still — the OnePlus 12 cannot answer this half at all, which is the standing fact that makes the
+pair worth having: `abilist32` empty means the 32-bit round is *skipped and says so*, not silently passed.
+
+**`tpidrurw` is readable from an app in the guest ABI**: `mrc p15, 0, rX, c13, c0, 3` returned
+`0xef484be0` inside `u:r:untrusted_app`. `[1L]` That closes one of Step 5g's questions — the read is not
+blocked in the domain RetroBug's guests will be in — and sharpens the other: the platform permits the
+guest to read *its own* TLS, so the emulator's job is not to allow it, it is to **supply a value that
+means something**, which is the `Coprocessor` hook `30` §Step 9 says is missing. `tp` travelling on
+`MachineState` already makes `__ARM_NR_get_tls`/`set_tls` work; the `mrc` path is the remaining half.
+
+**Seccomp: the app filter did not trap *any* of the twelve numbers asked, and several demonstrably reached
+the kernel body.** `[1L]` SM-X710, Android 16, `u:r:untrusted_app`:
+
+| r7 | call | result | why that is the kernel's answer, not a filter's |
+|---|---|---|---|
+| 0x14 | getpid | 2412 | control: the harness works |
+| 0x182 | bpf | `-E2BIG` | `size=0` is checked inside `__sys_bpf`; a filter would not have let it get that far |
+| 0x88 | personality | `8` | `PER_LINUX32` — the process's own personality, which only the kernel knows |
+| 0xb | execve | `-EFAULT` | argument copy, with a null filename |
+| 0x179 | process_vm_writev | `-EINVAL` | body-level argument check |
+| 0x177 | setns | `-EBADF` | fd validation happens in the syscall body |
+| all twelve | — | none trapped | no `SIGSYS` anywhere, so no `SECCOMP_RET_TRAP` for these |
+
+The consequence is for `docs/10` §10.2, which says RetroBug installs its own TSYNC'd filter "denying
+`execve`/`ptrace`/`process_vm_*`/`unshare`/`setns`/`perf_event_open`/`userfaultfd`/`bpf`/`socket` outside
+AF_UNIX" and cites AOSP's "filters only ever tighten". Both statements stand, but the measurement removes a
+third one that was never written down and would have been assumed: **the platform's app filter is not
+doing that denying on this build.** For a 32-bit app process here, those calls are available, so the
+enforcement RetroBug designs is the only enforcement there is — which is a stronger argument for the T1
+filter, not a weaker one, and it is worth saying in exactly those terms where the filter is specced.
+
+`fork`/`vfork`/`clone` are deliberately *not* in the list. They were asked in the previous step's
+shell-domain attempt, `fork` succeeded, and the child inherited the parent's unflushed stdio buffer, so
+every line printed before it appeared twice — see the standing facts. Asking a call that duplicates the
+report in order to find out whether it is blocked is a bad trade when `bpf` and `personality` answer the
+same question without side effects.
+
+**`execve` has a measured refusal errno now: `EACCES`.** The `docs/20` §C07 review focus asks for "the
+same errno a real 32-bit Android would give", and the honest answer to that has to come from a real 32-bit
+Android in the app domain, because the *interesting* part is not the syscall but the policy behind it. The
+probe writes a file into its own `cache/` (the package name read out of `/proc/self/cmdline`, so nothing is
+hardcoded), then `execve`s it with valid `argv` **and** `envp`:
+
+```
+r7=0x0000b execve(own file) <- the policy answer RETURNED r0=0xfffffff3 (-13) C=1
+```
+
+`-EACCES`, which is `app_data_file:file execute_no_trans` doing what `docs/10` §13's row says it does.
+`rb::syscall` now answers `execve` with `Verdict::kDenied` and that errno, with the measurement named in
+the `detail` — first use of `kDenied`, and the distinction the guest sees is the point: `ENOSYS` would
+tell an app developer "this emulator cannot do it", which is false, while `EACCES` tells them "Android
+will not let you do it, anywhere", which is what was measured.
+
+**Two mistakes the harness made before the device did.** The first `execve` attempt passed only two
+arguments and left `r2` holding whatever the compiler had there — an invalid `envp` pointer — so the kernel
+answered `EFAULT` about an argument instead of `EACCES` about the file, and the row looked like a policy
+answer while measuring something else. And the low-4 GiB battery, built for 64-bit addresses, compiles in
+the 32-bit build with `uintptr_t` at 32 bits, where `4u * kGiB` overflows to zero and the final test
+compares against a constant that is now smaller than every address: it would have printed **"guest 32-bit
+space reachable without a bias: all of it"**. Both are fixed by *removing* the code from that build rather
+than by making it print the right thing, because a tautology in a measurement file is worse than a gap — it
+reads like a result. The 32-bit report says what is skipped and why, in the output, next to the totals.
+
+**Still unmeasured, and the shape of each experiment:** whether the filter traps anything at all for a
+number not in that table (`ENOSYS`-vs-`SIGSYS` for one known-blocked call would settle the filter's action,
+but no such call is known yet — which is itself the finding); the same battery on Xiaomi/vivo/Huawei; the
+32-bit half on a *second* 32-bit-capable device, since there is exactly one here; and whether an app can
+read `enforce` at all (it cannot — `selinux_enforce=(unreadable)` in both reports, so "Enforcing" remains a
+`getenforce` reading from the shell domain next to an `untrusted_app` context read from inside the app,
+which is two measurements joined by an inference and is labelled that way in `docs/10` U-13).
 
 ## Standing environment facts (so they are not re-derived)
 

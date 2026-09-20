@@ -39,18 +39,28 @@ to_host() {
   if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi
 }
 
-rm -rf "$OUT"; mkdir -p "$OUT/classes" "$OUT/dex" "$OUT/stage/lib/arm64-v8a"
+rm -rf "$OUT"; mkdir -p "$OUT/classes" "$OUT/dex" "$OUT/stage/lib/arm64-v8a" "$OUT/stage32/lib/armeabi-v7a"
 
-# ---- native: arm64 only. The probe measures what an arm64 RetroBug process may do; a 32-bit build
-# would answer for a domain that is itself the fallback case, and the stub it executes is arm64 code.
+# ---- native: both ABIs, from one source.
+#
+# arm64 is the host ABI and the one RetroBug runs *as*. armeabi-v7a is the ABI RetroBug runs *code in*,
+# and it answers questions the arm64 build cannot: whether the app-domain seccomp filter traps an ARM
+# EABI `svc` (an AArch64 process has no such numbers — different register, different table), and whether
+# a 32-bit app process may execute memory it mapped, which is U-13 for the shape the code cache actually
+# has to serve.
 #
 # `-static-libstdc++` because the default shared STL makes the library unloadable: the log said
 # `dlopen failed: library "libc++_shared.so" not found: needed by librbprobe.so`, which is a link-time
 # choice presenting as a runtime failure in a completely different place.
-"$TC/bin/clang++.exe" --target=aarch64-none-linux-android26 --sysroot="$TC/sysroot" \
-  -O2 -fPIC -shared -std=gnu++20 -static-libstdc++ -o "$OUT/stage/lib/arm64-v8a/librbprobe.so" \
-  "$SRC/probe.cpp" -llog 2>&1 | sed 's/^/clang: /'
-[ -f "$OUT/stage/lib/arm64-v8a/librbprobe.so" ] || { echo "native build failed" >&2; exit 1; }
+for spec in "aarch64-none-linux-android26||arm64-v8a|$OUT/stage" \
+            "armv7-none-linux-androideabi26|-mthumb -mfloat-abi=softfp -mfpu=neon|armeabi-v7a|$OUT/stage32"; do
+  IFS='|' read -r triple extra abidir stagedir <<< "$spec"
+  # shellcheck disable=SC2086  # $extra is deliberately two flags or empty
+  "$TC/bin/clang++.exe" --target="$triple" --sysroot="$TC/sysroot" \
+    -O2 -fPIC -shared -std=gnu++20 -static-libstdc++ $extra \
+    -o "$stagedir/lib/$abidir/librbprobe.so" "$SRC/probe.cpp" -llog 2>&1 | sed 's/^/clang: /'
+  [ -f "$stagedir/lib/$abidir/librbprobe.so" ] || { echo "native build failed for $abidir" >&2; exit 1; }
+done
 
 # ---- java -> dex
 JAVAC=javac; D8="$BT/d8.bat"; AAPT2="$BT/aapt2.exe"; ZIPALIGN="$BT/zipalign.exe"; SIGNER="$BT/apksigner.bat"
@@ -63,12 +73,22 @@ command -v "$JAVAC" >/dev/null || { echo "no javac on PATH" >&2; exit 1; }
 find "$OUT/classes" -name '*.class' -print0 |
   xargs -0 "$D8" --lib "$(to_host "$AJ")" --min-api 26 --output "$(to_host "$OUT/dex")" >/dev/null
 
-# ---- package: aapt2 produces the manifest+resources, jar adds the dex and the lib
-"$AAPT2" link -I "$(to_host "$AJ")" --manifest "$(to_host "$SRC/AndroidManifest.xml")" \
-  --min-sdk-version 26 --target-sdk-version 34 --version-code 1 --version-name 1 \
-  -o "$(to_host "$OUT/base.apk")"
-cp "$OUT/dex/classes.dex" "$OUT/stage/"
-(cd "$OUT/stage" && jar -uf "$(to_host "$OUT/base.apk")" classes.dex lib)
+# ---- package: aapt2 produces the manifest+resources, jar adds the dex and the lib. Two APKs from one
+# dex, differing only in which ABIs directory they carry — same package name, installed one at a time,
+# because an APK with *both* lib dirs would be picked as arm64 by an arm64 device and the 32-bit half
+# would never run. Installing separately is what makes "this process was 32-bit" a fact rather than a
+# hope, and the `build_abi=` line in the output is what proves it afterwards.
+package_apk() {  # $1 stage dir, $2 output apk
+  "$AAPT2" link -I "$(to_host "$AJ")" --manifest "$(to_host "$SRC/AndroidManifest.xml")" \
+    --min-sdk-version 26 --target-sdk-version 34 --version-code 1 --version-name 1 \
+    -o "$(to_host "$OUT/base-$2")"
+  cp "$OUT/dex/classes.dex" "$1/"
+  (cd "$1" && jar -uf "$(to_host "$OUT/base-$2")" classes.dex lib)
+  "$ZIPALIGN" -f -p 4 "$(to_host "$OUT/base-$2")" "$(to_host "$OUT/aligned-$2")"
+  "$SIGNER" sign --ks "$(to_host "$KS")" --ks-pass pass:android --key-pass pass:android \
+    --out "$(to_host "$OUT/$2")" "$(to_host "$OUT/aligned-$2")" >/dev/null
+  "$SIGNER" verify "$(to_host "$OUT/$2")" && echo "apksigner verify $2: clean"
+}
 
 # The keystore lives outside $OUT on purpose: $OUT is deleted at the start of every run, and a key that
 # is regenerated each time makes the *next* install fail with
@@ -78,10 +98,8 @@ KS="$ROOT/build/appdomain-probe-key.keystore"
 [ -f "$KS" ] || keytool -genkeypair -noprompt -keystore "$(to_host "$KS")" -storepass android \
   -keypass android -alias probe -dname "CN=RetroBug Probe, OU=none, O=none, L=none, S=none, C=US" \
   -keyalg RSA -keysize 2048 -validity 3650 >/dev/null 2>&1
-"$ZIPALIGN" -f -p 4 "$(to_host "$OUT/base.apk")" "$(to_host "$OUT/probe-aligned.apk")"
-"$SIGNER" sign --ks "$(to_host "$KS")" --ks-pass pass:android --key-pass pass:android \
-  --out "$(to_host "$OUT/probe.apk")" "$(to_host "$OUT/probe-aligned.apk")" >/dev/null
-"$SIGNER" verify "$(to_host "$OUT/probe.apk")" && echo "apksigner verify: clean"
+package_apk "$OUT/stage" probe.apk
+package_apk "$OUT/stage32" probe32.apk
 
 # ---- devices
 mapfile -t DEVICES < <("$ADB" devices | awk 'NR>1 && $2=="device"{print $1}')
@@ -96,36 +114,35 @@ status=0
 #
 # The bound has to live *inside* the function: `timeout 30 adb shell ...` fails with "No such file or
 # directory", because `timeout` execs a program and `adb` here is a shell function.
-for serial in "${DEVICES[@]}"; do
-  adb() { local secs="$1"; shift; MSYS_NO_PATHCONV=1 timeout "$secs" "$ADB" -s "$serial" "$@"; }
-  model="$(adb 30 shell getprop ro.product.model | tr -d '\r')"
-  echo "=== $serial ($model) ==="
-  if ! adb 180 install -r -g "$(to_host "$OUT/probe.apk")" >/dev/null 2>&1; then
-    # The one recoverable install failure is a leftover package signed by a key that no longer exists
-    # (an earlier run of this script, before the keystore was moved out of the wiped directory). Say so
-    # rather than reporting a device fault, and retry once after removing it.
-    echo "  install failed on $model; uninstalling the stale package and retrying once" >&2
-    adb 60 uninstall "$PKG" >/dev/null 2>&1 || true
-    if ! adb 180 install -r -g "$(to_host "$OUT/probe.apk")" 2>&1 | tail -2; then
-      echo "  install failed twice on $model — if this device shows an install-confirmation dialog," >&2
-      echo "  it needs a tap that no one is in front of. Skipping it, not failing the run." >&2
-      status=1
-      continue
-    fi
+run_apk() {  # $1 serial, $2 apk basename (probe.apk | probe32.apk), $3 report suffix, $4 abilist32
+  local serial="$1" apk="$2" suffix="$3" abilist32="$4"
+  if [ "$apk" = "probe32.apk" ] && [ -z "$abilist32" ]; then
+    echo "  skip 32-bit round: this device advertises no 32-bit ABI (abilist32 empty)"
+    return 0
+  fi
+  # Uninstall rather than `-r`: the package manager caches which ABI a package was installed as, so a
+  # device that already has the arm64 build would keep running it after a "reinstall" of the 32-bit one,
+  # and the report would say armeabi-v7a while the process was arm64. Removal makes the choice real.
+  adb 60 uninstall "$PKG" >/dev/null 2>&1 || true
+  if ! adb 180 install -r -g "$(to_host "$OUT/$apk")" >/dev/null 2>&1; then
+    echo "  install failed for $apk on $serial — if this device shows an install-confirmation dialog," >&2
+    echo "  it needs a tap that no one is in front of. Skipping it, not failing the run." >&2
+    return 1
   fi
   adb 30 logcat -c >/dev/null 2>&1 || true
   adb 30 shell am force-stop "$PKG" >/dev/null 2>&1 || true
   adb 60 shell am start -n "$PKG/.ProbeActivity" >/dev/null
-  # The probe executes code it wrote, so a denial can take the process down: wait for the completion
-  # line rather than for a fixed sleep, and keep whatever was printed either way.
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
+  # The probe executes code it wrote and issues syscalls it may be killed for, so a denial can take the
+  # process down: wait for the completion line rather than for a fixed sleep, and keep whatever was
+  # printed either way.
+  for _ in 1 2 3 4 5 6 7 8 9 10 12 14; do
     sleep 1
-    if adb 20 logcat -d -s rbprobe:I 2>/dev/null | grep -q "probe complete"; then break; fi
+    if adb 20 logcat -d -s rbprobe:I 2>/dev/null | grep -q "probe complete\|totals:"; then break; fi
   done
-  report="$SRC/results-$model.txt"
+  local report="$SRC/results-$model$suffix.txt"
   {
-    echo "# device=$model serial=$serial"
-    echo "# release=$(adb 20 shell getprop ro.build.version.release | tr -d '\r') sdk=$(adb 20 shell getprop ro.build.version.sdk | tr -d '\r') abilist32='$(adb 20 shell getprop ro.product.cpu.abilist32 | tr -d '\r')'"
+    echo "# device=$model serial=$serial apk=$apk"
+    echo "# release=$(adb 20 shell getprop ro.build.version.release | tr -d '\r') sdk=$(adb 20 shell getprop ro.build.version.sdk | tr -d '\r') abilist32='$abilist32'"
     echo "# ran $(date -Is) with apk built from $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo 'uncommitted tree')"
     adb 30 logcat -d -s rbprobe:I | sed -n '/rbprobe/p' | sed 's/^.*rbprobe *: //'
     echo "# seccomp/avc denials visible to the shell domain, if any:"
@@ -133,5 +150,16 @@ for serial in "${DEVICES[@]}"; do
   } > "$report" 2>&1
   cat "$report"
   adb 30 shell am force-stop "$PKG" >/dev/null 2>&1 || true
+}
+
+for serial in "${DEVICES[@]}"; do
+  adb() { local secs="$1"; shift; MSYS_NO_PATHCONV=1 timeout "$secs" "$ADB" -s "$serial" "$@"; }
+  model="$(adb 30 shell getprop ro.product.model | tr -d '\r')"
+  abilist32="$(adb 30 shell getprop ro.product.cpu.abilist32 | tr -d '\r')"
+  echo "=== $serial ($model) abilist32='$abilist32' ==="
+  # The two ABIs are two processes, two reports. Order is arm64 first because it is the case that has
+  # been measured before, so a regression in the older numbers is visible against the committed file.
+  run_apk "$serial" probe.apk "" "$abilist32" || status=1
+  run_apk "$serial" probe32.apk "-armv7" "$abilist32" || status=1
 done
 exit $status

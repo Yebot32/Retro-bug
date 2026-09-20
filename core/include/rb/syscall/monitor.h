@@ -76,6 +76,13 @@ constexpr std::uint32_t kFutex = 240;
 constexpr std::uint32_t kExitGroup = 248;
 constexpr std::uint32_t kClockGettime = 263;
 constexpr std::uint32_t kOpenat = 322;
+/// Measured refusal, not a gap: an `armeabi-v7a` process in `u:r:untrusted_app` on an SM-X710 asked for
+/// `execve` of a file the app itself had just written into its own cache directory and got **EACCES**
+/// (`tests/appdomain/results-SM-X710-armv7.txt`). That is the SELinux `app_data_file:file
+/// execute_no_trans` rule, and it is the answer `docs/20` §C07's "refused with the same errno a real
+/// 32-bit Android would give" was asking for — as opposed to `ENOSYS`, which is what a missing handler
+/// says and would have been a wrong answer that looks right.
+constexpr std::uint32_t kExecve = 11;
 constexpr std::uint32_t kCacheFlush = kArmNrBase + 2;
 constexpr std::uint32_t kSetTls = kArmNrBase + 5;
 constexpr std::uint32_t kGetTls = kArmNrBase + 6;

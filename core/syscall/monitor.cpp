@@ -42,6 +42,7 @@ const char* Name(std::uint32_t number) {
     case nr::kExitGroup: return "exit_group";
     case nr::kClockGettime: return "clock_gettime";
     case nr::kOpenat: return "openat";
+    case nr::kExecve: return "execve";
     case nr::kCacheFlush: return "arm_cacheflush";
     case nr::kSetTls: return "arm_set_tls";
     case nr::kGetTls: return "arm_get_tls";
@@ -150,6 +151,16 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
       return Outcome::Refused(err::kEnosys, Describe(f.number) +
                                                " is not forwarded: this build has an empty allowlist and "
                                                "no handler yet");
+
+    case nr::kExecve:
+      // The one refusal with a *measured* errno rather than a default. A real 32-bit app process asking
+      // for its own file gets EACCES from SELinux, so that is what a guest gets here — and the reason it
+      // is spelled out rather than left to the default is that `ENOSYS` and `EACCES` look equally
+      // plausible in a log while telling an app's developer two different stories: "this emulator cannot
+      // do it" versus "Android will not let you do it, anywhere".
+      return Outcome::Denied(err::kEacces,
+                             "execve: measured EACCES (13) from u:r:untrusted_app on SM-X710, SELinux "
+                             "app_data_file execute_no_trans; see 30 §Step 12");
 
     default:
       return Outcome::Refused(err::kEnosys, "no handler for " + Describe(f.number) +

@@ -1,24 +1,25 @@
-# device=SM-X710 serial=R52Y106BECZ
+# device=SM-X710 serial=R52Y106BECZ apk=probe.apk
 # release=16 sdk=36 abilist32='armeabi-v7a,armeabi'
-# ran 2026-09-20T02:50:53+04:00 with apk built from 83e4845
-java: release=16 sdk=36 targetSdk=34 minSdk=26 flags=0x30a9be44 nativeLibraryDir=/data/app/~~wj93ZB3Lqvpst0MOgKVPFA==/com.retrobug.probe-1lFENwnPli4o6hDqUemNLw==/lib/arm64 dataDir=/data/user/0/com.retrobug.probe
+# ran 2026-09-20T07:52:22+04:00 with apk built from c047827
+java: release=16 sdk=36 targetSdk=34 minSdk=26 flags=0x30a9be44 nativeLibraryDir=/data/app/~~EH8Rk_nLqB3LqRWvxBNcng==/com.retrobug.probe-oZSPBen83qYfSeNJ3UyjeQ==/lib/arm64 dataDir=/data/user/0/com.retrobug.probe
 java: product=samsung SM-X710 abiList=[arm64-v8a, armeabi-v7a, armeabi]
 === app-domain probe: what a JIT may do inside an installed app ===
-selinux=u:r:untrusted_app:s0:c36,c257,c512,c768
+selinux=u:r:untrusted_app:s0:c250,c257,c512,c768
 selinux_enforce=(unreadable) (1=Enforcing, 0=Permissive, empty=app cannot read it)
-uid=10292 gid=10292 pid=14144 comm=localhost
+uid=10506 gid=10506 pid=2763 comm=localhost
 machine=aarch64 release=5.15.189-android13-8-33413632-abX710XXS6EZH3 pagesize=4096 at_pagesz=4096
-mmap anon PROT_READ|WRITE|EXEC                       ok      addr=0x7dfc16f000
+build_abi=arm64-v8a (the host ISA)
+mmap anon PROT_READ|WRITE|EXEC                       ok      addr=0x7dfc16d000
   anon RWX: call the stub                            EXECUTED returned=42 ok
-mmap anon PROT_READ|WRITE (for later mprotect RX)    ok      addr=0x7dfc16f000
+mmap anon PROT_READ|WRITE (for later mprotect RX)    ok      addr=0x7dfc16d000
 mprotect RW -> RX                                    ok
   after RW->RX: call the stub                        EXECUTED returned=42 ok
 mprotect RX -> RW again (patching an existing block) ok errno=0
-memfd_create(MFD_CLOEXEC)                        ok      fd=104
-mmap memfd PROT_READ|WRITE (MAP_SHARED)              ok      addr=0x7dfc16f000
+memfd_create(MFD_CLOEXEC)                        ok      fd=102
+mmap memfd PROT_READ|WRITE (MAP_SHARED)              ok      addr=0x7dfc16d000
 mprotect memfd RW -> RX                              ok
   memfd RX: call the stub                            EXECUTED returned=42 ok
-mmap memfd PROT_READ|WRITE|EXEC (MAP_SHARED)         ok      addr=0x7dfc16f000
+mmap memfd PROT_READ|WRITE|EXEC (MAP_SHARED)         ok      addr=0x7dfc16d000
   memfd RWX: call the stub                           EXECUTED returned=42 ok
 --- the low 4 GiB, described before it is tested
   maps 02000000-22000000 rw-p
@@ -28,6 +29,7 @@ mmap memfd PROT_READ|WRITE|EXEC (MAP_SHARED)         ok      addr=0x7dfc16f000
   maps 46000000-46004000 rw-p
   maps 46004000-48004000 r--s
   maps 48004000-4a004000 r-xs
+  maps 4a004000-4a008000 rw-p
   maps 70440000-71b5c000 rw-p
   maps 71b5c000-71e90000 r--p
   maps 71e90000-72935000 r-xp
@@ -36,8 +38,7 @@ mmap memfd PROT_READ|WRITE|EXEC (MAP_SHARED)         ok      addr=0x7dfc16f000
   maps 72939000-7293c000 ---p
   maps 7293c000-72a8c000 rw-p
   maps 72a8c000-72aac000 r--p
-  maps 72aac000-72acb000 r-xp
-  low 4 GiB: 26 mappings, 1254 MiB occupied, span 0x2000000..0xebad7000
+  low 4 GiB: 27 mappings, 1254 MiB occupied, span 0x2000000..0xebad7000
   largest free gap below 4 GiB                       1872 MiB at 0x76ad4000
   largest contiguous low window obtainable           1856 MiB at 0x76ad4000
   guest 32-bit space reachable without a bias        PARTIAL — biased guest base is required on Android
@@ -62,7 +63,7 @@ mmap 1 GiB PROT_NONE at 0x10000, MAP_FIXED_NOREPLACE DENIED  errno=17 (File exis
 mmap 512 MiB PROT_NONE at 0x10000, MAP_FIXED_NOREPLACE DENIED  errno=17 (File exists)
 === totals: ok=13 denied=7 faulted_or_wrong=0 ===
 note: 'DENIED' is an answer, not a crash. The surprising outcome is an ok that cannot execute.
-load-from-writable: copied 18024 bytes to /data/user/0/com.retrobug.probe/cache/librbprobe_copy.so
+load-from-writable: copied 18200 bytes to /data/user/0/com.retrobug.probe/cache/librbprobe_copy.so
 load-from-writable: LOADED from app-writable storage
 === app-domain probe complete ===
 # seccomp/avc denials visible to the shell domain, if any:
