@@ -178,7 +178,8 @@ static void numbers() {
  * ordinary C expression between the two can set flags and destroy it. The compiler also has to be kept
  * from choosing r7/r1/r2 for its own reasons, hence the fixed register variables.
  */
-static void raw(unsigned nr, unsigned a0, unsigned a1, unsigned a2, const char* label) {
+static int raw_call(unsigned nr, unsigned a0, unsigned a1, unsigned a2, unsigned* r0out,
+                    unsigned* cpsrout) {
   register unsigned r0 asm("r0") = a0;
   register unsigned r1 asm("r1") = a1;
   register unsigned r2 asm("r2") = a2;
@@ -196,9 +197,16 @@ static void raw(unsigned nr, unsigned a0, unsigned a1, unsigned a2, const char* 
                : "+r"(r0), "+r"(r3), [c] "=r"(cpsr)
                : [nr] "r"(nr), "r"(r1), "r"(r2)
                : "memory", "cc");
+  *r0out = r0;
+  *cpsrout = cpsr;
+  return 0;
+}
+
+static void raw(unsigned nr, unsigned a0, unsigned a1, unsigned a2, const char* label) {
+  unsigned r0 = 0, cpsr = 0;
+  raw_call(nr, a0, a1, a2, &r0, &cpsr);
   const int carry = (cpsr >> 29) & 1;
-  printf("%-22s r7=0x%05x r0=0x%08x (%ld) C=%d\n", label, nr, r0,
-         (long)(int)r0, carry);
+  printf("%-22s r7=0x%05x r0=0x%08x (%ld) C=%d\n", label, nr, r0, (long)(int)r0, carry);
 }
 
 static void guest_convention(void) {
@@ -233,6 +241,26 @@ static void guest_convention(void) {
   printf("guest table for comparison: EBADF=%d ENAMETOOLONG=%d ENOSYS=%d EFAULT=%d\n", EBADF,
          ENAMETOOLONG, ENOSYS, EFAULT);
 }
+/*
+ * What is deliberately *not* measured here: what the seccomp filter denies.
+ *
+ * `docs/20` §C07 says `execve`/`fork` must be refused "with the same errno a real 32-bit Android would
+ * give", and `docs/10` §10.2 lists those same calls as seccomp denials — which is `SIGSYS`, not an errno,
+ * so the question may not have the kind of answer it asks for. A version of this file tried to settle it
+ * with a `SIGSYS` handler and one raw call per number, from here. It got an answer, and the answer was
+ * about the wrong process: run from `adb shell` the domain is `u:r:shell`, whose filter is not the app's,
+ * and *nothing trapped* — `execve` came back `-EFAULT` (it reached the kernel body), `ptrace(0, …)` came
+ * back 0 (TRACEME allowed), `bpf` `-EACCES`, `userfaultfd` `-EPERM`, and `fork` **succeeded**, which also
+ * duplicated every row after it: the child inherits the parent's unflushed stdio buffer, so a block
+ * buffered stdout under `adb shell` prints the earlier lines twice (`docs/30`'s standing facts, met a
+ * second way).
+ *
+ * So the measurement belongs in `tests/appdomain`, where the process really is `u:r:untrusted_app`, and
+ * in a 32-bit library there, because an AArch64 process has no ARM EABI numbers to ask about — its `svc`
+ * takes the number in `w8` from a different table entirely. That is task 11e, and until it is done the
+ * monitor's refusals say `ENOSYS` and say so in the `detail`, which is a gap honestly labelled rather than
+ * an errno copied from a book.
+ */
 #endif
 
 int main(void) {

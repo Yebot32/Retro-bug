@@ -1338,8 +1338,14 @@ Twelve lanes, 1,022 engine checks, 0 failures on the Tab S9; dynarmic's 200,561 
   launcher can revisit per app but is not one this component should make up.
 * `docs/20` §C07's review focus still has no answer for `execve`/`fork`: what `docs/10` §10.2 actually
   lists for them is a **seccomp denial**, which is `SIGSYS`, not an errno — so "refused with the same errno
-  a real 32-bit Android would give" may be a question with no errno as its answer. Needs the same
-  treatment as above: a handler-equipped probe that runs them and reports what comes back. `[UNVERIFIED]`
+  a real 32-bit Android would give" may be a question with no errno as its answer. Tried, and the attempt
+  is why the question is still open: from `adb shell` the domain is `u:r:shell`, whose filter is not the
+  app's, and nothing trapped (`execve` → `-EFAULT` having reached the kernel body, `ptrace(0,…)` → 0,
+  `bpf` → `-EACCES`, `userfaultfd` → `-EPERM`, `fork` → a child process, whose inherited stdio buffer then
+  duplicated the output — see the standing facts). An AArch64 process cannot ask the ARM EABI numbers at
+  all, so the measurement needs a **32-bit library inside `tests/appdomain`**, which is the one place both
+  the domain and the ABI are right. Until then the monitor says `ENOSYS` and its `detail` says the answer
+  is unmeasured. `[UNVERIFIED]`
 * Signals, `clone`/`futex`, and the 32-bit `ucontext` layout: untouched.
 * Forwarding rows, and with them the first thing that must not be able to escape C10's resolver. One
   monitor per guest instance, which is already how `Monitor` is written.
@@ -1353,7 +1359,7 @@ Twelve lanes, 1,022 engine checks, 0 failures on the Tab S9; dynarmic's 200,561 
 | `adb push` and mtimes | the destination keeps the **source** file's mtime, so two binaries pushed in one second show different timestamps. Useful for attributing a run to a device, and the reason `ls -la /data/local/tmp` can look like a stale push when it is not |
 | `adb install` on ColorOS (CPH2573) | **blocks on an on-device confirmation and never returns** — `Performing Streamed Install` is the last thing printed, with no timeout of its own. Unattended runs cannot install there; bound every device step (see `tools/app_domain_probe.sh`'s `adb()` wrapper) and say which device was skipped. `timeout` cannot wrap a shell *function*, so the bound has to live inside the wrapper |
 | Two devices attached at once | `adb` refuses any command that does not name one (`more than one device/emulator`), so every script takes `RB_SERIAL` / a serial argument and prints `model · abilist32 · sdk · page` per run. A silently-chosen device is how an arm64-only phone would end up "running" the ARMv7 lane |
-| A crashing device process loses its buffered stdout | `adb shell` pipes stdout, so it is block-buffered and `printf` output before a `SIGILL`/`abort` disappears. `setvbuf(stdout, NULL, _IONBF, 0)` in any probe that might die — without it, "crashed on line 1" and "crashed on the last line" are the same observable (this cost a cycle in Step 5g) |
+| A crashing device process loses its buffered stdout | `adb shell` pipes stdout, so it is block-buffered and `printf` output before a `SIGILL`/`abort` disappears. `setvbuf(stdout, NULL, _IONBF, 0)` in any probe that might die — without it, "crashed on line 1" and "crashed on the last line" are the same observable (this cost a cycle in Step 5g). **The same buffering lies the other way too**: a probe that calls `fork()` leaves the child holding the parent's unflushed buffer, so everything already printed appears a second time and the output looks like the harness ran twice (Step 11e found it that way) |
 | Emulator acceleration | AEHD 2.2 **installed but stoppable**: it was "usable" for two boots, then the `aehd` service was found `Stopped` and the AVD refused to start. Re-arm with an elevated `net start aehd`; check `Get-Service aehd` before trusting `-accel-check`'s "not installed" wording. AVD `Medium_Phone` exists |
 | Emulator image | `android-37.1/google_apis_playstore_ps16k/x86_64`, `abilist=x86_64,arm64-v8a`, **`abilist32=` empty** |
 | `openat2`/`io_uring`/`landlock` from an app | unavailable (outside bionic's `SYSCALLS.TXT` allowlist) — see `docs/research/05` §1.4 |
