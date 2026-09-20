@@ -17,11 +17,21 @@
  *     here, and resume. It is per-instance for the same reason everything else in the engine is: no
  *     host call, binding or stack is ever shared between two guest instances.
  *
- * The soft-float ABI is the reason both layers bother with `d[]` at all: Android's `armeabi-v7a` is
- * `-mfloat-abi=softfp`, which **passes** scalars in VFP registers and merely *computes* them in
- * software. Treating soft-float as "no VFP registers" would put a `jdouble` in core registers and be
- * wrong only for the functions that use floating point — which is every audio and geometry call in the
- * App Revival corpus.
+ * **The ABI is softfp, and that means core registers — not VFP ones.** This paragraph said the
+ * opposite until `docs/30` §Step 24, and it was confidently wrong in the way that matters: it claimed
+ * `-mfloat-abi=softfp` "passes scalars in VFP registers and merely *computes* them in software", which
+ * is a description of the *hard*-float variant. Android's `armeabi-v7a` passes and returns
+ * floating-point values in **r0-r3 / r0:r1**, and only the arithmetic uses `d[]`. Three independent
+ * checks settled it, and they are written down because the wrong version had already been believed
+ * once: the tablet's own `/system/lib/libm.so` shows `sqrt` as
+ * `vmov d16, r0, r1; vsqrt.f64; vmov r0, r1, d16`; the guest probe compiled for this project ends
+ * `vmov r0, r1, d18`; and clang **refuses** `-mfloat-abi=hard` outright for
+ * `armv7-none-linux-android26` ("unsupported option"), so there is no hard-float variant to be
+ * confused about. `d[]` is still needed for the arithmetic, and `ReturnValue` reads it for nothing.
+ *
+ * The practical consequence, stated so the next reader does not re-derive it: a `jdouble` argument
+ * occupies a core register *pair* and a `jdouble` return arrives in `r0:r1`. `PlaceArgs` still places
+ * `F64` arguments in VFP and is wrong for it — tracked as `docs/20` §9's ABI item, not silently.
  */
 #pragma once
 

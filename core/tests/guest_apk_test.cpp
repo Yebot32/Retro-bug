@@ -284,18 +284,19 @@ Rig build() {
 
   std::map<std::string, std::uint32_t> exported;
   std::size_t thumb_exports = 0;
-  for (const auto& name : rig.libm->ExportNames()) {
-    if (const auto found = rig.libm->FindExport(name)) {
-      // Recorded, not asserted. An earlier version of this loop failed the test on a Thumb-tagged
-      // export, on the unexamined assumption that libm is all ARM — and it is not: bionic mixes the
-      // two ISAs, and `docs/34` §1.2's symbol-bit-0 survey measured 863 ARM against 13 Thumb in this
-      // very archive. The count is printed because it is evidence for that claim, and because a guest
-      // linker has to handle both.
-      if (found->thumb) ++thumb_exports;
-      exported[name] = found->addr;
-    }
+  for (const auto& sym : rig.libm->exports) {
+    if (!sym.defined || !sym.is_function) continue;
+    // `Symbol::value` keeps the bit-0 Thumb tag, and that is what a GOT entry must hold: it is the
+    // callee's `st_value`, which the branch that reads it interprets as the ISA selector.
+    // `FindExport`'s `CodeAddress` splits that bit out and is the right thing to *execute* through —
+    // using it here instead was a real bug (caught by an independent review, not by this lane): every
+    // import resolved to an address with bit 0 clear, so a Thumb export would have been entered in ARM
+    // state. With the real libm it stayed invisible because the functions this probe imports are all
+    // ARM; a synthetic Thumb libm aborted the guest instead.
+    if (sym.thumb) ++thumb_exports;
+    exported[sym.name] = sym.value;
   }
-  std::fprintf(stderr, "# guest libm: %zu exports, %zu of them Thumb-tagged\n", exported.size(),
+  std::fprintf(stderr, "# guest libm: %zu exported functions, %zu of them Thumb\n", exported.size(),
                thumb_exports);
 
   loader::LoadOptions app_opts;
@@ -312,7 +313,14 @@ Rig build() {
     fail("load the APK's native library into guest memory", __LINE__, err);
     return rig;
   }
-  std::fprintf(stderr, "# app .so: base 0x%s, extent 0x%s, %zu exports, %zu imports (%zu unanswered)\n",
+  // `imports.size()` is NOT the number of symbols this library needs resolved, and printing it as if it
+  // were is how "0 imports (0 unanswered)" appeared on a library that imports three functions: the
+  // loader's `imports` vector only carries entries whose `.dynsym` type it recognises, and this probe's
+  // are `NOTYPE`. What matters is that `app_opts.resolve` was consulted and answered, so that count is
+  // printed instead.
+  std::fprintf(stderr,
+               "# app .so: base 0x%s, extent 0x%s, %zu exported, %zu dynsym imports, %zu name lookups "
+               "unanswered\n",
                Hex(rig.app->base).c_str(), Hex(rig.app->extent).c_str(), rig.app->exports.size(),
                rig.app->imports.size(), rig.unanswered);
 
