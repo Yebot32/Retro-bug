@@ -262,8 +262,9 @@ void both_tiers_agree_and_match_hardware() {
 /// `docs/32` §1 measured the demand (14,723 vector/FP instructions in bionic and libc++, `vmul.f64`
 /// 786 times, `vldr` 2,290) and §5 item 3 ranked this lane next after IT-blocks. What it did not
 /// answer is what RetroBug *does* about them, and the answer is asymmetric: Tier I implements one
-/// vector IR opcode (`VectorAdd32`) out of the ~70 the A32 front end can emit, so a `dadd` stops it
-/// with `StopReason::Unimplemented`. That is a clean refusal rather than a wrong number, which is the
+/// vector arithmetic IR opcode (`VectorAdd32`) out of the 448 `FP*`/`Vector*` names in the IR's 725-entry
+/// opcode table, so a `dadd` stops it with `StopReason::Unimplemented`. That is a clean refusal rather
+/// than a wrong number, which is the
 /// part worth having; the part worth *knowing* is which groups those are, in units of real code,
 /// before M1 discovers them by an app producing garbage on the `execmem`-denied path.
 ///

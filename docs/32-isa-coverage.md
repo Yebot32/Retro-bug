@@ -177,7 +177,8 @@ identified; correctness against a reference is not yet measured.
    Tier I's refusal is the finding with planning consequences. It stops at `FPFixedS32ToDouble` for
    scalar code and `VectorBroadcast64` for ASIMD, both with `StopReason::Unimplemented` — a named
    refusal, not a wrong number — but the extent is total: Tier I implements **one** vector IR opcode
-   (`VectorAdd32`) out of the ~70 the front end emits. So the interpreted path cannot run any
+   (`VectorAdd32`) out of the 448 `FP*`/`Vector*` names in the IR's 725-entry opcode table. So the
+   interpreted path cannot run any
    floating-point guest code at all, which reaches AD-2 (Tier I's priority was argued on
    correctness-first grounds), the `Kind::Interpreted` code-cache backend (C04's third option, i.e.
    the iOS/`execmem`-denied case where M3 has no other choice), and any T1 policy that trades

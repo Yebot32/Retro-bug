@@ -799,8 +799,8 @@ Progress and the findings that change this plan are tracked in
     item 3). 35 VFP/ASIMD rows, values captured on the SM-X710: Tier J matches hardware on all 35 — including
     `dcmp`/`vmrs` FPSCR flag semantics with ARM's less-than-sets-NV rule, `vsqrt`, `ddiv`, `fcvt` both ways,
     the callee-saved `d8-d15` traffic and eight-double softfp argument passing — and Tier I refuses all 35,
-    cleanly and by name (`FPFixedS32ToDouble`, `VectorBroadcast64`), because it implements one vector IR opcode
-    out of the ~70 the front end emits.
+    cleanly and by name (`FPFixedS32ToDouble`, `VectorBroadcast64`), because it implements one vector
+    arithmetic IR opcode out of the 448 `FP*`/`Vector*` names in the IR's 725-entry opcode table.
     **What this changes:** `Kind::Interpreted` is not a working configuration for FP code, so it is *not* a
     safe fallback for iOS (M3, where `execmem` is the open question rather than a measured grant) or for any
     T1 policy that trades `execmem` for isolation; and an app whose native `.so` uses `double` cannot run on

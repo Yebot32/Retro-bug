@@ -1620,7 +1620,8 @@ passing, NaN comparison semantics, and ASIMD `vmul.i32`/`vadd.i32` with lane ext
 real ARMv7 silicon returns for the same bytes. Including the part most likely to be subtly wrong: FPSCR's
 compare field reproduces ARM's rule that a less-than compare *also sets NV* (the row is `34 34 34 129 34`;
 `129` is that case). And the refusal is clean rather than silent: Tier I implements one vector IR opcode
-out of the ~70 the front end can emit, so it stops at the first FP instruction with the op named. That is
+out of the 448 `FP*`/`Vector*` names in the IR's 725-entry opcode table, so it stops at the first FP
+instruction with the op named. That is
 now a measured fact with consequences for `Kind::Interpreted`, recorded in `docs/20` §9 item 12.
 
 **Three ways this lane was nearly worthless, all found before it was believed.**
@@ -1667,6 +1668,15 @@ hard way; hence every row here carries hardware's number.
 - **A guest method with more than two declared parameters has no differential coverage.** That is the
   bridge's argument marshalling (C08), not the tiers', and `fp_args` only covers the case where the guest
   is its own caller. `CallGuest` with a 4-int shorty is the shape to add.
+- **The size of the hole is counted at the IR, not at the A32 front end.** 448 `FP*`/`Vector*` opcode
+  names out of 725 is `grep -c` over `ir/opcodes.inc`, which is a fact; *how many an ARMv7 block can
+  actually emit* is not, because the A32 decoder reaches them through `IR::EmitterBase` helpers shared
+  with A64 rather than by naming them, so a first grep found 20 and that number is wrong. The write-up
+  of this step originally said "~70", which was an estimate carried over from a different count in
+  memory and is corrected here rather than left standing. The experiment that would settle it: walk
+  `frontend/A32/a32_ir_emitter.cpp`'s calls into `ir/ir_emitter.cpp` and collect the opcodes reachable
+  from them. It matters because the scoped work ("implement the scalar VFP subset") is sized by that
+  number, not by 448.
 - **Tier I's `Fault` detail string is a mess** — `guest memory read at 0x100004 refused (unmapped or not
   readable) at ReadMemory32 arg0=imm:0x100003be8 arg1=%Add32 arg2=imm(type 0x8000)` — against Tier J's
   `guest memory read at 1048580 is unmapped or not readable`. The op-rendering branch prints an IR
