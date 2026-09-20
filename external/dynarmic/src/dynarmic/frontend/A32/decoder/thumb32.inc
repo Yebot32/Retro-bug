@@ -29,6 +29,13 @@ INST(thumb32_TBH,            "TBH",                      "111010001101nnnn111100
 INST(thumb32_LDREXB,         "LDREXB",                   "111010001101nnnntttt111101001111")
 INST(thumb32_LDREXH,         "LDREXH",                   "111010001101nnnntttt111101011111")
 INST(thumb32_LDREXD,         "LDREXD",                   "111010001101nnnnttttuuuu01111111")
+// RetroBug: the acquire-exclusive half of this group was missing, while the ARM-state table had all four
+// (arm.inc:115-131). bionic's `pthread_mutex_lock`/`trylock` are Thumb, so every mutex in a real guest
+// libc reached these encodings and the decoder declined them.
+INST(thumb32_LDAEXB,         "LDAEXB",                   "111010001101nnnntttt111111001111") // v8
+INST(thumb32_LDAEXH,         "LDAEXH",                   "111010001101nnnntttt111111011111") // v8
+INST(thumb32_LDAEX,          "LDAEX",                    "111010001101nnnntttt111111101111") // v8
+INST(thumb32_LDAEXD,         "LDAEXD",                   "111010001101nnnnttttuuuu11111111") // v8
 
 // Data Processing (Shifted Register)
 INST(thumb32_TST_reg,        "TST (reg)",                "111010100001nnnn0vvv1111vvttmmmm")

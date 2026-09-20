@@ -42,6 +42,54 @@
 namespace rb::exec {
 
 /**
+ * One core's ARMv7 exclusive-access reservation, as Tier I keeps it.
+ *
+ * Two levels, because the architecture has two: a *local marker*, set by any exclusive load and dropped by
+ * `CLREX` or by any executed exclusive store, and the address-plus-value record the store is checked
+ * against. An exclusive store whose marker is absent fails without touching memory, and so does one whose
+ * target no longer holds the value the load saw.
+ *
+ * Tier J does not use this type — Dynarmic holds the marker in its own state struct
+ * (`backend/arm64/emit_arm64_memory.cpp:156-157,197-200`) and the record in its `ExclusiveMonitor`, and
+ * RetroBug only supplies the compare half. The two are equivalent by construction, which is what the
+ * differential on `ldaex`/`strex` is testing; if either tier's side of that equivalence ever changes, the
+ * change belongs here too.
+ */
+struct ExclusiveState {
+  bool valid = false;
+  std::uint64_t address = 0;
+  std::uint64_t value = 0;
+
+  /// A fresh Run starts with nothing reserved, in both tiers.
+  void Clear() { valid = false; }
+
+  /// The exclusive load: mark `addr` and remember what was read there.
+  void Mark(std::uint64_t addr, std::uint64_t seen) {
+    valid = true;
+    address = addr;
+    value = seen;
+  }
+
+  /**
+   * True when the marker and the reserved address admit a store at `addr`, consuming the marker either
+   * way, as ARM does.
+   *
+   * The two-step shape matters: nothing may touch memory when this returns false, not even to compare,
+   * because Tier J's back end branches around the entire callback when its marker is clear
+   * (`emit_arm64_memory.cpp:197-200`). A store that faults on one tier and merely fails on the other is a
+   * differential failure wearing a success.
+   */
+  [[nodiscard]] bool AdmitAddress(std::uint64_t addr) {
+    if (!valid) return false;
+    valid = false;
+    return address == addr;
+  }
+
+  /// The value half of the check, against what is at the address now.
+  [[nodiscard]] bool ValueUnchanged(std::uint64_t current) const { return value == current; }
+};
+
+/**
  * Interprets guest code one IR instruction at a time, with no executable memory and no host code.
  *
  * `return_address` ends a call: guest code returns there via `BX` of LR, and stopping on the address
@@ -71,6 +119,11 @@ class InterpExecutor : public Executor {
   mem::GuestMemory& memory_;
   GuestAddr return_address_;
   const HostDispatch* dispatch_;
+  /// The reservation `ldaex`/`strex` consult. Per-core, and outliving one block: Dynarmic's own marker
+  /// lives in the JIT state for the whole `Run`, and an LL/SC retry loop whose load and store land in
+  /// different basic blocks is normal for a mutex, so a per-block record would make every such store fail
+  /// and the guest would spin until its budget ran out.
+  ExclusiveState excl_;
 };
 
 }  // namespace rb::exec

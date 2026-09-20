@@ -26,6 +26,7 @@
  */
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -34,6 +35,7 @@
 
 #include "dynarmic/interface/A32/a32.h"
 #include "dynarmic/interface/A32/config.h"
+#include "dynarmic/interface/exclusive_monitor.h"
 
 #include "rb/exec/machine_state.h"
 #include "rb/mem/guest_memory.h"
@@ -90,6 +92,37 @@ class JitExecutor : public Executor, public Dynarmic::A32::UserCallbacks {
   void MemoryWrite32(GuestAddr vaddr, std::uint32_t value) override;
   void MemoryWrite64(GuestAddr vaddr, std::uint64_t value) override;
 
+  /**
+   * The compare-and-store half of an exclusive store, on top of Dynarmic's reservation check.
+   *
+   * The base class defaults all four to `return false`, which is a *silently always-failing* STREX: the
+   * guest's `ldrex/strex` retry loop would spin forever and the run would end as an exhausted budget
+   * with no instruction named. Overriding them is therefore mandatory, not optional polish.
+   *
+   * Dynarmic has already decided the reservation was address-valid (`ExclusiveMonitor::CheckAndClear`)
+   * and hands us the value the exclusive load saw as `expected`. Comparing it is our job, and it is the
+   * part that carries the atomicity: a plain store to the same word between the load and this callback
+   * changes what is there, so `current != expected`, and the store must fail with `Rd = 1` the way
+   * hardware does it. Returning true without comparing would turn every lost-update race into a silent
+   * write.
+   *
+   * The marker Dynarmic keeps in its own state struct is cleared by the back end before this callback
+   * runs, so a failed store also clears it -- which matches ARM, where any executed STREX drops the local
+   * marker and the guest has to re-execute the load.
+   */
+  bool MemoryWriteExclusive8(GuestAddr vaddr, std::uint8_t value, std::uint8_t expected) override {
+    return ExclusiveCompareAndStore(vaddr, value, expected, 1);
+  }
+  bool MemoryWriteExclusive16(GuestAddr vaddr, std::uint16_t value, std::uint16_t expected) override {
+    return ExclusiveCompareAndStore(vaddr, value, expected, 2);
+  }
+  bool MemoryWriteExclusive32(GuestAddr vaddr, std::uint32_t value, std::uint32_t expected) override {
+    return ExclusiveCompareAndStore(vaddr, value, expected, 4);
+  }
+  bool MemoryWriteExclusive64(GuestAddr vaddr, std::uint64_t value, std::uint64_t expected) override {
+    return ExclusiveCompareAndStore(vaddr, value, expected, 8);
+  }
+
   void InterpreterFallback(GuestAddr pc, std::size_t num_instructions) override;
   void CallSVC(std::uint32_t swi) override;
   void ExceptionRaised(GuestAddr pc, Dynarmic::A32::Exception exception) override;
@@ -145,6 +178,13 @@ class JitExecutor : public Executor, public Dynarmic::A32::UserCallbacks {
   void SyncOut(MachineState& state);
   [[nodiscard]] RunResult MapHalt(Dynarmic::HaltReason hr, unsigned executed);
 
+  /// The body of all four `MemoryWriteExclusive*` callbacks: re-read the word, compare against what the
+  /// exclusive load saw, and store only if nothing has changed it. A fault here stops the core the same
+  /// way an ordinary access does; the `false` it returns is then irrelevant, because the guest never gets
+  /// to act on the result.
+  bool ExclusiveCompareAndStore(GuestAddr vaddr, std::uint64_t value, std::uint64_t expected,
+                                std::size_t bytes);
+
   /// Why the core is being asked to stop, distinguished from `HaltReason` because several of RetroBug's
   /// reasons (a host call, a returned call, an unimplemented op) are ordinary outcomes that dynarmic has
   /// no vocabulary for.
@@ -178,6 +218,29 @@ class JitExecutor : public Executor, public Dynarmic::A32::UserCallbacks {
   mem::GuestMemory& memory_;
   GuestAddr return_address_;
   const HostDispatch* dispatch_;
+
+  /**
+   * Dynarmic's global exclusive monitor, for the one core this object is.
+   *
+   * It is not optional: the AArch64 back end builds a trampoline for every exclusive access that calls
+   * `conf.global_monitor->ReadAndMark(...)` / `->DoExclusiveOperation(...)` with no null check
+   * (`backend/arm64/a32_address_space.cpp:81,136`), and `UserConfig::global_monitor` defaults to
+   * `nullptr`. So before this member existed, decoding an `ldaex`/`ldrex` was a host-process null
+   * dereference rather than a guest-visible failure -- which is also why Dynarmic's own test harness
+   * supplies one (`tests/A32/testenv.h`).
+   *
+   * Declared before `jit_` deliberately: members are destroyed in reverse declaration order, so this has
+   * to outlive the compiled code cache that holds its address.
+   *
+   * Per-executor, and `processor_id` 0 within it, because an executor *is* a core. Two guest threads
+   * therefore have two local markers, which is architecturally right; the atomicity that a *shared*
+   * monitor would provide comes instead from the compare against `expected` in
+   * `MemoryWriteExclusive*`, so a race between two threads on the same word still loses exactly one
+   * update. What this arrangement cannot do is fail an STREX whose target another core wrote but left
+   * holding the same value -- an ABA that real hardware would also usually let through, since its
+   * marker is address-granular too.
+   */
+  Dynarmic::ExclusiveMonitor monitor_{1};
   std::unique_ptr<Dynarmic::A32::Jit> jit_;
   std::unique_ptr<InterpExecutor> fallback_interp_;
   std::string err_;

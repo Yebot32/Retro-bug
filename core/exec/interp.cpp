@@ -402,8 +402,9 @@ std::uint64_t SignExtend(std::uint64_t value, unsigned from_bits, unsigned to_bi
 /// cross a block boundary: each block re-reads what it needs from CPSR or from its own registers.
 class BlockRunner {
  public:
-  BlockRunner(mem::GuestMemory& memory, MachineState& state, LocationDescriptor& location)
-      : memory_{memory}, state_{state}, location_{location} {}
+  BlockRunner(mem::GuestMemory& memory, MachineState& state, LocationDescriptor& location,
+              ExclusiveState& excl)
+      : memory_{memory}, state_{state}, location_{location}, excl_{excl} {}
 
   /// Returns false when execution must stop, with `stop` filled in. On true, `successor` is where to
   /// go next — already reflected in the location reference handed to the constructor.
@@ -609,6 +610,9 @@ class BlockRunner {
   mem::GuestMemory& memory_;
   MachineState& state_;
   LocationDescriptor& location_;
+  /// Passed in, not a member of this class: the exclusive reservation has to outlive a block, and this
+  /// object deliberately does not (see the comment on the class).
+  ExclusiveState& excl_;
   std::unordered_map<const Inst*, V> temps_;
   std::unordered_map<const Inst*, Flags> produced_;
   /// Shifter carries, kept apart from `produced_` because their N/Z reach CPSR by a different route
@@ -1002,6 +1006,73 @@ bool BlockRunner::Step(const Inst* inst) {
       }
       return WriteMem(addr, raw, bytes, inst);
     }
+
+    // ---------------------------------------------------------------- exclusive accesses (LL/SC)
+    //
+    // The same rule Tier J runs, in one place: `ExclusiveState`. What the *result* means is worth stating
+    // because it is inverted from intuition — `Rd = 0` means the store **passed**, and 1 means it failed —
+    // which is ARM's convention and the one Dynarmic's trampoline produces too
+    // (`a32_address_space.cpp:136-141` returns `? 0 : 1`).
+    case Opcode::A32ExclusiveReadMemory8:
+    case Opcode::A32ExclusiveReadMemory16:
+    case Opcode::A32ExclusiveReadMemory32:
+    case Opcode::A32ExclusiveReadMemory64: {
+      std::uint64_t addr = 0;
+      if (!W64(inst, 1, addr)) return false;
+      const std::size_t bytes = op == Opcode::A32ExclusiveReadMemory8    ? 1
+                                : op == Opcode::A32ExclusiveReadMemory16 ? 2
+                                : op == Opcode::A32ExclusiveReadMemory32 ? 4
+                                                                         : 8;
+      unsigned char raw[8] = {};
+      if (!ReadMem(addr, raw, bytes, inst)) return false;
+      std::uint64_t value = 0;
+      for (std::size_t i = 0; i < bytes; ++i) {
+        value |= static_cast<std::uint64_t>(raw[i]) << (i * 8);  // little-endian, as ARM is
+      }
+      excl_.Mark(addr, value);
+      Put(inst, V{value, 0});
+      return true;
+    }
+    case Opcode::A32ExclusiveWriteMemory8:
+    case Opcode::A32ExclusiveWriteMemory16:
+    case Opcode::A32ExclusiveWriteMemory32:
+    case Opcode::A32ExclusiveWriteMemory64: {
+      std::uint64_t addr = 0;
+      std::uint64_t want = 0;
+      if (!W64(inst, 1, addr)) return false;
+      if (!W64(inst, 2, want)) return false;
+      const std::size_t bytes = op == Opcode::A32ExclusiveWriteMemory8    ? 1
+                                : op == Opcode::A32ExclusiveWriteMemory16 ? 2
+                                : op == Opcode::A32ExclusiveWriteMemory32 ? 4
+                                                                          : 8;
+      bool passed = false;
+      // A rejected store reads nothing and writes nothing, so an unmapped target is a *failure* rather
+      // than a fault exactly when the reservation is absent — see `AdmitAddress`.
+      if (excl_.AdmitAddress(addr)) {
+        unsigned char raw[8] = {};
+        if (!ReadMem(addr, raw, bytes, inst)) return false;
+        std::uint64_t current = 0;
+        for (std::size_t i = 0; i < bytes; ++i) {
+          current |= static_cast<std::uint64_t>(raw[i]) << (i * 8);
+        }
+        passed = excl_.ValueUnchanged(current);
+        if (passed) {
+          for (std::size_t i = 0; i < bytes; ++i) {
+            raw[i] = static_cast<unsigned char>(want >> (i * 8));
+          }
+          if (!WriteMem(addr, raw, bytes, inst)) return false;
+        }
+      }
+      Put(inst, V{passed ? 0u : 1u, 0});
+      return true;
+    }
+    case Opcode::A32ClearExclusive:
+      // `clrex` drops the marker and nothing else: bionic's `pthread_mutex_trylock` uses it after a failed
+      // attempt precisely so the next caller's `ldaex` starts clean. Dynarmic's back end clears only its
+      // own marker here, not the monitor's address, which is equivalent because a store cannot pass
+      // without a fresh exclusive load re-marking it.
+      excl_.Clear();
+      return true;
 
     // ---------------------------------------------------------------- control transfer
     case Opcode::A32BXWritePC: {
@@ -1885,6 +1956,9 @@ bool BlockRunner::Take(const Term::Terminal& terminal, LocationDescriptor& succe
 
 RunResult InterpExecutor::Run(MachineState& state, unsigned max_instructions) {
   RunResult result{};
+  // A Run begins with no reservation in either tier, so a differential disagreement about an LL/SC loop
+  // cannot be a leftover from the previous Run. Tier J's `SyncIn` does the same on its way in.
+  excl_.Clear();
   // CPSR's T bit and `mode` are one fact; a caller that set only the latter (which is what every entry
   // point here does) must not see a state back that contradicts what it handed over. Tier J's SyncIn does
   // the same on its way in.
@@ -1956,7 +2030,7 @@ RunResult InterpExecutor::Run(MachineState& state, unsigned max_instructions) {
       }
     }
 
-    BlockRunner runner{memory_, state, location};
+    BlockRunner runner{memory_, state, location, excl_};
     LocationDescriptor successor{location};
     const bool contd = trace && ++shown <= 25;
     if (contd) {

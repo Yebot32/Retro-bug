@@ -210,6 +210,60 @@ bool TranslatorVisitor::thumb32_LDREXH(Reg n, Reg t) {
     return true;
 }
 
+// RetroBug: the Thumb-state acquire-exclusive group. The decoder rows were missing as well; see
+// decoder/thumb32.inc. Bodies mirror the ARM-state ones in synchronization.cpp, whose `ORDERED`
+// access type is the whole point of the LDAEX form -- an acquire-exclusive load is what makes bionic's
+// pthread mutex acquire readable as such, so `ATOMIC` here would silently be a different instruction.
+bool TranslatorVisitor::thumb32_LDAEX(Reg n, Reg t) {
+    if (t == Reg::PC || n == Reg::PC) {
+        return UnpredictableInstruction();
+    }
+
+    const auto address = ir.GetRegister(n);
+    const auto value = ir.ExclusiveReadMemory32(address, IR::AccType::ORDERED);
+
+    ir.SetRegister(t, value);
+    return true;
+}
+
+bool TranslatorVisitor::thumb32_LDAEXB(Reg n, Reg t) {
+    if (t == Reg::PC || n == Reg::PC) {
+        return UnpredictableInstruction();
+    }
+
+    const auto address = ir.GetRegister(n);
+    const auto value = ir.ZeroExtendToWord(ir.ExclusiveReadMemory8(address, IR::AccType::ORDERED));
+
+    ir.SetRegister(t, value);
+    return true;
+}
+
+bool TranslatorVisitor::thumb32_LDAEXD(Reg n, Reg t, Reg t2) {
+    if (t == Reg::PC || t2 == Reg::PC || t == t2 || n == Reg::PC) {
+        return UnpredictableInstruction();
+    }
+
+    const auto address = ir.GetRegister(n);
+    const auto [lo, hi] = ir.ExclusiveReadMemory64(address, IR::AccType::ORDERED);
+
+    // DO NOT SWAP hi AND lo IN BIG ENDIAN MODE, THIS IS CORRECT BEHAVIOUR
+    ir.SetRegister(t, lo);
+    ir.SetRegister(t2, hi);
+    return true;
+}
+
+bool TranslatorVisitor::thumb32_LDAEXH(Reg n, Reg t) {
+    if (t == Reg::PC || n == Reg::PC) {
+        return UnpredictableInstruction();
+    }
+
+    const auto address = ir.GetRegister(n);
+    const auto value = ir.ZeroExtendToWord(ir.ExclusiveReadMemory16(address, IR::AccType::ORDERED));
+
+    ir.SetRegister(t, value);
+    return true;
+}
+
 bool TranslatorVisitor::thumb32_STL(Reg n, Reg t) {
     if (t == Reg::PC || n == Reg::PC) {
         return UnpredictableInstruction();

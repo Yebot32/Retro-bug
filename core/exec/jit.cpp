@@ -303,12 +303,24 @@ JitExecutor::JitExecutor(mem::GuestMemory& memory, GuestAddr return_address,
   // the same thing here that it claims to.
   conf.enable_cycle_counting = true;
   conf.code_cache_size = kCodeCacheBytes;
+  // A diagnostic, not a feature: the exclusive-load disagreement in `docs/30` §Step 30 has to be
+  // attributed to either Dynarmic's IR optimizations or its AArch64 code generation before anything is
+  // "fixed", and this is the only way to ask that question without editing the vendored tree.
+  if (const char* noopt = std::getenv("RB_JIT_NOOPT"); noopt != nullptr && noopt[0] != '\0' && noopt[0] != '0') {
+    conf.optimizations = static_cast<Dynarmic::OptimizationFlag>(0);
+  }
   // Coprocessor 15 has to be present before the `Jit` is built, because the decision whether to compile a
   // callback or an assertion is made at translation time and the shared_ptr is baked into the code cache's
   // lifetime. Constructing it here rather than in the member list: it names `*this`, and a
   // self-reference must not be handed out before the object it points at is far enough along to answer.
   coproc15_ = std::make_shared<Arm15Coprocessor>(*this);
   conf.coprocessors[15] = coproc15_;
+  // The exclusive monitor, because Dynarmic dereferences this pointer unconditionally in the trampoline
+  // it bakes for every LL/SC access. `processor_id` indexes that monitor's per-core slot, and this object
+  // is one core, so it is 0 in a 1-processor monitor. See the member's declaration for why correctness
+  // does not depend on the monitor being shared.
+  conf.global_monitor = &monitor_;
+  conf.processor_id = 0;
 
   try {
     jit_ = std::make_unique<Dynarmic::A32::Jit>(conf);
@@ -352,6 +364,13 @@ void JitExecutor::RefuseCoprocessor(const CoprocSite& site) {
 }
 
 void JitExecutor::SyncIn(const MachineState& state) {
+  // A Run begins with no exclusive reservation, in both tiers — `InterpExecutor::Run` clears its
+  // `ExclusiveState` the same way. This is a *defined starting condition* rather than an architectural
+  // claim: the marker is not guest-visible, so what matters is that neither tier can carry one in from a
+  // previous Run and have an STREX pass on the first block of the next one differently.
+  jit_->ClearExclusiveState();
+  monitor_.ClearProcessor(0);
+
   auto& regs = jit_->Regs();
   static_assert(sizeof(JitRegs) == 16 * sizeof(std::uint32_t), "the guest register file is 16 words");
   std::copy(std::begin(state.r), std::end(state.r), regs.begin());
@@ -589,6 +608,40 @@ void JitExecutor::MemoryWrite64(GuestAddr vaddr, std::uint64_t value) {
                    " is unmapped, read-only, or an executing page");
     jit_->HaltExecution(Dynarmic::HaltReason::UserDefined1);
   }
+}
+
+bool JitExecutor::ExclusiveCompareAndStore(GuestAddr vaddr, std::uint64_t value, std::uint64_t expected,
+                                           std::size_t bytes) {
+  // Byte-wise, not a typed `Write(vaddr, &value, bytes)`: the four callers hand a 64-bit `value` for every
+  // width, and the same assembly-by-shift rule Tier I uses keeps the two tiers from disagreeing over host
+  // endianness instead of over the memory model.
+  unsigned char raw[8] = {};
+  if (!memory_.Read(vaddr, raw, bytes)) {
+    SetPending(Pending::Fault,
+               "guest exclusive access at " + std::to_string(vaddr) + " is unmapped or not readable");
+    jit_->HaltExecution(Dynarmic::HaltReason::UserDefined1);
+    return false;
+  }
+  std::uint64_t current = 0;
+  for (std::size_t i = 0; i < bytes; ++i) {
+    current |= static_cast<std::uint64_t>(raw[i]) << (i * 8);
+  }
+  // Dynarmic has already dropped the marker and matched the address; the value is the half that makes the
+  // pair atomic. A word that changed since the exclusive load means someone else got in, so the store
+  // fails with `Rd = 1` and the guest retries — which is the behaviour `pthread_mutex_lock` depends on.
+  if (current != expected) return false;
+
+  for (std::size_t i = 0; i < bytes; ++i) {
+    raw[i] = static_cast<unsigned char>(value >> (i * 8));
+  }
+  if (!memory_.Write(vaddr, raw, bytes)) {
+    SetPending(Pending::Fault,
+               "guest exclusive write at " + std::to_string(vaddr) +
+                   " is unmapped, read-only, or an executing page");
+    jit_->HaltExecution(Dynarmic::HaltReason::UserDefined1);
+    return false;
+  }
+  return true;
 }
 
 void JitExecutor::CallSVC(std::uint32_t swi) {

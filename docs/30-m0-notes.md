@@ -2649,6 +2649,128 @@ and a Tier J failure are the *same* underlying gap rather than a divergence.
 opcodes, `strtod`/`malloc` on the exclusive pair, or the rows that inherit them.
 
 
+## Step 30 — LL/SC: the Thumb encodings, a monitor that was never wired up, and two devices that disagree
+
+§Step 29 left one instruction standing between RetroBug and a real libc's mutexes: `e8d0 3fdf
+ldaexh r3, [r0]`. It turned out to be three gaps, not one, and the middle of them was a crash rather than
+a refusal.
+
+**Which devices can prove what, settled before anything else.** Both devices on the desk were re-checked
+by *executing* a static `EM_ARM` binary rather than by reading a property: the Reno 5
+(`e99abf39`, `lito`/SM7250, Android 13 / SDK 33) and the Tab S9 (`R52Y106BECZ`, `kalama`/SM8550,
+Android 16 / SDK 36) each print `EXEC32-OK` with `rc=0`, and each reports
+`abilist32=armeabi-v7a,armeabi` with `ro.zygote=zygote64_32`. **Neither device can therefore serve as
+evidence that RetroBug emulates anything** — an APK running on either could be running through the OS's
+real AArch32 support. What they *are* good for, and what this step uses them for, is as an **oracle**: a
+place to ask real ARMv7 hardware what an instruction does. The end-to-end claim — a guest APK that
+installs and runs *because an emulator interpreted it* — still needs the OnePlus 12 (SD 8 Gen 3,
+`abilist32` empty), which is not on the desk. Stated here rather than left implied, because every green
+row below is an oracle row or a tier-vs-tier row, and neither is the launch claim.
+
+**Gap 1, the decoder.** `frontend/A32/decoder/thumb32.inc` had `STREX`/`STREXB`/`STREXH`/`STREXD` and
+`LDREX`/`LDREXB`/`LDREXH`/`LDREXD` — the store half and the non-acquiring load half — and no
+`LDAEX*` at all, while `decoder/arm.inc:115-131` has all four ARM-state forms and
+`synchronization.cpp:98-158` implements them. So an exclusive *store* decoded, its acquiring *load* did
+not, and the pair could never complete in Thumb — which is where all of bionic's arm32 mutexes live.
+Four rows added, with the encodings taken from LLVM rather than from arithmetic
+(`clang .arch armv8-a` + `llvm-objdump`): `ldaexh r3,[r0]` = `e8d0 3fdf`, `ldaex` = `e8d0 3fef`,
+`ldaexb` = `e8d0 3fcf`, `ldaexd r3,r4,[r0]` = `e8d0 34ff`. The independent pass over the file corrected
+three more of my hand-written encodings — `strexh r3,r2,[r0]` is `e8c0 2f53` (the *status* register is
+the low nibble, the source the high one), plain `ldrex`/`strex` live in the `e850`/`e840` group with an
+`imm8` the translator scales by four, and `clrex` is `f3bf 8f2f`, which is not the 16-bit form I
+assumed.
+
+**Gap 2, the monitor — and this one was a host crash, not a refusal.** `A32::UserConfig::global_monitor`
+defaults to `nullptr` (`interface/A32/config.h:126`) and the AArch64 back end dereferences it with no
+check when it builds a trampoline for *any* exclusive access:
+`conf.global_monitor->ReadAndMark<T>(...)` and `->DoExclusiveOperation<T>(...)`
+(`backend/arm64/a32_address_space.cpp:81,136`). RetroBug set `arch_version`, the endianness, cycle
+counting, the code cache and coprocessor 15, and never set it — so the ARM-state `LDAEX`/`STREX`, which
+*was* translated, would have dereferenced null the first time a guest executed one. Nothing ever found
+that because no test had ever executed an exclusive pair: dynarmic's own harness supplies a monitor
+(`tests/A32/testenv.h:168-183`), which is the difference between "the backend implements it" and "the
+backend implements it *for you*". Now a `Dynarmic::ExclusiveMonitor` member, declared before `jit_` so
+destruction order keeps it alive as long as the code cache that holds its address.
+
+**Gap 3, Tier I, and the reason the base class default is a trap.** `UserCallbacks::MemoryWriteExclusive*`
+defaults to `return false` — an STREX that *always fails*. In a `ldrex/strex` retry loop that is an
+infinite guest loop ending as an exhausted instruction budget with no instruction named, which is the
+shape of a mysterious hang rather than of a loud failure. All four are now overridden, and Tier I gained
+`A32ExclusiveReadMemory*`, `A32ExclusiveWriteMemory*` and `A32ClearExclusive`, with the reservation held
+in `rb::exec::ExclusiveState` on the *executor* rather than in `BlockRunner` — a load and its store in
+different basic blocks is the ordinary shape of a mutex, and a per-block record would make every store
+fail and the guest spin.
+
+**The measurement that decided the semantics, and it did not agree with itself.** `tests/guest/exclprobe.s`
+runs twelve hand-written sequences on real hardware, each reporting `Rd` *and* the memory afterwards.
+For "an exclusive load, then a **plain store by the same core** to the same halfword, then an exclusive
+store" the two devices split:
+
+| sequence | Reno 5 (A76/A55) | Tab S9 (A710/A510) |
+|---|---|---|
+| `ldrexh`; plain `strh`; `strexh` | `rd=0`, new value written | `rd=1`, plain store's value survives |
+| `ldaexh`; plain `strh`; `strexh` | `rd=0` | `rd=1` |
+| `ldrexh [r0]`; `strexh [r0,#2]` | `rd=0` | `rd=0` |
+| plain pair / `clrex` between / no prior load | `rd=0` / `1` / `1` | `rd=0` / `1` / `1` |
+
+So there is no "what hardware does" answer to code against — the ARM ARM leaves a same-PE write to the
+reserved address implementation-defined, and these two ARMv7-A cores chose differently. The granule row
+is the other half: reserving one halfword and storing the next *succeeds* on both, so a real monitor
+reserves a granule wider than the access, not the exact address.
+
+**The rule, and why its direction matters more than its content.** ARM's contract is that **STREX may
+fail spuriously and software must retry**. That makes the two error directions asymmetric: failing where
+hardware would pass costs one extra loop iteration, while passing where hardware would fail loses an
+update a real device would have caught — which for a mutex is a silent double-lock. RetroBug therefore
+takes the conservative branch on both axes: `MemoryWriteExclusive*` compares the value the exclusive
+load saw against what is there now (a same-core plain store breaks the reservation, as on the Tab S9 and
+not as on the Reno 5), and the reservation is exact-address rather than granule-wide. Both choices are
+stricter than at least one real device and never looser than either, which is the only side it is
+allowed to be on.
+
+**What is covered, and what is not.** 13 rows in
+`exclusive_access_rows_match_hardware_rule_and_each_other()` (`core/tests/exec_tier_diff_test.cpp`): the
+plain pair, the conservative same-core-write row, `clrex`, no-prior-load, the exact-address row, the
+`ldaexh` form bionic uses, byte/word/doubleword widths, and a retry loop that must terminate inside its
+budget — the row that would catch a reservation that does not survive a block boundary. Each row claims
+`Rd`, the load's own result *and* the bytes at the data address, and says whether its expectation is
+"measured on hardware", "conservative versus a device that measured otherwise", or tier-vs-tier only.
+Named gaps: no **ARM-state** exclusive rows (the path whose null deref this step fixed is now exercised
+only through Thumb, so the ARM-state `LDAEX` remains unexecuted code), and no **two-core contention**
+row — the compare against `expected` is exactly what a race would rely on, and one executor cannot
+produce a race, so that claim is argued from the code rather than tested.
+
+**And one real Tier J bug, found by the lane rather than by reasoning.** The lane is **419 checks,
+12 failures**, identically on both devices, and all 12 are six rows where `Rd` and memory agree across
+tiers but the *destination register of the exclusive load* does not: Tier I leaves the value the load
+saw, Tier J leaves the value memory holds **after** the store.
+
+| row | Tier I `r3` | Tier J `r3` | what memory holds at the end |
+|---|---|---|---|
+| f1 `ldrexh r3,[r0]`; `strexh r2,r1,[r0]` | `1111` | `beef` | `beef` |
+| f3 `ldrexh r3`; plain `strh #0x99`; `clrex`; `strexh` (fails) | `1111` | `99` | `99` |
+| f6 `ldaexh r3`, same shape as f1 | `1111` | `beef` | `beef` |
+| f8 byte, f9 double (`r4`), f10 word | correct | post-store value | — |
+| f11 `ldaex r3,[r0]`; `strex r2,r3,[r0]` | `11112222` | `11112222` | unchanged |
+
+f3 is the row that decides the mechanism: its exclusive store *fails*, so the value Tier J shows in `r3`
+is not the store's source register (`r1 = 0xbeef`) but the plain store's (`0x99`) — i.e. **whatever the
+address contained when the pair finished**. And f11, the one row that stores exactly what it loaded, is
+the one row that passes: under "the read happens late" and "the read happens correctly" it is impossible
+to distinguish those two, which is why its passing is evidence about the mechanism and not a green row.
+It is not specific to the new `LDAEX` rows — plain `LDREX`/`LDREXH`/`LDREXB`/`LDREXD` fail identically,
+so this is Dynarmic's Thumb exclusive path, which nothing in this repo had ever executed.
+
+**Ruled out by measurement, not by argument:** Dynarmic's IR optimizations. `conf.optimizations` set to
+zero through a diagnostic switch (`RB_JIT_NOOPT`, `core/exec/jit.cpp`) reproduces the lane byte for byte
+— same 12 failures, same per-row `Rd`, same memory, same step counts. So the value is not being
+reordered by an optimization pass; it is being produced late (or clobbered) by the code generator or by
+the way its result reaches the guest register file. **This is #35, and it is open.** What is *not* in
+doubt: the exclusive pair now decodes, executes, computes correct `Rd`, writes correct memory on both
+tiers, and the null-monitor crash is gone — which is why this increment is committed with the lane red
+rather than held back.
+
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |

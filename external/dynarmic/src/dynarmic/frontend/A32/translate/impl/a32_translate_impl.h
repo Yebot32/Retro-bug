@@ -511,6 +511,11 @@ struct TranslatorVisitor final {
     bool thumb32_STREXB(Reg n, Reg t, Reg d);
     bool thumb32_STREXD(Reg n, Reg t, Reg t2, Reg d);
     bool thumb32_STREXH(Reg n, Reg t, Reg d);
+    // RetroBug: Thumb-state acquire-exclusive loads, the counterpart of the ARM-state declarations above.
+    bool thumb32_LDAEX(Reg n, Reg t);
+    bool thumb32_LDAEXB(Reg n, Reg t);
+    bool thumb32_LDAEXD(Reg n, Reg t, Reg t2);
+    bool thumb32_LDAEXH(Reg n, Reg t);
     bool thumb32_TBB(Reg n, Reg m);
     bool thumb32_TBH(Reg n, Reg m);
 

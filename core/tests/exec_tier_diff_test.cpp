@@ -1017,6 +1017,562 @@ int interpret_probe(const char* which) {
   return 0;
 }
 
+/**
+ * The ARMv7 / Thumb-2 exclusive pair — `ldaex*`/`ldrex*` with `strex*` — as both tiers see it.
+ *
+ * What this lane asserts is not "STREX returns 0 when it stores". It is the asymmetry in ARM's contract:
+ * **an STREX may fail spuriously, and software has to retry**. The two directions of error are not
+ * equivalent. Failing a store hardware would have passed costs the guest one more turn of a loop it can
+ * leave; passing a store hardware could have failed loses an update, and nothing downstream can undo it.
+ * So an emulator may be *stricter* than any device and may never be looser, and RetroBug's rule is the
+ * strict one: an exclusive store is checked against the value the exclusive load saw, and it reserves the
+ * exact address rather than a granule.
+ *
+ * `tests/guest/exclprobe.s` is where that was settled — hand-written single-core sequences run on two
+ * AArch32 devices, an Oppo Reno 5 (Cortex-A76/A55) and a Samsung Tab S9 (Cortex-A710/A510). Eight of the
+ * thirteen rows below are the answers both devices gave: every plain pair passes (`Rd = 0`) at halfword,
+ * byte, word and double width, both acquire forms pass, and `clrex` between a pair or a store with no
+ * preceding exclusive load fails (`Rd = 1`). Three do not simply copy a device, and each row says which:
+ *   - f2, `ldrexh` then a plain `strh` to the same halfword *by this same core* then `strexh`: the Reno 5
+ *     answered `Rd = 0` (store passed, the plain store's value overwritten) and the Tab S9 `Rd = 1` (store
+ *     failed, plain store's value survived). f7, the `ldaexh` form of the same sequence, split the same
+ *     way; it is not planted here. Neither device is wrong — address comparison and value comparison are
+ *     both inside the contract — and RetroBug answers like the Tab S9 because that is the only side a
+ *     guest cannot detect being wrong about.
+ *   - f5, `ldrexh [r0]` then `strexh [r0,#2]`: `Rd = 0` on **both**, so hardware reserves a granule wider
+ *     than the halfword. RetroBug answers 1, deliberately, in the safe direction.
+ *   - the retry loop, whose first iteration carries that same racing plain store. The Reno 5 would exit it
+ *     after one pass; here it exits after two, and asserting *that* (`r3`, the value the successful load
+ *     saw) is what makes the loop a test rather than a smoke check.
+ * The last two rows — `clrex` with nothing else between the pair, and a rejected store aimed at an
+ * unmapped page — are RetroBug's rule at points no device was asked about, and they are labelled as such.
+ *
+ * The rest is the reason the lane is in *this* file: `Compare()` on every row. Tier J answers through
+ * Dynarmic's `ExclusiveMonitor` plus RetroBug's four `MemoryWriteExclusive*` callbacks, Tier I through
+ * `rb::exec::ExclusiveState`, and the two are equivalent only by construction — Dynarmic's mask is a
+ * constant in one library and the address comparison is a method in another. A granule on one side, a
+ * marker that survives a failed store on the other, a reservation that dies with its basic block: each of
+ * those is invisible to every other test in this repository, and fatal under a mutex.
+ *
+ * The rows are planted as raw halfwords in a mapped page, the way `declined_instructions_refuse_by_name`
+ * plants its encodings, and not as fixture functions: the fixture `.so` has no exclusive probe, and giving
+ * it one would mean editing `tests/corpus/fixture_jni.c`, which this change is not allowed to touch. Two
+ * consequences are checked below rather than assumed. The page really is executable, and a planted
+ * `movs r0, #42; bx lr` really runs and returns on both tiers — so a red row is about the exclusive logic
+ * and not about the plant. And nothing has to be invalidated, because the encodings are in memory before
+ * either tier first fetches them; the lane above, `invalidation_reaches_the_compiled_code`, is what covers
+ * the path where that is not true.
+ *
+ * Every encoding was assembled and read back out of the disassembly, per `docs/30`'s standing rule (the
+ * NDK ships `llvm-objdump` and no `llvm-mc`):
+ *
+ *   $TC/bin/clang.exe --target=armv7-none-linux-androideabi26 -mthumb -c excl.s
+ *   $TC/bin/llvm-objdump.exe -d --triple=thumbv8 excl.o
+ *
+ * `--triple=thumbv8` because without it the disassembler prints the two `ldaex` rows as `<unknown>` — fine
+ * for reading bytes, useless for checking that the bytes mean what the mnemonic says. `docs/30` §Step 29
+ * quotes them named for the same reason.
+ *
+ * Some of them are not what the field order in the manual, or this work's first notes, suggested. In the
+ * STREX forms the **status** register is the *low* nibble of the second halfword and the **source** the
+ * high one: `0xe8c0 0x1f52` is `strexh r2, r1, [r0]` and not `strexh r1, r2, [r0]`, and
+ * `strexd r5, r3, r1, [r0]` is `0xe8c0 0x3175`, where the pattern's constant `0111` sits *between* the two
+ * source registers. `ldrex`/`strex` (word) are the `0xe850`/`0xe840` group whose `imm8` Dynarmic scales by
+ * four, and LLVM answers `#0` with `0x00`, so `ldrex r3, [r0]` is `0xe850 0x3f00` — not the
+ * `0xe8d0 0x3f1f` the instruction name was first guessed to be. And `clrex` has no 16-bit form at all:
+ * `0xf3bf 0x8f2f`.
+ * That status/source split is also why the rows claim the bytes around the target, masked, and not just
+ * `Rd`: an engine that read the two nibbles the other way round stores the wrong register, and that shows
+ * in memory rather than in the flag.
+ *
+ * One trap worth recording, because it produces a failure that points at the wrong file: the loop's
+ * backward branch must name a **local** label. Written `bne x12` to a `.global` symbol, LLVM emits
+ * `R_ARM_THM_JUMP19` and leaves a placeholder in the object — `0xf47f 0xaffe`, which decodes as a branch
+ * to itself. Planted verbatim that is a livelock the test would report as an engine bug.
+ * `llvm-readelf -r` says "no relocations" for the blobs below.
+ */
+enum class ExclProof : int {
+  kMeasured,     ///< both devices answered this way
+  kConservative, ///< the devices split; RetroBug follows the side that fails the store
+  kStricter,     ///< both devices were looser than RetroBug, on purpose
+  kRule,         ///< not measured: RetroBug's own contract, asserted absolutely and tier-vs-tier
+};
+/// The per-class tally in the runner is a plain array indexed by these, because a fifth kind of
+/// provenance needs saying so in the summary line as well.
+static_assert(static_cast<int>(ExclProof::kRule) == 3, "the provenance tally below is sized to four");
+
+/// "This row says nothing about that register." A row with nothing to say is caught by the guard in the
+/// runner, not silently passed.
+constexpr std::uint32_t kNoCheck = 0xFFFF'FFFFu;
+
+constexpr std::uint32_t kExclStore = 0xBEEF;  ///< r1, the value every row's store tries to land
+
+constexpr exec::GuestAddr kExclCodePage = 0x0194'0000u;
+constexpr exec::GuestAddr kExclDataPage = 0x0198'0000u;
+/// Mapped by nobody, on purpose, and checked with `IsMapped` before the row that uses it runs. All three
+/// addresses are 16 KiB-aligned even though the guest granule is 4 KiB, because the x86_64 emulator lane
+/// is the 16 KiB one (`docs/30`'s environment table) and a host granule shared with another mapping would
+/// make this lane's pages go out-of-line for reasons the lane then would not see.
+constexpr exec::GuestAddr kExclUnmapped = 0x019C'0000u;
+constexpr exec::GuestAddr kExclSlot = 16;  ///< each row gets its own 16 bytes of data
+
+/// Small on purpose: the loop row reaches its `bx lr` in a couple of dozen guest instructions, and a
+/// reservation that stops living at a block boundary makes it spin until this runs out — which is the
+/// regression being caught, not an accident to be waited out.
+constexpr unsigned kExclBudget = 1000;
+
+/// Each blob is a sequence of Thumb halfwords as `llvm-objdump` printed them, ended by a zero halfword
+/// (not a legal Thumb encoding), and each mirrors the like-named function in `tests/guest/exclprobe.s`.
+/// Two blobs carry one `nop` the measured source does not, where a 32-bit encoding would otherwise start
+/// at an address ending in 2 — after `adds r0, r0, #2` in one and `movs r5, #0` in the other. LLVM leaves
+/// the padding out until a `.p2align` asks for it; alignment of the instruction stream is not what this
+/// lane measures, so the pad keeps it out of the way rather than making a red row ambiguous.
+constexpr std::uint16_t kF1PairHalfword[] = {0xe8d0, 0x3f5f,  ///< ldrexh r3, [r0]
+                                             0xe8c0, 0x1f52,  ///< strexh r2, r1, [r0]
+                                             0x4610, 0x4770,  ///< mov r0, r2 ; bx lr
+                                             0};
+constexpr std::uint16_t kF2PlainStoreBetween[] = {
+    0x235a, 0x8003,  ///< movs r3, #0x5a ; strh r3, [r0]      — give the load something known to see
+    0xe8d0, 0x3f5f,  ///< ldrexh r3, [r0]
+    0x2277, 0x8002,  ///< movs r2, #0x77 ; strh r2, [r0]      — the racing store, same core
+    0xe8c0, 0x1f54,  ///< strexh r4, r1, [r0]
+    0x4620, 0x4770,  ///< mov r0, r4 ; bx lr
+    0};
+constexpr std::uint16_t kF3ClrexAfterStore[] = {
+    0xe8d0, 0x3f5f,  ///< ldrexh r3, [r0]
+    0x2299, 0x8002,  ///< movs r2, #0x99 ; strh r2, [r0]
+    0xf3bf, 0x8f2f,  ///< clrex
+    0xe8c0, 0x1f54,  ///< strexh r4, r1, [r0]
+    0x4620, 0x4770,  ///< mov r0, r4 ; bx lr
+    0};
+constexpr std::uint16_t kClrexWithNothingElse[] = {
+    0xe8d0, 0x3f5f,  ///< ldrexh r3, [r0]
+    0xf3bf, 0x8f2f,  ///< clrex
+    0xe8c0, 0x1f54,  ///< strexh r4, r1, [r0]
+    0x4620, 0x4770,  ///< mov r0, r4 ; bx lr
+    0};
+constexpr std::uint16_t kF4NoPriorLoad[] = {
+    0xf3bf, 0x8f2f,  ///< clrex                          — no exclusive load has happened in this Run
+    0xe8c0, 0x1f54,  ///< strexh r4, r1, [r0]
+    0x4620, 0x4770,  ///< mov r0, r4 ; bx lr
+    0};
+constexpr std::uint16_t kF5StoreTwoBytesOn[] = {
+    0xe8d0, 0x3f5f,  ///< ldrexh r3, [r0]
+    0x1c80,          ///< adds r0, r0, #2
+    0xbf00,          ///< nop — the alignment pad described above the blobs
+    0xe8c0, 0x1f54,  ///< strexh r4, r1, [r0]
+    0x4620, 0x4770,  ///< mov r0, r4 ; bx lr
+    0};
+constexpr std::uint16_t kF6AcquireHalfword[] = {0xe8d0, 0x3fdf,  ///< ldaexh r3, [r0]
+                                                0xe8c0, 0x1f52,  ///< strexh r2, r1, [r0]
+                                                0x4610, 0x4770,  ///< mov r0, r2 ; bx lr
+                                                0};
+constexpr std::uint16_t kF8BytePair[] = {0xe8d0, 0x3f4f,  ///< ldrexb r3, [r0]
+                                         0xe8c0, 0x1f44,  ///< strexb r4, r1, [r0]
+                                         0x4620, 0x4770,  ///< mov r0, r4 ; bx lr
+                                         0};
+/// Not f9's `mov r6, r1; mov r7, r1`: storing the same word in both halves cannot tell a swapped pair from
+/// a correct one. Here the low half of what gets stored is the register `ldrexd` produced and the high half
+/// is r1, and the two seeded halves differ — so the read is pinned by `r3`/`r4` and the write by the eight
+/// masked bytes, and neither can be satisfied by the other's mistake.
+constexpr std::uint16_t kF9DoublePair[] = {0xe8d0, 0x347f,  ///< ldrexd r3, r4, [r0]
+                                           0xe8c0, 0x3175,  ///< strexd r5, r3, r1, [r0]
+                                           0x4628, 0x4770,  ///< mov r0, r5 ; bx lr
+                                           0};
+constexpr std::uint16_t kF10WordPair[] = {0xe850, 0x3f00,  ///< ldrex r3, [r0]
+                                          0xe840, 0x1200,  ///< strex r2, r1, [r0]
+                                          0x4610, 0x4770,  ///< mov r0, r2 ; bx lr
+                                          0};
+/// f11: `strex` the value `ldaex` returned, which is bionic's `pthread_mutex_lock` shape one word wider.
+constexpr std::uint16_t kF11AcquireWord[] = {0xe8d0, 0x3fef,  ///< ldaex r3, [r0]
+                                             0xe840, 0x3200,  ///< strex r2, r3, [r0]
+                                             0x4610, 0x4770,  ///< mov r0, r2 ; bx lr
+                                             0};
+/// The LL/SC loop, in the shape a mutex lock has it: `cbnz` splits the exclusive load from the exclusive
+/// store, so they land in **different basic blocks** — which is the whole reason this row exists. Tier I's
+/// `BlockRunner` is constructed per block, and Dynarmic's marker lives in the JIT state for the whole run;
+/// a reservation record on either side that died with its block makes every store fail, and the guest
+/// spins until the budget runs out. The plain store races in on the first iteration only (`r5` is the
+/// "already wrote" flag the loop sets itself), so the second iteration's store has to pass.
+///
+/// The retry is `cmp`+`bne` rather than a second `cbnz` because CBZ/CBNZ cannot branch backwards — found
+/// by asking the assembler, not by recalling the encoding table: `cbnz r4, .Lback` on a preceding label
+/// is rejected with `out of range pc-relative fixup value`, since the field is zero-extended.
+constexpr std::uint16_t kRetryLoop[] = {
+    0x2500,          ///< movs r5, #0
+    0xbf00,          ///< nop — alignment pad, see the note above
+    0xe8d0, 0x3f5f,  ///< ldrexh r3, [r0]   <- the loop head, and the target of the `bne` below
+    0xb915,          ///< cbnz r5, .Lstore  -> the store, on every iteration but the first
+    0x2277, 0x8002,  ///< movs r2, #0x77 ; strh r2, [r0]   <- the store that races with the pair
+    0x2501,          ///< movs r5, #1
+    0xe8c0, 0x1f54,  ///< strexh r4, r1, [r0]
+    0x2c00,          ///< cmp r4, #0
+    0xd1f5,          ///< bne .Lretry       -> back to the ldrexh; the first pass lands here with Rd=1
+    0x4620, 0x4770,  ///< mov r0, r4 ; bx lr
+    0};
+constexpr std::uint16_t kControl[] = {0x202a, 0x4770,  ///< movs r0, #42 ; bx lr
+                                      0};
+
+struct ExclRow {
+  const char* name = "";      ///< the question, in the log line
+  const char* asm_text = "";  ///< the planted sequence, as disassembled
+  ExclProof proof = ExclProof::kRule;
+  const char* source = "";    ///< where this row's expectations come from, per row
+  const std::uint16_t* code = nullptr;
+  std::uint32_t seed_lo = 0;  ///< the row's first guest word
+  std::uint32_t seed_hi = 0;  ///< and its second; the word and 64-bit rows are the ones that use it
+  bool unmapped_target = false;
+  std::uint32_t want_r0 = kNoCheck;  ///< Rd, returned by the planted `mov r0, <status>`
+  std::uint32_t want_r3 = kNoCheck;
+  std::uint32_t want_r4 = kNoCheck;
+  std::uint32_t want_r5 = kNoCheck;
+  std::uint64_t want_mem = 0;  ///< the eight bytes at the row's data address, after the run...
+  std::uint64_t mem_mask = 0;  ///< ...of which only the masked ones are claimed, and never zero by
+                               ///< accident: eight bytes are read for every row, so an exclusive store of
+                               ///< the wrong width fails on the bits outside the width it was asked for.
+};
+
+/// Designated initializers here, where the neighbouring tables do without them: fourteen positional fields
+/// per row and a slip between `seed_hi` and `want_r0` would change what a row *claims* without changing
+/// anything a reader can see. Each row's comments are the answer hardware gave, not a restatement of the
+/// fields, which are self-naming.
+constexpr ExclRow kExclRows[] = {
+    {// The pair alone, nothing between: the baseline every `Rd = 1` row below is read against. Without it
+     // this table would be satisfied by an engine whose STREX never works.
+     .name = "f1 plain halfword pair",
+     .asm_text = "ldrexh r3,[r0]; strexh r2,r1,[r0]; mov r0,r2; bx lr",
+     .proof = ExclProof::kMeasured,
+     .source = "measured on both devices: Rd=0, and the store lands",
+     .code = kF1PairHalfword,
+     .seed_lo = 0x2222'1111u,
+     .want_r0 = 0,
+     .want_r3 = 0x1111,
+     .want_mem = 0x2222'BEEFull,
+     .mem_mask = 0xFFFF'FFFF'FFFF'FFFFull},
+    {// The row the two devices disagreed about. RetroBug takes the failing side: a spurious failure is
+     // legal and a false success is not, and only one of the two is observable from inside the guest.
+     .name = "f2 plain strh between",
+     .asm_text = "strh #0x5a; ldrexh r3; strh #0x77; strexh r4,r1,[r0]",
+     .proof = ExclProof::kConservative,
+     .source = "Reno 5 said Rd=0, Tab S9 Rd=1 — RetroBug follows the Tab S9 on purpose",
+     .code = kF2PlainStoreBetween,
+     .seed_lo = 0x2222'1111u,
+     .want_r0 = 1,
+     .want_r3 = 0x5a,  // what the exclusive load saw, before the plain store changed it
+     .want_mem = 0x2222'0077ull,
+     .mem_mask = 0xFFFF'FFFF'FFFF'FFFFull},
+    {// f3 as measured. Worth stating plainly: this row does **not** isolate `clrex`, because the plain
+     // store inside the sequence already breaks the value comparison. The next row is the one that does.
+     .name = "f3 clrex after a store",
+     .asm_text = "ldrexh; movs r2,#0x99; strh r2,[r0]; clrex; strexh r4,r1,[r0]",
+     .proof = ExclProof::kMeasured,
+     .source = "measured on both devices: Rd=1, plain store's value survives",
+     .code = kF3ClrexAfterStore,
+     .seed_lo = 0x2222'1111u,
+     .want_r0 = 1,
+     .want_r3 = 0x1111,
+     .want_mem = 0x2222'0099ull,
+     .mem_mask = 0xFFFF'FFFF'FFFF'FFFFull},
+    {// The marker on its own: nothing has touched memory between the load and the store, so an engine that
+     // reads `clrex` as a no-op passes the store here and fails. Not measured — ARM's text is unambiguous,
+     // and f3 above measured the same direction with the value rule also in play.
+     .name = "clrex, nothing else",
+     .asm_text = "ldrexh r3,[r0]; clrex; strexh r4,r1,[r0]",
+     .proof = ExclProof::kRule,
+     .source = "ARM's CLREX contract; the control that makes f3's clrex observable",
+     .code = kClrexWithNothingElse,
+     .seed_lo = 0x2222'1111u,
+     .want_r0 = 1,
+     .want_r3 = 0x1111,
+     .want_r4 = 1,  // the status register itself, not just the copy of it the function returns
+     .want_mem = 0x2222'1111ull,
+     .mem_mask = 0xFFFF'FFFF'FFFF'FFFFull},
+    {// A store with no reservation anywhere in this run. `SyncIn` / `InterpExecutor::Run` clear the state
+     // on entry, so a reservation cannot leak in from the previous row — which is what makes this row's
+     // answer mean something in a table where eleven of the other twelve do an exclusive load first.
+     .name = "f4 store, no prior load",
+     .asm_text = "clrex; strexh r4,r1,[r0]",
+     .proof = ExclProof::kMeasured,
+     .source = "measured on both devices: Rd=1",
+     .code = kF4NoPriorLoad,
+     .seed_lo = 0x2222'1111u,
+     .want_r0 = 1,
+     .want_r4 = 1,
+     .want_mem = 0x2222'1111ull,
+     .mem_mask = 0xFFFF'FFFF'FFFF'FFFFull},
+    {// f5, and the one row where RetroBug is stricter than *both* devices. The two halfwords hold the
+     // **same** value on purpose: then a value-only monitor would pass the store, and an `Rd = 1` here can
+     // only come from the reservation being for the address that was read. Hardware reserved a granule and
+     // said 0; the divergence is the design, and it is in the direction a guest can retry out of.
+     .name = "f5 reserved [r0], stored [r0,#2]",
+     .asm_text = "ldrexh r3,[r0]; adds r0,r0,#2; strexh r4,r1,[r0]",
+     .proof = ExclProof::kStricter,
+     .source = "both devices said Rd=0 (granule); RetroBug reserves the exact address",
+     .code = kF5StoreTwoBytesOn,
+     .seed_lo = 0x1111'1111u,
+     .want_r0 = 1,
+     .want_r3 = 0x1111,
+     .want_mem = 0x1111'1111ull,
+     .mem_mask = 0xFFFF'FFFF'FFFF'FFFFull},
+    {// `ldaexh`, the instruction `docs/30` §Step 29 found in bionic's `pthread_mutex_lock` and
+     // `trylock` — the reason this whole group was implemented. Same rule as f1, different opcode: a tier
+     // that translated `ldrexh` and declined the acquire form would leave every mutex in a guest libc
+     // broken while this table's first row stayed green.
+     .name = "f6 ldaexh pair",
+     .asm_text = "ldaexh r3,[r0]; strexh r2,r1,[r0]; mov r0,r2; bx lr",
+     .proof = ExclProof::kMeasured,
+     .source = "measured on both devices: Rd=0",
+     .code = kF6AcquireHalfword,
+     .seed_lo = 0x2222'1111u,
+     .want_r0 = 0,
+     .want_r3 = 0x1111,
+     .want_mem = 0x2222'BEEFull,
+     .mem_mask = 0xFFFF'FFFF'FFFF'FFFFull},
+    {// The 8-bit width, which is its own callback on Tier J and its own `Opcode` on Tier I. The claim is
+     // the *masked* byte: `0x11` -> `0xEF`, with the other three bytes of the word untouched, so a 16- or
+     // 32-bit store cannot pass it.
+     .name = "f8 byte pair",
+     .asm_text = "ldrexb r3,[r0]; strexb r4,r1,[r0]",
+     .proof = ExclProof::kMeasured,
+     .source = "measured on both devices: Rd=0",
+     .code = kF8BytePair,
+     .seed_lo = 0x2222'1111u,
+     .want_r0 = 0,
+     .want_r3 = 0x11,
+     .want_mem = 0x2222'11EFull,
+     .mem_mask = 0xFFFF'FFFF'FFFF'FFFFull},
+    {// The 64-bit pair, at an 8-byte-aligned address as ARM requires. Both words are claimed, and the
+     // values in them are deliberately different in each half and in each direction, so a swapped
+     // `Rt`/`Rt2` — the one place in the IR where `ldrexd`/`strexd` can be got wrong and both tiers still
+     // agree with each other — fails here rather than under a mutex.
+     .name = "f9 ldrexd/strexd pair",
+     .asm_text = "ldrexd r3,r4,[r0]; strexd r5,r3,r1,[r0]",
+     .proof = ExclProof::kMeasured,
+     .source = "measured on both devices: Rd=0",
+     .code = kF9DoublePair,
+     .seed_lo = 0xAAAA'5555u,
+     .seed_hi = 0xCCCC'3333u,
+     .want_r0 = 0,
+     .want_r3 = 0xAAAA'5555u,
+     .want_r4 = 0xCCCC'3333u,
+     .want_mem = 0x0000'BEEF'AAAA'5555ull,
+     .mem_mask = 0xFFFF'FFFF'FFFF'FFFFull},
+    {// The word pair through `0xe850`/`0xe840`, the only rows here whose encoding carries an `imm8`. The
+     // translator computes the address as `Rn + (imm8 << 2)`, so a decoded field that was not zero would
+     // store somewhere else entirely — and the masked word below says so.
+     .name = "f10 word pair",
+     .asm_text = "ldrex r3,[r0]; strex r2,r1,[r0]",
+     .proof = ExclProof::kMeasured,
+     .source = "measured on both devices: Rd=0",
+     .code = kF10WordPair,
+     .seed_lo = 0x1111'2222u,
+     .seed_hi = 0x3333'4444u,
+     .want_r0 = 0,
+     .want_r3 = 0x1111'2222u,
+     .want_mem = 0x3333'4444'0000'BEEFull,
+     .mem_mask = 0xFFFF'FFFF'FFFF'FFFFull},
+    {// f11: the acquire load's own result is what gets stored. One blind spot, named rather than papered
+     // over: because the value written equals the value that was already there, this row cannot tell "the
+     // store landed" from "the store was skipped with Rd=0". f10 is the same width storing a *different*
+     // word, and it is what covers that; what f11 adds over f10 is the acquire opcode and the load-to-store
+     // data dependency, both of which are checked here.
+     .name = "f11 ldaex, store what it read",
+     .asm_text = "ldaex r3,[r0]; strex r2,r3,[r0]",
+     .proof = ExclProof::kMeasured,
+     .source = "measured on both devices: Rd=0",
+     .code = kF11AcquireWord,
+     .seed_lo = 0x1111'2222u,
+     .want_r0 = 0,
+     .want_r3 = 0x1111'2222u,
+     .want_mem = 0x0000'0000'1111'2222ull,
+     .mem_mask = 0xFFFF'FFFF'FFFF'FFFFull},
+    {// The loop has to *terminate*, and terminate for the right reason. `r3 = 0x77` is the proof: the
+     // second iteration's exclusive load saw the racing plain store's value, which can only happen if the
+     // first store failed and the loop came round. The Reno 5 would have exited on the first pass with
+     // `r3 = 0x1111` — the same conservative choice as f2, and here it costs one iteration and nothing
+     // else. `r5 = 1` says the racing store ran at all, so the row cannot quietly become a plain pair.
+     .name = "retry loop, store races once",
+     .asm_text = "movs r5,#0; ldrexh; cbnz; strh #0x77; strexh r4,r1; cmp; bne back",
+     .proof = ExclProof::kConservative,
+     .source = "the number of passes is RetroBug's, not a measurement; a per-block reservation makes the "
+               "store never pass and the run end on the budget",
+     .code = kRetryLoop,
+     .seed_lo = 0x2222'1111u,
+     .want_r0 = 0,
+     .want_r3 = 0x77,
+     .want_r5 = 1,
+     .want_mem = 0x2222'BEEFull,
+     .mem_mask = 0xFFFF'FFFF'FFFF'FFFFull},
+    {// Same code as f4, one premise changed: the target is not mapped and there is no reservation. Neither
+     // may touch memory, so neither may fault — Tier I's `AdmitAddress` rejects before it reads, and Tier
+     // J's back end branches around the whole callback when its marker is clear (`emit_arm64_memory.cpp`
+     // `CBZ` on the state's exclusive marker). An engine that reads the target *before* deciding what to
+     // do with it ends the run with `Fault` instead of a returned `Rd = 1` — and the two tiers are free to
+     // disagree about that, which is exactly the shape Compare() exists to catch. No hardware claim;
+     // neither device was asked.
+     .name = "f4 shape, target unmapped",
+     .asm_text = "clrex; strexh r4,r1,[r0] at an unmapped address",
+     .proof = ExclProof::kRule,
+     .source = "tier-vs-tier only, no hardware claim: a rejected store must not read or write",
+     .code = kF4NoPriorLoad,
+     .unmapped_target = true,
+     .want_r0 = 1,
+     .want_r4 = 1},
+};
+
+void exclusive_access_rows_match_hardware_rule_and_each_other() {
+  Rig rig = build();
+  if (!rig.ok) return;
+
+  std::string err;
+  const auto map = [&](exec::GuestAddr at, unsigned prot) {
+    if (rig.mem->Map(at, mem::kGuestPage, prot, &err)) return true;
+    ++checks;
+    fail("could not map a page for the exclusive rows", __LINE__, "0x" + Hex(at) + ": " + err);
+    return false;
+  };
+  if (!map(kExclCodePage, kRead | kWrite | kExec) || !map(kExclDataPage, kRead | kWrite)) return;
+
+  // Halfwords in, bytes planted, 0 when the guest refused the write. The terminator is not written.
+  const auto plant = [&](exec::GuestAddr at, const std::uint16_t* h) -> std::size_t {
+    std::size_t n = 0;
+    for (; h[n] != 0; ++n) {
+      if (!rig.mem->Write(at + static_cast<exec::GuestAddr>(n * 2), &h[n], 2)) return 0;
+    }
+    return n * 2;
+  };
+
+  // The premise of every red row below: a planted Thumb function runs and returns on both tiers, so a
+  // failure is about the exclusive logic and not about this mechanism. Same control the declined lane has.
+  CHECK_CTX(plant(kExclCodePage, kControl) == sizeof kControl - 2, "the control pair did not land");
+  CHECK_CTX((rig.mem->ProtAt(kExclCodePage) & kExec) != 0u,
+            "the page the rows are planted in is not executable");
+  {
+    const std::pair<const char*, exec::Executor*> engines[] = {{"I", rig.interp.get()},
+                                                               {"J", rig.jit.get()}};
+    for (const auto& [which, engine] : engines) {
+      exec::MachineState s = EntryState(kExclCodePage, 0, 0, /*thumb=*/true);
+      const exec::RunResult r = engine->Run(s, kExclBudget);
+      CHECK_CTX(r.reason == exec::StopReason::Returned && s.r[0] == 42,
+                std::string{"the planted `movs r0, #42; bx lr` control on Tier "} + which + ": reason=" +
+                    std::to_string(static_cast<int>(r.reason)) + " r0=" + std::to_string(s.r[0]) +
+                    " detail=" + r.detail);
+    }
+  }
+
+  exec::GuestAddr cursor = kExclCodePage + 0x100;  // clear of the control
+  unsigned slot = 1;                               // slot 0 is the control's, which reads no memory
+  int counted[4] = {};
+  for (const auto& row : kExclRows) {
+    ++counted[static_cast<int>(row.proof)];
+    const std::size_t len = plant(cursor, row.code);
+    ++checks;
+    if (len == 0 || row.code[len / 2 - 1] != 0x4770) {
+      fail("a planted row is not code that returns", __LINE__,
+           std::string{row.name} + ": " + std::to_string(len) +
+               " bytes, last halfword " + Hex(len == 0 ? 0 : row.code[len / 2 - 1]) +
+               "; every blob has to end in `bx lr` (0x4770) before its zero terminator");
+      continue;
+    }
+    // A row's own expectations are part of what is tested: one that asserts nothing about `Rd`, or nothing
+    // about memory, would be satisfied by an STREX that always fails *and* by one that always passes, and
+    // this table is read as evidence about which of those it is not.
+    CHECK_CTX(row.want_r0 != kNoCheck,
+              std::string{row.name} + " asserts nothing about Rd, so a store that never works passes it");
+    CHECK_CTX(row.mem_mask != 0 || row.unmapped_target,
+              std::string{row.name} + " asserts nothing about memory, so a store that writes anything "
+                                      "passes it (the unmapped row has no memory to read, and its claim "
+                                      "is that the run returns rather than faults)");
+
+    const exec::GuestAddr data =
+        row.unmapped_target ? kExclUnmapped : kExclDataPage + slot * kExclSlot;
+    ++slot;
+    if (row.unmapped_target) {
+      CHECK_CTX(!rig.mem->IsMapped(kExclUnmapped),
+                "the target of \"" + std::string{row.name} + "\" is mapped after all, so the row is no "
+                "longer an unmapped access");
+    } else {
+      const std::uint64_t seed =
+          (static_cast<std::uint64_t>(row.seed_hi) << 32) | static_cast<std::uint64_t>(row.seed_lo);
+      CHECK_CTX(rig.mem->Write(data, &seed, 8), "could not seed " + std::string{row.name});
+    }
+
+    // `EntryState` seeds r2/r3 because the fixture's probes are JNI methods; these are freestanding code
+    // with no `JNIEnv` in sight, so the address and the value go into the registers the code reads.
+    exec::MachineState si = EntryState(cursor, 0, 0, /*thumb=*/true);
+    si.r[0] = data;  ///< the address the exclusive pair reserves — the code's only handle on its data
+    si.r[1] = kExclStore;
+    exec::MachineState sj = si;
+    const exec::RunResult ri = rig.interp->Run(si, kExclBudget);
+    const exec::RunResult rj = rig.jit->Run(sj, kExclBudget);
+
+    std::uint64_t mem_i = 0, mem_j = 0;
+    if (!row.unmapped_target) {
+      CHECK_CTX(rig.mem->Read(data, &mem_i, 8) && rig.mem->Read(data, &mem_j, 8),
+                std::string{row.name} + ": the row's data could not be read back");
+    }
+
+    int checked = 0;
+    const auto verdict = [&](const char* which, const exec::RunResult& res, const exec::MachineState& s,
+                             std::uint64_t mem) {
+      std::string wrong;
+      const auto reg = [&](int n, std::uint32_t want) {
+        if (want == kNoCheck) return;
+        ++checked;
+        if (s.r[n] != want) {
+          wrong += " r" + std::to_string(n) + "=" + Hex(s.r[n]) + " want " + Hex(want);
+        }
+      };
+      reg(0, row.want_r0);
+      reg(3, row.want_r3);
+      reg(4, row.want_r4);
+      reg(5, row.want_r5);
+      if (row.mem_mask != 0) {
+        ++checked;
+        if ((mem & row.mem_mask) != (row.want_mem & row.mem_mask)) {
+          wrong += " mem@" + Hex(data) + "=" + Hex(mem) + ", masked " + Hex(mem & row.mem_mask) +
+                   " want " + Hex(row.want_mem & row.mem_mask);
+        }
+      }
+      ++checked;
+      if (res.reason != exec::StopReason::Returned) {
+        wrong += " stopped as reason=" + std::to_string(static_cast<int>(res.reason)) + " \"" +
+                 res.detail + "\"";
+      }
+      return wrong.empty() ? std::string{} : std::string{which} + ":" + wrong;
+    };
+    const std::string i_bad = verdict("interp", ri, si, mem_i);
+    const std::string j_bad = verdict("jit   ", rj, sj, mem_j);
+    const std::string tag = std::string{row.name} + " | " + row.source;
+    CHECK_CTX(checked > 0, tag + " checked nothing at all");
+    CHECK_CTX(i_bad.empty(), tag + "\n      " + i_bad + "\n      " + Describe("interp", ri, si));
+    CHECK_CTX(j_bad.empty(), tag + "\n      " + j_bad + "\n      " + Describe("jit   ", rj, sj));
+    Compare(tag.c_str(), si, ri, sj, rj);
+
+    std::fprintf(stderr,
+                 "[excl] %-26s %-42s Rd want=%u I=%u J=%u | mem want=%s I=%s J=%s | steps I=%u J=%u\n",
+                 row.name, row.asm_text, row.want_r0, si.r[0], sj.r[0],
+                 Hex(row.want_mem & row.mem_mask).c_str(), Hex(mem_i & row.mem_mask).c_str(),
+                 Hex(mem_j & row.mem_mask).c_str(), ri.instructions_executed, rj.instructions_executed);
+    cursor = static_cast<exec::GuestAddr>(cursor + ((len + 3) & ~static_cast<std::size_t>(3)));
+  }
+
+  std::fprintf(stderr, "[excl] %zu rows: %d both devices agree, %d follow the failing device, %d stricter "
+                       "than either, %d RetroBug's own rule\n",
+               sizeof kExclRows / sizeof kExclRows[0], counted[static_cast<int>(ExclProof::kMeasured)],
+               counted[static_cast<int>(ExclProof::kConservative)],
+               counted[static_cast<int>(ExclProof::kStricter)],
+               counted[static_cast<int>(ExclProof::kRule)]);
+  // The three rows where RetroBug answers differently from at least one device are the reason this lane
+  // encodes a rule instead of a set of opcodes. If they were relabelled as measurements — or deleted —
+  // the lane would quietly go back to being a tier-vs-tier check with a hardware-sounding name.
+  CHECK_CTX(counted[static_cast<int>(ExclProof::kConservative)] == 2 &&
+                counted[static_cast<int>(ExclProof::kStricter)] == 1,
+            "expected three divergence rows, found " +
+                std::to_string(counted[static_cast<int>(ExclProof::kConservative)] +
+                               counted[static_cast<int>(ExclProof::kStricter)]));
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1025,6 +1581,7 @@ int main(int argc, char** argv) {
   both_tiers_agree_and_match_hardware();
   fp_groups_are_accurate_or_explicitly_refused();
   declined_instructions_refuse_by_name();
+  exclusive_access_rows_match_hardware_rule_and_each_other();
   invalidation_reaches_the_compiled_code();
   both_tiers_stop_at_the_same_svc();
   a_guest_cacheflush_reaches_the_tier_that_owns_the_cache();
