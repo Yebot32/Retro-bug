@@ -78,6 +78,7 @@
 #include "rb/loader/elf_defs.h"
 #include "rb/loader/guest_elf.h"
 #include "rb/mem/guest_memory.h"
+#include "rb/syscall/monitor.h"
 
 #include <unistd.h>
 
@@ -216,6 +217,11 @@ struct Rig {
   std::optional<loader::GuestModule> libc;
   std::optional<loader::GuestModule> probe;
   std::unique_ptr<abi::AbiContext> abi_ctx;
+  /// Present because five of the eight IFUNC resolvers probe `/dev/cpu_variant:arm` with a real `openat`,
+  /// and without a monitor an SVC is a *refusal* rather than a syscall. What the monitor answers is not the
+  /// interesting part — that a resolver survives `ENOENT`/`ENOSYS` and falls back to its generic body is
+  /// the thing being tested — so the tally it collects is printed at the end of the IFUNC row.
+  std::unique_ptr<syscall::Monitor> monitor;
   std::unique_ptr<exec::InterpExecutor> interp;
   std::unique_ptr<exec::JitExecutor> jit;
   std::vector<std::string> libc_asked;   ///< names `libc.so` itself asked the host for
@@ -375,6 +381,9 @@ Rig build() {
   // RELRO would otherwise make the slot unwritable.
   rig.abi_ctx = std::make_unique<abi::AbiContext>(*rig.mem, kStackTop, kReturnAddress);
   rig.abi_ctx->state().tp = kTp;  // see the note above: no row should fail on a missing thread pointer
+  rig.monitor = std::make_unique<syscall::Monitor>();
+  rig.monitor->set_ids(4242, 4243);  // the guest's own identity, invented here the way the monitor requires
+  rig.abi_ctx->set_monitor(rig.monitor.get());
   rig.interp = std::make_unique<exec::InterpExecutor>(*rig.mem, kReturnAddress);
   rig.jit = std::make_unique<exec::JitExecutor>(*rig.mem, kReturnAddress);
   opts.resolve_ifunc = [&](const loader::IfuncSlot& s) -> std::optional<std::uint32_t> {
@@ -1038,7 +1047,9 @@ void the_ifunc_slots_are_recorded_for_the_linker() {
   // The two resolver families are worth reading off the same table: `strcmp`, `memcpy` and `memmove` return
   // an implementation pointer in four steps with no syscall at all (and the low bit of `0x956c1` / `0x94ac0`
   // says those implementations are Thumb), while `strlen`, `memset` and the `_chk` variants stop at an SVC
-  // after 16 steps — the `/dev/cpu_variant:arm` probe, which needs a monitor this lane does not attach. So
+  // after 16 steps — the `/dev/cpu_variant:arm` probe. A monitor is attached now, and with it all eight
+  // resolve on the strength of **one** `openat` (the tally says `openat x1`, because bionic remembers the
+  // answer), so the five were never a loader gap: they were a syscall-surface one.
   // resolving all eleven is a strict superset of "call a guest function": it also needs the syscall path.
   std::size_t refused = 0;
   for (const auto& s : rig.libc->ifunc_slots) {
@@ -1068,16 +1079,25 @@ void the_ifunc_slots_are_recorded_for_the_linker() {
  * engine bug. `memcpy` and `memmove` are compared byte for byte because that is what their standard pins —
  * including the overlapping case, the one behaviour that distinguishes `memmove` from `memcpy`.
  *
- * **Why the non-overlapping rows still fail, traced rather than left as a mystery.** They reach `SVC #0x0`
- * on *both* tiers, and the reason is in the resolved body: `0x94ac0` is `memmove_a15` (bionic uses the
- * memmove body for `memcpy` too), and its forward-copy path ends in `b 0xd2b00`, which
- * `llvm-objdump` places inside **`.iplt`** — bionic's IFUNC PLT, whose stub is
- * `add r12, pc, …; ldr pc, [r12, #0xed8]!`. That slot is yet another IFUNC target, and the loader fills
- * only the relocations it was shown, so the stub loads a program counter out of file data and both tiers
- * faithfully execute whatever decodes as `svc #0`. Two conclusions, both worth more than the row:
- * tiers agreeing is evidence they ran the same bad pointer, not evidence of correctness; and resolving the
- * named GOT slots is not the whole of IFUNC — `.iplt` belongs to the same job, which is now #30's scope.
- * The overlapping `memmove` passes because its backward path never touches the IPLT.
+ * **What `.iplt` turned out to be, and why the detour was the point.** The non-overlapping `memcpy`/`memmove`
+ * reached `SVC #0x0` on *both* tiers, and the reason was inside the resolved body: `0x94ac0` is
+ * `memmove_a15` (bionic uses the memmove body for `memcpy` too), its forward-copy path ends in `b 0xd2b00`,
+ * and `llvm-objdump` puts that address in **`.iplt`** — bionic's IFUNC PLT, whose stub is
+ * `add r12, pc, …; ldr pc, [r12, #0xed8]!`. Decoding the stub's own arithmetic lands its target on
+ * `0xd69e0`: **the same `R_ARM_IRELATIVE` slot the loader already records.** So `.iplt` was never a second
+ * piece of work — it is one unfilled slot seen from the other end, and it fills itself as soon as the
+ * load-time write goes to the right address. Which it did not: `IfuncSlot::where` held a `vaddr`, so the
+ * write landed 0x2000 below its target and still reported success. Two lessons, kept visible on purpose:
+ *
+ *   - **A name-based lookup hides a slot-based bug.** `FindExport` was returning the right implementation
+ *     while the memory bionic actually branches through still held the resolver, so the rows that read like
+ *     proof of resolution were not looking at the thing that was resolved. The slot read-back below closes
+ *     that, and it is the only row in this file that can fail for the bug that was here.
+ *   - **Two tiers agreeing is not evidence of correctness.** They agreed on the `SVC` because both were
+ *     faithfully running the same bad pointer — §Step 24's wrong-test-constant lesson from the other side.
+ *
+ * The overlapping `memmove` passed throughout because its backward path never touches the IPLT, which is
+ * also why "some of it works" was not evidence that any of it was finished.
  */
 void resolved_ifunc_implementations_compute_what_hardware_does() {
   Rig rig = build();
@@ -1086,6 +1106,8 @@ void resolved_ifunc_implementations_compute_what_hardware_does() {
   for (const auto& line : rig.ifunc_log) std::fprintf(stderr, "[libc] %s\n", line.c_str());
   std::fprintf(stderr, "[libc] %zu of %zu IFUNC slot(s) resolved; still needing an answer: %s\n",
                rig.ifunc_resolved, rig.libc->ifunc_slots.size(), Join(rig.ifunc_unresolved).c_str());
+  std::fprintf(stderr, "[libc] syscalls the resolvers asked for: %s\n",
+               rig.monitor ? rig.monitor->TallyText().c_str() : "(no monitor)");
   CHECK_CTX(rig.ifunc_resolved >= 3u,
             "fewer than the three no-syscall resolvers resolved: " + std::to_string(rig.ifunc_resolved));
   CHECK_CTX(rig.ifunc_unresolved.size() + rig.ifunc_resolved == rig.libc->ifunc_slots.size(),
@@ -1111,6 +1133,24 @@ void resolved_ifunc_implementations_compute_what_hardware_does() {
               s.name + ": FindExport still returns the resolver (0x" +
                   Hex(fn ? fn->tagged() : 0u) + ") instead of the implementation (0x" +
                   Hex(s.implementation) + ")");
+  }
+
+  /**
+   * Read the slot back, which is the assertion that catches the bug this row was written for.
+   *
+   * Checking `FindExport` alone is not enough: it answers by name, so it stays right while the *slot* still
+   * holds the resolver — and it is the slot that bionic's own `.iplt` stubs branch through, which is how a
+   * resolved-but-unwritten `memcpy` was still copying nothing. First draft stored a `vaddr` in
+   * `IfuncSlot::where` and wrote 0x2000 below the target with a cheerful success.
+   */
+  for (const auto& s : rig.libc->ifunc_slots) {
+    if (s.implementation == 0) continue;
+    std::uint32_t held = 0;
+    rig.mem->Read(s.where, &held, 4);
+    CHECK_CTX(held == s.implementation,
+              (s.name.empty() ? std::string{"<IRELATIVE>"} : s.name) +
+                  " slot at 0x" + Hex(s.where) + " holds 0x" + Hex(held) + ", not the implementation 0x" +
+                  Hex(s.implementation));
   }
 
   const auto call_libc = [&](const char* name, const abi::Args32& args, const char* shorty,

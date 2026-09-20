@@ -546,7 +546,7 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
             // otherwise looks like a bug in the string code rather than an unfinished load.
             if (have_sym && ELF32_ST_TYPE(sym.st_info) == STT_GNU_IFUNC) {
               mod.ifunc_slots.push_back(IfuncSlot{
-                  r_offset, CodeAddress{sym_addr & ~1u, (sym_addr & 1u) != 0}, sym_addr, sname});
+                  base + r_offset, CodeAddress{sym_addr & ~1u, (sym_addr & 1u) != 0}, sym_addr, sname});
             }
             break;
           case R_ARM_IRELATIVE: {
@@ -562,7 +562,7 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
               return false;
             }
             mod.ifunc_slots.push_back(IfuncSlot{
-                r_offset, CodeAddress{resolver & ~1u, (resolver & 1u) != 0}, resolver, {}});
+                base + r_offset, CodeAddress{resolver & ~1u, (resolver & 1u) != 0}, resolver, {}});
             break;
           }
           default:

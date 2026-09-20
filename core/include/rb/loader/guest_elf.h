@@ -82,6 +82,15 @@ struct Symbol {
 /// implementation pointer in four steps, and `strlen` reaches the `openat` instead — so the execution is
 /// not the missing part, only the load-time call.
 struct IfuncSlot {
+  /**
+   * The **guest address** to write the answer into — load bias included, not a `vaddr`.
+   *
+   * Every other address on this struct is a guest address, and the relocation code that finds this one
+   * works in `vaddr`s and adds `base` on the way out, so the two conventions are one field apart from a
+   * write that lands 0x2000 below its target and reports total success. That is exactly what it did first:
+   * the slots held their resolvers, `FindExport` returned the right answer anyway, and only bionic's own
+   * `.iplt` stub — which reads the *slot* — noticed.
+   */
   std::uint32_t where = 0;
   CodeAddress resolver;
   std::uint32_t slot_value = 0;

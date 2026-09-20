@@ -1018,6 +1018,18 @@ Progress and the findings that change this plan are tracked in
     `memcpy` reaches an `svc` on both tiers. Both hosts now report identical counts, so the emulator is
     deterministic across them.
 
+    **Gap 1 is closed** (`30` §Step 29): with the load-time hook plus a syscall monitor, **all eight** slots
+    resolve, on the strength of one `openat` (`openat x1` — bionic caches the variant). `snprintf` returns
+    7 and writes `"42/xy/!"`, `strlen` 43, `getpid` the monitor's own id, `strstr` `NULL` where hardware gave
+    it. Two things that came with it: `IfuncSlot::where` had stored a `vaddr`, so the write-back landed
+    0x2000 below its target *while reporting success* — invisible to every name-based row and caught only by
+    reading the slot back, which is now the pattern ("assert on the artifact, not on the lookup that hides
+    it"); and `.iplt` was never extra work, since decoding its stub lands on the same `R_ARM_IRELATIVE` slot.
+    **What replaced it as the Tier J blocker** is one encoding, found by subtracting the load bias from both
+    remaining refusals: `ldaexh`/`strexh` inside `pthread_mutex_lock` and `pthread_mutex_trylock`, reached
+    from `strtod` and `malloc`. That is ARMv7's exclusive load/store pair — a memory-model feature, not a
+    decode oversight, and now its own item below.
+
 Sequencing constraint the owner should know before M1: **M1's end-to-end acceptance step cannot be verified on this
 machine at all** — it needs a physical 64-bit-only arm64 phone. Everything in §9 and most of M1's code can be written
 and tested without one, so the device gates only the final launch assertion, not the work.

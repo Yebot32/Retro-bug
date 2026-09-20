@@ -2600,6 +2600,55 @@ looks, and the reason a fresh device has to receive the full artifact set before
 being trusted on a green count.
 
 
+## Step 29 — all eight IFUNC slots resolve, and the last Tier J gap is one instruction
+
+**#30 finished, and it closed itself from two ends.** `LoadOptions::resolve_ifunc` plus a syscall monitor on
+the lane resolves **8 of 8** IFUNC slots on the device's `libc.so`, and the resolvers asked for exactly one
+syscall between them — the tally reads `openat x1`, because bionic remembers the variant after the first
+probe. The implementations it picked:
+
+```
+<IRELATIVE> -> 0x949c0    strcmp -> 0x956c1    strlen -> 0x95d01    memcpy  -> 0x94ac0
+memmove     -> 0x94ac0    memset -> 0x94dc0    __strcpy_chk -> 0xa7fc1   __memset_chk -> 0x94d80
+```
+
+(`memcpy` and `memmove` resolving to the *same* body is bionic's own choice, not a bug here.) What that
+unlocks is wider than IFUNC: with the memory and string routines real, bionic's formatting works —
+`snprintf(buf, 64, "%d/%s/%c", 42, "xy", '!')` returns **7** and leaves **`"42/xy/!"`** in the guest
+buffer, matching the device, and `strlen` returns **43**, `getpid` **4242** (the monitor's own id),
+`strstr` on an absent needle returns **0** where hardware returned `NULL`.
+
+**A bug the resolution itself introduced, caught by the row that looks least important.** `memcpy` was still
+copying nothing after a "successful" resolution, because `IfuncSlot::where` stored a **`vaddr`** and the
+write-back went 0x2000 below its target — and *reported success*. The reason nothing else noticed is that
+`FindExport` answers by name, so every name-based row was green while the slot bionic actually branches
+through was untouched. The fix is a read-back: for each resolved slot, read guest memory at `where` and
+require the implementation. That is the only row in the lane that could fail for that bug, and it is worth
+noting as a pattern — **assert on the artifact, not on the lookup that hides it.** The `.iplt` question from
+§Step 28 dissolved at the same time: decoding the stub's arithmetic (`add r12, pc, #0xc000; ldr pc,
+[r12, #0xed8]`) puts its target at `0xd69e0`, which *is* the `R_ARM_IRELATIVE` slot. One unfilled word, seen
+from two ends.
+
+**The last Tier J failure in real libc is a single encoding class, and it is not `strtod`.** Both remaining
+Tier J refusals — inside `strtod` and inside `malloc` — report the same instruction once the load bias is
+subtracted: `0x82fdc` and `0x835f2` are both
+
+```
+e8d0 3fdf    ldaexh  r3, [r0]      <- and four bytes later, e8c0 2f53  strexh r3, r2, [r0]
+```
+
+inside `pthread_mutex_lock` / `pthread_mutex_trylock`. So what stands between Tier J and bionic's locking
+paths is ARMv7's **exclusive load/store pair** (here the acquire/release halfword forms) — not a math bug and
+not a libc quirk. That is a feature with memory-model consequences (a reservation address, and `LDREX`/
+`STREX` semantics that a single-threaded emulator still has to define honestly), so it is #31 rather than a
+tonight fix. It also explains the Tier I `the front end raised an exception at this instruction` rows: same
+instructions, surfaced differently by the two tiers — which is the first case in this project where a Tier I
+and a Tier J failure are the *same* underlying gap rather than a divergence.
+
+`rb_guest_libc_tests` is now **116 checks, 17 failures**, and every one of the 17 is Tier I's five named
+opcodes, `strtod`/`malloc` on the exclusive pair, or the rows that inherit them.
+
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |
