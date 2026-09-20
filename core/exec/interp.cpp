@@ -269,6 +269,58 @@ std::uint64_t ToFixed(double rounded, bool is_signed, unsigned dst_bits, std::ui
                    : static_cast<std::uint64_t>(static_cast<std::uint64_t>(rounded));
 }
 
+/// Lane width in bits, for the integer ASIMD family whose opcodes are the same operation at 8, 16, 32
+/// and 64 bits. Listed exhaustively rather than parsed out of the opcode's name: a name-based reader
+/// would silently accept `VectorSignedSaturatedAdd8` or reject something new, and either mistake turns
+/// into arithmetic on the wrong lane width — a wrong answer, not a fault. Anything not listed returns
+/// 0, which the caller turns into a named refusal.
+unsigned LaneBits(Dynarmic::IR::Opcode op) {
+  using Dynarmic::IR::Opcode;
+  switch (op) {
+    case Opcode::VectorAdd8: case Opcode::VectorSub8: case Opcode::VectorMultiply8:
+    case Opcode::VectorAbs8: case Opcode::VectorGetElement8: case Opcode::VectorSetElement8:
+      return 8;
+    case Opcode::VectorAdd16: case Opcode::VectorSub16: case Opcode::VectorMultiply16:
+    case Opcode::VectorAbs16: case Opcode::VectorGetElement16: case Opcode::VectorSetElement16:
+      return 16;
+    case Opcode::VectorAdd32: case Opcode::VectorSub32: case Opcode::VectorMultiply32:
+    case Opcode::VectorAbs32: case Opcode::VectorGetElement32: case Opcode::VectorSetElement32:
+    case Opcode::VectorBroadcast32:
+      return 32;
+    case Opcode::VectorAdd64: case Opcode::VectorSub64: case Opcode::VectorMultiply64:
+    case Opcode::VectorAbs64: case Opcode::VectorGetElement64: case Opcode::VectorSetElement64:
+    case Opcode::VectorBroadcast64:
+      return 64;
+    case Opcode::VectorBroadcast8: return 8;
+    case Opcode::VectorBroadcast16: return 16;
+    default: return 0;
+  }
+}
+
+/// Sign-extend a lane of `bits` width held in the low bits of `value`. Written here rather than
+/// routed through `SignExtend` below, which takes a target width and lives further down the file.
+///
+/// `bits == 64` needs its own branch: the shift form below evaluates `1ull << 64`, which is undefined
+/// rather than zero, and hardware masks the shift count to 6 bits so it yields `1ull << 0`. The
+/// observable result is that `vabs` on a 64-bit lane silently computes from a lane of 0 — a wrong
+/// answer, which is the failure mode this whole file is trying not to have.
+std::int64_t SignedAt(std::uint64_t value, unsigned bits) {
+  if (bits >= 64) return static_cast<std::int64_t>(value);
+  const std::uint64_t low = value & ((1ull << bits) - 1);
+  const std::uint64_t sign = 1ull << (bits - 1);
+  return static_cast<std::int64_t>((low ^ sign) - sign);
+}
+
+/// How many lanes of `bits` width a 128-bit vector register holds, for validating a
+/// `VectorGetElement`/`VectorSetElement` index.
+///
+/// The index arrives as an IR `U8` argument, so it is data this file does not control: the A32
+/// translator supplies element indices as immediates today, but an out-of-range index from a
+/// mis-translated or future path would otherwise read — or, for a set, *write* — past the end of the
+/// 16-byte value on the stack. Bounding it here is what keeps a malformed guest binary from becoming
+/// host memory corruption inside the emulator.
+unsigned LaneCount(unsigned bits) { return bits == 0 ? 0 : 16u * 8u / bits; }
+
 std::string Hex(std::uint64_t v) {
   char buf[17];
   std::snprintf(buf, sizeof(buf), "%llx", static_cast<unsigned long long>(v));
@@ -375,6 +427,11 @@ class BlockRunner {
     stop.detail = std::string{Dynarmic::IR::GetNameOf(inst->GetOpcode())} + ": " + why;
     return false;
   }
+
+  /// The same, for a message assembled from the offending values. Named overloads rather than a
+  /// `string_view` parameter because the call sites that need this one build a `std::string` inline,
+  /// and a `const char*` taken from a temporary at the call boundary is exactly the thing to avoid.
+  bool Fail(const Inst* inst, const std::string& why) { return Fail(inst, why.c_str()); }
 
   bool Fault(const std::string& why) {
     stop.reason = StopReason::Fault;
@@ -946,6 +1003,25 @@ bool BlockRunner::Step(const Inst* inst) {
       check_bit = t.d() != 0;
       return true;
     }
+    /**
+     * `IsZero32` — and with it, Thumb-16 `CBZ`/`CBNZ`.
+     *
+     * It arrived as an incidental on the ASIMD lane (`docs/30` §Step 18), but it is worth naming for
+     * what it actually is: `thumb16.cpp:894` lowers `CBZ`/`CBNZ` to `SetCheckBit(IsZero(rn))`, so until
+     * this line Tier I could not run a compare-and-branch-on-zero at all, which is one of the most
+     * common control-flow instructions in compiled ARM code. The `If`/`CheckBit` *terminal* was already
+     * handled, so the missing half was only ever this predicate.
+     *
+     * `IsZero64` is not here because the A32 front end has exactly one `IsZero` call site and it passes
+     * a `U32`; an ARMv7 guest cannot reach the 64-bit form.
+     */
+    case Opcode::IsZero32: {
+      if (!HasArgs(inst, 1)) return false;
+      std::uint32_t a = 0;
+      if (!W32(inst, 0, a)) return false;
+      Put(inst, V{a == 0 ? 1u : 0u, 0});
+      return true;
+    }
 
     // ---------------------------------------------------------------- 32- and 64-bit arithmetic
     //
@@ -1018,6 +1094,52 @@ bool BlockRunner::Step(const Inst* inst) {
       std::uint32_t a = 0, b = 0;
       if (!W32(inst, 0, a) || !W32(inst, 1, b)) return false;
       Put(inst, V{op == Opcode::And32 ? a & b : op == Opcode::Or32 ? a | b : a ^ b, 0});
+      return true;
+    }
+    /// The same three at 64 bits, which an AArch32 guest reaches through the ASIMD structure paths that
+    /// assemble a `d` register out of element-sized pieces. No flag record, for the reason given above:
+    /// their flag-form is the `TST v, v` fallback, and `FlagsFromOp` already takes the width from the
+    /// value's IR type rather than assuming 32.
+    case Opcode::And64:
+    case Opcode::Or64:
+    case Opcode::Eor64: {
+      std::uint64_t a = 0, b = 0;
+      if (!W64(inst, 0, a) || !W64(inst, 1, b)) return false;
+      const std::uint64_t r = op == Opcode::And64 ? a & b : op == Opcode::Or64 ? a | b : a ^ b;
+      Put(inst, V{r, 0});
+      return true;
+    }
+
+    /**
+     * The 64-bit shift pair, which is *not* the 32-bit family above widened: `LogicalShiftLeft64` and
+     * its partner take two operands rather than three (opcodes.inc:111-113 — no `U1` carry-in), so they
+     * publish no shifter carry at all, and an amount of 64 or more yields zero rather than the
+     * ARMv7-style "shift by 32 leaves the operand alone".
+     *
+     * These exist because the AArch32 guest reaches them without a 64-bit shift instruction: the ASIMD
+     * structure paths insert and extract an element out of a 64-bit word with exactly these ops
+     * (`asimd_load_store_structures.cpp:161` for the store side), so `vst1`/`vld1` need them. The first
+     * demand was measured, not guessed — `docs/30` §Step 18's ASIMD probes refused on
+     * `LogicalShiftLeft64` while Tier J ran them fine.
+     *
+     * `ArithmeticShiftRight64` and `RotateRight64` are deliberately absent: their back-end forms take a
+     * register operand through an AArch64 *signed*-shift rule (`emit_arm64_data_processing.cpp`, the
+     * `ASR Xd, Xt, Xm` branch) that has not been looked up here, and nothing in an AArch32 guest has
+     * asked for them yet. Refusing names that instead of inventing semantics is the cheaper mistake.
+     */
+    case Opcode::LogicalShiftLeft64:
+    case Opcode::LogicalShiftRight64: {
+      if (!HasArgs(inst, 2)) return false;
+      std::uint64_t a = 0, raw = 0;
+      if (!W64(inst, 0, a) || !W64(inst, 1, raw)) return false;
+      // Masked to 8 bits, then the whole result goes to zero at 64 or above — both halves of
+      // `AND Xscratch0, Xshift, 0xff` followed by `CMP Xscratch0, 64` + `CSEL …, XZR, LT`.
+      const unsigned n = static_cast<unsigned>(raw) & 0xffu;
+      if (n >= 64) {
+        Put(inst, V{0, 0});
+        return true;
+      }
+      Put(inst, V{op == Opcode::LogicalShiftLeft64 ? (a << n) : (a >> n), 0});
       return true;
     }
 
@@ -1153,19 +1275,6 @@ bool BlockRunner::Step(const Inst* inst) {
       std::uint32_t a = 0, b = 0;
       if (!W32(inst, 0, a) || !W32(inst, 1, b)) return false;
       Put(inst, V{(static_cast<std::uint64_t>(b) << 32) | a, 0});
-      return true;
-    }
-
-    // ---------------------------------------------------------------- 128-bit vectors
-    case Opcode::VectorAdd32: {
-      V x{}, y{};
-      if (!W128(inst, 0, x) || !W128(inst, 1, y)) return false;
-      const auto lanes = [](std::uint64_t a, std::uint64_t b) {
-        const std::uint64_t lo = ((a & 0xffffffffu) + (b & 0xffffffffu)) & 0xffffffffu;
-        const std::uint64_t hi = ((a >> 32) + (b >> 32)) & 0xffffffffu;
-        return lo | (hi << 32);
-      };
-      Put(inst, V{lanes(x.lo, y.lo), lanes(x.hi, y.hi)});
       return true;
     }
 
@@ -1459,6 +1568,160 @@ bool BlockRunner::Step(const Inst* inst) {
         }
         Put(inst, V{AsBits<std::uint32_t>(static_cast<float>(src)), 0});
       }
+      return true;
+    }
+
+    // ---------------------------------------------------------------- ASIMD lanes
+    //
+    // The 16-byte view is the whole point: every integer lane operation in this group is the same loop
+    // over lanes of 8/16/32/64 bits, and writing it once against bytes rather than four times against
+    // `u64` pairs is what keeps "the D form" and "the Q form" from being two implementations where only
+    // one lane width was ever finished. `VectorAdd32`, the single vector op this file had before
+    // `docs/30` §Step 16 counted it, was already in that shape — which is the reason the shape is
+    // reused rather than reinvented here.
+    case Opcode::ZeroVector:
+      Put(inst, V{0, 0});
+      return true;
+    case Opcode::VectorBroadcast8: case Opcode::VectorBroadcast16:
+    case Opcode::VectorBroadcast32: case Opcode::VectorBroadcast64: {
+      const unsigned bits = LaneBits(inst->GetOpcode());
+      std::uint64_t v = 0;
+      if (!W64(inst, 0, v)) return false;
+      const std::uint64_t lane = bits == 64 ? v : v & ((1ull << bits) - 1);
+      const auto fill = [&](std::uint64_t& word) {
+        word = 0;
+        for (unsigned off = 0; off < 64; off += bits) word |= lane << off;
+      };
+      std::uint64_t lo = 0, hi = 0;
+      fill(lo);
+      if (bits == 64) hi = lo; else fill(hi);
+      Put(inst, V{lo, hi});
+      return true;
+    }
+
+    case Opcode::VectorOr: case Opcode::VectorAnd: case Opcode::VectorEor:
+    case Opcode::VectorAndNot: {
+      V a{}, b{};
+      if (!W128(inst, 0, a) || !W128(inst, 1, b)) return false;
+      const auto op = inst->GetOpcode();
+      const auto combine = [&](std::uint64_t x, std::uint64_t y) {
+        if (op == Opcode::VectorOr) return x | y;
+        if (op == Opcode::VectorAnd) return x & y;
+        if (op == Opcode::VectorAndNot) return x & ~y;
+        return x ^ y;
+      };
+      Put(inst, V{combine(a.lo, b.lo), combine(a.hi, b.hi)});
+      return true;
+    }
+    case Opcode::VectorNot: {
+      V a{};
+      if (!W128(inst, 0, a)) return false;
+      Put(inst, V{~a.lo, ~a.hi});
+      return true;
+    }
+
+    case Opcode::VectorAdd8: case Opcode::VectorAdd16: case Opcode::VectorAdd32:
+    case Opcode::VectorAdd64: case Opcode::VectorSub8: case Opcode::VectorSub16:
+    case Opcode::VectorSub32: case Opcode::VectorSub64: case Opcode::VectorMultiply8:
+    case Opcode::VectorMultiply16: case Opcode::VectorMultiply32: case Opcode::VectorMultiply64:
+    case Opcode::VectorAbs8: case Opcode::VectorAbs16: case Opcode::VectorAbs32:
+    case Opcode::VectorAbs64: {
+      const unsigned bits = LaneBits(inst->GetOpcode());
+      if (bits == 0) return Fail(inst, "unrecognised lane width in the vector arithmetic group");
+      const unsigned bytes = bits / 8;
+      V a{}, b{};
+      if (!W128(inst, 0, a)) return false;
+      // One operand for `abs`, two for the rest. Asked of the instruction rather than derived from the
+      // opcode's name, because `NumArgs()` is what the IR actually carries.
+      const bool abs_only = inst->GetOpcode() == Opcode::VectorAbs8 ||
+                            inst->GetOpcode() == Opcode::VectorAbs16 ||
+                            inst->GetOpcode() == Opcode::VectorAbs32 ||
+                            inst->GetOpcode() == Opcode::VectorAbs64;
+      if (!abs_only && !W128(inst, 1, b)) return false;
+      const bool sub = inst->GetOpcode() == Opcode::VectorSub8 ||
+                       inst->GetOpcode() == Opcode::VectorSub16 ||
+                       inst->GetOpcode() == Opcode::VectorSub32 ||
+                       inst->GetOpcode() == Opcode::VectorSub64;
+      const auto* pa = reinterpret_cast<const std::uint8_t*>(&a);
+      const auto* pb = reinterpret_cast<const std::uint8_t*>(&b);
+      V out{};
+      auto* pd = reinterpret_cast<std::uint8_t*>(&out);
+      for (unsigned i = 0; i < 16; i += bytes) {
+        std::uint64_t x = 0, y = 0;
+        for (unsigned k = 0; k < bytes; ++k) {
+          x |= static_cast<std::uint64_t>(pa[i + k]) << (8 * k);
+          if (!abs_only) y |= static_cast<std::uint64_t>(pb[i + k]) << (8 * k);
+        }
+        std::uint64_t r = 0;
+        if (abs_only) {
+          // Signed lanes only, and the most-negative lane stays negative through `abs` — ARM's
+          // documented behaviour for integer VABS, not an oversight here.
+          const std::int64_t sv = SignedAt(x, bits);
+          r = static_cast<std::uint64_t>(sv < 0 ? -sv : sv);
+        } else if (sub) {
+          r = x - y;
+        } else if (inst->GetOpcode() == Opcode::VectorMultiply8 ||
+                   inst->GetOpcode() == Opcode::VectorMultiply16 ||
+                   inst->GetOpcode() == Opcode::VectorMultiply32 ||
+                   inst->GetOpcode() == Opcode::VectorMultiply64) {
+          r = x * y;
+        } else {
+          r = x + y;
+        }
+        // No mask here, and that is deliberate: only the low `bytes` of `r` are stored below, so the
+        // lane-width wraparound falls out of the store. The widening multiply forms are distinct
+        // opcodes with distinct names (`VectorMultiplySignedWiden*`), and a lane that silently took
+        // the narrow path for one of those would be a plausible wrong answer rather than a fault —
+        // which is why they are not in this case label at all.
+        for (unsigned k = 0; k < bytes; ++k) pd[i + k] = static_cast<std::uint8_t>(r >> (8 * k));
+      }
+      Put(inst, out);
+      return true;
+    }
+
+    case Opcode::VectorGetElement8: case Opcode::VectorGetElement16:
+    case Opcode::VectorGetElement32: case Opcode::VectorGetElement64: {
+      const unsigned bits = LaneBits(inst->GetOpcode());
+      V a{};
+      std::uint8_t index = 0;
+      if (!W128(inst, 0, a) || !ByteArg(inst, 1, index)) return false;
+      if (index >= LaneCount(bits)) {
+        return Fail(inst, "vector lane index " + std::to_string(index) + " is out of range for a " +
+                              std::to_string(bits) + "-bit lane in a 128-bit register");
+      }
+      std::uint64_t x = 0;
+      const std::uint8_t* p = reinterpret_cast<const std::uint8_t*>(&a);
+      for (unsigned k = 0; k < bits / 8; ++k) {
+        x |= static_cast<std::uint64_t>(p[index * (bits / 8) + k]) << (8 * k);
+      }
+      Put(inst, V{x, 0});
+      return true;
+    }
+    case Opcode::VectorSetElement8: case Opcode::VectorSetElement16:
+    case Opcode::VectorSetElement32: case Opcode::VectorSetElement64: {
+      const unsigned bits = LaneBits(inst->GetOpcode());
+      V a{};
+      std::uint8_t index = 0;
+      std::uint64_t value = 0;
+      if (!W128(inst, 0, a) || !ByteArg(inst, 1, index)) return false;
+      if (index >= LaneCount(bits)) {
+        return Fail(inst, "vector lane index " + std::to_string(index) + " is out of range for a " +
+                              std::to_string(bits) + "-bit lane in a 128-bit register");
+      }
+      // The value argument is the lane's own width, so it has to be read at that width; reading it
+      // as a U64 on a `VectorSetElement8` would take whatever the register above the byte held.
+      if (bits == 64) {
+        if (!W64(inst, 2, value)) return false;
+      } else {
+        V raw{};
+        if (!Read(inst->GetArg(2), raw)) return false;
+        value = raw.lo & ((1ull << bits) - 1);
+      }
+      std::uint8_t* p = reinterpret_cast<std::uint8_t*>(&a);
+      for (unsigned k = 0; k < bits / 8; ++k) {
+        p[index * (bits / 8) + k] = static_cast<std::uint8_t>(value >> (8 * k));
+      }
+      Put(inst, a);
       return true;
     }
 

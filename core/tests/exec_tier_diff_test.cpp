@@ -261,12 +261,12 @@ void both_tiers_agree_and_match_hardware() {
 ///
 /// `docs/32` §1 measured the demand (14,723 vector/FP instructions in bionic and libc++, `vmul.f64`
 /// 786 times, `vldr` 2,290) and §5 item 3 ranked this lane next after IT-blocks. What it did not
-/// answer is what RetroBug *does* about them, and the answer is asymmetric: Tier I implements one
-/// vector arithmetic IR opcode (`VectorAdd32`) out of the 448 `FP*`/`Vector*` names in the IR's 725-entry
-/// opcode table, so a `dadd` stops it with `StopReason::Unimplemented`. That is a clean refusal rather
-/// than a wrong number, which is the
-/// part worth having; the part worth *knowing* is which groups those are, in units of real code,
-/// before M1 discovers them by an app producing garbage on the `execmem`-denied path.
+/// answer is what RetroBug *does* about them, and this lane is that answer in units of real code: what
+/// began as one vector IR opcode (`VectorAdd32`) out of the 725-entry table now covers the scalar VFP
+/// group (§Step 17) and the integer ASIMD lane group (§Step 18). What is still refused is *vector
+/// floating-point* (`FPVectorAdd` and friends), the widening/narrowing and saturating ASIMD forms,
+/// shifts by a register, and the table lookups — so the example this comment used to give, a scalar
+/// `dadd`, is now answered rather than refused, and the refusal belongs to `vadd.f32`.
 ///
 /// So each row asserts two different things, deliberately not the same one:
 ///   - Tier J must equal the hardware number. A miss here is a bug, and it fails.
@@ -275,6 +275,19 @@ void both_tiers_agree_and_match_hardware() {
 ///     agree with each other are not evidence: they can both be wrong together, which is exactly what
 ///     §Step 7c found for IT blocks. Hence the hardware column rather than a tier-vs-tier diff.
 /// The stderr summary is the deliverable: which group, which op, how far Tier I gets today.
+///
+/// One limit worth stating rather than leaving to the reader: a row passing on Tier I proves the
+/// handlers *this probe happens to reach* are right, and the probe reaching them is an assumption about
+/// compiler output. The assumption is checked two ways — the refusal count below is the instrument that
+/// says "nothing was needed that is missing", and `llvm-objdump` on the built fixture is what says the
+/// mnemonics are really there. See the `RB_HOLD` comment in `tests/corpus/fixture_jni.c` for the second
+/// one, which is how a 64-bit `vdup` turned out to be unencodable rather than untested.
+///
+/// The negative control, run 2026-09-20 on the SM-X710 with two mutations applied at once to
+/// `interp.cpp` — the 8-bit lane loop stepping in 16s, and `VectorAndNot` computed as `~x & y`:
+/// **all ten ASIMD rows failed, 20 checks**, then all passed again on revert. A row that cannot
+/// distinguish those two bugs would not be worth adding, and "0 of 50 refused" alone does not show
+/// that it can.
 struct FpCase {
   const char* name;
   std::int32_t a, b;
@@ -355,6 +368,24 @@ void fp_groups_are_accurate_or_explicitly_refused() {
       {"Java_com_retrobug_fixture_MainActivity_simd_int", -5, 3, 67, "ASIMD i32 lanes"},
       {"Java_com_retrobug_fixture_MainActivity_simd_int", 100, -50, 30250, "ASIMD i32 lanes"},
       {"Java_com_retrobug_fixture_MainActivity_simd_int", 0, 1, -1, "ASIMD i32 lanes"},
+      // simd_lane: one lane width per row, and a fold over all 16 result bytes rather than a returned
+      // lane, so a lane loop of the wrong width shows up as a changed number. `a` is the mode (0=8,
+      // 1=16, 2=32, 3=64 bit) and `b` seeds the register; row 4 repeats the 64-bit path with different
+      // data because ARMv7 has exactly four integer lane widths, not five.
+      {"Java_com_retrobug_fixture_MainActivity_simd_lane", 0, 3, 1709337648, "ASIMD 8-bit lanes"},
+      {"Java_com_retrobug_fixture_MainActivity_simd_lane", 1, 7, -1185945012, "ASIMD 16-bit lanes"},
+      {"Java_com_retrobug_fixture_MainActivity_simd_lane", 2, -5, -1238834555, "ASIMD 32-bit lanes"},
+      {"Java_com_retrobug_fixture_MainActivity_simd_lane", 3, 100, -450686130, "ASIMD 64-bit lanes"},
+      {"Java_com_retrobug_fixture_MainActivity_simd_lane", 4, -2, -1656795248, "ASIMD 64-bit lanes"},
+      // simd_bits: the width-independent logical group, one operation per row, including `vbic` twice
+      // with its operands swapped — an implementation of `A & ~B` as `~A & B` is a plausible mistake
+      // and passes every symmetric test, so the two rows differ only in operand order. `vorn` reaches
+      // `VectorNot` and `vneg` reaches `ZeroVector`; see the fixture for both lowerings.
+      {"Java_com_retrobug_fixture_MainActivity_simd_bits", 0, 3, 1148729636, "ASIMD logical + VORN/VNEG"},
+      {"Java_com_retrobug_fixture_MainActivity_simd_bits", 1, 7, 1143559836, "ASIMD logical + VORN/VNEG"},
+      {"Java_com_retrobug_fixture_MainActivity_simd_bits", 2, -5, -1080895096, "ASIMD logical + VORN/VNEG"},
+      {"Java_com_retrobug_fixture_MainActivity_simd_bits", 3, 100, -1479472860, "ASIMD logical + VORN/VNEG"},
+      {"Java_com_retrobug_fixture_MainActivity_simd_bits", 4, -2, 442803864, "ASIMD logical + VORN/VNEG"},
   };
 
   int refused = 0;

@@ -45,6 +45,10 @@ extern jint Java_com_retrobug_fixture_MainActivity_fp_nan(JNIEnv* env, jclass cl
 extern jint Java_com_retrobug_fixture_MainActivity_fp_cmp(JNIEnv* env, jclass clazz, jint mode);
 extern jint Java_com_retrobug_fixture_MainActivity_simd_int(JNIEnv* env, jclass clazz, jint a,
                                                             jint b);
+extern jint Java_com_retrobug_fixture_MainActivity_simd_lane(JNIEnv* env, jclass clazz, jint mode,
+                                                             jint a);
+extern jint Java_com_retrobug_fixture_MainActivity_simd_bits(JNIEnv* env, jclass clazz, jint mode,
+                                                             jint a);
 
 /*
  * A JNIEnv for the guest to call out through, so the oracle can measure the *JNI call path* on real
@@ -227,6 +231,24 @@ int main(int argc, char** argv) {
     const fn2 simd = Java_com_retrobug_fixture_MainActivity_simd_int;
     for (unsigned i = 0; i < npairs; ++i) {
       printf(" %d", simd(NULL, NULL, pairs[i][0], pairs[i][1]));
+    }
+    printf("\n");
+
+    // simd_lane / simd_bits: the first argument is the *mode* (a lane width, or a logical operation),
+    // not an arithmetic operand, so this pair set is its own — {mode, seed} with all five modes covered.
+    // Row 4 repeats the 64-bit path of `simd_lane` with different data rather than inventing a fifth
+    // width, because ARMv7 has exactly four integer lane widths.
+    static const jint simd_modes[][2] = {{0, 3}, {1, 7}, {2, -5}, {3, 100}, {4, -2}};
+    printf("simd_lane:");
+    for (unsigned i = 0; i < sizeof simd_modes / sizeof simd_modes[0]; ++i) {
+      printf(" %d", Java_com_retrobug_fixture_MainActivity_simd_lane(
+                        NULL, NULL, simd_modes[i][0], simd_modes[i][1]));
+    }
+    printf("\n");
+    printf("simd_bits:");
+    for (unsigned i = 0; i < sizeof simd_modes / sizeof simd_modes[0]; ++i) {
+      printf(" %d", Java_com_retrobug_fixture_MainActivity_simd_bits(
+                        NULL, NULL, simd_modes[i][0], simd_modes[i][1]));
     }
     printf("\n");
 

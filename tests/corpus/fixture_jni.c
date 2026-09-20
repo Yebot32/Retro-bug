@@ -415,6 +415,187 @@ JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_simd_int(JNIEnv* e
 }
 
 /*
+ * Forces `vec` to stay in a vector register.
+ *
+ * At -Os clang will scalarise a whole int8x16 chain it can prove is only read back lane by lane, and
+ * then this file's "NEON probe" measures the compiler's integer add rather than the emulator's `vadd`
+ * — which is the `fpsr_flags` mistake (docs/30 §Step 16) in a new costume. An empty asm with a `+w`
+ * tied operand is opaque to the optimiser, so the value has to be in a `d`/`q` register at that point.
+ * The proof that it worked is the disassembly of the built library, not the pass rate:
+ *
+ *   $TC/bin/clang.exe --target=armv7-none-linux-androideabi26 ... -o /tmp/f.so tests/corpus/fixture_jni.c
+ *   $TC/bin/llvm-objdump.exe -d --no-show-raw-insn /tmp/f.so | sed -n '/<_simd_lane>:/,/<_simd_bits>:/p'
+ *
+ * which is how the `vdupq_lane_u64` below was found to have been lowered into two `vmov.32`s rather
+ * than the `VDUP` it was written as — a probe that silently stops probing is the failure this guards.
+ */
+#define RB_HOLD(vec) __asm__ volatile("" : "+w"(vec))
+
+/// The same, for a value that is not a writable lvalue: an opaque *use* of it forces it into a vector
+/// register at this point without asking to modify it.
+#define RB_SEE(vec) __asm__ volatile("" : : "w"(vec))
+
+/**
+ * Integer ASIMD arithmetic and lane indexing, one lane width per `mode`.
+ *
+ * The returned value is a fold over all 16 bytes of the result register rather than one lane, because
+ * a probe that reads back a single lane only proves that lane's arithmetic: an implementation of
+ * `vadd.8` that walked the register in 16-bit steps would very likely leave lane 3 still correct. The
+ * fold makes the *shape* of the operation part of the measured value — a lane loop with the wrong
+ * width carries into its neighbour and the fold moves.
+ *
+ * Operands are deliberately different at each step (`v`, `w`, `u`), so an add is not undone by the
+ * following sub and two wrong handlers cannot cancel into a green row.
+ */
+JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_simd_lane(JNIEnv* env, jclass clazz,
+                                                                       jint mode, jint a) {
+  (void)env; (void)clazz;
+  uint8_t bytes[16], seed[16], third[16];
+  for (int i = 0; i < 16; ++i) {
+    bytes[i] = (uint8_t)(a * 3 + i * 61 + mode * 17);
+    seed[i] = (uint8_t)(mode * 5 + i * 29 + 7);
+    third[i] = (uint8_t)(a - i * 13 + mode);
+  }
+  uint8x16_t v = vld1q_u8(bytes);
+  uint8x16_t w = vld1q_u8(seed);
+  uint8x16_t u = vld1q_u8(third);
+  RB_HOLD(v); RB_HOLD(w); RB_HOLD(u);
+
+  uint8x16_t x = v;
+  switch (mode) {
+    case 0: /* 8-bit lanes: the width a lane loop most easily gets wrong */
+      x = vaddq_u8(v, w);
+      x = vsubq_u8(x, u);
+      x = vreinterpretq_u8_s8(vmulq_s8(vreinterpretq_s8_u8(x), vreinterpretq_s8_u8(w)));
+      x = vreinterpretq_u8_s8(vabsq_s8(vreinterpretq_s8_u8(x)));
+      x = vsetq_lane_u8((uint8_t)(vgetq_lane_u8(x, 3) + 5u), x, 11);
+      x = vorrq_u8(x, vdupq_n_u8((uint8_t)a));
+      break;
+    case 1: /* 16-bit lanes */
+      x = vaddq_u16(vreinterpretq_u16_u8(v), vreinterpretq_u16_u8(w));
+      x = vsubq_u16(vreinterpretq_u16_u8(x), vreinterpretq_u16_u8(u));
+      x = vmulq_s16(vreinterpretq_s16_u16(x), vreinterpretq_s16_u16(w));
+      x = vabsq_s16(x);
+      x = vsetq_lane_u16((uint16_t)(vgetq_lane_u16(x, 1) + 9u), x, 6);
+      /*
+       * `0xfff0 + a` rather than `a`, which the first capture exposed: masking a lane with a 3-bit
+       * constant zeroes most of the register, and the fold came back as 29791 — a row that measures
+       * mostly nothing and would let a great many lane-loop mistakes through.
+       */
+      x = vandq_u16(x, vdupq_n_u16((uint16_t)(0xfff0u + (uint16_t)a)));
+      break;
+    case 2: /* 32-bit lanes, plus a broadcast and a rotate through the logical group */
+      x = vaddq_u32(vreinterpretq_u32_u8(v), vreinterpretq_u32_u8(w));
+      x = vsubq_u32(vreinterpretq_u32_u8(x), vreinterpretq_u32_u8(u));
+      x = vmulq_s32(vreinterpretq_s32_u32(x), vreinterpretq_s32_u32(w));
+      x = vabsq_s32(x);
+      x = vsetq_lane_u32(vgetq_lane_u32(x, 2) ^ 0x5a5a5a5au, x, 0);
+      x = veorq_u32(x, vdupq_n_u32((uint32_t)a));
+      break;
+    default: /* 64-bit lanes: no `vmul.I64`/`vabs.I64` in ARMv7, so add/sub/index only */
+      x = vaddq_u64(vreinterpretq_u64_u8(v), vreinterpretq_u64_u8(w));
+      x = vsubq_u64(vreinterpretq_u64_u8(x), vreinterpretq_u64_u8(u));
+      x = vsetq_lane_u64(vgetq_lane_u64(x, 0) + vgetq_lane_u64(x, 1), x, 1);
+      /*
+       * Meant to be `VDUP q, D[m]`, and the disassembly says otherwise: clang lowered it to two
+       * `vmov.32 d[0]`/`d[1]`. It had to — assembling `vdup.64 q6, d7[0]` is rejected while
+       * `vdup.8/.16/.32` with the same bracketed-lane spelling are accepted, so ARMv7 has no
+       * lane-indexed broadcast of a 64-bit element into a Q register at all. This line stays because
+       * those two `vmov`s are what a 64-bit get-and-set looks like out of a compiler.
+       */
+      x = vdupq_lane_u64(vget_high_u64(vreinterpretq_u64_u8(x)), 0);
+      /*
+       * `VMOV (immediate)` with the Q bit set is how `VectorBroadcast64` is reached: dynarmic lowers
+       * exactly that case to `VectorBroadcast(64, imm64)` (asimd_one_reg_modified_immediate.cpp:24).
+       * The encoding restricts the `.i64` immediate to 0 or all-ones, so `-1` it is, and all-ones is
+       * the better probe anyway: fed through the `veor` below it complements the register, so a
+       * broadcast that wrongly yielded 0 leaves the fold unchanged instead of matching it.
+       */
+      uint64x2_t dup;
+      __asm__ ("vmov.i64 %0, #-1" : "=w"(dup));
+      RB_HOLD(dup);
+      x = vreinterpretq_u8_u64(veorq_u64(vreinterpretq_u64_u8(x), dup));
+      break;
+  }
+  RB_HOLD(x);
+  vst1q_u8(bytes, x);
+  unsigned r = 0;
+  for (int i = 0; i < 16; ++i) r = r * 31u + bytes[i];
+  return (int)r;
+}
+
+/**
+ * The width-independent ASIMD logical group, one operation per `mode`, at both register sizes.
+ *
+ * `vorr`/`vand`/`veor`/`vbic` are 128-bit operations with no lane structure, so the lane loop cannot
+ * hide a width bug here — what these rows can catch is an operand-order mistake. `vbic` is the one
+ * worth naming: it is `A & ~B`, and `~A & B` is the same *shape* of expression and would pass every
+ * symmetric test above. Hence the pairs below, whose operands differ in more than one byte.
+ *
+ * `vdupq_n_*` with a runtime value is what reaches `VectorBroadcast`; the `_n_` forms with a constant
+ * get folded into an immediate the translator never shows my handler.
+ */
+JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_simd_bits(JNIEnv* env, jclass clazz,
+                                                                       jint mode, jint a) {
+  (void)env; (void)clazz;
+  uint8_t bytes[16], seed[16];
+  for (int i = 0; i < 16; ++i) {
+    bytes[i] = (uint8_t)(a + i * 37 + mode);
+    seed[i] = (uint8_t)(0xa5u ^ (i * 19u) ^ (unsigned)mode);
+  }
+  uint8x16_t v = vld1q_u8(bytes);
+  uint8x16_t w = vld1q_u8(seed);
+  uint8x16_t bcast = vdupq_n_u8((uint8_t)a);
+  RB_HOLD(v); RB_HOLD(w); RB_HOLD(bcast);
+
+  uint8x16_t x = v;
+  switch (mode) {
+    case 0: x = vorrq_u8(v, w); break;
+    case 1: x = vandq_u8(v, w); break;
+    case 2: x = veorq_u8(v, w); break;
+    case 3: x = vbicq_u8(v, w); break;   /* A & ~B, and the order is the whole point */
+    default: x = vbicq_u8(w, v); break;  /* the *other* operand masked: a distinct answer */
+  }
+  /* Fold the broadcast in rather than leaving it live-only-until-optimised-away. */
+  x = veorq_u8(x, bcast);
+  /*
+   * `VORN`, because that is what reaches `VectorNot`: dynarmic lowers it to
+   * `VectorOr(reg_n, VectorNot(reg_m))` (asimd_three_regs.cpp:334) — the *second* operand is the one
+   * inverted, so an implementation that reads it the other way round still produces a bitwise
+   * function of two operands and only a value comparison catches it. AArch32 has no `vmvnq`
+   * intrinsic, so VORN is the reachable form of the same handler.
+   */
+  x = vornq_u8(x, w);
+  /*
+   * `VNEG`, which reaches `ZeroVector`: dynarmic lowers integer VNEG to
+   * `VectorSub(esize, ZeroVector(), reg_m)` (asimd_two_regs_misc.cpp:452). Signed here so the
+   * most-negative lane is included and the wrap is the documented one rather than a new behaviour.
+   */
+  x = vreinterpretq_u8_s8(vnegq_s8(vreinterpretq_s8_u8(x)));
+  RB_HOLD(x);
+
+  /*
+   * The same two operations on the D halves, because the Q form alone cannot tell an implementation
+   * that stops at 64 bits from one that walks the whole register. `vbic` again on the second leg, with
+   * the operands swapped relative to the first, so the D path is checked for order as well as range.
+   */
+  const uint8x8_t lo = vget_low_u8(x);
+  const uint8x8_t hi = vget_high_u8(x);
+  RB_SEE(lo); RB_SEE(hi);
+  const uint8x8_t m = vorr_u8(lo, hi);
+  const uint8x8_t n = vbic_u8(hi, lo);
+  uint8_t out[16];
+  RB_SEE(m); RB_SEE(n);
+  vst1_u8(out, m);
+  vst1_u8(out + 8, n);
+
+  unsigned r = 0;
+  for (int i = 0; i < 16; ++i) r = r * 31u + out[i];
+  for (int i = 0; i < 16; ++i) r = r * 31u + bytes[i];
+  return (int)r;
+}
+
+/*
  * The FPSCR compare field, one relation at a time, straight out of the register.
  *
  * Why this exists rather than a table copied from the ARMv7 manual: Tier I implemented `VCMP` from the
