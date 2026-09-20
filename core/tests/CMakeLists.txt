@@ -75,3 +75,13 @@ target_link_libraries(rb_codecache_tests PRIVATE rb_codecache)
 # several of its cases passing.
 add_executable(rb_profile_tests profile_test.cpp)
 target_link_libraries(rb_profile_tests PRIVATE rb_profile rb_diag)
+
+# M1's first end-to-end lane: a real APK's native library, loaded and called on both tiers against
+# values captured from the same bytes running natively on a device (tools/build-guest-apk.sh builds
+# both the APK and that oracle). It needs the engine and the loader, so like the tier-diff lane it is
+# not in the "runs without the DBT" group.
+add_executable(rb_guest_apk_tests guest_apk_test.cpp)
+target_link_libraries(rb_guest_apk_tests PRIVATE rb_exec rb_abi rb_loader)
+target_compile_definitions(rb_guest_apk_tests PRIVATE
+  RB_GUEST_APK_PATH="/data/local/tmp/rb_guestprobe.apk"
+  RB_GUEST_LIBM_PATH="/data/local/tmp/libm.so")

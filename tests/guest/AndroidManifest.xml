@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The smallest manifest that produces a real APK: aapt2 compiles it to binary XML, and the native
+  library that matters goes in beside it. No activity and no code, because M1's question at this
+  stage is whether RetroBug can load and call a real APK's native library — the Java side is host
+  ART's business on the normal path (docs/10 AD-3) and is not what is being tested here.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.retrobug.guestprobe">
+    <uses-sdk android:minSdkVersion="21" />
+    <application android:label="RetroBug Guest Probe" android:hasCode="false" />
+</manifest>

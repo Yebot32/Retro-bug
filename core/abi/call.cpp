@@ -207,12 +207,27 @@ Ret32 ReturnValue(const MachineState& state, const Shorty& shorty) {
       out.bits = (static_cast<std::uint64_t>(state.r[1]) << 32) | state.r[0];
       break;
     case 'F':
+      /**
+       * `-mfloat-abi=softfp`, which is the ABI this project builds every guest for because it is
+       * Android's own `armeabi-v7a` ABI: a `jfloat` comes back in **r0**, not in `s0`.
+       *
+       * This was wrong for a long time and no test could see it, which is worth stating plainly. Every
+       * cross-boundary call the suites made until M1's first real APK either took no floating-point
+       * argument or returned none — the fixture's `fp_args` passes eight doubles *guest to guest*, where
+       * both sides are softfp and therefore agree with each other regardless of what this bridge does.
+       * The first real JNI method to return a `jdouble` produced a result whose low 32 bits matched
+       * hardware exactly and whose high half was zero, because the value was in r0:r1 and this function
+       * was reading d0 (`docs/30` §Step 24).
+       */
       out.kind = Value32::Kind::F32;
-      out.bits = GetS(state, 0);
+      out.bits = state.r[0];
       break;
     case 'D':
+      // softfp again: a `jdouble` returns in `r0:r1`, exactly as the `J` case above does. Taken from the
+      // guest's own disassembly rather than from the ABI document — the probe's method ends
+      // `vmov r0, r1, d18` then `pop {…, pc}`.
       out.kind = Value32::Kind::F64;
-      out.bits = state.d[0];
+      out.bits = (static_cast<std::uint64_t>(state.r[1]) << 32) | state.r[0];
       break;
     default:  // 'L' and anything ART adds later: a 32-bit handle.
       out.kind = Value32::Kind::Ptr;

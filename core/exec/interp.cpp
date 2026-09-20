@@ -1116,6 +1116,26 @@ bool BlockRunner::Step(const Inst* inst) {
       Put(inst, V{r, 0});
       return true;
     }
+    /**
+     * `AndNot` — `a & ~b`, which is ARM's BIC and AArch64's BICS. The operand order is the whole of the
+     * semantics and it is not symmetric: `~a & b` is the same *shape* of expression and would pass any
+     * test whose operands happen to be bitwise complements of each other. It is named here because the
+     * first real guest library RetroBug tried to execute stopped on it — `docs/30` §Step 24 — which is
+     * also why the ordering claim is taken from the back end's own `BICS(Rresult, Ra, Rb)` rather than
+     * from the ARM ARM's prose about BIC.
+     */
+    case Opcode::AndNot32: {
+      std::uint32_t a = 0, b = 0;
+      if (!W32(inst, 0, a) || !W32(inst, 1, b)) return false;
+      Put(inst, V{a & ~b, 0});
+      return true;
+    }
+    case Opcode::AndNot64: {
+      std::uint64_t a = 0, b = 0;
+      if (!W64(inst, 0, a) || !W64(inst, 1, b)) return false;
+      Put(inst, V{a & ~b, 0});
+      return true;
+    }
 
     /**
      * The 64-bit shift pair, which is *not* the 32-bit family above widened: `LogicalShiftLeft64` and
