@@ -110,3 +110,22 @@ Java_com_retrobug_guestprobe_Probe_doubleIntDouble(JNIEnv* env, jclass clazz, jd
   (void)clazz;
   return a * c + (double)b;
 }
+
+/**
+ * A comparator for `qsort`, reached *from inside emulated libc*.
+ *
+ * Deliberately not a JNI-shaped method: `qsort`'s fourth argument is a plain `int (*)(const void*,
+ * const void*)`, so RetroBug has to hand a real guest function address to a real guest library and then
+ * let that library call back into guest code. That is the same indirection a `jvalue` callback uses, with
+ * neither side being RetroBug's own, and the bit-0 ISA tag on the address is what makes the callback
+ * decode at all.
+ *
+ * Written as `(x > y) - (x < y)` rather than `x - y` because the subtraction overflows for
+ * `INT_MIN`/`INT_MAX`, and the oracle sorts exactly that pair. An overflowing comparator makes `qsort`'s
+ * result depend on undefined behaviour, which is the one thing a differential test cannot tolerate.
+ */
+JNIEXPORT int cmpInt(const void* a, const void* b) {
+  const int x = *(const int*)a;
+  const int y = *(const int*)b;
+  return (x > y) - (x < y);
+}

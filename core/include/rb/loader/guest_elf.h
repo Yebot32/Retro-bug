@@ -53,6 +53,19 @@ struct Symbol {
   bool weak = false;
   bool is_function = false;
   bool thumb = false;        ///< is_function and st_value bit 0 set.
+  /**
+   * `STT_GNU_IFUNC`: `value` is a *resolver*, and the address a caller must use is whatever that
+   * function returns.
+   *
+   * Not a detail. The device's own 32-bit `libc.so` exports eleven of these and they are
+   * `memcpy`, `memmove`, `memset`, `strlen`, `strcmp`, `strcpy`, `stpcpy`, `strcat` and the three `_chk`
+   * variants — the routines every app and every other library calls first. Resolving one means *running
+   * guest code during load*, which is a capability C05 does not have and C06 will have to, so the flag is
+   * here to make that blocker countable rather than discoverable: `rb_guest_libc_tests` asserts on the
+   * eleven names instead of guessing at them from a document. Measured with
+   * `llvm-readelf --dyn-syms` on `/system/lib/libc.so` from the SM-X710 (Android 16 / SDK 36).
+   */
+  bool ifunc = false;
 };
 
 /// The linker-facing facts about one loaded module.
@@ -68,6 +81,10 @@ struct GuestModule {
   std::vector<Symbol> exports;
   std::vector<Symbol> imports;
   std::vector<std::string> unsupported_relocs;  ///< Relocation kinds refused, named for diagnostics.
+  /// The same refusals as raw `r_type` values, in order. Separate from the strings above because a test
+  /// that asserts by *parsing a diagnostic message* is coupled to its formatting: change the printf and
+  /// the assertion starts passing for the wrong reason. `rb_guest_libc_tests` counts these.
+  std::vector<std::uint32_t> unsupported_reloc_types;
 
   /// PT_NOTE build-id, if the image carries one. The NDK-built fixture used in tests does **not**,
   /// so nothing here may assume it is present. App Revival's patch identity (docs/10 §12.2) needs a

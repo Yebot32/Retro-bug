@@ -27,6 +27,7 @@
 #pragma once
 
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <optional>
 #include <string>
@@ -111,6 +112,34 @@ class JitExecutor : public Executor, public Dynarmic::A32::UserCallbacks {
    */
   bool PreCodeReadHook(bool is_thumb, GuestAddr pc, Dynarmic::A32::IREmitter& ir) override;
 
+  // ---------------------------------------------------------- coprocessor 15, for Arm15Coprocessor
+  //
+  // These three exist because Dynarmic hands a coprocessor callback nothing but the `user_arg` pointer it
+  // baked into the compiled code. They are not an interface for anyone else, and `Arm15Coprocessor` is the
+  // only caller.
+  /// One entry per distinct coprocessor register a guest actually touches, so the refusal can name the
+  /// register rather than the class of thing it was.
+  ///
+  /// `user_arg` is compiled in as a raw address, so a site has to live as long as the block that mentions
+  /// it — hence a `std::deque`, whose elements do not move when more are appended. In practice there is one
+  /// entry: the device's `libc.so` reads TPIDRURW (`mrc p15, #0x0, rX, c13, c0, #0x3`) from 98 places and
+  /// makes no other coprocessor access at all, which `llvm-objdump -d` over the whole image establishes.
+  struct CoprocSite {
+    JitExecutor* exec = nullptr;
+    bool tp_read = false;   ///< answer from `MachineState::tp`
+    bool tp_write = false;  ///< store into it
+    std::string detail;     ///< what to say when the honest answer is "not modelled"
+  };
+  /// Returns the site for this shape of access, creating it once.
+  CoprocSite* CoprocSiteFor(bool tp_read, bool tp_write, std::string detail);
+  /// The live guest state, or null outside a `Run`. A compiled block cannot execute there, so a handler
+  /// that sees null has found a bug rather than an edge case.
+  MachineState* live_state() const { return live_; }
+  /// Stops the core with `Unimplemented` naming `site`. Dynarmic's own answer to an unhandled coprocessor
+  /// is `ASSERT_FALSE` in the AArch64 back end, which kills the host process; this is the reason that does
+  /// not happen. See `docs/30` §Step 26.
+  void RefuseCoprocessor(const CoprocSite& site);
+
  private:
   void SyncIn(const MachineState& state);
   void SyncOut(MachineState& state);
@@ -152,6 +181,11 @@ class JitExecutor : public Executor, public Dynarmic::A32::UserCallbacks {
   std::unique_ptr<Dynarmic::A32::Jit> jit_;
   std::unique_ptr<InterpExecutor> fallback_interp_;
   std::string err_;
+
+  /// Coprocessor 15, registered so that it is *never* absent. See `Arm15Coprocessor` for why an empty
+  /// slot is a host-process abort rather than a guest-visible failure.
+  std::shared_ptr<Dynarmic::A32::Coprocessor> coproc15_;
+  std::deque<CoprocSite> coproc_sites_;
 
   MachineState* live_ = nullptr;  ///< the caller's state, for the duration of one Run
   unsigned budget_ = 0;

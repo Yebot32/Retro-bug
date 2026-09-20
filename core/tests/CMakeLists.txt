@@ -85,3 +85,13 @@ target_link_libraries(rb_guest_apk_tests PRIVATE rb_exec rb_abi rb_loader)
 target_compile_definitions(rb_guest_apk_tests PRIVATE
   RB_GUEST_APK_PATH="/data/local/tmp/rb_guestprobe.apk"
   RB_GUEST_LIBM_PATH="/data/local/tmp/libm.so")
+
+# The lane that loads the device's *own* 32-bit bionic libc.so and calls into it, with the answers
+# captured from the same file running natively (tests/guest/oracle_libc.c). Its expectations about IFUNC,
+# TLS relocations and the host-provided symbol set are what make C06's first feature list a measurement
+# rather than a guess, so it is kept separate from rb_guest_apk_tests even though they share a rig shape.
+add_executable(rb_guest_libc_tests guest_libc_test.cpp)
+target_link_libraries(rb_guest_libc_tests PRIVATE rb_exec rb_abi rb_loader)
+target_compile_definitions(rb_guest_libc_tests PRIVATE
+  RB_DEVICE_LIBC_PATH="/data/local/tmp/rb_device_libc.so"
+  RB_GUEST_APK_PATH="/data/local/tmp/rb_guestprobe.apk")

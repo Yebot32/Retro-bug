@@ -2331,6 +2331,142 @@ emulation rather than from silicon. That also means the `--interpret-probe` inst
 across hosts, which is worth knowing before spending a device hunt on it.
 
 
+## Step 26 — a real bionic `libc.so`: what it demands, the host abort it caused, and the thread pointer
+
+**What was loaded, and why that file.** `core/tests/guest_libc_test.cpp` is a new lane and it loads the
+SM-X710's own 32-bit bionic: `/system/lib/libc.so` → `/apex/com.android.runtime/lib/bionic/libc.so`,
+1,267,328 bytes, ELF32 ARM DYN, Android 16 / SDK 36, pulled with `adb pull` and pushed back as
+`/data/local/tmp/rb_device_libc.so`. Not a relink of `libc.a`, because `docs/34` §1.3 already recorded that
+the archive is bionic's **static** variant while a guest expects the dynamic one with `__libc_preinit`,
+`libc_init_dynamic` and the allocator's init — and because `tests/guest/oracle_libc.c` links against that
+same file through the ordinary `DT_NEEDED` chain, so both sides of every comparison below are the same
+machine code and a difference can only be RetroBug's. It also raises no licence question: the bytes stay on
+the device that shipped them.
+
+**What the image asks for, measured rather than assumed.**
+
+| Fact | Value |
+|---|---|
+| `.dynsym` functions / Thumb-tagged / IFUNC | 1739 / **1368** / **11** |
+| Relocations | 1665 RELATIVE, 589 JUMP_SLOT, 132 ABS32, 41 GLOB_DAT, **2 TLS_DTPMOD32, 1 TLS_TPOFF32, 1 IRELATIVE** |
+| The four special relocs' `r_sym` | **0** in every case — libc's own TLS block and its own function pointer |
+| `DT_FLAGS` / `DT_FLAGS_1` | `BIND_NOW STATIC_TLS` / `NOW` |
+| `DT_NEEDED` | `ld-android.so`, `libdl.so` |
+| `DT_INIT_ARRAY` | 20 bytes — recorded by C05, **not run** |
+| Undefined, non-weak, named | **9**: `__loader_shared_globals`, `android_dlopen_ext`, `android_get_application_target_sdk_version`, `dl_unwind_find_exidx`, `dladdr`, `dlclose`, `dlerror`, `dlopen`, `dlsym` |
+| Undefined, weak | 3 (`__loader_add_thread_local_dtor`, `__loader_android_get_exported_namespace`, `__loader_remove_thread_local_dtor`) plus one nameless LOCAL entry |
+
+The eleven IFUNCs are `memcpy, memmove, memset, strlen, strcmp, strcpy, stpcpy, strcat, __strcat_chk,
+__strcpy_chk, __memset_chk`. Two numbers there are worth more than the rest: **the host-provided surface a
+real libc needs is nine names, not the ~1,300 it exports** — C11's open question, answered with a list that
+fits on two lines; and **bionic is mostly Thumb** (1368 of 1739), which is the opposite mix to the NDK
+`libm.a` relink (304 ARM against 60 Thumb), so nothing about "what state is system code in" generalises
+between artifacts.
+
+**The crash, which is the reason this step exists.** `atoi("9223372036854775808")` ended the lane's process:
+
+```
+assertion failed: false
+Message:Should raise coproc exception here
+libc++abi: terminating
+Aborted
+```
+
+That string is `external/dynarmic/src/dynarmic/backend/arm64/emit_arm64_a32_coprocessor.cpp:23`, an
+`ASSERT_FALSE` in the path taken when `Config::coprocessors[n]` is empty — and mcl's `ASSERT` is not
+`NDEBUG`-gated, so it is `std::terminate` inside `Run()`. It fired on `atoi` because of `errno`, and
+`errno` is a coprocessor read; the device's `__errno()` is twelve bytes and starts with one:
+
+```
+76dec:  ee1d 0f70   mrc p15, #0x0, r0, c13, c0, #0x3     r0 = TPIDRURW
+76df0:  6840        ldr r0, [r0, #0x4]                   r0 = the thread's bionic_tls*
+76df2:  f500 7027   add.w r0, r0, #0x29c                 r0 = &tls->errno
+76df6:  4770        bx lr
+```
+
+`llvm-objdump -d` over the whole image counts **98 coprocessor accesses, all of them that one register, and
+zero `mcr` and zero other coprocessor number**. So this is not an exotic corner reached by one unlucky
+program: any guest that reports an error, overflows a conversion, or takes an assertion hits it, and what
+happened was that RetroBug died rather than the guest faulting. §Step 21 removed the same class of host
+abort for `Term::Interpret`; this is the second instance of it, found two steps later on real code.
+
+**Fixed on both tiers, in the same shape.** Tier J registers a `Dynarmic::A32::Coprocessor` for 15
+(`Arm15Coprocessor` in `jit.cpp`): `mrc`/`mcr p15, #0, rX, c13, c0, #3` read and write
+`MachineState::tp` through the caller's live state, and *every other* coprocessor access stops the run with
+`Unimplemented` naming the encoding and the address. Naming it rather than returning zero matters — a
+fabricated coprocessor value gets dereferenced, and the memory callbacks can only afford to hand back zero
+because `check_halt_on_memory_access` re-tests after each access. There is no such re-test for a coprocessor
+result, so the halt comes first. Tier I implements the same one register in its opcode switch
+(`A32CoprocGetOneWord`/`SendOneWord`) and refuses the rest by the same names, because two tiers that
+disagree about which register is readable turn every future differential into a question about the thread
+pointer. The address in the message comes from `jit_->Regs()[15]`, which is safe there specifically because
+a coprocessor callback is a *call* and `PrepareForCall` flushes live IR values first.
+
+Proved by a row that could not have existed before: seed `tp` at a guest address holding the address of a
+guest block, call libc's own `__errno`, expect `block + 0x29c`.
+
+```
+[libc] __errno  Tier I: tp=0x902000 -> 0x9022bc (expected 0x9022bc)
+[libc] __errno  Tier J: tp=0x902000 -> 0x9022bc (expected 0x9022bc)
+```
+
+`0x29c` is bionic's constant from its own disassembly, not this file's, which is what makes the row
+independent of any struct layout anyone remembers.
+
+**What the lane passes now.** With a thread pointer seeded for every row (not seeding it is a harness bug
+wearing a guest-failure costume: it makes `atoi` fault at guest address 4 and reads as an engine finding):
+`strncmp` (six rows), `strchr`/`strrchr` (four), `strstr` on the found path, `strspn`/`strcspn` (three),
+`atoi` and `abs`, `strtol` for all four bases **on Tier J** with its `endptr` written back through a guest
+pointer, `strtok_r` across four sequential calls against a mutated buffer, `qsort` **on Tier J** — which
+calls a comparator that lives in a *different guest library*, so #27's bit-0 ISA tag survives a `blx` issued
+by emulated bionic — and the thread-pointer row above, on both tiers. `strtod` matches nothing yet: Tier I
+refuses it twice over (`Mul64`, then `ConditionalSelect64`) and Tier J stops at an unexplained
+`undefined instruction encoding at 544732`.
+
+Two rows were corrected after they were first written, and both were the lane over-claiming rather than the
+engine under-delivering. `strncmp`'s contract is the **sign**, and bionic's arm32 returns `-1` where the byte
+difference is `-2` (`'c'` against `'e'`), so the magnitude assertion was wrong about the ABI and failed on a
+difference the standard permits — the mirror image of the mistake this lane exists to catch. And the
+host-provided list has to be taken from the loader's `imports`, with the weak entries excluded: a resolver
+call carries no binding, so mixing the three weak `__loader_*` names and one nameless LOCAL entry in with the
+nine the guest actually requires produced a failure that read as though bionic had changed.
+`rb_guest_libc_tests` is now **74 checks, 13 failures**, every one of them named below, and the 14-lane
+engine suite is unchanged at **1,418 checks, 0 failures** on the tablet plus dynarmic's 200,561 assertions.
+
+**The 13, which are the work list, in the order the measurements put them.**
+
+1. **IFUNC resolution at load — 9 of the 13, and the one that unblocks everything.** And it is now known to
+   be *cheap*, because the lane accidentally measured it: calling `memcpy` goes to the resolver, and the
+   resolver **runs correctly and returns an implementation pointer** — `r0=0x94ac0`, 4 steps on Tier J and 8
+   on Tier I, `reason=Returned`. Nothing about executing a resolver is missing; what is missing is the load-
+   time step of *calling* it and storing the result. `strlen`/`strstr` reach `SVC #0` instead only because
+   that resolver path is the one that probes `/dev/cpu_variant:arm` — the string is in the image at file
+   offset 120130 — and the lane attaches no syscall monitor, so the probe cannot be answered. Which also
+   confirms, first-hand rather than as a document reading, that arm32 bionic selects by opening that node
+   and that a guest needs its `openat` answered before IFUNC can resolve.
+   **[1A]**, from a sub-agent reading `linker_relocate.cpp` at `android-16.0.0_r1` and not re-verified here:
+   the AArch32 rule is `*slot = resolver(load_bias + *slot)` — the addend comes out of the slot itself, not
+   the entry — bionic does **not** cache, it re-calls the resolver for every relocation naming the symbol,
+   and the resolvers ignore the `hwcap` argument they are passed.
+2. **Four Tier I opcodes**, named by the refusals themselves: `Mul64` (6 rows — bionic's `atoi`/`strtol`
+  /`strtod`/`snprintf` all reach it), `ByteReverseWord` (`strstr`), `ConditionalSelect64` (`strtod`),
+   `CountLeadingZeros32` (`qsort`). Tier I is the iOS and the denies-`execmem` path, so this is the list that
+   stands between it and real system code, and it is four names rather than a survey.
+3. **Two Tier J refusals that are *not* opcodes**: `undefined instruction encoding at 544732` on `strtod`
+   and `at 546290` on `malloc`, both with a plausible-looking `r0` already in hand. Unexplained, and the
+   shape of it is closer to #26 than to anything else in this step — investigate before IFUNC hides it.
+4. **The 3 TLS slots are still unfilled.** `STATIC_TLS` means they need no dynamic model, but the loader
+   *records* them and moves on, and bionic writes those words unconditionally during relocation — so a guest
+   that later reads them gets whatever the mapping held. That is silent corruption, not a fault, and whether
+   C05 should refuse the load instead is an owner decision, recorded in `docs/20` §9 rather than made here.
+5. **`DT_INIT_ARRAY` is parsed and never run**, and `malloc` is what would notice first.
+
+**Also in this step, separately useful:** `Symbol::ifunc` and `GuestModule::unsupported_reloc_types` are new
+on C05's face — the first so a caller can tell a resolver from a routine, the second because an assertion
+that parses a diagnostic *string* is coupled to its formatting and starts passing for the wrong reason when
+the `printf` changes.
+
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |
@@ -2347,5 +2483,6 @@ across hosts, which is worth knowing before spending a device hunt on it.
 | Asking the assembler what an encoding actually is | the NDK ships **`llvm-objdump` but no `llvm-mc`**, so: `clang --target=armv7-none-linux-androideabi26 -mthumb -c x.s` then `llvm-objdump -d x.o`. This is how `#5`→`0x1d50` and `#9`→`f102 0009` were settled in Step 9, and it needs no device — the answer is the same bytes the guest will load |
 | ARM AAPCS argument registers, and what a JNI method can take in registers | **r0-r3 only.** r4 upwards are *workspace*, not arguments, so a 32-bit guest's fifth declared argument is on the stack; with `JNIEnv*` in r0 and `jobject`/`jclass` in r1, **a JNI method has exactly two register parameters**. `EntryState` seeds r2/r3 and provides no caller frame, so a probe with three or more declared parameters faults on its first instruction — correctly. Found the expensive way in Step 16 (a four-`jint` NEON probe), and it is a fact about the ABI rather than about RetroBug |
 | Where a softfp guest puts floats, and where it puts spilled arguments | **Core registers, both directions, at the boundary.** A `jfloat` takes one of r0-r3, a `jdouble` an even/odd pair, a `jdouble` result returns in `r0:r1` — `d0..d7` carry arguments only under `-mfloat-abi=hard`, which the NDK refuses for this target (`docs/30` §Step 25's disassembly table is the primary source; §Step 24 the results half). Two traps attached: (1) a `static` function whose address never escapes its TU *does* get the VFP register ABI from clang under `softfp`, so "softfp ⇒ never VFP" is false about a disassembly and true only about a cross-boundary call; (2) the argument **block starts at the callee's entry SP** — a callee reads its fifth-and-later parameters at `[sp]`, `[sp,#8]`, … — and the 16-byte intra-procedure area is *below* that, not between it and SP |
+| A real 32-bit `libc.so`, and the two things it catches you out on | **`errno` is a coprocessor read**, not a memory access: bionic's `__errno()` begins `mrc p15, #0, r0, c13, c0, #3` (TPIDRURW), and in the device's image **all 98 coprocessor accesses are that one register** with no `mcr` at all — so an emulator without a coprocessor-15 handler does not merely misbehave, it dies in Dynarmic's arm64 `ASSERT_FALSE` (§Step 26). And **`memcpy`/`memmove`/`memset`/`strlen`/`strcmp`/`strcpy`/`stpcpy`/`strcat` + the three `_chk` variants are `STT_GNU_IFUNC`**: `st_value` is a resolver and the address a caller wants is what it *returns*, so resolving them means running guest code during load. Selection is by `openat("/dev/cpu_variant:arm")` (string present at file offset 120130) with `ENOENT` ⇒ generic, so a guest syscall path has to exist before IFUNC does. Pull the device's own `/system/lib/libc.so` for the real dynamic variant: the NDK's `libc.a` is the **static** one (`docs/34` §1.3) and a relink of it is not the same artifact. |
 | Executable memory from an app | permitted: `allow appdomain self:process execmem;` (`private/app.te:189`, read directly) |
 | Exec from app-writable files | forbidden: `app_neverallows.te:69-73` (read directly) → why AD-5 ships one pre-built agent `.so` |

@@ -16,6 +16,7 @@
 #include <utility>
 
 #include "dynarmic/frontend/A32/a32_ir_emitter.h"
+#include "dynarmic/interface/A32/coprocessor.h"
 #include "dynarmic/ir/terminal.h"
 
 #include "rb/exec/interp.h"
@@ -156,6 +157,129 @@ constexpr DeclinedForm kDeclinedForms[] = {
     MakeForm("1111100--1-0110100000101000-----", "arm_SRS"),
 };
 
+/**
+ * Coprocessor 15 for an AArch32 guest: TPIDRURW modelled, everything else refused by name.
+ *
+ * Registering *something* is the load-bearing part. With `Config::coprocessors[15]` empty, Dynarmic's
+ * AArch64 back end compiles every `mrc`/`mcr`/`cdp` into `EmitCoprocessorException()`, which is
+ * `ASSERT_FALSE("Should raise coproc exception here")` (`emit_arm64_a32_coprocessor.cpp:23`) — and mcl's
+ * `ASSERT` is not `NDEBUG`-gated, so `std::terminate` runs inside `Run()` and the whole RetroBug process
+ * dies. Same failure class §Step 21 removed for `Term::Interpret`, found here on real code and far sooner
+ * than anyone expected: the device's `libc.so` begins `__errno()` with
+ *
+ *     76dec:  ee1d 0f70   mrc p15, #0x0, r0, c13, c0, #0x3
+ *     76df0:  6840        ldr r0, [r0, #0x4]
+ *     76df2:  f500 7027   add.w r0, r0, #0x29c
+ *
+ * so one overflowing `atoi` — one `errno` write — was enough to abort `rb_guest_libc_tests` mid-run.
+ * `llvm-objdump -d` over the whole image counts 98 coprocessor accesses and they are **all** this one
+ * register: no other coprocessor number, no other `c13` slot, and no `mcr` at all. So modelling the
+ * thread-pointer read is not a corner case priced against a crash-prone default; it is the entire set of
+ * what libc asks for. The write form is here because it is that register's other half and a guest that
+ * sets `tp` must not find a hole — `[UNVERIFIED]` that any corpus code does, since none was observed.
+ *
+ * A refusal is a *stop*, not a zero: an unmodelled coprocessor must not hand back a value the guest then
+ * dereferences, which is what the memory callbacks are able to get away with only because
+ * `check_halt_on_memory_access` re-tests after every data access. There is no such re-test for a
+ * coprocessor result, so the halt comes first and the guest never sees a plausible register.
+ */
+class Arm15Coprocessor final : public Dynarmic::A32::Coprocessor {
+ public:
+  // An alias, not a using-declaration: in class scope `Namespace::Name` is only legal when the qualifier
+  // is a base class, so the latter is a compile error here and the former is not.
+  using CoprocReg = Dynarmic::A32::CoprocReg;
+
+  explicit Arm15Coprocessor(JitExecutor& exec) : exec_{exec} {}
+
+  std::optional<Callback> CompileInternalOperation(bool two, unsigned opc1, CoprocReg CRd, CoprocReg CRn,
+                                                   CoprocReg CRm, unsigned opc2) override {
+    return Callback{&Refuse, Site(false, false, Describe("CDP", two, opc1, CRn, CRm, opc2))};
+  }
+
+  CallbackOrAccessOneWord CompileSendOneWord(bool two, unsigned opc1, CoprocReg CRn, CoprocReg CRm,
+                                             unsigned opc2) override {
+    if (IsThreadPointer(two, opc1, CRn, CRm, opc2)) {
+      return Callback{&WriteThreadPointer, Site(false, true, {})};
+    }
+    return Callback{&Refuse, Site(false, false, Describe("MCR", two, opc1, CRn, CRm, opc2))};
+  }
+
+  CallbackOrAccessOneWord CompileGetOneWord(bool two, unsigned opc1, CoprocReg CRn, CoprocReg CRm,
+                                            unsigned opc2) override {
+    if (IsThreadPointer(two, opc1, CRn, CRm, opc2)) {
+      return Callback{&ReadThreadPointer, Site(true, false, {})};
+    }
+    return Callback{&Refuse, Site(false, false, Describe("MRC", two, opc1, CRn, CRm, opc2))};
+  }
+
+  CallbackOrAccessTwoWords CompileSendTwoWords(bool two, unsigned opc, CoprocReg CRm) override {
+    return Callback{&Refuse, Site(false, false, DescribePair("MCRR", two, opc, CRm))};
+  }
+
+  CallbackOrAccessTwoWords CompileGetTwoWords(bool two, unsigned opc, CoprocReg CRm) override {
+    return Callback{&Refuse, Site(false, false, DescribePair("MRRC", two, opc, CRm))};
+  }
+
+  std::optional<Callback> CompileLoadWords(bool, bool, CoprocReg CRd,
+                                           std::optional<std::uint8_t>) override {
+    return Callback{&Refuse,
+                    Site(false, false,
+                         std::string{"LDC c"} + std::to_string(static_cast<unsigned>(CRd)))};
+  }
+
+  std::optional<Callback> CompileStoreWords(bool, bool, CoprocReg CRd,
+                                            std::optional<std::uint8_t>) override {
+    return Callback{&Refuse,
+                    Site(false, false,
+                         std::string{"STC c"} + std::to_string(static_cast<unsigned>(CRd)))};
+  }
+
+ private:
+  /// `mrc`/`mcr p15, #0, rX, c13, c0, #3`: ARMv7's user-mode thread ID register, which is what bionic's
+  /// `__get_tls()` compiles to and therefore what `__errno()`, `assert`, and the property and locale
+  /// accessors all begin with.
+  static bool IsThreadPointer(bool two, unsigned opc1, CoprocReg CRn, CoprocReg CRm, unsigned opc2) {
+    return !two && opc1 == 0 && CRn == CoprocReg::C13 && CRm == CoprocReg::C0 && opc2 == 3;
+  }
+
+  static std::string Describe(const char* mnemonic, bool two, unsigned opc1, CoprocReg CRn,
+                              CoprocReg CRm, unsigned opc2) {
+    return std::string{mnemonic} + (two ? "2" : "") + " p15, #" + std::to_string(opc1) + ", c" +
+           std::to_string(static_cast<unsigned>(CRn)) + ", c" +
+           std::to_string(static_cast<unsigned>(CRm)) + ", #" + std::to_string(opc2);
+  }
+
+  static std::string DescribePair(const char* mnemonic, bool two, unsigned opc, CoprocReg CRm) {
+    return std::string{mnemonic} + (two ? "2" : "") + " p15, #" + std::to_string(opc) + ", c" +
+           std::to_string(static_cast<unsigned>(CRm));
+  }
+
+  JitExecutor::CoprocSite* Site(bool tp_read, bool tp_write, std::string detail) {
+    return exec_.CoprocSiteFor(tp_read, tp_write, std::move(detail));
+  }
+
+  static std::uint64_t ReadThreadPointer(void* user_arg, std::uint32_t, std::uint32_t) {
+    const auto* site = static_cast<const JitExecutor::CoprocSite*>(user_arg);
+    MachineState* s = site->exec->live_state();
+    return s != nullptr ? s->tp : 0u;
+  }
+
+  static std::uint64_t WriteThreadPointer(void* user_arg, std::uint32_t value, std::uint32_t) {
+    const auto* site = static_cast<const JitExecutor::CoprocSite*>(user_arg);
+    MachineState* s = site->exec->live_state();
+    if (s != nullptr) s->tp = value;
+    return 0;
+  }
+
+  static std::uint64_t Refuse(void* user_arg, std::uint32_t, std::uint32_t) {
+    const auto* site = static_cast<const JitExecutor::CoprocSite*>(user_arg);
+    site->exec->RefuseCoprocessor(*site);
+    return 0;
+  }
+
+  JitExecutor& exec_;
+};
+
 }  // namespace
 
 JitExecutor::JitExecutor(mem::GuestMemory& memory, GuestAddr return_address,
@@ -179,6 +303,12 @@ JitExecutor::JitExecutor(mem::GuestMemory& memory, GuestAddr return_address,
   // the same thing here that it claims to.
   conf.enable_cycle_counting = true;
   conf.code_cache_size = kCodeCacheBytes;
+  // Coprocessor 15 has to be present before the `Jit` is built, because the decision whether to compile a
+  // callback or an assertion is made at translation time and the shared_ptr is baked into the code cache's
+  // lifetime. Constructing it here rather than in the member list: it names `*this`, and a
+  // self-reference must not be handed out before the object it points at is far enough along to answer.
+  coproc15_ = std::make_shared<Arm15Coprocessor>(*this);
+  conf.coprocessors[15] = coproc15_;
 
   try {
     jit_ = std::make_unique<Dynarmic::A32::Jit>(conf);
@@ -190,6 +320,36 @@ JitExecutor::JitExecutor(mem::GuestMemory& memory, GuestAddr return_address,
 }
 
 JitExecutor::~JitExecutor() = default;
+
+JitExecutor::CoprocSite* JitExecutor::CoprocSiteFor(bool tp_read, bool tp_write, std::string detail) {
+  // One site per distinct access, because the pointer is compiled into every block that mentions the
+  // register and a fresh site per *reference* would grow without bound — `libc.so` reads the thread pointer
+  // from 98 places, which is 98 blocks and one site. A `std::deque` rather than a `std::vector` because
+  // appending must not move what is already referenced; the linear scan is over a handful of entries.
+  for (auto& s : coproc_sites_) {
+    if (s.tp_read == tp_read && s.tp_write == tp_write && s.detail == detail) return &s;
+  }
+  coproc_sites_.push_back(CoprocSite{this, tp_read, tp_write, std::move(detail)});
+  return &coproc_sites_.back();
+}
+
+void JitExecutor::RefuseCoprocessor(const CoprocSite& site) {
+  std::string detail = "the coprocessor access ";
+  detail += site.detail.empty() ? "p15 c13 (thread pointer)" : site.detail;
+  // R15 is the address, and it is trustworthy *here* specifically because a coprocessor callback is a
+  // call: `PrepareForCall` flushes the register allocators' live state into the jit state first, which is
+  // also why the callbacks can read and write `live_` at all. `live_->pc` would not do — that field holds
+  // the address the `Run` was entered at, and by now the guest has moved.
+  if (jit_ != nullptr) {
+    detail += " at 0x" + Hex(jit_->Regs()[15]) + " is not modelled";
+  } else {
+    detail += " is not modelled";
+  }
+  SetPending(Pending::Unimplemented, std::move(detail));
+  if (jit_ != nullptr) {
+    jit_->HaltExecution(Dynarmic::HaltReason::UserDefined1);
+  }
+}
 
 void JitExecutor::SyncIn(const MachineState& state) {
   auto& regs = jit_->Regs();

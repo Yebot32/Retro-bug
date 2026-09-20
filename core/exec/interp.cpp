@@ -656,6 +656,28 @@ void BlockRunner::WritePC(std::uint32_t value, bool interwork) {
   state_.cpsr = CpsrWithMode(state_.cpsr, thumb ? isa::Mode::Thumb : isa::Mode::Arm);
 }
 
+/**
+ * The one coprocessor register an ARMv7 guest may read for its thread pointer: `c13`, with `opc1 == 0`,
+ * `CRm == c0` and `opc2 == 3` — i.e. `mrc p15, #0, rX, c13, c0, #3`, which is what bionic's `__get_tls()`
+ * compiles to.
+ *
+ * The indices are the front end's packing, read straight out of `emit_arm64_a32_coprocessor.cpp`:
+ * `[0]` coprocessor number, `[1]` the "2" extension bit, `[2]` opcode 1, `[3]` CRn, `[4]` CRm,
+ * `[5]` opcode 2. Same order Tier J sees, which is the point of naming the check once per tier rather than
+ * inlining an index comparison twice.
+ */
+bool IsThreadPointerAccess(const Dynarmic::IR::Value::CoprocessorInfo& i) {
+  return i[0] == 15 && i[1] == 0 && i[2] == 0 && i[3] == 13 && i[4] == 0 && i[5] == 3;
+}
+
+std::string CoprocName(const char* mnemonic, const Dynarmic::IR::Value::CoprocessorInfo& i) {
+  return std::string{mnemonic} + (i[1] ? "2" : "") + " p" + std::to_string(static_cast<unsigned>(i[0])) +
+         ", #" + std::to_string(static_cast<unsigned>(i[2])) + ", c" +
+         std::to_string(static_cast<unsigned>(i[3])) + ", c" +
+         std::to_string(static_cast<unsigned>(i[4])) + ", #" +
+         std::to_string(static_cast<unsigned>(i[5]));
+}
+
 bool BlockRunner::Step(const Inst* inst) {
   const Opcode op = inst->GetOpcode();
   // RRX is the one shift whose carry-in reaches the result, so it is the one whose operands sit one
@@ -684,6 +706,42 @@ bool BlockRunner::Step(const Inst* inst) {
 
     case Opcode::A32ExceptionRaised:
       return Fault("the front end raised an exception at this instruction");
+
+    /**
+     * Coprocessor 15, and only the thread pointer.
+     *
+     * The same rule `Arm15Coprocessor` encodes for Tier J, and it has to be the same rule: the two tiers
+     * may differ in speed and in step accounting, but a register one tier can read and the other cannot
+     * turns every future differential into a tier-dependent answer about the guest's TLS. What the device's
+     * `libc.so` actually contains is 98 reads of exactly this register and no other coprocessor access at
+     * all (`llvm-objdump -d` over the whole image), so this covers real bionic rather than guessing at it.
+     *
+     * Anything else *refuses*, naming the coordinates, rather than returning zero: a guest that
+     * dereferences a fabricated coprocessor read gets a wrong answer, and in an emulator a wrong answer is
+     * worse than a stop. Tier J's equivalent of that refusal has to be a stop too, because Dynarmic's own
+     * answer to an unhandled coprocessor is `ASSERT_FALSE` in the AArch64 back end, which terminates the
+     * host process — see `docs/30` §Step 26.
+     */
+    case Opcode::A32CoprocGetOneWord: {
+      if (!HasArgs(inst, 1)) return false;
+      const auto info = inst->GetArg(0).GetCoprocInfo();
+      if (!IsThreadPointerAccess(info)) {
+        return Fail(inst, CoprocName("MRC", info) + " is not modelled");
+      }
+      Put(inst, V{state_.tp, 0});
+      return true;
+    }
+    case Opcode::A32CoprocSendOneWord: {
+      if (!HasArgs(inst, 2)) return false;
+      const auto info = inst->GetArg(0).GetCoprocInfo();
+      if (!IsThreadPointerAccess(info)) {
+        return Fail(inst, CoprocName("MCR", info) + " is not modelled");
+      }
+      std::uint32_t value = 0;
+      if (!W32(inst, 1, value)) return false;
+      state_.tp = value;
+      return true;
+    }
 
     // ---------------------------------------------------------------- register file
     case Opcode::A32GetRegister: {

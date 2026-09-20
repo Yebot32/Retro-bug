@@ -74,6 +74,18 @@ constexpr std::uint32_t R_ARM_COPY = 20, R_ARM_GLOB_DAT = 21, R_ARM_JUMP_SLOT = 
                         R_ARM_RELATIVE = 23;
 constexpr std::uint32_t R_ARM_GOTOFF = 24, R_ARM_GOTPC = 25, R_ARM_GOT32 = 26;
 constexpr std::uint32_t R_ARM_THM_CALL = 10, R_ARM_THM_JUMP24 = 31;
+/**
+ * The three TLS kinds and the IFUNC one, which every real system library needs and RetroBug does not
+ * yet apply. The numbers are not recalled from a table: they are what `llvm-readelf -rW` prints for
+ * `/system/lib/libc.so` on the SM-X710 (`0x11`, `0x13`, `0xa0`), and `rb_guest_libc_tests` asserts the
+ * multiset, so a wrong constant here shows up as a red lane naming the count.
+ *
+ * The refusals are not benign. `R_ARM_IRELATIVE`'s target is meant to hold the *result of a guest call*,
+ * and bionic writes all three TLS slots unconditionally during relocation, so a slot this loader skips
+ * keeps whatever the mapping left in it — a wrong pointer, not a fault waiting to happen.
+ */
+constexpr std::uint32_t R_ARM_TLS_DTPMOD32 = 17, R_ARM_TLS_DTPOFF32 = 18, R_ARM_TLS_TPOFF32 = 19,
+                        R_ARM_IRELATIVE = 160;
 
 // Tag 11 is SYMENT: the size of *one* Elf32_Sym (16), not the length of the table. There is no
 // DT_SYMSZ — a symbol table's extent is not in the dynamic section at all, which is easy to miss

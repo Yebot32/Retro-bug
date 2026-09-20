@@ -966,6 +966,38 @@ Progress and the findings that change this plan are tracked in
     garbage argument — and it is a precondition for #29, because bionic's own functions take stack
     arguments constantly (`printf` more than most).
 
+16. **A real bionic `libc.so` loaded and called — Done as a measurement, and it produced the work list**
+    (`30` §Step 26). New lane `rb_guest_libc_tests` loads the SM-X710's own
+    `/apex/com.android.runtime/lib/bionic/libc.so` (1,267,328 bytes, ELF32 ARM DYN, Android 16) and calls
+    into it, with the expected values from `tests/guest/oracle_libc.c` run natively on the same file on the
+    same device. Two results, one of them a defect that was about to be structural.
+    **The defect:** bionic's `errno` is a **coprocessor read** — `__errno()` starts
+    `mrc p15, #0, r0, c13, c0, #3`, and 98 of the library's coprocessor accesses are that one register — while
+    Dynarmic's AArch64 back end answers an unregistered coprocessor with a non-`NDEBUG` `ASSERT_FALSE`. So
+    `atoi` on an overflowing string **terminated the emulator process**, and every guest that reports an
+    error would have. Fixed on both tiers: TPIDRURW reads and writes go to `MachineState::tp` (proved by a
+    row that seeds a TLS block and asks libc's own `__errno` for the slot address, expecting the `+0x29c` out
+    of its disassembly — both tiers return it exactly), and any other coprocessor access now stops with
+    `Unimplemented` naming the encoding and the address instead of returning a value the guest would
+    dereference. §Step 21's lesson, generalised: **an unimplemented thing must be a reason, never an abort**
+    — and both instances so far were found by loading code nobody wrote here.
+    **The measurement:** the asserted rows that depend on nothing missing all match hardware — string
+    scanning, `atoi`/`abs`/`strtol` with its `endptr` written back through a guest pointer, `strtok_r` across
+    four calls on a mutating buffer, the thread pointer, and `qsort` calling a comparator in a *different*
+    guest library, which is #27's ISA tag surviving a `blx` issued by emulated bionic. The lane is left
+    **74 checks, 13 failures red on purpose**, because each failure is a named gap rather than a mystery: IFUNC resolution at load (9 rows; and the resolvers
+    themselves already execute — calling `memcpy` reaches the resolver and it *returns* an implementation
+    pointer in 4 steps, so only the load-time call is missing), four Tier I opcodes (`Mul64`,
+    `ByteReverseWord`, `ConditionalSelect64`, `CountLeadingZeros32` — the list that stands between the
+    interpreted tier and real system code), two unexplained Tier J `undefined instruction encoding` refusals
+    inside `strtod` and `malloc`, three unfilled TLS slots whose silent-corruption semantics are an owner
+    decision (§Step 26 item 4), and `DT_INIT_ARRAY` parsed but never run.
+    **And the number that changes a plan:** the host-provided surface a real `libc.so` needs is **nine
+    names** — `dlopen`, `dlsym`, `dlclose`, `dladdr`, `dlerror`, `dl_unwind_find_exidx`, `android_dlopen_ext`,
+    `android_get_application_target_sdk_version`, `__loader_shared_globals` — not the ~1,300 it exports. C11's
+    scope, measured off an image instead of estimated. Suite otherwise unchanged: 1,418 checks, 0 failures,
+    plus dynarmic's 200,561 assertions.
+
 Sequencing constraint the owner should know before M1: **M1's end-to-end acceptance step cannot be verified on this
 machine at all** — it needs a physical 64-bit-only arm64 phone. Everything in §9 and most of M1's code can be written
 and tested without one, so the device gates only the final launch assertion, not the work.

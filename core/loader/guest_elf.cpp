@@ -500,6 +500,13 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
           default:
             // Unsupported kinds are reported, not applied wrongly. TLS and COPY are the realistic
             // ones; a silent skip here would corrupt a guest pointer instead.
+            //
+            // Worth stating for whoever loads a real `libc.so` next: bionic fills its TLS slots
+            // unconditionally during relocation, so a *recorded* refusal is a silent wrong value in the
+            // guest, not a fault waiting to happen. `rb_guest_libc_tests` asserts on the exact multiset
+            // so it cannot be mistaken for a clean load; whether C05 should fail the load instead is an
+            // open decision, recorded in docs/20 §9 rather than made here.
+            mod.unsupported_reloc_types.push_back(type);
             char buf[96];
             std::snprintf(buf, sizeof buf, "reloc type 0x%02x at guest 0x%x (%s)", type, r_offset,
                           sname.empty() ? "?" : sname.c_str());
@@ -583,6 +590,7 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
         if (out.name.empty()) continue;
         out.size = sym.st_size;
         out.is_function = (type == STT_FUNC || type == STT_GNU_IFUNC);
+        out.ifunc = (type == STT_GNU_IFUNC);
         out.thumb = out.is_function && (sym.st_value & 1u);
         out.weak = ELF32_ST_BIND(sym.st_info) == STB_WEAK;
         if (sym.st_shndx == SHN_UNDEF) {
