@@ -1762,6 +1762,61 @@ work above; the rest are still open.
 green on both the SM-X710 and the CPH2573. Neither device runs ARMv7 for these rows except as the oracle;
 the tiers are arm64 host code executing decoded A32.
 
+## Step 18 — what C04 can actually govern on the JIT path, found by reading the back end instead of assuming
+
+Step 13 left C04 as "policy half done, nothing wired into Tier J yet". The wiring was the next item, and the
+first thing it needed was a fact nobody had checked: **what does an embedder of this vendored Dynarmic get
+to control about its code cache?** The answer changes what C04 promises, so it is worth writing down even
+though it is mostly a negative result.
+
+What exists, read from the tree rather than inferred from the upstream docs of a newer release:
+
+| Control point | Where | What it gives RetroBug |
+|---|---|---|
+| `UserConfig::code_cache_size` | `interface/A32/config.h:239` (default 128 MiB) | The whole of the per-instance budget story: one `Jit` per instance, sized by C04's `Limits`. Already used — `core/exec/jit.cpp` sets 8 MiB. |
+| A hard ceiling | `backend/arm64/address_space.cpp:28`: `ASSERT_MSG(code_cache_size <= 128 MiB, …)` | The arm64 jump range, not a tuning knob. Quotas above 128 MiB abort the process. |
+| Eviction | `address_space.cpp:110-113`: `if (GetRemainingSize() < 1 MiB) ClearCache();` | **All of it, at once.** No per-block eviction, no LRU, no callback. |
+| W^X | `address_space.cpp:115` + `129`: `UnprotectCodeMemory()` … emit … `ProtectCodeMemory()`, and `mem.invalidate(...)` between | Already honoured by the back end, with the icache maintenance included. C04's allocator-side W^X is not layered under it — it would *replace* it, which nothing can do from outside. |
+| Fill level, block count, block-added/block-removed events | not present (`interface/A32/a32.h` exposes `ClearCache`, `InvalidateCacheRange`, `DumpDisassembly`; no `CodeBlockEvents`, which is a newer upstream addition) | No occupancy telemetry. C17's code-cache field can report the budget and the backend, not the fill. |
+
+**So the `Allocator` seam has no consumer in the shipped back end.** Not a defect in C04's design — the
+seam is the right shape for a code cache RetroBug owns — but Dynarmic allocates its own executable memory
+through oaknut and never asks. Three consequences, all recorded in `docs/20` §C04:
+
+1. **C04's real present job is narrower and still worth doing**: the per-instance number handed to
+   `code_cache_size`, the `kInterpreted` choice and its echo, and the guest-range algebra both tiers use on
+   invalidation. What it is *not* today is the eviction manager of Tier J.
+2. **A quota has a floor, and it is 1 MiB + ε.** Under that the back end clears on nearly every block, so
+   "tight memory per instance" becomes a recompile loop. C04's default is 2 MiB; that is now documented at
+   the struct rather than discovered by an app that gets one.
+3. **Per-instance fairness across instances is preserved by construction, not by policy** — one `Jit` each
+   means one instance filling its cache cannot evict another's blocks. The property `docs/research/05`
+   §2.9 demanded holds *before* C04's key even comes into play, which is a good outcome and worth stating
+   plainly rather than claiming credit for it. The instance-tagged key still matters for the caches that
+   are ours (any RetroBug-side block table, and the Tier I IR cache if it ever gets one).
+
+**What it would take to get the real thing** (a code cache RetroBug owns, so that `MemfdDualAlias`, W^X
+without an RWX window, and per-block LRU all become available): a patch to `external/dynarmic` to source
+`AddressSpace`'s `mem` from an injected allocator. Costed honestly: it is one constructor and one member in
+`backend/arm64/address_space.{h,cpp}`, and the vendored tree is 0BSD so it is permitted by AD-10 — but it
+breaks the "we do not modify `external/dynarmic`" posture that has held for 18 steps, it must be carried
+against every future upstream sync, and nothing in M1 needs it: the app-domain probe measured anon RWX
+*and* memfd-executing as available, so the back end's own choice is fine on Android today. The case that
+would force the decision is iOS (M3), where NX on writable memory is the whole problem and Dynarmic's
+`ProtectCodeMemory()` already keys off `__APPLE__` — meaning the *first* thing to do there is measure
+whether the existing protect/unprotect path is sufficient, before paying for a patch. Recorded that way in
+`docs/20` §C04 so the question arrives with its answer already narrowed.
+
+**Also in this step, a real bug found in C04's own key:** `BlockKey` carried instance, image, pc and mode —
+and not the IT state, while `isa::TranslateOne` documents that pc, mode **and** IT state together decide
+what a word of guest bytes decodes to, and Dynarmic's own cache is keyed on the full location descriptor
+(`A32JitState::upper_location_descriptor`). Same class of alias as forgetting the mode, and the reason it
+matters is that it is a wrong-answer bug rather than a stale-code bug. `itstate` is now in the key with a
+test that two IT states at one pc get two slots, and that dropping one leaves the other. The pre-existing
+`Describe()` test then failed on its own assertion style — it pinned the mode marker to the end of the
+string, which held only while the key had four fields — so that assertion now checks presence and
+distinguishability instead of position. 95 checks in the C04 lane, up from 86.
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |

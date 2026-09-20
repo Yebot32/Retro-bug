@@ -29,7 +29,7 @@ const char* Name(Kind k) {
 
 std::string BlockKey::Describe() const {
   return "inst" + std::to_string(instance) + "/img" + std::to_string(image) + "@0x" + Hex(pc) +
-         (mode == isa::Mode::Thumb ? "t" : "a");
+         (mode == isa::Mode::Thumb ? "t" : "a") + "/it" + Hex(itstate);
 }
 
 Cache::Cache(std::unique_ptr<Allocator> allocator, Kind asked, Limits limits)

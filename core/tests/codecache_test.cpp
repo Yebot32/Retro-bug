@@ -43,8 +43,8 @@ void fail(const char* what, int line, const std::string& detail = {}) {
 #define CHECK(cond) CHECK_CTX(cond, {})
 
 cc::BlockKey Key(std::uint32_t instance, std::uint32_t image, exec::GuestAddr pc,
-                 isa::Mode mode = isa::Mode::Thumb) {
-  return cc::BlockKey{instance, image, pc, mode};
+                 isa::Mode mode = isa::Mode::Thumb, std::uint8_t itstate = 0) {
+  return cc::BlockKey{instance, image, pc, mode, itstate};
 }
 
 /// The contract every platform backend has to satisfy, enforced here rather than documented: a range is
@@ -161,7 +161,7 @@ void two_instances_at_one_pc_are_two_blocks() {
 /// Address and instance are not enough: two modules can be mapped at the same guest address, and the
 /// mode is in the key because getting it wrong is the failure that does not fault — an ARM-mode fetch
 /// of Thumb bytes decodes *something*, and the guest runs it.
-void image_and_mode_are_part_of_the_identity() {
+void identity_fields_image_mode_and_itstate() {
   auto c = Make(Fake());
   const auto a = c.Acquire(Key(1, 1, 0x3000), 64);
   std::string err;
@@ -172,6 +172,26 @@ void image_and_mode_are_part_of_the_identity() {
   // would evict the block it is asking about.
   CHECK_CTX(c.Acquire(Key(1, 1, 0x3000), 64).state == cc::Slot::State::kDuplicate,
             "a duplicate Acquire offered fresh space");
+
+  // The IT state, which was not in the key at first. Dynarmic keys its own cache on the whole location
+  // descriptor and `isa::TranslateOne` says why: pc, mode and IT state together decide what a word of
+  // guest bytes compiles to, so an entry keyed without it would serve a block translated inside one
+  // predicated sequence to a fetch inside another. That is a wrong-answer bug, not a stale one — the
+  // bytes are the same, which is exactly why it would survive a casual test.
+  CHECK_CTX(c.Acquire(Key(1, 1, 0x3000, isa::Mode::Thumb, 0x82), 64).state ==
+                cc::Slot::State::kSpace,
+            "a different IT state at the same pc, mode and image was served the committed block");
+  cc::HostRange found{};
+  CHECK_CTX(c.Find(Key(1, 1, 0x3000), &found) && !found.empty(),
+            "the original key lost its entry — a distinct key must not displace it");
+  CHECK_CTX(!c.Find(Key(1, 1, 0x3000, isa::Mode::Thumb, 3), &found) || found.empty(),
+            "an IT state that was never committed looked present");
+  // And dropping one must leave the others alone, which is what `Forget` returning a real range means:
+  // three keys survive (the other image, the other mode, the other IT state — the last uncommitted, so
+  // `blocks()` still counts the reservation it holds).
+  CHECK_CTX(c.Forget(Key(1, 1, 0x3000)) == 0x3000u, "Forget did not report the guest range");
+  CHECK_CTX(c.Forget(Key(1, 1, 0x3000)) == 0u, "the same key was forgotten twice");
+  CHECK_CTX(c.blocks() == 3u, std::to_string(c.blocks()) + " blocks, want the three others intact");
 }
 
 // ------------------------------------------------------- W^X and accountancy
@@ -390,8 +410,19 @@ void the_names_are_stable_and_the_kinds_are_all_distinct() {
   CHECK(std::string{cc::Name(cc::Kind::kAnonRwx)} != cc::Name(cc::Kind::kMemfdDual));
   CHECK_CTX(Key(1, 2, 0x3000).Describe().find("inst1") != std::string::npos,
             Key(1, 2, 0x3000).Describe());
-  CHECK_CTX(Key(1, 2, 0x3000, isa::Mode::Arm).Describe().back() == 'a',
-            Key(1, 2, 0x3000, isa::Mode::Arm).Describe());
+  // Asserted on containment rather than on `.back()`: the first version of this pinned the mode marker
+  // to the end of the string, which held only while the key had four fields and broke the moment the IT
+  // state was appended. What a report needs from `Describe` is that each field is *present and
+  // distinguishable*, not that it is last.
+  const std::string t = Key(1, 2, 0x3000, isa::Mode::Arm, 0x82).Describe();
+  CHECK_CTX(t.find("inst1") != std::string::npos && t.find("img2") != std::string::npos &&
+                t.find("0x3000") != std::string::npos,
+            t);
+  CHECK_CTX(t.find("a/it") != std::string::npos, "ARM mode marker or IT field missing: " + t);
+  CHECK_CTX(Key(1, 2, 0x3000, isa::Mode::Thumb, 0x82).Describe().find("t/it") != std::string::npos,
+            "the two modes described identically");
+  CHECK_CTX(t != Key(1, 2, 0x3000, isa::Mode::Arm, 0x83).Describe(),
+            "two IT states that differ describe the same key");
 }
 
 /// Named rather than a bare call list: this lane's first run ended in a `Segmentation fault` with
@@ -408,7 +439,7 @@ void the_names_are_stable_and_the_kinds_are_all_distinct() {
 
 int main() {
   RUN(two_instances_at_one_pc_are_two_blocks);
-  RUN(image_and_mode_are_part_of_the_identity);
+  RUN(identity_fields_image_mode_and_itstate);
   RUN(commit_shrinks_and_release_takes_the_whole_reservation);
   RUN(an_over_eager_commit_is_refused_not_clamped);
   RUN(a_failed_commit_leaves_nothing_executable_behind);

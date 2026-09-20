@@ -13,7 +13,9 @@
  * the same `pc` get two slots is the cheapest way to make forgetting it expensive. `image_id` and the
  * mode are in the key for the same kind of reason: two modules can map the same guest address, and an
  * ARM/Thumb distinction that is not in the key is how a block of Thumb bytes gets served to an ARM-mode
- * fetch — which does not fault, it just decodes something else.
+ * fetch — which does not fault, it just decodes something else. Nor is the IT state optional: Dynarmic
+ * keys its own cache on the full location descriptor for exactly that reason, and the same bytes in two
+ * predicated sequences are two different blocks.
  *
  * **This file decides what to drop; it does not touch an instruction cache.** The host-cache discipline
  * (`dc civac`, `ic iallu`, `isb`) belongs to whichever back end emitted the code — today that is
@@ -62,19 +64,28 @@ enum class Kind : std::uint8_t {
 
 [[nodiscard]] const char* Name(Kind);
 
-/// The identity of one compiled block. Four fields, all of them load-bearing — see the header.
+/// The identity of one compiled block. Five fields, all of them load-bearing — see the header.
 struct BlockKey {
   InstanceId instance = 0;
   ImageId image = 0;
   exec::GuestAddr pc = 0;
   isa::Mode mode = isa::Mode::Thumb;
+  /// The IT state the block was decoded under, as the low 8 bits of the CPSR's IT encoding. This is not
+  /// decoration and it was missing at first: Dynarmic's own cache is keyed on the whole
+  /// `LocationDescriptor`, which carries pc, mode **and** IT state (`A32JitState` holds the latter in
+  /// `upper_location_descriptor`), and `isa::TranslateOne` documents that all three change what the same
+  /// bytes decode to. A key without it would hand a block translated for `itt gt` to a fetch that is in
+  /// the middle of a different predicated sequence — the same class of alias as forgetting `mode`, and
+  /// the reason the test below covers it rather than the three obvious fields.
+  std::uint8_t itstate = 0;
 
   [[nodiscard]] bool operator==(const BlockKey&) const = default;
   [[nodiscard]] bool operator<(const BlockKey& o) const {
     // The mode goes through an `int` because `std::tie` binds references and a cast is a temporary; the
-    // comparison is still by that exact four-field order, which is what the equality below relies on.
+    // comparison is still by that exact five-field order, which is what the equality above relies on.
     const int m = static_cast<int>(mode), om = static_cast<int>(o.mode);
-    return std::tie(instance, image, pc, m) < std::tie(o.instance, o.image, o.pc, om);
+    const int it = itstate, oit = o.itstate;
+    return std::tie(instance, image, pc, m, it) < std::tie(o.instance, o.image, o.pc, om, oit);
   }
   [[nodiscard]] std::string Describe() const;
 };
@@ -122,6 +133,16 @@ struct Slot {
 
 /// Per-instance bounds, because a cache shared without accounting is one app evicting another — and the
 /// other direction, an app that compiles a lot, is a memory problem that has to land somewhere.
+///
+/// **The floor is not a style preference.** On the arm64 back end the only lever a per-instance bound
+/// has is `UserConfig::code_cache_size` (`interface/A32/config.h:239`), because Dynarmic allocates its
+/// own executable memory and hands back no hook: it clears the *whole* cache once fewer than
+/// 1 MiB remain (`backend/arm64/address_space.cpp:110-113`) and asserts the size is at most 128 MiB
+/// (`address_space.cpp:28`). So a quota under roughly 1 MiB is not a tight budget, it is a loop that
+/// recompiles everything; and a quota is a cliff (all of that instance's blocks at once, latency not
+/// isolation) rather than the per-block LRU this class implements for itself. Both facts are written up
+/// in `docs/30` §Step 18 and they bound what C04 can promise, which is why they are here rather than in
+/// a comment in a file the back end does not read.
 struct Limits {
   std::size_t bytes_per_instance = 2u << 20;
   std::size_t blocks_per_instance = 4096;

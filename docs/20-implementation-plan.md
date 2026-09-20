@@ -246,9 +246,33 @@ the guest as writable-and-executable at the same time once a block is committed.
 - `Kind`, per-instance `Limits` (bytes and blocks), LRU eviction *within one instance only*, and the
   requested-vs-active echo into C17's `code-cache-backend`, recorded `inert` when a stronger backend was
   asked for and a weaker one is in use.
-- Still open: wiring into `JitExecutor` (which runs on Dynarmic's cache), thread safety (one cache per
-  instance *and* per thread until C16's threading story exists), and any measurement behind the eviction
-  policy or the sizing — both are `[INFER]` until a real app's block trace says otherwise.
+- **The Tier J wiring was investigated and the answer is a boundary, not a to-do** (`30` §Step 18): this
+  vendored Dynarmic allocates its own executable memory and exposes no injection point, so the
+  `Allocator` seam has no consumer on the JIT path. What C04 governs there is exactly one number —
+  `UserConfig::code_cache_size` per `Jit`, hence per instance — plus `kInterpreted` and its echo, and the
+  guest-range algebra both tiers use when invalidating. Three consequences that have to travel with the
+  component: eviction on that path is **the whole cache at once** below 1 MiB remaining
+  (`backend/arm64/address_space.cpp:110-113`), so a per-instance quota is a latency cliff rather than an
+  LRU and has a **floor of about 1 MiB + ε** (C04's default is 2 MiB, now stated at the struct);
+  `code_cache_size` is hard-capped at 128 MiB by an assert; and **fill level is not observable**, so the
+  C17 field can report budget and backend, never occupancy. Cross-instance isolation, the property
+  `docs/research/05` §2.9 demanded, holds by construction — one `Jit` each — which is worth saying
+  plainly rather than attributing to the key. Getting a cache RetroBug actually owns (memfd dual-alias, no
+  RWX window, per-block LRU) means injecting an allocator into `AddressSpace`: ~2 lines of
+  `external/dynarmic`, permitted by its 0BSD licence, forbidden by the no-patches posture so far held for
+  18 steps. Nothing in M1 needs it — the app-domain probe measured anon RWX *and* memfd execution as
+  available — so the decision belongs to iOS/M3, where the first step is measuring whether the back end's
+  existing `ProtectCodeMemory()` (which already keys on `__APPLE__`) is sufficient before paying for the
+  patch at all.
+- **`BlockKey` was missing a field and now has it:** `itstate`. Instance, image, pc and mode were all there,
+  but `isa::TranslateOne` documents that pc, mode *and* IT state decide what a word of guest bytes
+  decode to, and Dynarmic keys its own cache on the whole location descriptor. Without it, a block
+  translated inside one predicated sequence is served to a fetch inside another — a wrong-answer alias,
+  the same class as dropping the mode, and the reason the key is tested field by field.
+- Still open: thread safety (one cache per instance *and* per thread until C16's threading story exists),
+  and any measurement behind the eviction policy or the sizing — both are `[INFER]` until a real app's
+  block trace says otherwise, and note that on the Tier J path such a trace cannot be taken at all from
+  outside the back end.
 
 ### C05 `rb::loader` — guest ELF
 ```cpp
