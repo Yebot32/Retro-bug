@@ -62,3 +62,9 @@ target_link_libraries(rb_diag_tests PRIVATE rb_diag)
 # the numbers measured on hardware, and the results are checked against those same measurements.
 add_executable(rb_syscall_monitor_tests syscall_monitor_test.cpp)
 target_link_libraries(rb_syscall_monitor_tests PRIVATE rb_syscall rb_diag rb_exec)
+
+# C04's policy needs no guest program and no executable memory: the allocator is injected, so the tests
+# can assert the ordering (reserve writable, commit executable, release the whole reservation) that a
+# platform backend will have to honour.
+add_executable(rb_codecache_tests codecache_test.cpp)
+target_link_libraries(rb_codecache_tests PRIVATE rb_codecache)

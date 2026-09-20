@@ -1441,6 +1441,60 @@ read `enforce` at all (it cannot — `selinux_enforce=(unreadable)` in both repo
 `getenforce` reading from the shell domain next to an `untrusted_app` context read from inside the app,
 which is two measurements joined by an inference and is labelled that way in `docs/10` U-13).
 
+## Step 13 — `rb::codecache` (C04): the policy half, with the memory left to the platform
+
+`core/codecache/codecache.cpp` + 86 checks. What landed is *who owns which block, and what gets dropped
+when there is no room* — not an `mmap`. The executable memory is behind an injected `Allocator`
+(`Reserve` writable → `Commit` executable-and-smaller → `Release` the whole reservation), so the three
+backends `docs/10` §8.3 names — `AnonRwx`, `MemfdDualAlias`, `Interpreted` — arrive with M1's platform
+glue where the U-13 probe answer is actually consumed, and the W^X ordering is testable here without any
+memory being mapped at all. `[1A]`
+
+**`BlockKey` is `{instance, image, pc, mode}`** and every field is load-bearing, with a test per field.
+`instance` closes the hole `docs/research/05` §2.9 names — a cache looked up by guest PC alone serves one
+app's compiled block to another, which would break the "no isolation property is shared across apps" rule
+through a hash table that forgot a member. `image` because two modules map the same guest address (the
+fixture's own exports and `liblog`'s stubs already do). `mode` because getting it wrong is the failure that
+does not fault: an ARM-mode fetch served a Thumb block *decodes*, and the guest runs the result.
+
+**`kInterpreted` is a shape, not a failure.** It returns a slot with no range and reserves nothing, so
+Tier I runs with no cache — on iOS, and on any OEM where the probe says no. A cache that reported
+`kNoRoom` there would send a caller into an eviction loop over a table it never filled, which is how a
+fallback stops being takeable.
+
+**`FlushInstance` and `Forget` return guest ranges instead of invalidating anything.** Step 9 established
+that the host-cache maintenance is Dynarmic's and C04's job is policy; that split is now in the signature
+rather than in a comment. `Instances()` exists so "FlushInstance is provably called on every T1 exit
+path" is checkable against a list rather than against hope — the *proving* is C16's, which does not exist
+yet.
+
+**The state machine, found by two of my own tests failing.** An entry is created at `Reserve`, and until
+`Commit` it has no executable bytes. That has to be a real state, not an entry with a size in it:
+`Find` returning an uncommitted block would hand a caller a writable range to branch into, and
+`EvictOne` choosing one would `Release` memory out from under a back end mid-write — the symptom of which
+is one app executing another's code. Both were wrong in the first version (the entry stored its
+reservation as "used", so an uncommitted block was evictable and findable), and both were caught because a
+test asked for the opposite. `Find` now refreshes recency — hence non-`const`, which is honest: a lookup
+that pretends not to change anything would evict the block a hot loop is sitting in.
+
+**`Echo` fills C17's `code-cache-backend` field** with `requested`/`active`, and records `inert` when a
+stronger backend was asked for and a weaker one is in use, with the reason in `evidence` — the
+requested-`MemfdDualAlias`, active-`Interpreted` case is a test, not a hypothetical.
+
+**One operational lesson about test harnesses.** This lane's first run was `Segmentation fault` with
+nothing printed: an allocator-fixture bug emptied the cache, the assertion on `dropped.size()` reported it,
+and the *next line* indexed `dropped[0]` anyway. A lane that crashes tells you less than a lane that
+fails, so the case list now prints the case name as it starts, and index-after-size-check is guarded. The
+same pattern as Step 9's "what value would this line print if the thing it tests were broken?", on this
+side of the boundary.
+
+**Not done, and not pretended done:** no `AnonRwx`/`MemfdDualAlias` allocator (M1's, next to the probe
+that selects them); nothing wired into `JitExecutor`, which still runs on Dynarmic's own cache and whose
+`Invalidate` is still what a flush has to reach; no thread-safety, so one `Cache` per instance *and per
+thread* until C16's threading story exists; and the eviction *policy* has no measurement behind it yet —
+LRU-with-per-instance-quotas is a reasoned choice, `[INFER]`, and the experiment is a real app's block
+access trace against `bytes_per_instance` at 1, 4 and 16 MiB, which also closes C04's sizing question.
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |

@@ -69,9 +69,18 @@ add_library(rb_syscall STATIC syscall/monitor.cpp)
 target_compile_features(rb_syscall PUBLIC cxx_std_20)
 target_link_libraries(rb_syscall PUBLIC rb_exec rb_diag)
 
+# rb::codecache (C04): the block-cache policy. It reaches no executable memory of its own — the
+# allocator is injected, so the three backends (anon RWX, memfd dual alias, none) are the platform's
+# answer to the U-13 probe and this is only what to do about it. That boundary is why the tests can
+# assert W^X ordering without an mmap.
+add_library(rb_codecache STATIC codecache/codecache.cpp)
+target_compile_features(rb_codecache PUBLIC cxx_std_20)
+target_link_libraries(rb_codecache PUBLIC rb_exec rb_diag)
+
 # rb_core is the aggregate the engine-facing components will hang off.
 add_library(rb_core INTERFACE)
-target_link_libraries(rb_core INTERFACE rb_mem rb_loader rb_isa rb_exec rb_abi rb_diag rb_syscall dynarmic)
+target_link_libraries(rb_core INTERFACE rb_mem rb_loader rb_isa rb_exec rb_abi rb_diag rb_syscall
+                                        rb_codecache dynarmic)
 
 if(DEFINED RB_COMPAT_INCLUDE_DIR)
   target_include_directories(rb_core INTERFACE "${RB_COMPAT_INCLUDE_DIR}")

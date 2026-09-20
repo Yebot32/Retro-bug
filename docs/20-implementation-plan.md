@@ -210,6 +210,31 @@ silently downgraded.
 **Review focus:** `FlushInstance` must be provably called on every T1 exit path; executable memory is never handed to
 the guest as writable-and-executable at the same time once a block is committed.
 
+**As built, policy half** (`30` §Step 13, 86 checks): the sketch's `CodeCache` exists as
+`rb::codecache::Cache`, and the split that fell out of building it changes what C04 is *for*.
+
+- **The memory is injected, so the three backends are M1's, not this component's.** `Reserve` hands out
+  writable space, `Commit` makes a prefix of it executable and *not* writable, `Release` takes the whole
+  reservation back — and that ordering is asserted against a fake allocator, so W^X is checked with no
+  `mmap` in `core/` at all. `AnonRwx` and `MemfdDualAlias` land where the U-13 probe result is consumed,
+  which is also where their real constraints (SELinux, a memfd's dual mapping, iOS's outright refusal) live.
+- **`FlushInstance`/`Forget` return the guest ranges to invalidate; they do not invalidate.** Step 9
+  settled that host-cache maintenance belongs to whichever back end emitted the code — Dynarmic today — so
+  C04 owns *what to drop, when, and for whom*. `Instances()` gives the T1 teardown the list that makes
+  "provably called on every exit path" checkable; the proving itself is C16's and is not done.
+- **`kInterpreted` returns a slot with no range rather than failing,** which is what lets Tier I run with
+  no cache on iOS or on an OEM whose probe says no. A cache that answered `kNoRoom` there would be a
+  fallback that cannot be taken.
+- **An entry is neither findable nor evictable until it is committed.** Two tests were written before the
+  code got this right and failed, which is the only reason it is now correct: an uncommitted block is a
+  back end mid-write, and evicting one releases memory from under someone's emitter.
+- `Kind`, per-instance `Limits` (bytes and blocks), LRU eviction *within one instance only*, and the
+  requested-vs-active echo into C17's `code-cache-backend`, recorded `inert` when a stronger backend was
+  asked for and a weaker one is in use.
+- Still open: wiring into `JitExecutor` (which runs on Dynarmic's cache), thread safety (one cache per
+  instance *and* per thread until C16's threading story exists), and any measurement behind the eviction
+  policy or the sizing — both are `[INFER]` until a real app's block trace says otherwise.
+
 ### C05 `rb::loader` — guest ELF
 ```cpp
 namespace rb::loader {
@@ -709,6 +734,11 @@ Progress and the findings that change this plan are tracked in
     values and return convention are measured on hardware per ABI (`tools/syscall_abi_probe.sh`), which
     corrected two things this plan had stated as fact — see C07's "As built" above. Signals, threads and
     forwarding are not.
+11. `rb::codecache` (C04) — **policy half done** (`30` §Step 13): instance-tagged keys, per-instance limits
+    with eviction that cannot cross an instance, W^X enforced through an injected allocator, `kInterpreted`
+    as a working configuration rather than a failure, and the backend choice echoed through C17. The
+    `AnonRwx`/`MemfdDualAlias` allocators themselves are M1's, next to the probe that selects them, and
+    nothing is wired into Tier J yet — which still runs on Dynarmic's cache.
 
 Sequencing constraint the owner should know before M1: **M1's end-to-end acceptance step cannot be verified on this
 machine at all** — it needs a physical 64-bit-only arm64 phone. Everything in §9 and most of M1's code can be written
