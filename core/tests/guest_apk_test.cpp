@@ -548,11 +548,44 @@ std::string state_diff(const exec::MachineState& a, const exec::MachineState& b)
   return out;
 }
 
+/**
+ * Runs one guest call to completion with a **single large budget**, the way `AbiContext` does, and
+ * returns the final register state.
+ *
+ * This exists to answer one question that the step-by-step trace above cannot: is the tiers' divergence
+ * in the engine, or is it an artifact of stepping with a budget of one? Repeated `Run(state, 1)` and one
+ * `Run(state, N)` are *supposed* to be equivalent, and if they are not, then every stepper-based
+ * instrument in this file — including three that already misled me — is suspect before the engine is.
+ */
+exec::MachineState run_to_sentinel(exec::Executor& engine, Rig& rig, const char* name,
+                                   std::uint64_t arg_bits) {
+  exec::MachineState s{};
+  const auto fn = rig.libm->FindExport(name);
+  if (!fn) return s;
+  s.r[13] = kStackTop;
+  s.r[14] = kReturnAddress;
+  const abi::Args32 args = {abi::Value32::U32(static_cast<std::uint32_t>(arg_bits)),
+                            abi::Value32::U32(static_cast<std::uint32_t>(arg_bits >> 32))};
+  std::string err;
+  if (!abi::PlaceArgs(*rig.mem, s, fn->tagged(), args, kReturnAddress,
+                      abi::AbiContext::kCallFrameBytes, &err)) {
+    return s;
+  }
+  const exec::RunResult r = engine.Run(s, 4'000'000);
+  std::fprintf(stderr, "# one-shot %s on Tier %s: reason=%d steps=%u r0=0x%s r1=0x%s d0=0x%s\n", name,
+               engine.tier() == exec::CodeTier::Interp ? "I" : "J", static_cast<int>(r.reason),
+               r.instructions_executed, Hex(s.r[0]).c_str(), Hex(s.r[1]).c_str(),
+               Hex64(s.d[0]).c_str());
+  return s;
+}
+
 void the_two_tiers_walk_the_same_path_through_libm() {
   Rig rig = build();
   if (!rig.ok) return;
 
   // sin(100.0): the one input of this function whose answer already differs between the tiers.
+  run_to_sentinel(*rig.interp, rig, "sin", 0x4059'0000'0000'0000ull);
+  run_to_sentinel(*rig.jit, rig, "sin", 0x4059'0000'0000'0000ull);
   const auto i_states = first_states(*rig.interp, rig, "sin", 0x4059'0000'0000'0000ull);
   const auto j_states = first_states(*rig.jit, rig, "sin", 0x4059'0000'0000'0000ull);
 
