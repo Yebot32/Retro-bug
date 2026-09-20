@@ -140,7 +140,8 @@ identified; correctness against a reference is not yet measured.
    Two qualifications the tool prints rather than hides, both of which matter more than the headline:
 
    - **`ldm`, `stm`, `ldm.w`, `stm.w`, `ldmge`, `stmge` (509 instructions) partly route to
-     interpretation, not compilation.** The matched decoder cases include `arm_LDM_usr`, `arm_STM_usr`,
+     interpretation, not compilation. §7 shows this claim is false and supersedes it.** The matched decoder
+     cases include `arm_LDM_usr`, `arm_STM_usr`,
      `arm_CPS`, `arm_RFE`, `arm_SRS`, whose bodies end in `InterpretThisInstruction()`. Dynarmic's
      `IR::Term::Interpret` is not an interpreter: the back ends emit a call to
      **`UserCallbacks::InterpreterFallback(pc, num_instructions)`** — the *embedder* is expected to
@@ -202,3 +203,160 @@ bash tools/isa_coverage.sh [output-dir]     # default build/isa-coverage
 # needs: ANDROID_HOME (or the default %LOCALAPPDATA%/Android/Sdk), an NDK with AArch32 sysroot;
 # RB_NDK overrides 28.2.13676358. No Python.
 ```
+
+## 7. The six A32 bodies that end in `InterpretThisInstruction()` — §5 item 2, resolved
+
+Read out of the vendored tree and re-measured against the corpus. **§5 item 2 was wrong in both directions**:
+the group it called load-bearing is not reached by the code it cited, and the failure it predicted ("nowhere
+to go") is not a stop at all but a process abort on the shipping host — with a hang on the other one.
+Everything is [1L] (read or ran here, `external/dynarmic` at `e77b1ba`, NDK 28.2) unless tagged otherwise.
+
+**7.1 The enumeration — six, not five.** `InterpretThisInstruction()` is defined once
+(`frontend/A32/translate/impl/a32_translate_impl.cpp:31-34`: `ir.SetTerm(IR::Term::Interpret(ir.current_location))`,
+return false), and grep finds exactly six callers, all ARM-state:
+
+| body | file:line | what it is | a real encoding, assembled here | userspace-reachable? |
+|---|---|---|---|---|
+| `arm_LDM_usr` | `impl/load_store.cpp:868` | banked-reg **load**, no writeback | `e8d20030` = `ldm r2, {r4,r5}^` | no — privileged modes only |
+| `arm_LDM_eret` | `:872` | banked load **including PC** = exception return | `e9708010` = `ldmdb r0!, {r4,pc}^` | no — OS exception return |
+| `arm_STM_usr` | `:953` | banked-reg **store** | `e9400030` = `stmdb r0, {r4,r5}^` | no — privileged modes only |
+| `arm_CPS` | `impl/status_register_access.cpp:14` | change processor state | `f102001f` `cps #0x1f`, `f1080080` `cpsie i`, `f10c01c0` `cpsid aif` | mode change no; A/I/F-only at EL0 is UNPREDICTABLE-to-UNDEF — [UNVERIFIED, measure] |
+| `arm_RFE` | `:106` | return from exception | `f8b00a00` = `rfeia r0!` | no |
+| `arm_SRS` | `:117` | store return state | `f96d051f` = `srsdb sp!, #0x1f` | no |
+
+Masks: `decoder/arm.inc:184,185,190,310,315,316`. Two facts decide severity. (i) The `_usr` masks wildcard the
+condition field, so **predicated banked forms (`ldmeq`/`stmcs` with `^`) do decode here** — §5's worry is
+right at the decoder level; `arm_CPS`'s mask instead *fixes* bits 31-28 to 1111, so predicated CPS is not this
+instruction. (ii) Here bit 22 is the banked-register marker, bit 20 is L and `Rn` is 19-16, so a mask test is
+unambiguous, and `decoder/arm.h:45-47` stable-sorts by mask popcount so the 7-bit plain forms beat the 6-bit
+banked ones — verified on a P/U/W/L matrix where bit 22 is the only thing separating `stmdb r0, {…}` from
+`stmdb r0, {…} ^`.
+
+**Reachability, measured rather than asserted.** In the §1 corpus (711 objects, 325,541 instructions): **zero**
+banked forms (objdump's trailing `^`; 0 hits, and the caret survives the script's `--no-show-raw-insn`,
+checked against my own probe) and **zero** `cps`/`rfe`/`srs` mnemonics. The NDK assembler accepts every one of
+them for `armv7a-none-linux-androideabi`, rejecting only what the ARM ARM forbids ("system STM cannot have
+writeback register"), and `__attribute__((target("arm")))` makes them reachable as inline asm inside a
+`-mthumb` TU — so a hand-written `.s` in an app's `.so` *can* ship one. What it cannot get is a defined
+meaning: these are privileged-mode instructions, and the guest is EL0 userspace with no ARM32 kernel emulated
+(AD-3 — the syscall ABI is translated, not run). QEMU agrees from the other side, raising an undefined
+encoding for RFE in user mode and SRS at EL0
+([translate.c](https://raw.githubusercontent.com/qemu/qemu/master/target/arm/tcg/translate.c), `gen_srs` and
+the RFE path) [1A]. **Low trigger probability because the group is OS-only; not zero, because "the assembler
+accepts it" is the whole story for hand-written assembly.**
+
+**7.2 Correction to §5 item 2.** Three of its claims do not survive the reading above.
+
+1. *"509 instructions of bionic … carry those paths"* — **false.** Of the 509 (`ldm.w` 212, `stm.w` 150, `ldm`
+   87, `stm` 54, `ldmge` 3, `stmge` 3) the 362 `.w` rows are **Thumb-2** while all six bodies are ARM-state, and
+   the other 147 decode to `arm_LDM`/`arm_STM` and compile normally. The 509 is an artifact of the tool's join
+   key — "objdump mnemonic → first word of the `INST` mnemonic string" (`build/isa-coverage/handlers.txt:8-9`)
+   — against dynarmic's names `"LDM (usr reg)"`/`"STM (usr reg)"`. The tool printed its rollup honestly
+   (`handlers.txt:51`: "falls back to the interpreter (not compiled): ldm.w stm.w ldm stm stmge ldmge") and
+   flagged per-mnemonic attribution as optimistic one bullet later; the mistake was reading the rollup as
+   demand. §5's 100.00% is unaffected — these were never the instructions behind it.
+2. *"the back ends emit a call to `UserCallbacks::InterpreterFallback`"* — **true of x64 only, false of the
+   back end we ship on.** `backend/x64/a32_emit_x64.cpp:1124-1134` does call it; the AArch64 back end's whole
+   handling is `backend/arm64/emit_arm64_a32.cpp:36-38`, `ASSERT_FALSE("Interpret should never be emitted.")`,
+   and riscv64 is identical (`backend/riscv64/emit_riscv64_a32.cpp:115-117`). That assert is **not**
+   `NDEBUG`-gated (`externals/mcl/include/mcl/assert.hpp:54` → `externals/mcl/src/assert.cpp:14-20`: print,
+   then `std::terminate()`), and `interface/A32/config.h:104` declares the callback `= 0`, so nothing is
+   defaulted to nothing. The same overstatement sits in `core/exec/interp.cpp:13-17`, `docs/10` §5 AD-2(3) and
+   `docs/30` §Step 6c; all three need this correction (not edited here).
+3. *"Tier I is load-bearing on the JIT path for these"* — **Tier I cannot run them either.** The terminal
+   captures `ir.current_location` *before* `translate_arm.cpp:63` advances the PC, so `next` is the offending
+   instruction's own address and the block holds no IR (`ir/terminal.h:20-28`, `num_instructions = 1`).
+   `BlockRunner::Take` treats `Term::Interpret` as a `LinkBlock` (`core/exec/interp.cpp`, the
+   `is_same_v<T, Term::Interpret>` branch, ~1672 as written), so `successor` is the same PC and `steps` adds 0
+   → `InterpExecutor::Run` re-translates the same empty block forever: **a livelock, not a refusal.** [INFER]
+   — read off the code, not run: no compiler on this host, devices in use.
+
+**7.3 What happens today, per tier and host.** Tier J is `Dynarmic::A32::Jit`, whose back end is picked by
+*host* (`src/dynarmic/CMakeLists.txt:264,343`), so one RetroBug binary behaves differently on the two machines
+our tests run on. **arm64 (shipping):** the terminal is hit while the block is *emitted*, and emission happens
+inside `jit_->Run()` (`backend/arm64/a32_core.h:19-21` → `GetOrEmit`) → `std::terminate` → SIGABRT; `jit.cpp:187`
+never returns and `MapHalt` never runs, so there is **no `RunResult`, no `StopReason`, no C17 record** — the
+process dies at the first execution of a block containing one of six 32-bit words. **x86_64 (emulator lane):**
+the x64 back end *does* call `JitExecutor::InterpreterFallback` (`core/exec/jit.cpp:395-438`) — real, correct
+code, which advances exactly one encoding via `EncodingSizeAt` and propagates other stop reasons — and hands
+it to Tier I, which livelocks per 7.2(3): this lane hangs where the hardware lane aborts. Were Tier I fixed to
+refuse, the x64 path would return from `Run()` with no `HaltReason` bit and `pending_ == None`, which
+`MapHalt` maps to `StopReason::Suspended` (`jit.cpp:217`) — an ordinary-looking stop, not a fault. A green
+x86_64 run is therefore no evidence about this path either way.
+
+**7.4 Observable today? No — and the suite is structurally unable to see it.** dynarmic's own A32 test
+environment *asserts false* if the fallback is called (`tests/A32/testenv.h:98`, `:185`), so its 200,561
+passing assertions prove the upstream suite never routes through `Term::Interpret` — and since those tests also
+pass on arm64 hardware (§5 item 1), they never reach `ASSERT_FALSE` there either. The randomized
+`A32/fuzz_arm.cpp`/`fuzz_thumb.cpp`, which would eventually generate one of the words, are built only under
+`DYNARMIC_TESTS_USE_UNICORN` (`tests/CMakeLists.txt:37-49`), which §5 item 1 turns off. Our tests share one
+fixture containing no banked form and no CPS/RFE/SRS, and `core/tests/isa_front_end_test.cpp:137` only checks
+that a terminal is *in* `kTerminalNames` — `Interpret` is in that table (`core/isa/front_end.cpp:28`) — so a
+wrong or missing Interpret path is invisible by construction.
+
+**Smallest test that would catch it**, entirely in existing shapes: two
+`__attribute__((target("arm"), noinline))` JNI exports in `tests/corpus/fixture_jni.c` — one body
+`stmdb r13, {r4,r5}^\nldm r13, {r4,r5}^`, one `cps #0x13` — written like `patch_probe` (`fixture_jni.c:147-161`:
+complete asm definition, fixed registers, `__builtin_unreachable()` after `bx lr`). Verified compilable with
+this NDK at `-mthumb -Os`: the exports land in ARM state and objdump prints them with the caret and as `cps`,
+which is the check that the probe reaches its target. Then assert three things, none a guessed number: that
+`isa_front_end_test` reports `terminal == "Interpret"` for them; that **both tiers end the `Run` on a named stop
+within a bounded budget** — the row that turns today's abort and today's hang into failures, precedent at
+`core/tests/exec_tier_diff_test.cpp:260-285` ("equal hardware, *or* stop with `Unimplemented` naming the op; a
+third outcome is a bug"); and that `MachineState` is bit-identical across the tiers at the stop. The SM-X710 can
+settle the *expected* behaviour rather than our inventing it — `tests/corpus/oracle_armv7.c` already runs each
+EL0-restricted probe separately and records `rc=132` (SIGILL) for the `mrc p15` reads — but that is a device
+run, **not done here**; the expectation stays [UNVERIFIED].
+
+**7.5 Other embedders.** From the lineage this tree came from: **Azahar** (Citra successor), **A32** front end,
+ARM9+ARM11 — `src/core/arm/dynarmic/arm_dynarmic.cpp:102`
+([raw](https://raw.githubusercontent.com/azahar-emu/azahar/master/src/core/arm/dynarmic/arm_dynarmic.cpp)) is
+`UNREACHABLE_MSG("InterpeterFallback reached with pc = …, code = …, num = {}")`: neither implemented nor
+patched out. And it *has* been hit — issue [#1044](https://github.com/azahar-emu/azahar/issues/1044) reports a
+game crashing on boot at `code = 0xf10c0040`, which our own `llvm-objdump` decodes as **`cpsid f`**, an
+`arm_CPS` body; reached because that embedder runs the guest's *kernel*, which is where these instructions
+live. dynarmic's own envs assert false for A32 *and* A64 (§7.4), so upstream ships no reference implementation.
+**Ryujinx** (ARMeilleure) and **PPSSPP** (own JIT) do not use Dynarmic's ARM front ends; **yuzu/sudachi/suyu
+could not be read from here** (every raw and mirror URL 404'd) — [UNVERIFIED]. The A64 case does not transfer
+anyway: A64 reaches `InterpretThisInstruction` from MRS/MSR for any system register off a short whitelist
+(`frontend/A64/translate/impl/system.cpp:118,158`) plus three SIMD edges, and has a pass rewriting
+`num_instructions` to span a run of them (`ir/opt/a64_merge_interpret_blocks.cpp:18-47`), while **A32 has no
+such pass** and is always exactly one instruction: an open-ended interpreter obligation over there, a closed set
+of six masks here.
+
+**7.6 Recommendation: (c), plus the Tier I fix that makes (c) true on both tiers.** Cheapest thing that is
+also correct, in this order.
+
+1. **Tier I (~3 lines, ours only):** make `Term::Interpret` a named refusal in `BlockRunner::Take` —
+   `StopReason::Unimplemented`, detail carrying pc and word — as ASIMD's `VectorBroadcast64` refusal is named
+   today. This is the precondition for everything else: nothing here is testable while Tier I spins.
+2. **Tier J, no patch (~15 lines, ours only):** the seam already exists — `CodeReader::PreCodeReadHook`
+   (`core/include/rb/isa/front_end.h:57-62`, currently `return true`) is called by dynarmic for both states
+   *before* a word is read or translated (`translate_arm.cpp:33`, `translate_thumb.cpp:114`), and
+   `JitExecutor` inherits the same default and can override it identically. Returning **false** precludes the
+   translation and hands the terminal to us (`frontend/A32/translate/translate_callbacks.h:23-25`;
+   `interface/A32/config.h:70-72` says "returning true" and is stale against `if (!tcb->PreCodeReadHook(...))`).
+   Set the terminal dynarmic's own `RaiseException` sets (`a32_translate_impl.cpp:48-54`: `BranchWritePC`,
+   `ExceptionRaised`, `Term::CheckHalt{ReturnToDispatch}`), lowered to a real arm64 trampoline
+   (`emit_arm64_a32.cpp:612-624`) and already received by `JitExecutor::ExceptionRaised`. Six mask tests, and
+   both hosts on both tiers give the same named stop instead of one aborting and one hanging — with pc and
+   word in the C17 record, which is what turns "some app won't start" into a triageable fact.
+3. **(a)/(b), per-instruction re-entry: possible, cheap to add on top of 2, buys nothing now.**
+   `num_instructions` is always 1 for A32, `RaiseException` leaves PC *past* the instruction, and `Jit` exposes
+   `ClearHalt`/`SetCpsr` (`interface/A32/a32.h:65,75`), so `JitExecutor::Run` can loop `jit_->Run()` → one
+   encoding through `fallback_interp_` → `SyncIn` → `ClearHalt` → re-enter; `jit.cpp:395-438` already holds the
+   per-instruction half. Step 1 is what Tier I would do with it, which is the whole objection.
+4. **(d), patching `emit_arm64_a32.cpp` to call the callback as x64 does: not yet.** Small, 0BSD-permitted, and
+   inside `patches/README.md` rules 1-2 — `docs/30` §Step 18 already costed the comparable `address_space`
+   patch as "~2 lines, permitted by AD-10, forbidden by the posture, nothing in M1 needs it" — but it is
+   carried against every re-import, and its payload is a callback into a Tier I that has no semantics for
+   these six: abort becomes hang unless step 1 lands first. The real blocker is not the dispatcher but the
+   state model — `backend/arm64/a32_jitstate.h:18-31` has 16 GPRs and **no banked register file**, and neither
+   does `MachineState`, so banked LDM/STM and `SRS`/`RFE` are not faithfully implementable at any tier without
+   adding exception-mode state to both. Only the A/I/F-only `CPS` form is, and that is a CPSR write in code we
+   own.
+
+What would change my mind, in order of likelihood: an app-level corpus (§5 item 4) or a live C17 record from
+step 2 showing a nonzero count; any decision to run guest-kernel or EL1 code, which moves this group from
+unreachable to mandatory and makes the banked-register state model the real project; or a T1/iOS policy where
+Tier I must *answer* rather than refuse, which is the case for implementing `CPS`-without-mode-change first.
