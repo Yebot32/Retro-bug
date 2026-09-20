@@ -41,8 +41,12 @@
 #include "dynarmic/ir/terminal.h"
 #include "dynarmic/ir/value.h"
 
+#include <cfenv>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <limits>
 #include <string>
 #include <type_traits>
 #include <unordered_map>
@@ -113,6 +117,156 @@ struct Flags {
 /// through, which is the difference between matching the back end and merely looking plausible.
 Flags Tst(std::uint64_t value, unsigned width) {
   return Flags{(value & (1ull << (width - 1))) != 0, value == 0, false, false};
+}
+
+/**
+ * Scalar VFP helpers.
+ *
+ * The IR carries floats as *bit patterns* in `U32`/`U64` operands — `GetExtendedRegister32` hands out
+ * S&lt;n&gt;'s bits, not a host `float` — so every op below begins and ends with an integer, and the
+ * reinterpretation is the only conversion that is not architectural.
+ *
+ * Rounding is the part worth being precise about. The translator resolves FPSCR's RMode field **at
+ * translation time** and passes it as a `U8` immediate (`ir_emitter.cpp:2359-2400`), which is why the
+ * mode is part of block identity and why the AArch64 back end can `ASSERT(rounding_mode ==
+ * ctx.FPCR().RMode())` (`emit_arm64_floating_point.cpp:68`) rather than switch at runtime. Tier I reads
+ * the same immediate, so both tiers round the same way for the same block — with one exception, stated
+ * where it is used: the back end uses native AArch64 `FCVT*`, which honours every mode in the source
+ * precision, while Tier I's `f64`→`f32` narrowing goes through the host conversion, which is
+ * round-to-nearest. `FPSCR.RMode` has four values (0-3) and three of them are not nearest, so a guest
+ * that changes RMode and then narrows is where the two would part. No probe here does, and the
+ * differential would report it if one did.
+ */
+template <class F, class B>
+F BitsAs(B b) {
+  static_assert(sizeof(F) == sizeof(B), "a bit pattern has to be the width of the type it becomes");
+  F f{};
+  std::memcpy(&f, &b, sizeof f);
+  return f;
+}
+
+template <class B, class F>
+B AsBits(F f) {
+  static_assert(sizeof(F) == sizeof(B), "a bit pattern has to be the width of the type it came from");
+  B b{};
+  std::memcpy(&b, &f, sizeof b);
+  return b;
+}
+
+/// FPSCR's sticky exception bits, at the positions `Dynarmic::FP::FPSR` uses (`common/fp/fpsr.h:88-138`:
+/// IOC 0, DZC 1, OFC 2, UFC 3, IXC 4, IDC 7). These are the *ARMv8* positions. The legacy ARMv7
+/// locations in [12:8] read as zero on the device measured here, which is why the first FPSCR probe
+/// looked at the wrong half of the word and reported the flags as unexercised.
+enum FpSticky : std::uint32_t {
+  kIoc = 1u << 0,
+  kDzc = 1u << 1,
+  kOfc = 1u << 2,
+  kUfc = 1u << 3,
+  kIxc = 1u << 4,
+};
+constexpr std::uint32_t kFpStickyMask = 0x0000'009fu;
+
+/**
+ * Fold in whatever the host FPU flagged while computing the operation that just ran.
+ *
+ * Not a shortcut around softfloat's flag logic — it is the same source the AArch64 back end uses:
+ * native `FDIV`/`FSQRT`/`FMADD` set the host FPSR and the back end stores those bits into guest state
+ * (`ctx.fpsr.Load()` on every FP op), so on that path the guest's cumulative flags *are* the host's.
+ * Tier I reaching the same bits through `<cfenv>` is agreement, not approximation. Without it Tier I
+ * left FPSCR at 0 where hardware and Tier J both had 0x10 — IXC, from an inexact divide — and no
+ * probe's returned value showed the difference; only the state diff did (`docs/30` §Step 16).
+ */
+std::uint32_t TakeHostFpFlags() {
+  const int raised = std::fetestexcept(FE_ALL_EXCEPT);
+  std::feclearexcept(FE_ALL_EXCEPT);
+  return (raised & FE_INVALID ? kIoc : 0u) | (raised & FE_DIVBYZERO ? kDzc : 0u) |
+         (raised & FE_OVERFLOW ? kOfc : 0u) | (raised & FE_UNDERFLOW ? kUfc | kIxc : 0u) |
+         (raised & FE_INEXACT ? kIxc : 0u);
+}
+
+/// Clears the host flags for one FP operation and merges into the guest FPSCR whatever it raised.
+class FpOps {
+ public:
+  explicit FpOps(std::uint32_t& fpscr) : fpscr_(fpscr) { std::feclearexcept(FE_ALL_EXCEPT); }
+  ~FpOps() { fpscr_ |= TakeHostFpFlags() & kFpStickyMask; }
+
+  /// For an operation whose inexactness or invalidity is known without asking the host: a rounding
+  /// step, a clamp, or a compare that is unordered. Clearing afterwards is what keeps each
+  /// operation's flags its own rather than marking everything after the first exception.
+  void Raise(std::uint32_t bits) {
+    std::feclearexcept(FE_ALL_EXCEPT);
+    fpscr_ |= bits & kFpStickyMask;
+  }
+
+ private:
+  std::uint32_t& fpscr_;
+};
+
+/// `FP::RoundingMode`, as the translator's `U8` immediates. 4 and 5 (ties-away, ToOdd) are not
+/// reachable from ARMv7's two-bit RMode field, and the back end's own `ToOdd` case is
+/// `ASSERT_FALSE("Unimplemented")`.
+enum Rp : std::uint8_t { kRn = 0, kRp = 1, kRm = 2, kRz = 3 };
+
+/**
+ * Round to an integer per ARM's four RMode values, and say whether rounding changed the value.
+ *
+ * Spelled out rather than delegated to `std::nearbyint`, which follows the *host's current* rounding
+ * direction: Dynarmic's back end writes that direction into the host FPCR from the guest FPSCR
+ * (`FPCR::WriteRaw`), so leaning on it would make the two tiers agree only while both had set it the
+ * same way — a dependency on global state that the differential cannot see. Ties-to-even is the case
+ * that needs the floor-and-test; the other three are one host call each.
+ */
+template <class F>
+F RoundToInt(F x, std::uint8_t rm, bool* inexact) {
+  F r{};
+  switch (rm) {
+    case kRn: {
+      const F f = std::floor(x);
+      const F d = x - f;
+      // Ties go to the even neighbour. `fmod` rather than `%` because the remainder's sign has to be
+      // the divisor's: -2.5 and -1.5 both have to land on -2, which a truncating-removal test gets
+      // wrong for exactly one of them.
+      r = (d > F{0.5} || (d == F{0.5} && std::fmod(f, F{2}) != F{0})) ? f + F{1} : f;
+      break;
+    }
+    case kRp: r = std::ceil(x); break;
+    case kRm: r = std::floor(x); break;
+    default: r = std::trunc(x); break;
+  }
+  if (inexact != nullptr) *inexact = !(r == x) && !std::isnan(x);
+  return r;
+}
+
+/**
+ * ARM's convert-to-fixed-point saturates, and what it saturates *to* is the interesting half: NaN
+ * becomes the sign-preferring extreme (0x80000000 signed, 0 unsigned) rather than either bound, and an
+ * out-of-range value raises IOC as it clamps. AArch64's `FCVT{N,Z,P,M}{S,U}` — what Tier J compiles
+ * these to — follow the same rules, which is why this is a clamp-and-special-case rather than a cast:
+ * `(std::int32_t)some_huge_double` is *undefined* in C++, and an optimiser may hand back anything,
+ * which is the shape of a heisenbug that only appears at -O3.
+ */
+std::uint64_t ToFixed(double rounded, bool is_signed, unsigned dst_bits, std::uint32_t* flags) {
+  if (std::isnan(rounded)) {
+    *flags |= kIoc;
+    return is_signed ? (1ull << (dst_bits - 1)) : 0ull;
+  }
+  const double lo = is_signed ? -std::ldexp(1.0, static_cast<int>(dst_bits) - 1) : 0.0;
+  const double hi = is_signed ? std::ldexp(1.0, static_cast<int>(dst_bits) - 1) - 1.0
+                              : std::ldexp(1.0, static_cast<int>(dst_bits)) - 1.0;
+  if (!(rounded < hi)) {
+    *flags |= kIoc;
+    return is_signed ? static_cast<std::uint64_t>(static_cast<std::int64_t>(hi))
+                     : static_cast<std::uint64_t>(hi);
+  }
+  if (!(rounded > lo)) {
+    // Below range raises IOC and clamps; *equal* to the bound is exact and raises nothing, which is
+    // the distinction the unsigned case turns on (a negative value clamps to 0 and is invalid, while
+    // the already-zero value is simply zero).
+    if (rounded != lo) *flags |= kIoc;
+    return static_cast<std::uint64_t>(static_cast<std::int64_t>(lo));
+  }
+  return is_signed ? static_cast<std::uint64_t>(static_cast<std::int64_t>(rounded))
+                   : static_cast<std::uint64_t>(static_cast<std::uint64_t>(rounded));
 }
 
 std::string Hex(std::uint64_t v) {
@@ -259,6 +413,16 @@ class BlockRunner {
     V t{};
     if (!Read(inst->GetArg(i), t)) return false;
     out = t.w();
+    return true;
+  }
+
+  /// An `Imm8` operand, which is how the translator attaches non-data parameters to an instruction:
+  /// the FP conversions carry their fixed-point scale and their resolved rounding mode this way, and
+  /// both tiers read the same immediate, so neither can drift from the other on a per-block basis.
+  [[nodiscard]] bool ByteArg(const Inst* inst, std::size_t i, std::uint8_t& out) {
+    std::uint64_t v = 0;
+    if (!W64(inst, i, v)) return false;
+    out = static_cast<std::uint8_t>(v);
     return true;
   }
 
@@ -751,7 +915,28 @@ bool BlockRunner::Step(const Inst* inst) {
     case Opcode::A32SetFpscr: {
       std::uint32_t v = 0;
       if (!W32(inst, 0, v)) return false;
-      state_.fpscr = v;
+      // Masked, not stored whole. FPSCR is three different things to the translator: the compare field
+      // [31:28], the sticky/QC bits, and the *mode* bits (AHP/DN/FZ/RMode/Stride/Len) that change what an
+      // instruction means and therefore take part in block identity. The AArch64 back end splits them
+      // across `fpsr_nzcv`, `fpsr` and the top half of the upper location descriptor, keeping
+      // 0xF0000000 | 0x0800009F | 0x07F70000 (`a32_jitstate.cpp:61-72`, whose `Fpscr()` ORs the three
+      // back together), so a `vmsr` of a garbage word retains exactly that union and nothing else.
+      // Tier I holds one architectural word, so it applies the same union once.
+      state_.fpscr = v & 0xFFF7'009Fu;
+      return true;
+    }
+    case Opcode::A32GetFpscrNZCV:
+      // The compare field alone, at its [31:28] position — `vmrs APSR_nzcv, fpscr` reads this rather
+      // than the whole word precisely so the mode and sticky bits cannot leak into CPSR. The back end
+      // loads a separate `fpsr_nzcv` word; Tier I keeps one architectural word and masks.
+      Put(inst, V{state_.fpscr & 0xf000'0000u, 0});
+      return true;
+    case Opcode::A32SetFpscrNZCV: {
+      std::uint32_t v = 0;
+      if (!W32(inst, 0, v)) return false;
+      // `VCMP` writes only the compare field; the mode and sticky bits survive. On the back end this is
+      // a store to a separate `fpsr_nzcv` word that `Fpscr()` ORs back in, which is the same rule.
+      state_.fpscr = (state_.fpscr & 0x0fff'ffffu) | (v & 0xf000'0000u);
       return true;
     }
     case Opcode::A32SetCheckBit: {
@@ -981,6 +1166,302 @@ bool BlockRunner::Step(const Inst* inst) {
         return lo | (hi << 32);
       };
       Put(inst, V{lanes(x.lo, y.lo), lanes(x.hi, y.hi)});
+      return true;
+    }
+
+    // ---------------------------------------------------------------- scalar VFP
+    //
+    // `docs/30` §Step 16 measured why this group exists: with none of it, Tier I stops at the first FP
+    // instruction of any kind, which makes the interpreted path — the one an `execmem`-denied host has
+    // to take, and C04's `kInterpreted` backend — unable to run libm or any `double` in a guest `.so`.
+    // The expectations below are not invented: every one of these ops is exercised by a fixture probe
+    // whose value silicon returned, in `tests/corpus/oracle-armv7.txt`.
+    case Opcode::FPAdd32: case Opcode::FPSub32: case Opcode::FPMul32: case Opcode::FPDiv32:
+    case Opcode::FPMax32: case Opcode::FPMin32: case Opcode::FPMaxNumeric32:
+    case Opcode::FPMinNumeric32: {
+      std::uint32_t raw_a = 0, raw_b = 0;
+      if (!W32(inst, 0, raw_a) || !W32(inst, 1, raw_b)) return false;
+      FpOps flags{state_.fpscr};
+      const float a = BitsAs<float>(raw_a), b = BitsAs<float>(raw_b);
+      float r{};
+      switch (inst->GetOpcode()) {
+        case Opcode::FPAdd32: r = a + b; break;
+        case Opcode::FPSub32: r = a - b; break;
+        case Opcode::FPMul32: r = a * b; break;
+        case Opcode::FPDiv32: r = a / b; break;
+        case Opcode::FPMaxNumeric32: case Opcode::FPMinNumeric32:
+          // The "Numeric" forms are the ones that treat a NaN operand as the *other* one, which is
+          // VMAXNM/VMINNM; the plain forms propagate it. Getting these two the same way round is a
+          // wrong answer that only shows up on inputs nobody thinks to test.
+          r = (std::isnan(a) && !std::isnan(b)) ? b
+              : (std::isnan(b) && !std::isnan(a)) ? a
+              : (inst->GetOpcode() == Opcode::FPMaxNumeric32 ? a > b ? a : b : a < b ? a : b);
+          break;
+        default:  // VMAX/VMIN: NaN in, NaN out
+          r = (std::isnan(a) || std::isnan(b))
+                  ? std::numeric_limits<float>::quiet_NaN()
+                  : (inst->GetOpcode() == Opcode::FPMax32 ? (a > b ? a : b) : (a < b ? a : b));
+          break;
+      }
+      Put(inst, V{AsBits<std::uint32_t>(r), 0});
+      return true;
+    }
+
+    case Opcode::FPAdd64: case Opcode::FPSub64: case Opcode::FPMul64: case Opcode::FPDiv64:
+    case Opcode::FPMax64: case Opcode::FPMin64: case Opcode::FPMaxNumeric64:
+    case Opcode::FPMinNumeric64: {
+      std::uint64_t raw_a = 0, raw_b = 0;
+      if (!W64(inst, 0, raw_a) || !W64(inst, 1, raw_b)) return false;
+      FpOps flags{state_.fpscr};
+      const double a = BitsAs<double>(raw_a), b = BitsAs<double>(raw_b);
+      double r{};
+      switch (inst->GetOpcode()) {
+        case Opcode::FPAdd64: r = a + b; break;
+        case Opcode::FPSub64: r = a - b; break;
+        case Opcode::FPMul64: r = a * b; break;
+        case Opcode::FPDiv64: r = a / b; break;
+        case Opcode::FPMaxNumeric64: case Opcode::FPMinNumeric64:
+          r = (std::isnan(a) && !std::isnan(b)) ? b
+              : (std::isnan(b) && !std::isnan(a)) ? a
+              : (inst->GetOpcode() == Opcode::FPMaxNumeric64 ? a > b ? a : b : a < b ? a : b);
+          break;
+        default:
+          r = (std::isnan(a) || std::isnan(b))
+                  ? std::numeric_limits<double>::quiet_NaN()
+                  : (inst->GetOpcode() == Opcode::FPMax64 ? (a > b ? a : b) : (a < b ? a : b));
+          break;
+      }
+      Put(inst, V{AsBits<std::uint64_t>(r), 0});
+      return true;
+    }
+
+    case Opcode::FPMulAdd32: case Opcode::FPMulAdd64: {
+      // Fused: `a + b*c` with one rounding, because the back end emits a single `FMADD`. Two host
+      // operations would be a different number, and this op is how `vmla.f64` lowers — which the
+      // fixture's `fp_arith` reaches through `x*x`.
+      const bool dbl = inst->GetOpcode() == Opcode::FPMulAdd64;
+      FpOps flags{state_.fpscr};
+      if (dbl) {
+        std::uint64_t a = 0, b = 0, c = 0;
+        if (!W64(inst, 0, a) || !W64(inst, 1, b) || !W64(inst, 2, c)) return false;
+        const double r = std::fma(BitsAs<double>(b), BitsAs<double>(c), BitsAs<double>(a));
+        Put(inst, V{AsBits<std::uint64_t>(r), 0});
+      } else {
+        std::uint32_t a = 0, b = 0, c = 0;
+        if (!W32(inst, 0, a) || !W32(inst, 1, b) || !W32(inst, 2, c)) return false;
+        const float r = std::fma(BitsAs<float>(b), BitsAs<float>(c), BitsAs<float>(a));
+        Put(inst, V{AsBits<std::uint32_t>(r), 0});
+      }
+      return true;
+    }
+
+    case Opcode::FPSqrt32: case Opcode::FPSqrt64: case Opcode::FPNeg32: case Opcode::FPNeg64:
+    case Opcode::FPAbs32: case Opcode::FPAbs64: {
+      const bool wide = inst->GetOpcode() != Opcode::FPSqrt32 &&
+                        inst->GetOpcode() != Opcode::FPNeg32 &&
+                        inst->GetOpcode() != Opcode::FPAbs32;
+      // Only the sqrt can raise anything — `FPNEG`/`FPABS` are sign edits on the bit pattern. The
+      // scope is still opened for them, because clearing-then-merging nothing is the same observable
+      // as not touching the sticky bits, and a branch per opcode here would only invite a mistake.
+      FpOps flags{state_.fpscr};
+      if (wide) {
+        std::uint64_t raw = 0;
+        if (!W64(inst, 0, raw)) return false;
+        if (inst->GetOpcode() == Opcode::FPSqrt64) {
+          Put(inst, V{AsBits<std::uint64_t>(std::sqrt(BitsAs<double>(raw))), 0});
+        } else if (inst->GetOpcode() == Opcode::FPNeg64) {
+          Put(inst, V{raw ^ (1ull << 63), 0});
+        } else {
+          Put(inst, V{raw & ~(1ull << 63), 0});
+        }
+      } else {
+        std::uint32_t raw = 0;
+        if (!W32(inst, 0, raw)) return false;
+        if (inst->GetOpcode() == Opcode::FPSqrt32) {
+          Put(inst, V{AsBits<std::uint32_t>(std::sqrt(BitsAs<float>(raw))), 0});
+        } else if (inst->GetOpcode() == Opcode::FPNeg32) {
+          Put(inst, V{raw ^ (1u << 31), 0});
+        } else {
+          Put(inst, V{raw & ~(1u << 31), 0});
+        }
+      }
+      return true;
+    }
+
+    case Opcode::FPCompare32: case Opcode::FPCompare64: {
+      /**
+       * ARM's floating-point compare writes FPSCR[31:28] as NV : Z : C : GE, and this table is
+       * **measured, not copied from the manual** — which is worth saying because the manual's version is
+       * what this file had first, and it disagreed with hardware on three of four relations. The
+       * fixture's `fp_cmp` probe clears FPSCR, performs one compare, reads the field back, and gives
+       * (`docs/30` §Step 16):
+       *
+       *   less        NV          0x8
+       *   equal       Z,   C      0x6
+       *   greater        C        0x2
+       *   unordered      C,   GE  0x3
+       *
+       * The manual has unordered as all four (0xF) and carries GE in the equal and greater rows.
+       * Hardware and Dynarmic's AArch64 back end both produce the table above — Tier I now agrees with
+       * both on all four — but *why* is not something four measurements can establish, so this is a
+       * reproduction of an observation rather than an explanation, and it is marked as one.
+       *
+       * GE is the bit that reaches beyond these rows: `it vs` tests V, which `vmrs APSR_nzcv, fpscr`
+       * fills from GE, so a NaN's `x != y` is decided by it — which is how the fixture's `fp_nan` gets
+       * its hardware-measured answer of 8.
+       */
+      bool unordered = false;
+      std::uint8_t exc_on_qnan = 0;
+      if (!ByteArg(inst, 2, exc_on_qnan)) return false;
+      FpOps flags{state_.fpscr};
+      std::uint64_t out = 0;
+      if (inst->GetOpcode() == Opcode::FPCompare64) {
+        std::uint64_t ra = 0, rb = 0;
+        if (!W64(inst, 0, ra) || !W64(inst, 1, rb)) return false;
+        const double a = BitsAs<double>(ra), b = BitsAs<double>(rb);
+        unordered = !(a < b) && !(a > b) && !(a == b);
+        const std::uint64_t nv = a < b, z = a == b, c = a > b || a == b || unordered,
+                              ge = unordered;
+        out = (nv << 31) | (z << 30) | (c << 29) | (ge << 28);
+      } else {
+        std::uint32_t ra = 0, rb = 0;
+        if (!W32(inst, 0, ra) || !W32(inst, 1, rb)) return false;
+        const float a = BitsAs<float>(ra), b = BitsAs<float>(rb);
+        unordered = !(a < b) && !(a > b) && !(a == b);
+        const std::uint64_t nv = a < b, z = a == b, c = a > b || a == b || unordered,
+                              ge = unordered;
+        out = (nv << 31) | (z << 30) | (c << 29) | (ge << 28);
+      }
+      Put(inst, V{out, 0});
+      // `VCMPE` raises the invalid exception on a quiet NaN and `VCMP` does not — the only observable
+      // difference between the two encodings, and the whole content of the operand. A compare is not a
+      // host arithmetic operation here (C++'s `<` on a NaN raises nothing), so the flag is stated
+      // rather than borrowed.
+      if (unordered && exc_on_qnan != 0) flags.Raise(kIoc);
+      return true;
+    }
+
+    // Conversions between integers and floats. `fbits` is the ARM fixed-point scale: the result is
+    // value × 2^fbits on the way in and × 2^-fbits on the way out, with `fbits == 0` the ordinary
+    // case (`vcvt.f64.s32`) and non-zero the `float64_to_fixed*` forms `vcmp`'s cousins use.
+    case Opcode::FPFixedS32ToDouble: case Opcode::FPFixedS32ToSingle:
+    case Opcode::FPFixedU32ToDouble: case Opcode::FPFixedU32ToSingle:
+    case Opcode::FPFixedS64ToDouble: case Opcode::FPFixedS64ToSingle:
+    case Opcode::FPFixedU64ToDouble: case Opcode::FPFixedU64ToSingle: {
+      const bool src64 = inst->GetOpcode() == Opcode::FPFixedS64ToDouble ||
+                         inst->GetOpcode() == Opcode::FPFixedS64ToSingle ||
+                         inst->GetOpcode() == Opcode::FPFixedU64ToDouble ||
+                         inst->GetOpcode() == Opcode::FPFixedU64ToSingle;
+      const bool uns = inst->GetOpcode() == Opcode::FPFixedU32ToDouble ||
+                       inst->GetOpcode() == Opcode::FPFixedU32ToSingle ||
+                       inst->GetOpcode() == Opcode::FPFixedU64ToDouble ||
+                       inst->GetOpcode() == Opcode::FPFixedU64ToSingle;
+      const bool to_single = inst->GetOpcode() == Opcode::FPFixedS32ToSingle ||
+                             inst->GetOpcode() == Opcode::FPFixedU32ToSingle ||
+                             inst->GetOpcode() == Opcode::FPFixedS64ToSingle ||
+                             inst->GetOpcode() == Opcode::FPFixedU64ToSingle;
+      std::uint64_t raw = 0;
+      std::uint8_t fbits = 0, rm = 0;
+      if (src64) {
+        if (!W64(inst, 0, raw)) return false;
+      } else {
+        std::uint32_t narrow = 0;
+        if (!W32(inst, 0, narrow)) return false;
+        raw = narrow;
+      }
+      if (!ByteArg(inst, 1, fbits) || !ByteArg(inst, 2, rm)) return false;
+      FpOps flags{state_.fpscr};
+      const double scaled = src64
+          ? std::ldexp(uns ? static_cast<double>(static_cast<std::uint64_t>(raw))
+                           : static_cast<double>(static_cast<std::int64_t>(raw)),
+                       -static_cast<int>(fbits))
+          : std::ldexp(uns ? static_cast<double>(static_cast<std::uint32_t>(raw))
+                           : static_cast<double>(static_cast<std::int32_t>(raw)),
+                       -static_cast<int>(fbits));
+      bool inexact = false;
+      if (to_single) {
+        const float r = RoundToInt(static_cast<float>(scaled), rm, &inexact);
+        if (inexact) flags.Raise(kIxc);
+        Put(inst, V{AsBits<std::uint32_t>(r), 0});
+      } else {
+        const double r = RoundToInt(scaled, rm, &inexact);
+        if (inexact) flags.Raise(kIxc);
+        Put(inst, V{AsBits<std::uint64_t>(r), 0});
+      }
+      return true;
+    }
+
+    case Opcode::FPDoubleToFixedS32: case Opcode::FPDoubleToFixedU32:
+    case Opcode::FPDoubleToFixedS64: case Opcode::FPDoubleToFixedU64:
+    case Opcode::FPSingleToFixedS32: case Opcode::FPSingleToFixedU32:
+    case Opcode::FPSingleToFixedS64: case Opcode::FPSingleToFixedU64: {
+      const bool src_double = inst->GetOpcode() == Opcode::FPDoubleToFixedS32 ||
+                              inst->GetOpcode() == Opcode::FPDoubleToFixedU32 ||
+                              inst->GetOpcode() == Opcode::FPDoubleToFixedS64 ||
+                              inst->GetOpcode() == Opcode::FPDoubleToFixedU64;
+      const bool uns = inst->GetOpcode() == Opcode::FPDoubleToFixedU32 ||
+                       inst->GetOpcode() == Opcode::FPDoubleToFixedU64 ||
+                       inst->GetOpcode() == Opcode::FPSingleToFixedU32 ||
+                       inst->GetOpcode() == Opcode::FPSingleToFixedU64;
+      const bool to64 = inst->GetOpcode() == Opcode::FPDoubleToFixedS64 ||
+                        inst->GetOpcode() == Opcode::FPDoubleToFixedU64 ||
+                        inst->GetOpcode() == Opcode::FPSingleToFixedS64 ||
+                        inst->GetOpcode() == Opcode::FPSingleToFixedU64;
+      std::uint64_t raw = 0;
+      std::uint8_t fbits = 0, rm = 0;
+      if (src_double) {
+        if (!W64(inst, 0, raw)) return false;
+      } else {
+        std::uint32_t narrow = 0;
+        if (!W32(inst, 0, narrow)) return false;
+        raw = narrow;
+      }
+      if (!ByteArg(inst, 1, fbits) || !ByteArg(inst, 2, rm)) return false;
+      FpOps flags{state_.fpscr};
+      const double in = src_double ? BitsAs<double>(raw)
+                                   : static_cast<double>(BitsAs<float>(static_cast<std::uint32_t>(raw)));
+      const double scaled = std::ldexp(in, static_cast<int>(fbits));
+      bool inexact = false;
+      const double rounded = RoundToInt(scaled, rm, &inexact);
+      std::uint32_t raised = inexact ? kIxc : 0u;
+      const std::uint64_t out = ToFixed(rounded, !uns, to64 ? 64u : 32u, &raised);
+      flags.Raise(raised);
+      Put(inst, V{to64 ? out : (out & 0xffffffffu), 0});
+      return true;
+    }
+
+    case Opcode::FPSingleToDouble: case Opcode::FPDoubleToSingle: {
+      std::uint8_t rm = 0;
+      if (!ByteArg(inst, 1, rm)) return false;
+      // Only round-to-nearest is honoured on the narrowing side: the host conversion does that one,
+      // and picking a *neighbour* in a requested direction is a nextafter-sized piece of work nothing
+      // in the corpus reaches (ARM's `vcvt.f32.f64` is emitted with the FPSCR at its reset RM by every
+      // compiler measured here). Named rather than left implicit, because a silent single-direction
+      // difference is exactly the class of bug this file has already been bitten by once.
+      (void)rm;
+      FpOps flags{state_.fpscr};
+      if (inst->GetOpcode() == Opcode::FPSingleToDouble) {
+        std::uint32_t raw = 0;
+        if (!W32(inst, 0, raw)) return false;
+        // Widening a float to a double is exact in IEEE-754, so the rounding mode cannot apply — which
+        // is why this branch reads the immediate and does not use it.
+        Put(inst, V{AsBits<std::uint64_t>(static_cast<double>(BitsAs<float>(raw))), 0});
+      } else {
+        std::uint64_t raw = 0;
+        if (!W64(inst, 0, raw)) return false;
+        const double src = BitsAs<double>(raw);
+        if (std::isnan(src)) {
+          // Narrowing a NaN keeps a NaN: the sign, the all-ones exponent, and the *leading* bits of the
+          // payload — and the quiet bit forced, because ARM's VCVT never emits a signalling NaN from a
+          // conversion. The payload is the one part of a NaN a guest can observe, so it is carried
+          // rather than replaced with a canonical one.
+          const std::uint32_t sign = static_cast<std::uint32_t>(raw >> 63) << 31;
+          const std::uint32_t payload = static_cast<std::uint32_t>(raw >> 30) & 0x003f'ffffu;
+          Put(inst, V{sign | 0x7f80'0000u | 0x0040'0000u | payload, 0});
+          return true;
+        }
+        Put(inst, V{AsBits<std::uint32_t>(static_cast<float>(src)), 0});
+      }
       return true;
     }
 

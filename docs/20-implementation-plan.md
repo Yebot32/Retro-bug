@@ -795,25 +795,29 @@ Progress and the findings that change this plan are tracked in
     as a working configuration rather than a failure, and the backend choice echoed through C17. The
     `AnonRwx`/`MemfdDualAlias` allocators themselves are M1's, next to the probe that selects them, and
     nothing is wired into Tier J yet — which still runs on Dynarmic's cache.
-12. **Tier I cannot execute floating point, measured rather than assumed** (`30` §Step 16, `docs/32` §5
-    item 3). 35 VFP/ASIMD rows, values captured on the SM-X710: Tier J matches hardware on all 35 — including
-    `dcmp`/`vmrs` FPSCR flag semantics with ARM's less-than-sets-NV rule, `vsqrt`, `ddiv`, `fcvt` both ways,
-    the callee-saved `d8-d15` traffic and eight-double softfp argument passing — and Tier I refuses all 35,
-    cleanly and by name (`FPFixedS32ToDouble`, `VectorBroadcast64`), because it implements one vector
-    arithmetic IR opcode out of the 448 `FP*`/`Vector*` names in the IR's 725-entry opcode table.
-    **What this changes:** `Kind::Interpreted` is not a working configuration for FP code, so it is *not* a
-    safe fallback for iOS (M3, where `execmem` is the open question rather than a measured grant) or for any
-    T1 policy that trades `execmem` for isolation; and an app whose native `.so` uses `double` cannot run on
-    Tier I today, which is a C17-visible fact rather than a performance one.
-    **Experiment, before it is scoped:** objdump the M1 corpus's own `.so` files (not bionic) for the FP-heavy
-    groups, and time a `Math.sqrt`-free vs `Math.sqrt`-heavy guest on Tier J to see whether the exception-bit
-    caveat in Dynarmic ("FPSR state is approximate") is reachable at all — the probes here read the cumulative
-    bits and both hardware and the emulator returned 0, so the caveat is unexercised rather than cleared.
-    **Fallback, in cost order:** (a) gate the interpreted path per app and say so in the report, which is a
-    day and honest; (b) implement the scalar VFP subset Tier I is missing — `FP*ToFloat`/`FloatToFP*`,
-    `Scalar{Add,Sub,Mul,Div,Compare}*`, `Vector{Load,Store}*` and `VectorPush/Pop`, which is most of what
-    libm-style guest code needs, and is the M1-sized option; (c) full ASIMD in Tier I, which nothing yet
-    asks for.
+12. **FP on the interpreted path: scalar VFP done, NEON not.** `30` §Step 16 measured the boundary and
+    §Step 17 moved it. 40 VFP/ASIMD rows carry values captured on the SM-X710; Tier J matches hardware on
+    all 40, and Tier I — which refused all 35 it was first shown — now matches on the 35 scalar rows
+    (conversions, `f64`/`f32` arithmetic with `vsqrt` and `ddiv`, `dcmp`+`vmrs`, `vldr`/`vstr`, the
+    callee-saved `d8-d15` bank, eight-double softfp argument passing, NaN comparison semantics) and
+    refuses only ASIMD, at `VectorBroadcast64`.
+    **What this changes:** `Kind::Interpreted` can run `double`-using guest code, so the iOS/M3 case and a
+    FP-using app are no longer blocked; it still cannot run NEON, so an ASIMD-heavy guest on an
+    `execmem`-denied host needs either the vector group implemented or a visible per-app gate in C17 — the
+    gate is a day, the vector group is M1-sized, and `vmov`-only ASIMD (a `vmul.i32` in a codec's setup
+    path) is the part most likely to be reached for first.
+    **Open, and the reason not to call this closed:** `VCMP`'s FPSCR compare field measured here is *not*
+    the ARMv7 manual's table — three of four relations differ (GE is absent on equal and greater; NV is
+    absent on unordered) — and **both** tiers follow the host rather than the manual. The host is an
+    ARMv8 core executing AArch32, so the agreement is with the machine RetroBug runs on, not with the one
+    a legacy app was written against. [UNVERIFIED] which a genuine ARMv7 VFP does.
+    *Experiment:* `fp_cmp` on real ARMv7 hardware, or on the `qemu-arm` linux-user oracle in CI, which
+    needs no device. *Fallback:* implement the manual's table in Tier I and route the JIT's compares
+    through the same per-op helper; if instead the manual is the thing that is wrong, that has to be
+    written down here rather than left as a passing difference of opinion between a table and a core.
+    **Related, and cheap:** the guest's cumulative FP flags are the *host's* on both tiers (native
+    `FDIV`/`FMADD` raise them; Tier I folds the same `<cfenv>` state in), so an app that branches on
+    FPSCR's exception bits inherits its host. `FPDoubleToSingle` honours round-to-nearest only.
 
 Sequencing constraint the owner should know before M1: **M1's end-to-end acceptance step cannot be verified on this
 machine at all** — it needs a physical 64-bit-only arm64 phone. Everything in §9 and most of M1's code can be written

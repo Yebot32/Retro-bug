@@ -332,6 +332,13 @@ JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_fpsr_flags(JNIEnv*
   uint32_t f = 0;
   __asm__ volatile("vmrs %0, fpscr" : "=r"(f));
   /* Bits 31:28 are the compare result (NV, Z, C, GE); bit 16 is DXC and 12:8 the cumulative set. */
+  //
+  // A low-byte term used to live here, and it was measuring the wrong thing: an app process arrives
+  // with FPSCR's sticky bits already raised by whatever ART did before, so `(f & 0xff)` reported that
+  // history rather than anything this function did — five identical 0x11s, including for operations
+  // that cannot raise an exception. `fp_cmp` below is the probe that measures the sticky bits
+  // properly, by clearing FPSCR first. What stays here is the compare field, which `vcmpe` rewrites
+  // and so cannot inherit.
   return r + (int)((f >> 27) & 0x1fu) * 8 + (int)((f >> 16) & 1u) * 256 +
          (int)((f >> 8) & 0x1fu) * 512;
 }
@@ -405,4 +412,66 @@ JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_simd_int(JNIEnv* e
   const int32x4_t w = {a - b, a + b, b, a};
   v = vaddq_s32(vmulq_s32(v, w), w);
   return vgetq_lane_s32(v, 0) + vgetq_lane_s32(v, 3);
+}
+
+/*
+ * The FPSCR compare field, one relation at a time, straight out of the register.
+ *
+ * Why this exists rather than a table copied from the ARMv7 manual: Tier I implemented `VCMP` from the
+ * documented NV/Z/C/GE matrix and disagreed with hardware on every row, while Tier J agreed. One of the
+ * three is wrong, and the manual is not the arbiter — the silicon is. So this asks the four questions
+ * directly (less, equal, greater, unordered), reads FPSCR back with `vmrs` immediately after the
+ * `dcmp` so nothing can intervene, and returns both halves that matter:
+ *
+ *   bits [11:8]  FPSCR[31:28], i.e. NV : Z : C : GE
+ *   bits  [7:0]  FPSCR[7:0], the sticky exception bits (IOC 0, DZC 1, OFC 2, UFC 3, IXC 4, IDC 7)
+ *
+ * The `vcmpe`/`vmrs` pair is inline asm on purpose: it is the only way to guarantee the read follows the
+ * compare for *this* relation rather than for whichever compare the compiler decided to run last.
+ */
+JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_fp_cmp(JNIEnv* env, jclass clazz,
+                                                                    jint mode) {
+  (void)env; (void)clazz;
+  double a = 0.0, b = 2.0;
+  int quiet = 0;
+  switch (mode) {
+    case 0: a = 1.0; break;   /* less */
+    case 1: a = 2.0; break;   /* equal */
+    case 2: a = 3.0; break;   /* greater */
+    case 3:               /* unordered, with the form that raises on a quiet NaN */
+      __asm__ volatile("vmov.i32 %[n], #0\n\t"
+                       "vdiv.f64 %[n], %[n], %[n]\n\t"
+                       : [n] "+w"(a) :: );
+      break;
+    default:                  /* unordered, with the form that does not */
+      quiet = 1;
+      __asm__ volatile("vmov.i32 %[n], #0\n\t"
+                       "vdiv.f64 %[n], %[n], %[n]\n\t"
+                       : [n] "+w"(a) :: );
+      break;
+  }
+  /*
+   * FPSCR is cleared first, and that is not decoration. The sticky bits are process state: an app
+   * process arrives with the exceptions whatever ART's earlier floating-point work left raised, and
+   * this probe's first version reported 0x11 in every row including the ones whose operation cannot
+   * raise anything. Clearing makes the low byte a measurement of *this* compare, which is the only
+   * way the number means anything.
+   */
+  uint32_t zero = 0;
+  __asm__ volatile("vmsr fpscr, %0" :: "r"(zero) : "cc");
+  uint32_t f = 0;
+  if (quiet) {
+    __asm__ volatile("vcmp.f64 %[x], %[y]\n\t"
+                     "vmrs   %0, fpscr\n\t"
+                     : "=r"(f)
+                     : [x] "w"(a), [y] "w"(b)
+                     : "cc");
+  } else {
+    __asm__ volatile("vcmpe.f64 %[x], %[y]\n\t"
+                     "vmrs   %0, fpscr\n\t"
+                     : "=r"(f)
+                     : [x] "w"(a), [y] "w"(b)
+                     : "cc");
+  }
+  return (int)((((f >> 28) & 0xfu) << 8) | (f & 0xffu));
 }

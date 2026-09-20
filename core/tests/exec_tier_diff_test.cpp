@@ -299,13 +299,27 @@ void fp_groups_are_accurate_or_explicitly_refused() {
       {"Java_com_retrobug_fixture_MainActivity_fp_arith", 100, -50, -5113, "scalar f64 +-*/,sqrt"},
       {"Java_com_retrobug_fixture_MainActivity_fp_arith", 0, 1, -1, "scalar f64 +-*/,sqrt"},
       // fpsr_flags: dcmp.f64 then vmrs of FPSCR — the flag *semantics*, not the value. `129` is the
-      // `t < u` case and it is the row that carries ARM's odd rule that a less-than compare also sets
-      // NV; four of the five pairs land on the same number, which is why that pair is in the set.
+      // `t < u` case, and it is the row that carries ARM's rule that a less-than compare also sets NV.
+      // Four of the five pairs land on the same number, which is why the fifth is in the set.
       {"Java_com_retrobug_fixture_MainActivity_fpsr_flags", 3, 7, 34, "dcmp + FPSCR flags"},
       {"Java_com_retrobug_fixture_MainActivity_fpsr_flags", 7, 3, 34, "dcmp + FPSCR flags"},
       {"Java_com_retrobug_fixture_MainActivity_fpsr_flags", -5, 3, 34, "dcmp + FPSCR flags"},
       {"Java_com_retrobug_fixture_MainActivity_fpsr_flags", 100, -50, 129, "dcmp + FPSCR flags"},
       {"Java_com_retrobug_fixture_MainActivity_fpsr_flags", 0, 1, 34, "dcmp + FPSCR flags"},
+      // fp_cmp: the compare field per relation, measured with FPSCR cleared first, so the low byte is
+      // this compare's own exception state rather than the process's history. Both tiers must produce
+      // the same four values — and the point of putting them in a row at all is that Tier I's first
+      // version came from the ARMv7 manual and disagreed with hardware on three of the four.
+      {"Java_com_retrobug_fixture_MainActivity_fp_cmp", 0, 0, 0x800, "compare field: less"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_cmp", 1, 0, 0x600, "compare field: equal"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_cmp", 2, 0, 0x200, "compare field: greater"},
+      // The last two differ only in whether the invalid exception is raised, which is the entire
+      // observable difference between `vcmpe.f64` and `vcmp.f64` — and so the only evidence in this
+      // suite that the IR's `exc_on_qnan` operand means anything.
+      {"Java_com_retrobug_fixture_MainActivity_fp_cmp", 3, 0, 0x301,
+       "compare field: unordered, VCMPE raises IOC"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_cmp", 4, 0, 0x300,
+       "compare field: unordered, VCMP does not"},
       // fp_stack: vldr/vstr through a stack array, and the callee-saved d8-d15 bank across a call.
       {"Java_com_retrobug_fixture_MainActivity_fp_stack", 3, 7, 110125, "FP stack + save/restore"},
       {"Java_com_retrobug_fixture_MainActivity_fp_stack", 7, 3, 144035, "FP stack + save/restore"},

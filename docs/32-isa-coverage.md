@@ -169,20 +169,29 @@ identified; correctness against a reference is not yet measured.
    and nothing had measured them since: **FPSCR flag semantics match silicon including ARM's rule that
    a less-than compare also sets NV** (the row is `34 34 34 129 34`, and `129` is the `t < u` case), and
    `vmul.f64`-class arithmetic — the group §2 item 2 called required rather than optional — is right to
-   the returned integer on every pair. Dynarmic's "FPSR state is approximate" caveat is about the
-   *cumulative exception* bits, which these probes read (`(f>>8) & 0x1f`) and which came back 0 on
-   hardware and in the emulator alike; the caveat therefore stands, unfalsified and unexercised, and
-   narrowing it needs a program that raises an exception, not one that only compares.
+   the returned integer on every pair. Dynarmic's "FPSR state is approximate" caveat was first read as
+   *unexercised* on the grounds that the cumulative bits came back 0 — which was wrong twice over, and
+   `docs/30` §Step 17 has the correction: the bits masked (`FPSCR[12:8]`) are the ARMv7 locations and
+   read as zero on an ARMv8 core regardless of what happened, while the bits that carry the exceptions
+   here are `[7:0]` (`common/fp/fpsr.h:88-138`), and an app process arrives with them already raised by
+   ART's earlier work. Measured properly — FPSCR cleared, one operation, read back — a `vcmpe.f64`
+   against a NaN raises IOC and its non-raising twin does not, and the inexact flag accumulates from the
+   divides as it should. So the caveat is neither cleared nor confirmed: **the flags that do work are the
+   host's**, which is a different concern from the one the README was warning about.
 
-   Tier I's refusal is the finding with planning consequences. It stops at `FPFixedS32ToDouble` for
-   scalar code and `VectorBroadcast64` for ASIMD, both with `StopReason::Unimplemented` — a named
-   refusal, not a wrong number — but the extent is total: Tier I implements **one** vector IR opcode
-   (`VectorAdd32`) out of the 448 `FP*`/`Vector*` names in the IR's 725-entry opcode table. So the
-   interpreted path cannot run any
-   floating-point guest code at all, which reaches AD-2 (Tier I's priority was argued on
-   correctness-first grounds), the `Kind::Interpreted` code-cache backend (C04's third option, i.e.
-   the iOS/`execmem`-denied case where M3 has no other choice), and any T1 policy that trades
-   `execmem` for isolation. Consequence recorded in `docs/20` §9 item 12.
+   Tier I's refusal was the finding with planning consequences, and `docs/30` §Step 17 has since
+   changed its extent: the scalar VFP group is implemented, so Tier I now executes and matches hardware on
+   35 of the 40 FP rows (the conversions, `dadd`/`dmul`/`ddiv`/`vsqrt`, `dcmp`+`vmrs` with the measured
+   compare field, `vldr`/`vstr`, the callee-saved bank, eight-double softfp arguments, NaN compares) and
+   refuses only ASIMD, at `VectorBroadcast64` with `StopReason::Unimplemented` — a named refusal, not a
+   wrong number. What still stands from the paragraph above: the interpreted path cannot run NEON, which
+   reaches AD-2, the `Kind::Interpreted` code-cache backend (C04's third option, i.e. the iOS/`execmem`-
+   denied case where M3 has no other choice) and any T1 policy that trades `execmem` for isolation. And
+   the FP work surfaced something §2's ranking had not: **`VCMP`'s FPSCR compare field on this ARMv8 host
+   is not the ARMv7 manual's table** — three of four relations differ, in the GE bit and in NV for
+   unordered — with both tiers following the host. Whether a genuine ARMv7 VFP agrees with the manual
+   here is the next question in this lane, and it is [UNVERIFIED]: `docs/30` §Step 17 states the table,
+   the experiment and the fallback.
 4. Repeat on the **app-level** corpus once `docs/research/10`'s APK fixtures are downloaded, since
    bionic will under-represent what games' hand-written assembly and codec libraries use.
 

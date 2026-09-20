@@ -1683,6 +1683,77 @@ hard way; hence every row here carries hardware's number.
   operand's `type` enum as a hex number and an `Imm` where a resolved address belongs. Not wrong exactly,
   but unreadable at 2 a.m. on a device with no debugger, which is the only place it will ever be read.
 
+## Step 17 — scalar VFP in Tier I, and the FPSCR compare table is not the manual's
+
+Step 16's table said Tier I refused 35 of 35 FP rows. It refuses 5 of 40 now: the scalar VFP group is
+implemented (`core/exec/interp.cpp`'s new `FPAdd/Sub/Mul/Div/Max/Min/Sqrt/Neg/Abs`, `FPMulAdd`,
+`FPCompare`, the eight fixed↔float conversions, `FPSingleToDouble`/`FPDoubleToSingle`,
+`A32Get/SetFpscrNZCV`), and every row it runs matches hardware — with ASIMD (`VectorBroadcast64`) the
+only group left refusing. Four things came out of it that are worth more than the opcodes.
+
+**1. `VCMP`'s FPSCR compare field on this silicon is not the table in the ARMv7 manual, and I wrote the
+first version from the manual.** Measured with a probe that clears FPSCR, performs one compare and reads
+the field back — so the value is this compare's, not the process's:
+
+| relation | measured, FPSCR[31:28] (NV:Z:C:GE) | ARMv7 manual |
+|---|---|---|
+| less | `0x8` — NV | NV ✓ |
+| equal | `0x6` — Z, C | `0x7`, adds GE |
+| greater | `0x2` — C | `0x3`, adds GE |
+| unordered | `0x3` — C, GE | `0xF` — all four |
+
+Three of four rows differ, and Tier J matches the *measurement* on all four, which is how I found out my
+reading of the architecture was the odd one out. Tier I now reproduces the measured table and both tiers
+plus hardware agree on all five `fp_cmp` rows.
+
+**The consequence is uncomfortable and should not be smoothed over.** The host is an ARMv8 core running
+AArch32, so "what hardware says" here is what an *ARMv8* core does with a VFP compare — not necessarily
+what the ARMv7 VFP a 2012 app was written against did. If real ARMv7 sets GE on the equal and greater
+rows, then a guest branching on `it hi`/`it vs` after a float compare sees RetroBug answer differently
+from the device it was tested on, and both our tiers are wrong together in the same direction. That is
+exactly the shape of bug `docs/32` §2's IT-block finding had, and it is [UNVERIFIED] which way.
+*Experiment:* run `fp_cmp` on a genuine ARMv7 device, or on the `qemu-arm` linux-user oracle in CI —
+the latter needs no hardware at all and is the cheaper half. *Fallback:* implement the manual's table in
+Tier I and route the JIT's compares through the same, which is a per-op helper rather than a rewrite.
+What must not happen is the current state being read as settled: the tiers agreeing with the host is not
+the same as agreeing with ARMv7.
+
+**2. Tier J's sticky exception bits are the host's, so Tier I's have to be too.** The state diff after
+`fp_arith` showed FPSCR `0x10` on one side and `0` on the other: IXC, the inexact flag, left raised by
+the divides. The back end reaches it by running native `FDIV`/`FMADD`/`FCVT` and storing the host FPSR
+(`ctx.fpsr.Load()`), so Tier J has no flag logic of its own to reproduce — and Tier I's honest equivalent
+is `<cfenv>`, which is what `FpOps` does now: clear, run, fold in. The rows agree on `0x10` and on the
+`0x01` the NaN path leaves. Worth knowing about the mechanism: **the guest's cumulative FP flags are
+host state on both tiers**, so `0x10`-class differences between two hosts are possible, and an app that
+branches on FPSCR's exception bits — rare but legal — inherits them.
+
+**3. FPSCR's sticky bits are process-inherited on a device and zero in an emulator, so they cannot be
+compared directly.** The first `fp_cmp` reported `0x11` for *every* relation, including the compares that
+cannot raise anything: an app process arrives with whatever ART's earlier floating-point work left
+raised. Adding the `vmsr fpscr, #0` before the operation is what made the low byte mean something — and
+the same contamination is why Step 16's "cumulative bits read 0, so Dynarmic's approximate-FPSR caveat is
+unexercised" was wrong twice over: the bits I masked (`[12:8]`) are the *ARMv7* locations, which read as
+zero on ARMv8 regardless, and the ones that matter (`[7:0]`, per `common/fp/fpsr.h:88-138`) I was not
+looking at.
+
+**4. `exc_on_qnan` is not decoration.** Modes 3 and 4 of the probe are the same unordered compare with
+`vcmpe.f64` and `vcmp.f64`; the only difference in the returned word is IOC — `0x301` against `0x300`.
+That is the whole observable content of the IR's `U1` compare operand, and it is now asserted, by both
+tiers, against hardware. Before this I had written it off as unobservable.
+
+**Rounding, deliberately not delegated to the host.** `RoundToInt` spells ties-to-even out with
+`floor`/`fmod` instead of `std::nearbyint`, because the latter follows the host's *current* rounding
+direction and Dynarmic's back end writes that direction from the guest FPSCR (`FPCR::WriteRaw`). The two
+tiers would then agree only while both had set it the same way — a dependency on process-global state
+that no per-block test can see. The known gap in the same place: `FPDoubleToSingle` narrows with the host
+conversion, so it honours round-to-nearest only, and the mode immediate is `(void)`-discarded with a
+comment saying so. Nothing in the corpus reaches it (every compiler measured here emits the reset RM),
+and the differential would report it the moment something does.
+
+**Suite:** 14 lanes, **1 303 engine checks**, dynarmic's 200 561 assertions — identical counts and all
+green on both the SM-X710 and the CPH2573. Neither device runs ARMv7 for these rows except as the oracle;
+the tiers are arm64 host code executing decoded A32.
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |

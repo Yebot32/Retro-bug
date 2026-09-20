@@ -42,6 +42,7 @@ extern jint Java_com_retrobug_fixture_MainActivity_fp_stack(JNIEnv* env, jclass 
 extern jint Java_com_retrobug_fixture_MainActivity_fp_args(JNIEnv* env, jclass clazz, jint a,
                                                            jint b);
 extern jint Java_com_retrobug_fixture_MainActivity_fp_nan(JNIEnv* env, jclass clazz, jint a);
+extern jint Java_com_retrobug_fixture_MainActivity_fp_cmp(JNIEnv* env, jclass clazz, jint mode);
 extern jint Java_com_retrobug_fixture_MainActivity_simd_int(JNIEnv* env, jclass clazz, jint a,
                                                             jint b);
 
@@ -226,6 +227,15 @@ int main(int argc, char** argv) {
     const fn2 simd = Java_com_retrobug_fixture_MainActivity_simd_int;
     for (unsigned i = 0; i < npairs; ++i) {
       printf(" %d", simd(NULL, NULL, pairs[i][0], pairs[i][1]));
+    }
+    printf("\n");
+
+    // fp_cmp: the FPSCR compare field per relation, in hex, because reading it as decimal invites a
+    // transcription error on the exact bits this row exists to establish. Less, equal, greater,
+    // unordered-with-raise, unordered-without.
+    printf("fp_cmp(nibble<<8|sticky):");
+    for (int m = 0; m <= 4; ++m) {
+      printf(" 0x%03x", Java_com_retrobug_fixture_MainActivity_fp_cmp(NULL, NULL, m) & 0xfff);
     }
     printf("\n");
   }
