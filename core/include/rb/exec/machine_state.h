@@ -70,6 +70,43 @@ static_assert(sizeof(GuestAddr) == 4, "guest addresses are 32-bit by definition"
          (static_cast<std::uint32_t>(itstate >> 6) << 24);
 }
 
+/// CPSR bit 5 *is* the execution mode: `MachineState::mode` and that bit are one fact kept in two
+/// representations, and both tiers have to leave them agreeing.
+///
+/// Tier J gets this for free — Dynarmic's `Cpsr()` carries the bit and its mode is read back from it.
+/// Tier I carries the mode on the block's location descriptor, so without this its `cpsr` can come back
+/// with bit 5 clear while `mode` says Thumb: two fields that contradict each other in one struct, in the
+/// one place the design says a guest's state is fully described. It is also the difference between a
+/// guest's `mrs r0, cpsr` seeing 0x20 in one tier and 0x0 in the other, which is a real divergence
+/// waiting for the first piece of guest code that reads CPSR — bionic's `__get_tls()` neighbours do.
+///
+/// Not modelled in either tier, and named here so nobody mistakes the field for complete: an `MSR CPSR`
+/// that writes bit 5 is an exception return in disguise, and Dynarmic handles it by ending the block with
+/// a fresh location descriptor. Nothing in the current corpus does it, so there is no measurement of what
+/// either tier would do.
+[[nodiscard]] inline std::uint32_t CpsrWithMode(std::uint32_t cpsr, isa::Mode mode) {
+  constexpr std::uint32_t kTBit = 1u << 5;
+  return (cpsr & ~kTBit) | (mode == isa::Mode::Thumb ? kTBit : 0u);
+}
+
+/// The diagnostic text for an SVC immediate, from one definition shared by both tiers. Format matters
+/// here more than it looks: an earlier version of this produced `SVC 0x42` out of `std::to_string`, so a
+/// `svc #0x2a` was reported as `SVC 0x42` — the same number in the wrong radix, in the one line a reader
+/// uses to look up a syscall. Both tiers print hex, both print it through this function, and the
+/// differential compares what they said.
+[[nodiscard]] inline std::string SvcDetail(std::uint32_t imm) {
+  static constexpr char kDigits[] = "0123456789abcdef";
+  std::string out = "SVC #0x";
+  std::string hex;
+  for (int shift = 28; shift >= 0; shift -= 4) {
+    const unsigned nib = (imm >> shift) & 0xfu;
+    if (hex.empty() && nib == 0 && shift > 0) continue;
+    hex += kDigits[nib];
+  }
+  if (hex.empty()) hex = "0";
+  return out + hex;
+}
+
 /// Why a Run call returned. `halted` is the only normal outcome; the rest are diagnostics that must
 /// reach a log, because each one is a case where the guest stopped for a reason RetroBug chose.
 enum class StopReason {
@@ -77,7 +114,9 @@ enum class StopReason {
   Returned,      ///< the guest returned from the entry (Tier I: popped the link stack empty).
   HostCall,      ///< a `bl`/`blx` reached a host entry point. `host_slot` says which; resume after the
                  ///< handler has run and left PC at the link, exactly as a guest callee would.
-  Syscall,       ///< an SVC reached the syscall monitor, which will resume us.
+  Syscall,       ///< an SVC reached the syscall monitor, which will resume us. `svc_number` carries the
+                 ///< immediate and `pc` is already the instruction after the SVC, because both tiers
+                 ///< observe the halt at the block terminal rather than in the middle of the block.
   Suspended,     ///< the caller stopped us (thread park, debugger).
   Unimplemented, ///< an IR op with no Tier I semantics. Never silent: `detail` names the op.
   Fault,         ///< unmapped/permission failure the guest would have seen.
@@ -101,6 +140,13 @@ struct RunResult {
   /// function's identity. Zero is a valid slot, so it is the reason code that says this is set, not
   /// the value.
   std::uint32_t host_slot = 0;
+  /// Meaningful only for `Syscall`: the SVC immediate, which is where an ARMv7 guest puts the syscall
+  /// number (r7) *and* a small code in the encoding, so both are the monitor's business. Recorded by
+  /// both tiers from the same operand, because an SVC that reaches the monitor with a different number
+  /// per tier would be dispatched to a different syscall — the worst kind of disagreement, since both
+  /// runs would look plausible. Thumb-16 `svc` carries an 8-bit immediate, so a tier that zero-extended
+  /// something else would still produce a number; only the comparison catches it.
+  std::uint32_t svc_number = 0;
 };
 
 /// Which execution path a block went through. Naming discipline is AD-8's, so the strings a user can

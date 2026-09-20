@@ -319,6 +319,10 @@ class BlockRunner {
   void Put(const Inst* inst, V value) { temps_[inst] = value; }
 
   void WriteReg(Reg reg, std::uint32_t value);
+  /// A write to the program counter. `interwork` is the `BX` rule — bit 0 of the value selects the ISA —
+  /// and it belongs to exactly one opcode. Everything else that reaches PC arrives already masked, and
+  /// changing the mode there would be inventing a state transition the guest did not ask for.
+  void WritePC(std::uint32_t value, bool interwork);
   bool Step(const Inst* inst);
   bool Take(const Term::Terminal& terminal, LocationDescriptor& successor);
 
@@ -384,22 +388,44 @@ class BlockRunner {
   /// the back end about what a `GetNZCVFromOp` on a shift means.
   std::unordered_map<const Inst*, bool> carry_;
   bool check_bit = false;
+  /// An SVC noted by `A32CallSupervisor`, waiting to be surfaced at the block's `CheckHalt` terminal —
+  /// see the two places that read it. Pending rather than immediate so the PC is already past the
+  /// instruction, which is what Tier J's back end reports and what the syscall monitor resumes from.
+  bool svc_pending_ = false;
+  std::uint32_t svc_ = 0;
 };
 
 void BlockRunner::WriteReg(Reg reg, std::uint32_t value) {
   if (reg == Reg::PC) {
-    // A guest write to PC. Dynarmic ends the block after one (usually with Interpret), so this only
-    // has to get the next location right. In Thumb the low bit is the ISA tag rather than part of the
-    // address; in ARM it is not set at all.
-    const bool thumb = state_.mode == isa::Mode::Thumb;
-    const std::uint32_t next = thumb ? (value & ~1u) : (value & ~3u);
-    if (thumb && (value & 1u) == 0) state_.mode = isa::Mode::Arm;  // BX-like PC write into ARM code
-    location_ = location_.SetPC(next).SetTFlag(state_.mode == isa::Mode::Thumb);
-    state_.pc = next;
-    state_.r[15] = next;
+    // `A32SetRegister(PC, v)`. Dynarmic's `IREmitter::BranchWritePC` masks the target itself and then
+    // emits exactly this op (`a32_ir_emitter.cpp:101-110`), so a write arriving here has *already* had
+    // its low bits cleared and carries no ISA tag: the mode has to survive it. Only `BXWritePC`
+    // interworks, and it is a distinct opcode handled below.
+    //
+    // Getting this wrong is invisible until something exercises a non-`bx` PC write, because the ordinary
+    // ones (`bx lr`, `ldr pc, [sp]`) go through `BXWritePC` with a tag-bearing value. The first one in
+    // this corpus is a syscall's continuation — `BranchWritePC(pc+2)`, an even address — and Tier I took
+    // that to mean "switch to ARM", then decoded its own Thumb code with the ARM decoder and reported an
+    // exception at an instruction that had run fine a moment earlier.
+    WritePC(value, /*interwork=*/false);
     return;
   }
   state_.r[static_cast<int>(reg)] = value;
+}
+
+void BlockRunner::WritePC(std::uint32_t value, bool interwork) {
+  const bool was_thumb = state_.mode == isa::Mode::Thumb;
+  // In Thumb the low bit of a branch target is the ISA tag rather than part of the address; in ARM it is
+  // not a tag at all. `interwork` is the `BX` rule, which reads that bit; the other case keeps whatever
+  // mode the block was translated for.
+  const bool thumb = interwork ? (value & 1u) != 0 : was_thumb;
+  const std::uint32_t next = thumb ? (value & ~1u) : (value & ~3u);
+  state_.mode = thumb ? isa::Mode::Thumb : isa::Mode::Arm;
+  location_ = location_.SetPC(next).SetTFlag(thumb);
+  state_.pc = next;
+  state_.r[15] = next;
+  // CPSR bit 5 *is* the mode — see `CpsrWithMode` for why both tiers keep that true on the way out.
+  state_.cpsr = CpsrWithMode(state_.cpsr, thumb ? isa::Mode::Thumb : isa::Mode::Arm);
 }
 
 bool BlockRunner::Step(const Inst* inst) {
@@ -695,10 +721,26 @@ bool BlockRunner::Step(const Inst* inst) {
     case Opcode::A32BXWritePC: {
       std::uint32_t target = 0;
       if (!W32(inst, 0, target)) return false;
-      // Same rule as a PC write through SetRegister, and the reason the two share one helper: bit 0 of
-      // a Thumb target is the ISA tag, so `bx lr` out of a Thumb function and `bx` into an ARM one
-      // differ only in that bit. Dynarmic ends the block after this with PopRSBHint or Interpret.
-      WriteReg(Reg::PC, target);
+      // The one interworking PC write: bit 0 of the target is the ISA tag, so `bx lr` out of a Thumb
+      // function and `bx` into an ARM one differ only in that bit. Dynarmic ends the block after this
+      // with PopRSBHint or Interpret, and its own lowering of this op is what reads bit 0
+      // (`backend/arm64/emit_arm64_a32.cpp:551-577`) — `BranchWritePC` is not this op, so the rule does
+      // not belong anywhere else.
+      WritePC(target, /*interwork=*/true);
+      return true;
+    }
+
+    // ---------------------------------------------------------------- exception-generating
+    case Opcode::A32CallSupervisor: {
+      std::uint32_t imm = 0;
+      if (!W32(inst, 0, imm)) return false;
+      // Noted, not stopped here. Both translators emit `BranchWritePC(pc+n)` before this op and end the
+      // block with `CheckHalt{PopRSBHint}`, so the halt is *observed* at the terminal — which is where
+      // Tier J's back end stops too (it checks the halt flag at that same terminal). Stopping mid-block
+      // instead would leave the two tiers reporting different PCs for one SVC, and PC is the resume
+      // address the syscall monitor hands back to.
+      svc_pending_ = true;
+      svc_ = imm;
       return true;
     }
 
@@ -972,6 +1014,15 @@ bool BlockRunner::Take(const Term::Terminal& terminal, LocationDescriptor& succe
       // back ends keep it in a stack slot for exactly the same reason.
       return Take(check_bit ? t.then_ : t.else_, successor);
     } else if constexpr (std::is_same_v<T, Term::CheckHalt>) {
+      if (svc_pending_) {
+        // The halt is observed here, at the terminal, which is where Dynarmic's own back ends test the
+        // halt flag — so both tiers stop at the same instruction with the same PC already advanced past
+        // the SVC by the `BranchWritePC` the translator emitted before it.
+        stop.reason = StopReason::Syscall;
+        stop.detail = SvcDetail(svc_);
+        stop.svc_number = svc_;
+        return false;
+      }
       return Take(t.else_, successor);  // a halt request stops the executor, not the guest
     } else if constexpr (std::is_same_v<T, Term::ReturnToDispatch>) {
       stop.reason = StopReason::Returned;
@@ -986,6 +1037,10 @@ bool BlockRunner::Take(const Term::Terminal& terminal, LocationDescriptor& succe
 
 RunResult InterpExecutor::Run(MachineState& state, unsigned max_instructions) {
   RunResult result{};
+  // CPSR's T bit and `mode` are one fact; a caller that set only the latter (which is what every entry
+  // point here does) must not see a state back that contradicts what it handed over. Tier J's SyncIn does
+  // the same on its way in.
+  state.cpsr = CpsrWithMode(state.cpsr, state.mode);
   LocationDescriptor location{state.pc, PSR{state.cpsr}, FPSCR{state.fpscr}, false};
   location = location.SetTFlag(state.mode == isa::Mode::Thumb);
 
@@ -1081,6 +1136,7 @@ RunResult InterpExecutor::Run(MachineState& state, unsigned max_instructions) {
   // The IT mirror is derived from CPSR here rather than from each block's location descriptor, in both
   // tiers, so that the two-tier comparison measures guest behaviour instead of two representations of
   // the same field. Translation still takes IT from the descriptor, which is where Dynarmic keeps it.
+  state.cpsr = CpsrWithMode(state.cpsr, state.mode);
   state.itstate = ItStateFromCpsr(state.cpsr);
   result.instructions_executed = steps;
   return result;

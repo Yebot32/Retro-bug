@@ -421,6 +421,69 @@ void invalidation_reaches_the_compiled_code() {
                 std::to_string(static_cast<std::int32_t>(back.r[0])) + " " + rerr);
 }
 
+/// An SVC has to reach the syscall monitor with the same frame from both tiers: the same reason, the
+/// same immediate, `r7` untouched, and a PC already past the instruction so the monitor's resume point is
+/// the same address for both. This is C07's precondition, and it belongs in the differential because
+/// every part of it is a comparison rather than an absolute: RetroBug decides what a syscall *means*, so
+/// no external oracle can say whether the frame is right — but the two tiers have to agree, and a guest
+/// that resumed in the wrong place would not come back with 42.
+void both_tiers_stop_at_the_same_svc() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  const auto p = rig.mod->FindExport("Java_com_retrobug_fixture_MainActivity_svc_probe");
+  if (!p || !p->thumb) {
+    ++checks;
+    fail("the fixture has no svc_probe", __LINE__);
+    return;
+  }
+  constexpr std::uint32_t kSvcImm = 0x9c;
+  constexpr std::uint32_t kNrExitGroup = 0xf8;  ///< __NR_exit_group, ARM EABI, from the NDK's own header
+
+  exec::MachineState si = EntryState(p->addr, 41, 0, p->thumb);
+  exec::MachineState sj = si;
+  const exec::RunResult ri = rig.interp->Run(si, 100000);
+  const exec::RunResult rj = rig.jit->Run(sj, 100000);
+
+  CHECK_CTX(ri.reason == exec::StopReason::Syscall,
+            "Tier I stopped with reason " + std::to_string(static_cast<int>(ri.reason)) + " " + ri.detail);
+  CHECK_CTX(rj.reason == exec::StopReason::Syscall,
+            "Tier J stopped with reason " + std::to_string(static_cast<int>(rj.reason)) + " " + rj.detail);
+  CHECK_CTX(ri.svc_number == kSvcImm, "Tier I reports the SVC immediate as " + Hex(ri.svc_number));
+  CHECK_CTX(rj.svc_number == kSvcImm, "Tier J reports the SVC immediate as " + Hex(rj.svc_number));
+  CHECK_CTX(si.r[7] == kNrExitGroup, "Tier I left r7 at " + Hex(si.r[7]));
+  CHECK_CTX(sj.r[7] == kNrExitGroup, "Tier J left r7 at " + Hex(sj.r[7]));
+  // The two channels have to be distinguishable, which is the reason the fixture's immediate and `r7` are
+  // different numbers: with `svc 0` either reading gives 0, and a monitor that dispatched on the encoding
+  // instead of the register would pass every such test until an app used a non-zero immediate.
+  CHECK_CTX(ri.svc_number != si.r[7], "the immediate and r7 are the same value, so this proves nothing");
+  CHECK_CTX(ri.detail == rj.detail,
+            "Tier I said \"" + ri.detail + "\" and Tier J said \"" + rj.detail + "\" of one SVC");
+  CHECK_CTX(si.pc > p->addr && sj.pc > p->addr && (si.pc & 1u) == 0,
+            "PC at the stop is inside the function and Thumb-tagged: I pc=" + Hex(si.pc) +
+                " J pc=" + Hex(sj.pc));
+  Compare("svc #0x9c stop", si, ri, sj, rj);
+  std::fprintf(stderr, "[diff] svc stop: I \"%s\" pc=%s r7=%s | J \"%s\" pc=%s r7=%s\n",
+               ri.detail.c_str(), Hex(si.pc).c_str(), Hex(si.r[7]).c_str(), rj.detail.c_str(),
+               Hex(sj.pc).c_str(), Hex(sj.r[7]).c_str());
+
+  // Resume. Nothing has to *emulate* exit_group for this to be meaningful: the monitor's job is to leave
+  // r7 and r0 alone and put the guest at pc, so pretending it returned 0 is the whole handler. What the
+  // test then measures is whether the resume address was right, by arithmetic the guest itself does.
+  const exec::RunResult ri2 = rig.interp->Run(si, 100000);
+  const exec::RunResult rj2 = rig.jit->Run(sj, 100000);
+  CHECK_CTX(ri2.reason == exec::StopReason::Returned, "Tier I after the syscall: " + ri2.detail);
+  CHECK_CTX(rj2.reason == exec::StopReason::Returned, "Tier J after the syscall: " + rj2.detail);
+  CHECK_CTX(static_cast<std::int32_t>(si.r[0]) == 42,
+            "Tier I resumed at the wrong instruction: r0 = " +
+                std::to_string(static_cast<std::int32_t>(si.r[0])) + " want 42");
+  CHECK_CTX(static_cast<std::int32_t>(sj.r[0]) == 42,
+            "Tier J resumed at the wrong instruction: r0 = " +
+                std::to_string(static_cast<std::int32_t>(sj.r[0])) + " want 42");
+  Compare("svc #0x9c resumed", si, ri2, sj, rj2);
+  std::fprintf(stderr, "[diff] svc resumed: I r0=%d J r0=%d (want 41+1=42)\n",
+               static_cast<std::int32_t>(si.r[0]), static_cast<std::int32_t>(sj.r[0]));
+}
+
 /// A fault has to be a fault in both tiers, with a reason rather than a plausible zero.
 void unmapped_code_faults_in_both_tiers() {
   Rig rig = build();
@@ -442,6 +505,7 @@ void unmapped_code_faults_in_both_tiers() {
 int main() {
   both_tiers_agree_and_match_hardware();
   invalidation_reaches_the_compiled_code();
+  both_tiers_stop_at_the_same_svc();
   unmapped_code_faults_in_both_tiers();
 
   std::printf("%d checks, %d failures\n", checks, failures);

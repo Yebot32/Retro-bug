@@ -180,6 +180,7 @@ RunResult JitExecutor::Run(MachineState& state, unsigned max_instructions) {
   pending_ = Pending::None;
   pending_detail_.clear();
   pending_slot_ = 0;
+  pending_svc_ = 0;
   pending_pc_ = 0;
 
   SyncIn(state);
@@ -225,6 +226,7 @@ RunResult JitExecutor::MapHalt(Dynarmic::HaltReason hr, unsigned executed) {
       break;
     case Pending::Syscall:
       out.reason = StopReason::Syscall;
+      out.svc_number = pending_svc_;
       out.detail = std::move(pending_detail_);
       break;
     case Pending::Fault:
@@ -356,7 +358,8 @@ void JitExecutor::MemoryWrite64(GuestAddr vaddr, std::uint64_t value) {
 }
 
 void JitExecutor::CallSVC(std::uint32_t swi) {
-  SetPending(Pending::Syscall, "SVC 0x" + std::to_string(swi));
+  pending_svc_ = swi;
+  SetPending(Pending::Syscall, SvcDetail(swi));
   jit_->HaltExecution(Dynarmic::HaltReason::UserDefined1);
 }
 

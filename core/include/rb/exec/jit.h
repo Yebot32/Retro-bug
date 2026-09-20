@@ -144,6 +144,7 @@ class JitExecutor : public Executor, public Dynarmic::A32::UserCallbacks {
   Pending pending_ = Pending::None;
   std::string pending_detail_;
   std::uint32_t pending_slot_ = 0;
+  std::uint32_t pending_svc_ = 0;  ///< the SVC immediate, when `pending_` is `Syscall`
   GuestAddr pending_pc_ = 0;  ///< the address that caused the stop, before Dynarmic advanced past it
 };
 

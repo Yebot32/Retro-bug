@@ -177,3 +177,33 @@ JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_patch_probe_b(JNIE
       "bx     lr\n" ::: "r0", "cc");
   __builtin_unreachable();
 }
+
+/*
+ * A syscall, for the channel between an executor and the syscall monitor (C07).
+ *
+ * Two things are deliberately *not* the same number here. `r7` holds 248, which is `__NR_exit_group` on
+ * ARM EABI (`arm-linux-androideabi/asm/unistd-eabi.h:214`, read from the NDK rather than recalled), and
+ * the encoding's immediate is 0x9c. Bionic puts the number in `r7` and leaves the immediate at zero, so a
+ * probe that conflated the two would look right in a test that used `svc 0` — which is every test anyone
+ * writes until one of them is wrong. As it stands, a tier or a monitor that reports `r7` as the
+ * immediate, or the immediate as the number, is caught by the pair.
+ *
+ * The `add` after the SVC is the part that cannot be faked: the run only returns 42 for input 41 if
+ * execution resumed at the instruction after the SVC and executed it exactly once. Two halfwords early
+ * and the guest runs the tail of the `movw` as code; two late and r0 comes back 43.
+ *
+ * No hardware oracle value for this one, and that is honest rather than an omission: on real silicon the
+ * same bytes ask the *kernel* for `exit_group`, which ends the oracle process instead of measuring it.
+ * The claim being tested is that RetroBug's two tiers hand the monitor the same frame, so it is checked
+ * between them, and the resume arithmetic is checked by `r0`.
+ */
+JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_svc_probe(JNIEnv* env, jclass clazz,
+                                                                       jint a) {
+  (void)env; (void)clazz; (void)a;
+  __asm__ volatile(
+      "movw   r7, #0xf8\n"
+      "svc    #0x9c\n"
+      "adds   r0, r2, #1\n"
+      "bx     lr\n" ::: "r0", "r7", "cc");
+  __builtin_unreachable();
+}
