@@ -27,6 +27,18 @@ struct CodeAddress {
   bool thumb = false;
   explicit operator bool() const { return addr != 0; }
   bool operator==(const CodeAddress&) const = default;
+
+  /**
+   * The address as a *function pointer*: bit 0 set for Thumb, clear for ARM.
+   *
+   * `addr` is the form to execute at; this is the form to hand to anything that will branch to it, and
+   * the distinction is not cosmetic. In ARM, bit 0 of a code pointer selects the instruction set — that
+   * is what `blx` reads — and it is the same bit a symbol's `st_value` carries (`Symbol::value` keeps it
+   * for exactly this reason). A bridge that passes `addr` to a call therefore loses the ISA, which is
+   * how `rb::abi` came to enter every guest function in Thumb state: harmless for the Thumb-compiled JNI
+   * methods it was first used on, and fatal for bionic's libm, which is mostly A32.
+   */
+  [[nodiscard]] std::uint32_t tagged() const { return addr | (thumb ? 1u : 0u); }
 };
 
 /// One exported or imported dynamic symbol, in guest terms.

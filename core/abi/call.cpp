@@ -60,6 +60,19 @@ std::uint32_t GetS(const MachineState& state, unsigned unit) {
 
 bool PlaceArgs(mem::GuestMemory& memory, MachineState& state, GuestAddr fn, const Args32& args,
                GuestAddr return_address, unsigned stack_bytes, std::string* err) {
+  /**
+   * The instruction set comes from bit 0 of the target, exactly as `blx` reads it.
+   *
+   * `AbiContext` used to fix the mode to Thumb at construction, which was invisible for as long as the
+   * only things called through here were Thumb-compiled JNI methods — and wrong for everything else:
+   * bionic's libm is mostly A32 (304 ARM against 60 Thumb by `readelf`), so no ARM-state guest function
+   * could be entered at all. It showed up as `undefined instruction encoding` on Tier J and a decoder
+   * exception on Tier I, at addresses that were perfectly valid ARM.
+   *
+   * Callers pass a *tagged* address (`CodeAddress::tagged()`); `state.pc` is then masked below, because
+   * the tag is a property of the pointer rather than of the code.
+   */
+  state.mode = (fn & 1u) != 0 ? isa::Mode::Thumb : isa::Mode::Arm;
   // Compute the frame first, so a call whose arguments do not fit fails *before* any register or byte
   // has been mutated: a half-applied argument list is a call that looks like it happened.
   unsigned core = 0;   ///< next free core register, 0..4
@@ -248,6 +261,10 @@ AbiContext::AbiContext(mem::GuestMemory& memory, GuestAddr stack_top, GuestAddr 
   state_.r[RegLayout::kSp] = stack_top;
   state_.r[15] = return_address;
   state_.pc = return_address;
+  // An initial value only: `PlaceArgs` derives the mode from bit 0 of every target, and this line used
+  // to be the bug — a mode fixed here meant the bridge could not enter ARM-state code at all. It is
+  // left set to Thumb because the host-entry slots the guest calls *into* are Thumb-shaped, and because
+  // a state with no mode at all would be a worse default than one that matches the common case.
   state_.mode = isa::Mode::Thumb;
 }
 

@@ -359,7 +359,7 @@ Outcome call(exec::Executor& engine, Rig& rig, abi::AbiContext& ctx, const char*
   }
   ctx.set_executor(engine);
   exec::RunResult result{};
-  const abi::Ret32 ret = ctx.CallGuest(fn->addr, args, abi::Shorty::For(shorty), 4'000'000, &result);
+  const abi::Ret32 ret = ctx.CallGuest(fn->tagged(), args, abi::Shorty::For(shorty), 4'000'000, &result);
   out.reason = result.reason;
   out.bits = ret.bits;
   out.detail = result.detail;
@@ -386,9 +386,14 @@ struct Split {
   std::uint64_t want;
 };
 constexpr Split kSplit100[] = {
+    // 100.0 = 0x4059000000000000 and 10001.0 = 0x40c3888000000000, both copied from a run of
+    // `node -e` rather than worked out by hand — the first draft of this table had
+    // `0x40c3882000000000` for 10001.0, which is 10000.25, and it produced a "both tiers agree with each
+    // other and disagree with hardware" failure that looked exactly like a shared engine bug and was a
+    // typo in a test constant. Reproducing the arithmetic here would be the same mistake twice.
     {"sin", 0x4059'0000'0000'0000ull, 0xbfe0'3425'b78c'4db8ull},
     {"cos", 0x4059'0000'0000'0000ull, 0x3feb'981d'bf66'5fdfull},
-    {"sqrt", 0x40c3'8820'0000'0000ull, 0x4059'0051'eafe'e8b3ull},
+    {"sqrt", 0x40c3'8880'0000'0000ull, 0x4059'0051'eafe'e8b3ull},
 };
 
 /**

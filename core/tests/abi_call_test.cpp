@@ -187,9 +187,29 @@ void four_or_less_stay_in_core_registers() {
   CHECK(abi::PlaceArgs(*rig.mem, s, kFn, a, kReturnAddress, abi::AbiContext::kCallFrameBytes, &err));
   CHECK(s.r[0] == 1 && s.r[1] == 2 && s.r[2] == 3 && s.r[3] == 4);
   CHECK(s.pc == kFn);
-  // Thumb bit 0 of LR is the ISA tag, and `bx lr` reads it: dropping it here returns the guest into
-  // ARM-mode decoding of Thumb bytes, which faults somewhere far away from the cause.
-  CHECK_CTX(s.r[14] == (kReturnAddress | 1u), "LR=" + Hex(s.r[14]));
+  /**
+   * LR carries the ISA tag that `bx lr` reads, and the tag follows the *callee's* mode — which comes
+   * from bit 0 of the target, the way `blx` does it. `kFn` is even, so this is an ARM call and LR is
+   * untagged.
+   *
+   * This assertion used to read `== (kReturnAddress | 1u)` unconditionally, and that is exactly how the
+   * Thumb-only bridge stayed invisible: a fixed tag looks right for the one mode it was written for, and
+   * `PlaceArgs` was ignoring the target's bit 0 entirely, so no ARM-state guest function could be
+   * entered. Both rows are checked below, because neither alone can fail for the right reason.
+   */
+  CHECK_CTX(s.r[14] == kReturnAddress, "ARM callee, LR=" + Hex(s.r[14]));
+  CHECK(s.mode == isa::Mode::Arm);
+  {
+    exec::MachineState t = Fresh();
+    const abi::Args32 none = {};
+    CHECK(abi::PlaceArgs(*rig.mem, t, kFn | 1u, none, kReturnAddress,
+                         abi::AbiContext::kCallFrameBytes, &err));
+    CHECK(t.mode == isa::Mode::Thumb);
+    CHECK_CTX(t.r[14] == (kReturnAddress | 1u), "Thumb callee, LR=" + Hex(t.r[14]));
+    // The tag belongs to the pointer, not to the code: `pc` has to be the masked address or the fetch
+    // starts one byte into the instruction.
+    CHECK_CTX(t.pc == kFn, "tag not stripped from pc, got " + Hex(t.pc));
+  }
   CHECK((s.r[13] & 0xFu) == 0);  ///< 16-byte aligned below the caller, per the plan's invariant
 }
 
@@ -276,8 +296,20 @@ void return_values_come_from_where_the_type_says() {
 
   CHECK(abi::ReturnValue(s, abi::Shorty::For("II")).i() == 0x1111'1111);
   CHECK(abi::ReturnValue(s, abi::Shorty::For("JI")).j() == 0x2222'2222'1111'1111ull);
-  CHECK(abi::ReturnValue(s, abi::Shorty::For("FI")).bits == 0x3333'3333ull);  // s0, the low half of d0
-  CHECK(abi::ReturnValue(s, abi::Shorty::For("DL")).bits == 0x3333'3333ull);  // d0 whole
+  /**
+   * `F` and `D` read **core registers**, because the guest ABI is softfp — `AbiContext`'s header carries
+   * the three independent checks that settled it, and `docs/30` §Step 24 records what believing
+   * otherwise cost.
+   *
+   * The fixture above is deliberately built so this cannot pass by accident: `d[0]` holds `0x33333333`
+   * while r0/r1 hold `0x11111111`/`0x22222222`. Asserting the softfp values therefore *fails* if anyone
+   * restores the hard-float read, which is what the previous version of these two lines asserted — and
+   * it passed for as long as nothing called a float-returning JNI method.
+   */
+  CHECK(abi::ReturnValue(s, abi::Shorty::For("FI")).bits == 0x1111'1111ull);            // r0
+  CHECK(abi::ReturnValue(s, abi::Shorty::For("DL")).bits == 0x2222'2222'1111'1111ull);  // r0:r1, not d0
+  // Named so the negative control is explicit: this is what the hard-float read would have returned.
+  CHECK(abi::ReturnValue(s, abi::Shorty::For("DL")).bits != s.d[0]);
 
   // 'Z' is an unsigned *byte*: a callee that left a stale upper byte in r0 must not read back as true
   // through it, and must not read back as 0x11 either.
@@ -380,7 +412,7 @@ void guest_functions_called_through_the_bridge_match_hardware() {
     // that got `docs/30` §Step 6d wrong once already, checked here by the hardware value rather than
     // by a register dump.
     const auto ret = rig.abi_ctx->CallGuest(
-        where->addr,
+        where->tagged(),
         {abi::Value32::Ptr(0), abi::Value32::Ptr(0), abi::Value32::S32(c.arg)},
         abi::Shorty::For("IILLI"), 4'000'000, &outcome);
     const std::string what = std::string{c.export_name} + "(" + std::to_string(c.arg) + ")";
@@ -399,7 +431,7 @@ void the_bridge_leaves_the_guest_stack_where_it_found_it() {
   const auto fib = rig.mod->FindExport("Java_com_retrobug_fixture_MainActivity_fib");
   if (!fib) return;
   exec::RunResult outcome{};
-  const auto ret = rig.abi_ctx->CallGuest(fib->addr,
+  const auto ret = rig.abi_ctx->CallGuest(fib->tagged(),
                                           {abi::Value32::Ptr(0), abi::Value32::Ptr(0),
                                            abi::Value32::S32(12)},
                                           abi::Shorty::For("IILLI"), 4'000'000, &outcome);
@@ -408,7 +440,7 @@ void the_bridge_leaves_the_guest_stack_where_it_found_it() {
   // Two calls must agree, and the second must not be affected by where the first left SP: the context
   // restores its state per call, so the frame descends from the same top every time.
   exec::RunResult second{};
-  const auto again = rig.abi_ctx->CallGuest(fib->addr,
+  const auto again = rig.abi_ctx->CallGuest(fib->tagged(),
                                             {abi::Value32::Ptr(0), abi::Value32::Ptr(0),
                                              abi::Value32::S32(12)},
                                             abi::Shorty::For("IILLI"), 4'000'000, &second);
@@ -439,7 +471,7 @@ void a_guest_syscall_in_a_jni_call_is_answered() {
 
   {
     exec::RunResult out{};
-    rig.abi_ctx->CallGuest(probe->addr, args(), abi::Shorty::For("IILLI"), 100000, &out);
+    rig.abi_ctx->CallGuest(probe->tagged(), args(), abi::Shorty::For("IILLI"), 100000, &out);
     CHECK_CTX(out.reason == exec::StopReason::Fault,
               "without a monitor the call must not look successful: reason " +
                   std::to_string(static_cast<int>(out.reason)) + " " + out.detail);
@@ -452,7 +484,7 @@ void a_guest_syscall_in_a_jni_call_is_answered() {
     // Still no ids: the monitor refuses, and the guest sees the refusal as a value rather than as a
     // crash — which is the difference between an unimplemented syscall and a broken emulator.
     exec::RunResult out{};
-    const auto refused = rig.abi_ctx->CallGuest(probe->addr, args(), abi::Shorty::For("IILLI"), 100000,
+    const auto refused = rig.abi_ctx->CallGuest(probe->tagged(), args(), abi::Shorty::For("IILLI"), 100000,
                                                 &out);
     CHECK_CTX(out.reason == exec::StopReason::Returned, out.detail);
     CHECK_CTX(refused.i() == -37, "getpid refused as -38, then the guest's +1: got " +
@@ -461,7 +493,7 @@ void a_guest_syscall_in_a_jni_call_is_answered() {
   mon.set_ids(4242, 4243);
   {
     exec::RunResult out{};
-    const auto ret = rig.abi_ctx->CallGuest(probe->addr, args(), abi::Shorty::For("IILLI"), 100000,
+    const auto ret = rig.abi_ctx->CallGuest(probe->tagged(), args(), abi::Shorty::For("IILLI"), 100000,
                                             &out);
     CHECK_CTX(out.reason == exec::StopReason::Returned, out.detail);
     CHECK_CTX(ret.i() == 4243, "the monitor's getpid never reached the guest: " +
@@ -489,7 +521,7 @@ void exit_group_stops_the_call() {
   exec::RunResult out{};
   // r0 is the exit status, so the first hidden argument carries 7 into it: what a JNI caller would put
   // in `env` is here what `exit_group` reads.
-  rig.abi_ctx->CallGuest(probe->addr,
+  rig.abi_ctx->CallGuest(probe->tagged(),
                          {abi::Value32::Ptr(7), abi::Value32::Ptr(0), abi::Value32::S32(41)},
                          abi::Shorty::For("IILLI"), 100000, &out);
   CHECK_CTX(out.reason == exec::StopReason::Exited,

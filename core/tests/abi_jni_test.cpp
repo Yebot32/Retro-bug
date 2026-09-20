@@ -148,7 +148,7 @@ CallOut call_guest(Rig& rig, const char* export_name, const abi::Args32& tail, c
   }
   abi::Args32 args = {abi::Value32::Ptr(rig.jni->env()), abi::Value32::Ptr(0)};
   for (const auto& a : tail) args.push_back(a);
-  const auto ret = rig.bridge->CallGuest(where->addr, args, abi::Shorty::For(shorty), 4'000'000,
+  const auto ret = rig.bridge->CallGuest(where->tagged(), args, abi::Shorty::For(shorty), 4'000'000,
                                          &out.run);
   out.bits = ret.bits;
   out.i = ret.i();

@@ -730,7 +730,7 @@ void a_guest_cacheflush_reaches_the_tier_that_owns_the_cache() {
   const auto flush_through = [&](abi::AbiContext& b, exec::GuestAddr at, exec::GuestAddr expect_lo,
                                  exec::GuestAddr expect_hi) {
     exec::RunResult out{};
-    const auto ret = b.CallGuest(flush->addr,
+    const auto ret = b.CallGuest(flush->tagged(),
                                  {abi::Value32::Ptr(0), abi::Value32::Ptr(0), abi::Value32::S32(at),
                                   abi::Value32::S32(7)},
                                  abi::Shorty::For("IILLII"), 100000, &out);
