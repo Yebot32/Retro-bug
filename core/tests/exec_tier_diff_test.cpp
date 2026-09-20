@@ -1030,7 +1030,7 @@ int interpret_probe(const char* which) {
  *
  * `tests/guest/exclprobe.s` is where that was settled — hand-written single-core sequences run on two
  * AArch32 devices, an Oppo Reno 5 (Cortex-A76/A55) and a Samsung Tab S9 (Cortex-A710/A510). Eight of the
- * thirteen rows below are the answers both devices gave: every plain pair passes (`Rd = 0`) at halfword,
+ * fourteen rows below are the answers both devices gave: every plain pair passes (`Rd = 0`) at halfword,
  * byte, word and double width, both acquire forms pass, and `clrex` between a pair or a store with no
  * preceding exclusive load fails (`Rd = 1`). Three do not simply copy a device, and each row says which:
  *   - f2, `ldrexh` then a plain `strh` to the same halfword *by this same core* then `strexh`: the Reno 5
@@ -1044,8 +1044,9 @@ int interpret_probe(const char* which) {
  *   - the retry loop, whose first iteration carries that same racing plain store. The Reno 5 would exit it
  *     after one pass; here it exits after two, and asserting *that* (`r3`, the value the successful load
  *     saw) is what makes the loop a test rather than a smoke check.
- * The last two rows — `clrex` with nothing else between the pair, and a rejected store aimed at an
- * unmapped page — are RetroBug's rule at points no device was asked about, and they are labelled as such.
+ * The last three rows — `clrex` with nothing else between the pair, a rejected store aimed at an
+ * unmapped page, and an ordinary `ldrh` planted inside a passing halfword pair to date its exclusive
+ * read — are RetroBug's rule at points no device was asked about, and they are labelled as such.
  *
  * The rest is the reason the lane is in *this* file: `Compare()` on every row. Tier J answers through
  * Dynarmic's `ExclusiveMonitor` plus RetroBug's four `MemoryWriteExclusive*` callbacks, Tier I through
@@ -1210,6 +1211,40 @@ constexpr std::uint16_t kRetryLoop[] = {
     0xd1f5,          ///< bne .Lretry       -> back to the ldrexh; the first pass lands here with Rd=1
     0x4620, 0x4770,  ///< mov r0, r4 ; bx lr
     0};
+/// The #35 discriminator: f1's pair with an ordinary `ldrh r5, [r0]` between the load and the store,
+/// reading the same halfword. Unlike every other blob here it has no counterpart in `exclprobe.s` — no
+/// device was ever asked this sequence, and the row below claims no measurement. The pad after the
+/// 16-bit load is the alignment convention stated above the blobs: without it the `strexh` would start
+/// off a 4-byte boundary, and the red this blob exists to produce would not be unambiguous.
+constexpr std::uint16_t kLdrhInsidePair[] = {0xe8d0, 0x3f5f,  ///< ldrexh r3, [r0]
+                                             0x8805,          ///< ldrh r5, [r0]   — the discriminator
+                                             0xbf00,          ///< nop — the alignment pad, see above
+                                             0xe8c0, 0x1f52,  ///< strexh r2, r1, [r0]
+                                             0x4610, 0x4770,  ///< mov r0, r2 ; bx lr
+                                             0};
+/// The same shape with **no exclusive instruction in it at all**, which is what decides whether #35 is
+/// about exclusives or about Tier J's callback-only memory path generally: two loads of one halfword into
+/// different registers, then a store to it. Encodings from LLVM (`ldrh r3,[r0]` = `8803`,
+/// `ldrh r5,[r0]` = `8805`, `movs r1,#0x77` = `2177`, `strh r1,[r0]` = `8001`). `0x77` rather than zero so
+/// a clobbered register cannot be mistaken for a register nobody wrote.
+constexpr std::uint16_t kTwoLoadsOneStoreNoExclusive[] = {
+    0x8803,  ///< ldrh r3, [r0]
+    0x8805,  ///< ldrh r5, [r0]
+    0x2177,  ///< movs r1, #0x77
+    0x8001,  ///< strh r1, [r0]
+    0x205a,  ///< movs r0, #0x5a  — reaching the last instruction before `bx lr` is itself a claim
+    0x4770,  ///< bx lr
+    0};
+/// The same, with **one** load. If a single load survives its own store correctly and two do not, the
+/// two results are sharing something — the call-return register Dynarmic defines every callback load in.
+/// If one load is wrong the same way, the read is being performed after the store instead.
+constexpr std::uint16_t kOneLoadOneStoreNoExclusive[] = {
+    0x8803,  ///< ldrh r3, [r0]
+    0x2177,  ///< movs r1, #0x77
+    0x8001,  ///< strh r1, [r0]
+    0x205a,  ///< movs r0, #0x5a
+    0x4770,  ///< bx lr
+    0};
 constexpr std::uint16_t kControl[] = {0x202a, 0x4770,  ///< movs r0, #42 ; bx lr
                                       0};
 
@@ -1289,7 +1324,7 @@ constexpr ExclRow kExclRows[] = {
      .mem_mask = 0xFFFF'FFFF'FFFF'FFFFull},
     {// A store with no reservation anywhere in this run. `SyncIn` / `InterpExecutor::Run` clear the state
      // on entry, so a reservation cannot leak in from the previous row — which is what makes this row's
-     // answer mean something in a table where eleven of the other twelve do an exclusive load first.
+     // answer mean something in a table where twelve of the other thirteen do an exclusive load first.
      .name = "f4 store, no prior load",
      .asm_text = "clrex; strexh r4,r1,[r0]",
      .proof = ExclProof::kMeasured,
@@ -1418,6 +1453,59 @@ constexpr ExclRow kExclRows[] = {
      .unmapped_target = true,
      .want_r0 = 1,
      .want_r4 = 1},
+    {// The discriminator for #35, which its two remaining explanations need different fixes for. Tier J
+     // ends this pair with `r3` holding what the address contains *after* the store, while `Rd` and
+     // memory are right on both tiers. Either (A) the exclusive read is performed late — at or after the
+     // store, an ordering problem in the exclusive path — or (B) it reads on time and the value is
+     // clobbered on its way into the guest register. The ordinary `ldrh` into `r5`, same halfword,
+     // different register, splits them: Tier J green on `r5` and red on `r3` means (A); both red with
+     // `0xBEEF` means one late read feeding both, so (B); both green means #35 is no longer this bug.
+     // Every expectation below is Tier I's answer, which the measured rows pin to hardware — nothing of
+     // this sequence was measured on a device.
+     .name = "plain ldrh inside, #35",
+     .asm_text = "ldrexh r3,[r0]; ldrh r5,[r0]; strexh r2,r1,[r0]; mov r0,r2; bx lr",
+     .proof = ExclProof::kRule,
+     .source = "tier-vs-tier only, no hardware claim: Rd of an exclusive load is the value it read",
+     .code = kLdrhInsidePair,
+     .seed_lo = 0x2222'1111u,
+     .want_r0 = 0,
+     .want_r3 = 0x1111,  // wrong on Tier J today — that failure is the whole point of the row
+     .want_r5 = 0x1111,  // the control: an ordinary load of the same halfword at the same moment
+     .want_mem = 0x2222'BEEFull,
+     .mem_mask = 0xFFFF'FFFF'FFFF'FFFFull},
+    {// The scope test for #35. The row above shows Tier J getting *both* the exclusive load's and an
+     // ordinary load's destination register wrong, which is not an exclusive-shaped failure at all: if
+     // this sequence — two `ldrh`s and a `strh`, no `ldrex`, no `strex`, no monitor involved — is also red
+     // on Tier J, then what the exclusive work uncovered is that a value produced by one memory callback
+     // can be overwritten by a later one in the same block, and that reaches ordinary guest code. If it
+     // is green, #35 is confined to the exclusive path after all.
+     //
+     // Nothing here is a hardware claim: the sequence was never run on a device, and every expectation is
+     // the architecturally obvious one (a load returns what was there when it executed).
+     .name = "two loads, one store, no exclusive",
+     .asm_text = "ldrh r3,[r0]; ldrh r5,[r0]; movs r1,#0x77; strh r1,[r0]; bx lr",
+     .proof = ExclProof::kRule,
+     .source = "scope probe: is #35 about exclusives, or about Tier J's memory callbacks generally",
+     .code = kTwoLoadsOneStoreNoExclusive,
+     .seed_lo = 0x2222'1111u,
+     .want_r0 = 0x5a,  // the blob ran to its last instruction, so `r3` was not left stale by an early stop
+     .want_r3 = 0x1111,
+     .want_r5 = 0x1111,
+     .want_mem = 0x2222'0077ull,
+     .mem_mask = 0xFFFF'FFFF'FFFF'FFFFull},
+    {// The partition for the row above: one load instead of two, nothing else changed. Green here and
+     // red there means the two loads' results are sharing a host register; red both ways means a
+     // callback load's value is simply taken after the store that overwrites its address.
+     .name = "one load, one store, no exclusive",
+     .asm_text = "ldrh r3,[r0]; movs r1,#0x77; strh r1,[r0]; movs r0,#0x5a; bx lr",
+     .proof = ExclProof::kRule,
+     .source = "scope probe, second half: does #35 need two loads, or does one suffice?",
+     .code = kOneLoadOneStoreNoExclusive,
+     .seed_lo = 0x2222'1111u,
+     .want_r0 = 0x5a,
+     .want_r3 = 0x1111,
+     .want_mem = 0x2222'0077ull,
+     .mem_mask = 0xFFFF'FFFF'FFFF'FFFFull},
 };
 
 void exclusive_access_rows_match_hardware_rule_and_each_other() {
@@ -1491,25 +1579,41 @@ void exclusive_access_rows_match_hardware_rule_and_each_other() {
       CHECK_CTX(!rig.mem->IsMapped(kExclUnmapped),
                 "the target of \"" + std::string{row.name} + "\" is mapped after all, so the row is no "
                 "longer an unmapped access");
-    } else {
+    }
+    // Seeded immediately before *each* tier, not once for both. Every one of these rows writes to the
+    // very slot it loads from, so a single seeding would let Tier J start from the memory Tier I left
+    // behind, and its loads would faithfully return the other tier's answer. That is not a comparison;
+    // and it did not look like a mistake either — it looked like Tier J reading late, which is the
+    // wrong conclusion this lane was ready to file as an engine bug.
+    const auto seed_slot = [&]() -> bool {
+      if (row.unmapped_target) return true;
       const std::uint64_t seed =
           (static_cast<std::uint64_t>(row.seed_hi) << 32) | static_cast<std::uint64_t>(row.seed_lo);
-      CHECK_CTX(rig.mem->Write(data, &seed, 8), "could not seed " + std::string{row.name});
-    }
+      return rig.mem->Write(data, &seed, 8);
+    };
+    CHECK_CTX(seed_slot(), "could not seed " + std::string{row.name} + " before Tier I");
 
     // `EntryState` seeds r2/r3 because the fixture's probes are JNI methods; these are freestanding code
     // with no `JNIEnv` in sight, so the address and the value go into the registers the code reads.
     exec::MachineState si = EntryState(cursor, 0, 0, /*thumb=*/true);
     si.r[0] = data;  ///< the address the exclusive pair reserves — the code's only handle on its data
     si.r[1] = kExclStore;
+    // Copied here, before either tier runs: `Run` advances the state it is given, so a copy made after
+    // Tier I would start Tier J at Tier I's *ending* PC — where it executes one step, returns, and
+    // reports a spotless agreement about nothing.
     exec::MachineState sj = si;
     const exec::RunResult ri = rig.interp->Run(si, kExclBudget);
-    const exec::RunResult rj = rig.jit->Run(sj, kExclBudget);
-
     std::uint64_t mem_i = 0, mem_j = 0;
     if (!row.unmapped_target) {
-      CHECK_CTX(rig.mem->Read(data, &mem_i, 8) && rig.mem->Read(data, &mem_j, 8),
-                std::string{row.name} + ": the row's data could not be read back");
+      CHECK_CTX(rig.mem->Read(data, &mem_i, 8),
+                std::string{row.name} + ": Tier I's data could not be read back");
+    }
+
+    CHECK_CTX(seed_slot(), "could not re-seed " + std::string{row.name} + " before Tier J");
+    const exec::RunResult rj = rig.jit->Run(sj, kExclBudget);
+    if (!row.unmapped_target) {
+      CHECK_CTX(rig.mem->Read(data, &mem_j, 8),
+                std::string{row.name} + ": Tier J's data could not be read back");
     }
 
     int checked = 0;

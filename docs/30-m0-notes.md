@@ -2740,35 +2740,55 @@ only through Thumb, so the ARM-state `LDAEX` remains unexecuted code), and no **
 row — the compare against `expected` is exactly what a race would rely on, and one executor cannot
 produce a race, so that claim is argued from the code rather than tested.
 
-**And one real Tier J bug, found by the lane rather than by reasoning.** The lane is **419 checks,
-12 failures**, identically on both devices, and all 12 are six rows where `Rd` and memory agree across
-tiers but the *destination register of the exclusive load* does not: Tier I leaves the value the load
-saw, Tier J leaves the value memory holds **after** the store.
+**The lane found a bug in itself, and the wrong bug first.** The first version of this lane came back
+**419 checks, 12 failures** on both devices, all twelve in one consistent shape: `Rd` and memory agreed
+across tiers, but the exclusive load's *destination register* did not — Tier I held the value the load
+saw, Tier J held what the address contained after the store. That was written up here, in the commit
+message, and in task #35 as a Tier J code-generation defect. **It was no such thing: the harness seeded
+each row's data slot once, ran Tier I — whose entire job in these rows is to store into that slot — and
+then ran Tier J against the memory Tier I had left behind.** Tier J was returning the other tier's
+input, correctly. With the slot seeded immediately before each tier, the lane is **478 checks, 0
+failures, green on both devices**.
 
-| row | Tier I `r3` | Tier J `r3` | what memory holds at the end |
-|---|---|---|---|
-| f1 `ldrexh r3,[r0]`; `strexh r2,r1,[r0]` | `1111` | `beef` | `beef` |
-| f3 `ldrexh r3`; plain `strh #0x99`; `clrex`; `strexh` (fails) | `1111` | `99` | `99` |
-| f6 `ldaexh r3`, same shape as f1 | `1111` | `beef` | `beef` |
-| f8 byte, f9 double (`r4`), f10 word | correct | post-store value | — |
-| f11 `ldaex r3,[r0]`; `strex r2,r3,[r0]` | `11112222` | `11112222` | unchanged |
+What is worth keeping from the wrong reading is *why it was believable*, since that is the failure mode
+to watch for:
 
-f3 is the row that decides the mechanism: its exclusive store *fails*, so the value Tier J shows in `r3`
-is not the store's source register (`r1 = 0xbeef`) but the plain store's (`0x99`) — i.e. **whatever the
-address contained when the pair finished**. And f11, the one row that stores exactly what it loaded, is
-the one row that passes: under "the read happens late" and "the read happens correctly" it is impossible
-to distinguish those two, which is why its passing is evidence about the mechanism and not a green row.
-It is not specific to the new `LDAEX` rows — plain `LDREX`/`LDREXH`/`LDREXB`/`LDREXD` fail identically,
-so this is Dynarmic's Thumb exclusive path, which nothing in this repo had ever executed.
+- **The mechanism fit every row it was tested against, including the negative evidence.** f3's exclusive
+  store *fails*, so the value in `r3` could not be the store's source register and had to be "whatever
+  the address held last" — which is true, and true for the stale-input reason too. f11 stores exactly
+  what it loads, so it is the one row where "late" and "correct" are indistinguishable, and it was the
+  one row that passed. A shared input and a late read produce **identical numbers on every row in the
+  table**, because the tier that runs second always sees the first tier's output as its input.
+- **The one experiment run to discriminate it was not discriminating.** `RB_JIT_NOOPT=1` reproduced the
+  lane byte for byte and was read as "not the optimizer, therefore the code generator". A stale input is
+  unaffected by optimization flags too. The experiment could not have come out differently, which is the
+  definition of a probe that cannot fail.
+- **The control row that existed to widen the scope is what caught it.** Adding `ldrh r3,[r0]; ldrh
+  r5,[r0]; … strh` — a row with **no exclusive instruction in it** — was meant to ask "is this about
+  exclusives or about Tier J's callback loads generally?". It answered "neither", by showing an ordinary
+  load misbehaving identically, which should have been the loudest possible clue that the shared
+  assumption was the harness and not the engine. When a bug's fingerprint spreads to code paths that
+  have been green for weeks, check what the *test* feeds both paths before believing the engine broke
+  both of them.
+- Two smaller artifacts from the same hour, both the same species: moving the re-seed *after* `sj = si`
+  made Tier J start from Tier I's *ending PC*, so it executed one step, "returned", and reported a
+  spotless agreement about nothing — a green that was emptier than the red.
 
-**Ruled out by measurement, not by argument:** Dynarmic's IR optimizations. `conf.optimizations` set to
-zero through a diagnostic switch (`RB_JIT_NOOPT`, `core/exec/jit.cpp`) reproduces the lane byte for byte
-— same 12 failures, same per-row `Rd`, same memory, same step counts. So the value is not being
-reordered by an optimization pass; it is being produced late (or clobbered) by the code generator or by
-the way its result reaches the guest register file. **This is #35, and it is open.** What is *not* in
-doubt: the exclusive pair now decodes, executes, computes correct `Rd`, writes correct memory on both
-tiers, and the null-monitor crash is gone — which is why this increment is committed with the lane red
-rather than held back.
+**The durable rule, for every two-tier row in this project:** each tier gets its own initial state — its
+own copy of the entry `MachineState` **and** its own re-seeded memory — or the comparison is not between
+tiers, it is between one tier and the other's output. `#35` is closed as a probe artifact, not an engine
+defect; `RB_JIT_NOOPT` stays in `core/exec/jit.cpp` as the diagnostic it was, now that its answer means
+something.
+
+What *is* established about the engine, and what the 478 green checks now cover: the exclusive pair
+decodes in Thumb at all four widths, executes on both tiers, computes `Rd` correctly, writes the right
+bytes, honors `CLREX`, refuses a store with no reservation, and the null-monitor crash is gone. The
+16 rows break down as 8 measured on both devices, 2 where RetroBug deliberately follows the device that
+fails, 1 deliberately stricter than either, and 5 asserting RetroBug's own rule. Named gaps: no
+**ARM-state** exclusive rows (the path whose null deref this step fixed is exercised only through Thumb,
+so ARM-state `LDAEX` remains unexecuted code), and no **two-core contention** row — the compare against
+`expected` is what a race would rely on, and one executor cannot produce a race, so that claim is argued
+from code rather than tested.
 
 
 ## Standing environment facts (so they are not re-derived)
