@@ -86,12 +86,28 @@ A second local asset the inventory did not use: **`$NDK/meta/system_libs.json`**
 `armeabi-v7a: { "deprecated": false, "min_os_version": 21 }` [1L].
 
 **ISA mix, measured from symbol bit 0** (`llvm-nm --defined-only --format=posix`, odd address ⇒ Thumb):
-`libm.a` 863 ARM / 13 Thumb, `libc.a` 5 402 / 302, `libz.a` 249 / 15. [1L] So bionic's own code is **overwhelmingly
+`libm.a` 863 ARM / 13 Thumb, `libc.a` 5 402 / 302, `libz.a` 249 / 15. [1L — **but the method is wrong;
+see the correction below**] So bionic's own code is **overwhelmingly
 ARM-mode (A32)**, unlike NDK-compiled app code which defaults to Thumb-2. Corollary, and it is a load-bearing one
 for U-8: *the A32 decoder and ARM↔Thumb interworking (`bx`, `blx`) are not optional for M1* — a guest's own
 `libc.so` is mostly A32 even if the app's `.so` is all Thumb. This is independent corroboration of the 8 387
 IT-block instructions [`docs/32-isa-coverage.md:26`](32-isa-coverage.md) measured from real bionic/libm/libc++/zlib
 ARMv7 code.
+
+> **Correction, 2026-09-20, from an independent review that re-ran it: the numbers above are not
+> measurements of what they claim.** `llvm-nm` **masks bit 0 for functions**, so a symbol-bit-0 survey of
+> its output can never count a Thumb function, and the rows it produces as "Thumb" are `.L.str` data
+> labels rather than code. A `readelf` survey of the same archives gives **`libm.a` 304 ARM / 60 Thumb**
+> and **`libz.a` 131 / 131** — the second of which flatly contradicts this section's "overwhelmingly ARM"
+> for libz. It matters because the numbers propagated: they were repeated in RetroBug's own commit
+> `ba40a52` before anyone re-derived them, which is the failure this project keeps writing rules about.
+>
+> **What survives is the conclusion the paragraph was used for**, now on a sounder basis: the functions
+> M1's probe actually imports (`sin`, `cos`, `sqrt`) are ARM-state in the built `libm.so`, and
+> `core/tests/guest_apk_test.cpp` prints that count from the loaded image rather than from a survey
+> (28 of 315 exported functions are Thumb). ARM↔Thumb interworking is still not optional for M1 — it is
+> now evidenced by direct calls that fail with an ISA mismatch rather than by a bit-0 census.
+
 
 ### 1.2 The experiment: a static link, then a shared guest library
 
