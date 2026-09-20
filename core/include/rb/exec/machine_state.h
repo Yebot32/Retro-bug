@@ -121,6 +121,10 @@ enum class StopReason {
   Unimplemented, ///< an IR op with no Tier I semantics. Never silent: `detail` names the op.
   Fault,         ///< unmapped/permission failure the guest would have seen.
   Internal,      ///< RetroBug's own bug — a state we assert cannot happen happened.
+  /// The guest asked to end the instance (`exit_group`) and the monitor agreed. Last rather than
+  /// inserted, because `StopReason`'s numeric value appears in differential logs and renumbering it
+  /// would make old logs and new code disagree about what `reason 6` meant.
+  Exited,
 };
 
 struct RunResult {

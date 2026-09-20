@@ -15,6 +15,7 @@
 #include "rb/exec/interp.h"
 #include "rb/loader/guest_elf.h"
 #include "rb/mem/guest_memory.h"
+#include "rb/syscall/monitor.h"
 
 #include <unistd.h>
 
@@ -38,6 +39,7 @@ namespace abi = rb::abi;
 namespace exec = rb::exec;
 namespace isa = rb::isa;
 namespace loader = rb::loader;
+namespace sc = rb::syscall;
 
 int failures = 0;
 int checks = 0;
@@ -416,6 +418,91 @@ void the_bridge_leaves_the_guest_stack_where_it_found_it() {
             "SP left at " + Hex(rig.abi_ctx->state().r[13]) + " by a completed call");
 }
 
+/// The loop from the other side: a guest that makes a syscall during a JNI call, with the monitor behind
+/// it. The value asserted is 4243 rather than 4242 because the guest adds one to whatever came back — so
+/// the test proves the answer reached the guest's own arithmetic, not merely that the host noticed the
+/// SVC — and the no-monitor case is first, because a refused syscall leaves the state mid-call and the
+/// rest of the case wants a clean one.
+void a_guest_syscall_in_a_jni_call_is_answered() {
+  Rig rig = build(true);
+  if (!rig.ok) return;
+  const auto probe = rig.mod->FindExport("Java_com_retrobug_fixture_MainActivity_syscall_add");
+  if (!probe) {
+    ++checks;
+    fail("the fixture has no syscall_add", __LINE__);
+    return;
+  }
+  const auto args = [&] {
+    return std::vector<abi::Value32>{abi::Value32::Ptr(0), abi::Value32::Ptr(0),
+                                     abi::Value32::S32(4242)};
+  };
+
+  {
+    exec::RunResult out{};
+    rig.abi_ctx->CallGuest(probe->addr, args(), abi::Shorty::For("IILLI"), 100000, &out);
+    CHECK_CTX(out.reason == exec::StopReason::Fault,
+              "without a monitor the call must not look successful: reason " +
+                  std::to_string(static_cast<int>(out.reason)) + " " + out.detail);
+    CHECK_CTX(out.detail.find("no syscall monitor") != std::string::npos, out.detail);
+  }
+
+  sc::Monitor mon;
+  rig.abi_ctx->set_monitor(&mon);
+  {
+    // Still no ids: the monitor refuses, and the guest sees the refusal as a value rather than as a
+    // crash — which is the difference between an unimplemented syscall and a broken emulator.
+    exec::RunResult out{};
+    const auto refused = rig.abi_ctx->CallGuest(probe->addr, args(), abi::Shorty::For("IILLI"), 100000,
+                                                &out);
+    CHECK_CTX(out.reason == exec::StopReason::Returned, out.detail);
+    CHECK_CTX(refused.i() == -37, "getpid refused as -38, then the guest's +1: got " +
+                                      std::to_string(refused.i()));
+  }
+  mon.set_ids(4242, 4243);
+  {
+    exec::RunResult out{};
+    const auto ret = rig.abi_ctx->CallGuest(probe->addr, args(), abi::Shorty::For("IILLI"), 100000,
+                                            &out);
+    CHECK_CTX(out.reason == exec::StopReason::Returned, out.detail);
+    CHECK_CTX(ret.i() == 4243, "the monitor's getpid never reached the guest: " +
+                                   std::to_string(ret.i()));
+    std::fprintf(stderr, "[abi] getpid through the monitor: guest saw %d (%s)\n", ret.i(),
+                 mon.TallyText().c_str());
+  }
+  CHECK_CTX(mon.tally().size() == 1u && mon.TallyText() == "getpid x2", mon.TallyText());
+}
+
+/// `exit_group` ends the instance, so the bridge has to stop rather than resume: a guest that asked to
+/// die and then keeps executing is the failure mode, and it is invisible to any assertion about the
+/// return value because there isn't one.
+void exit_group_stops_the_call() {
+  Rig rig = build(true);
+  if (!rig.ok) return;
+  const auto probe = rig.mod->FindExport("Java_com_retrobug_fixture_MainActivity_svc_probe");
+  if (!probe) {
+    ++checks;
+    fail("the fixture has no svc_probe", __LINE__);
+    return;
+  }
+  sc::Monitor mon;
+  rig.abi_ctx->set_monitor(&mon);
+  exec::RunResult out{};
+  // r0 is the exit status, so the first hidden argument carries 7 into it: what a JNI caller would put
+  // in `env` is here what `exit_group` reads.
+  rig.abi_ctx->CallGuest(probe->addr,
+                         {abi::Value32::Ptr(7), abi::Value32::Ptr(0), abi::Value32::S32(41)},
+                         abi::Shorty::For("IILLI"), 100000, &out);
+  CHECK_CTX(out.reason == exec::StopReason::Exited,
+            "reason " + std::to_string(static_cast<int>(out.reason)) + " " + out.detail);
+  CHECK_CTX(rig.abi_ctx->exit_status() == 7, std::to_string(rig.abi_ctx->exit_status()));
+  CHECK_CTX(out.detail.find("exit_group") != std::string::npos, out.detail);
+  // Not asserted: the state. A nested call restores the *outer* state on the way out — the caller's
+  // registers are live, so the bridge puts them back — and `abi_ctx->state().r[0]` here is the outer r0,
+  // not the guest's at the moment it stopped. Reaching for it was a wrong assertion rather than a wrong
+  // emulator, and the two facts above (reason and status) are what the bridge actually promises.
+  CHECK_CTX(mon.tally().size() == 1u && mon.TallyText() == "exit_group x1", mon.TallyText());
+}
+
 }  // namespace
 
 int main() {
@@ -431,6 +518,8 @@ int main() {
   a_slot_range_misalignment_is_not_a_host_call();
   guest_functions_called_through_the_bridge_match_hardware();
   the_bridge_leaves_the_guest_stack_where_it_found_it();
+  a_guest_syscall_in_a_jni_call_is_answered();
+  exit_group_stops_the_call();
 
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;

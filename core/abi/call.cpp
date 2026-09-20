@@ -2,13 +2,16 @@
  * RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
  *
  * C08 `rb::abi` — AAPCS32 argument placement, return extraction, and the run/resume loop around host
- * calls. See rb/abi/abi.h for the layering and for why each rule below is here rather than assumed.
+ * calls *and* guest syscalls. See rb/abi/abi.h for the layering and for why each rule below is here
+ * rather than assumed.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "rb/abi/abi.h"
 
 #include <utility>
+
+#include "rb/syscall/monitor.h"
 
 namespace rb::abi {
 
@@ -272,12 +275,44 @@ Ret32 AbiContext::CallGuest(GuestAddr fn, const Args32& args, const Shorty& shor
   }
 
   exec::RunResult run{};
+  unsigned syscalls = 0;
   for (;;) {
     run = executor().Run(state_, remaining);
     if (run.instructions_executed >= remaining) {
       remaining = 0;
     } else {
       remaining -= run.instructions_executed;
+    }
+    if (run.reason == exec::StopReason::Syscall) {
+      // The tier stops with PC already past the instruction and the number in `svc_number`, which is the
+      // whole content of the two-tier agreement checked in `exec_tier_diff_test.cpp`: from here the
+      // monitor's work is the same regardless of which tier got it here.
+      if (monitor_ == nullptr) {
+        run.reason = exec::StopReason::Fault;
+        run.detail = "guest " + run.detail +
+                     " with no syscall monitor attached; continuing would hand the guest a return value "
+                     "nobody produced";
+        break;
+      }
+      if (remaining == 0) {
+        run.reason = exec::StopReason::Budget;
+        run.detail = "call budget exhausted inside a syscall";
+        break;
+      }
+      if (++syscalls > kMaxSyscallsPerCall) {
+        run.reason = exec::StopReason::Budget;
+        run.detail = "more than " + std::to_string(kMaxSyscallsPerCall) +
+                     " syscalls in one call, which is a loop rather than a program";
+        break;
+      }
+      const syscall::Outcome o = monitor_->Handle(state_, run.svc_number);
+      if (o.verdict == syscall::Verdict::kExit) {
+        run.reason = exec::StopReason::Exited;
+        run.detail = o.detail;
+        exit_status_ = o.r0;
+        break;
+      }
+      continue;
     }
     if (run.reason != exec::StopReason::HostCall) break;
     if (remaining == 0) {

@@ -306,6 +306,12 @@ re-discovered:
 - **`__ARM_NR_set_tls`/`get_tls` work now**, through `MachineState::tp`. That is the syscall half of TLS;
   the `mrc` read of `tpidrurw` still needs the `Coprocessor` hook (`30` §Step 9), and guests from different
   toolchain generations use one path or the other, so both have to exist before "TLS works" is true.
+- **The loop exists** (`30` §Step 11d): `AbiContext::CallGuest` services a syscall the way it services a
+  host call, `exit_group` ends the call with `StopReason::Exited` (appended to that enum on purpose: its
+  numbers appear in differential logs), and a guest with no monitor attached fails rather than continuing
+  past an unanswered SVC. `arm_cacheflush` reaching the tier's `Invalidate` is now proven with the
+  *guest's* instruction — including that a flush of an unrelated address leaves the cache stale, which is
+  the assertion that makes the range meaningful instead of decorative.
 
 ### C08 `rb::abi`
 ```cpp
@@ -687,10 +693,12 @@ Progress and the findings that change this plan are tracked in
    `MissingRequired().empty()` rather than a review note. Populating it is M1's launch-path work, listed
    there rather than assumed here.
 10. `rb::syscall` (C07) — first slice **done** (`30` §Step 11): the SVC channel, identical in both tiers and
-    proved with guest arithmetic rather than a log line, and a monitor whose forwarding allowlist is empty
-    by design and echoes itself through C17. Its syscall numbers, errno values and return convention are
-    measured on hardware per ABI (`tools/syscall_abi_probe.sh`), which corrected two things this plan had
-    stated as fact — see C07's "As built" above. Signals, threads and forwarding are not.
+    proved with guest arithmetic rather than a log line; a monitor whose forwarding allowlist is empty by
+    design and echoes itself through C17; and the loop that services a syscall inside a JNI call, with
+    `exit_group` ending it and `arm_cacheflush` reaching the tier that owns the cache. Its numbers, errno
+    values and return convention are measured on hardware per ABI (`tools/syscall_abi_probe.sh`), which
+    corrected two things this plan had stated as fact — see C07's "As built" above. Signals, threads and
+    forwarding are not.
 
 Sequencing constraint the owner should know before M1: **M1's end-to-end acceptance step cannot be verified on this
 machine at all** — it needs a physical 64-bit-only arm64 phone. Everything in §9 and most of M1's code can be written

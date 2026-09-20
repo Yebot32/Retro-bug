@@ -50,7 +50,7 @@ target_compile_definitions(rb_abi_call_tests PRIVATE RB_FIXTURE_PATH="/data/loca
 # The back-end equivalence test (docs/20 §C02): one fixture, two tiers, every field of MachineState
 # compared, and both compared to the hardware oracle. It is the M0 exit test's second half.
 add_executable(rb_exec_tier_diff_tests exec_tier_diff_test.cpp)
-target_link_libraries(rb_exec_tier_diff_tests PRIVATE rb_exec rb_loader)
+target_link_libraries(rb_exec_tier_diff_tests PRIVATE rb_exec rb_loader rb_abi rb_syscall)
 target_compile_definitions(rb_exec_tier_diff_tests PRIVATE RB_FIXTURE_PATH="/data/local/tmp/librb_fixture.so")
 
 # C17's recorder is pure string work, so it needs neither the fixture nor a guest program — and that is

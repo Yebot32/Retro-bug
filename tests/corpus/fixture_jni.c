@@ -207,3 +207,49 @@ JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_svc_probe(JNIEnv* 
       "bx     lr\n" ::: "r0", "r7", "cc");
   __builtin_unreachable();
 }
+
+/*
+ * Two more probes that a *monitor* answers, for the executor→C07 loop.
+ *
+ * `syscall_add` asks for getpid and returns one more than whatever came back, so the value the host
+ * monitor supplied is visible in the guest's own arithmetic: 4242 in, 4243 out, or nothing matches. It
+ * also proves the guest continued after the SVC a second time, from a different call site than
+ * `svc_probe`.
+ *
+ * `flush_probe` is AD-7 told the honest way. The guest flushes `[addr, addr+16)` with
+ * `__ARM_NR_cacheflush` (0xf0002 — the number `docs/20` §C07 names, and the one the measured 32-bit
+ * table gives) and then returns `b+1`. The test that uses it patches a byte of guest code from the host
+ * first, because a guest cannot write to its own executing page — that refusal is the design — so this
+ * is the guest's half of self-modifying code, reached through its own syscall rather than through a host
+ * call that happens to invalidate a cache.
+ */
+JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_syscall_add(JNIEnv* env, jclass clazz,
+                                                                         jint a) {
+  (void)env; (void)clazz; (void)a;
+  __asm__ volatile(
+      "mov    r0, r2\n"
+      "mov    r7, #20\n"  // __NR_getpid on ARM EABI, measured
+      "svc    #0\n"
+      "adds   r0, r0, #1\n"
+      "bx     lr\n" ::: "r0", "r7", "cc");
+  __builtin_unreachable();
+}
+
+JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_flush_probe(JNIEnv* env, jclass clazz,
+                                                                         jint addr, jint b) {
+  (void)env; (void)clazz; (void)addr; (void)b;
+  __asm__ volatile(
+      "mov    r0, r2\n"
+      "mov    r1, r2\n"
+      "adds   r1, #16\n"
+      "movw   r7, #0x0002\n"
+      "movt   r7, #0x000f\n"  // __ARM_NR_cacheflush = 0xf0002. `movt` writes the top *halfword*, so
+                              // #0xf000 here yields 0xf0000002, which the kernel's r7 masking (and
+                              // `Frame::Capture`'s copy of it) folds down to 2 — a wrong number that
+                              // reaches the monitor looking plausible. Found by both tiers agreeing.
+      "svc    #0\n"
+      "movs   r0, #0\n"
+      "adds   r0, r3, #1\n"
+      "bx     lr\n" ::: "r0", "r1", "r7", "cc");
+  __builtin_unreachable();
+}

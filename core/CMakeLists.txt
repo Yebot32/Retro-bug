@@ -49,10 +49,11 @@ target_link_libraries(rb_exec PUBLIC rb_isa rb_mem)
 
 # rb::abi (C08): the call bridge. It consumes an executor rather than knowing which tier it is — the
 # marshalling in abi/call.cpp is register arithmetic over MachineState, and the only executor coupling
-# is Run/resume around a host call, so Tier J inherits the bridge unchanged (docs/20 §C08).
+# is Run/resume around a host call or a guest syscall, so Tier J inherits the bridge unchanged
+# (docs/20 §C08).
 add_library(rb_abi STATIC abi/call.cpp abi/jni_env.cpp)
 target_compile_features(rb_abi PUBLIC cxx_std_20)
-target_link_libraries(rb_abi PUBLIC rb_exec rb_mem)
+target_link_libraries(rb_abi PUBLIC rb_exec rb_mem rb_syscall)
 
 # rb::diag (C17) has no engine dependency and must not gain one: it is the component that reports on the
 # others, so a report that could not be produced because something else failed to build would be the

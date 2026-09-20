@@ -1297,16 +1297,52 @@ allowlist and no handler yet`), because a bare ENOSYS in a support report descri
 Unknown numbers answer `-ENOSYS`, which is also what the measured device kernel answers for an r7 above its
 table, so at least the shape of a refusal matches silicon. `[1A]`
 
+### 11d — the loop, and a fixture bug both tiers agreed about
+
+`AbiContext::CallGuest` now services `StopReason::Syscall` the way it already services `HostCall`: capture,
+dispatch, resume — with `Verdict::kExit` ending the call in a new `StopReason::Exited` (appended to the
+enum, because its numeric value appears in differential logs and renumbering it would make old logs and
+new code disagree about what `reason 6` meant), a missing monitor ending it in a `Fault` that says so, and
+`kMaxSyscallsPerCall` bounding a guest that spins on a refused call.
+
+Two new cases, and the interesting one is the failure that came first. `syscall_add` asks for `getpid` and
+returns one more than the answer, so the value asserted (4243 from a configured 4242) can only be reached
+if the monitor's return actually landed in the guest's own arithmetic; a monitor that never ran, or ran and
+whose answer was dropped, produces something else. `exit_group` ends the call.
+
+`flush_probe` is AD-7 told from the guest's side, and it was wrong before it was right. The first version
+of the case failed with both tiers handing the monitor **the same wrong number** (`nr:0x2` where
+`__ARM_NR_cacheflush` is 0xf0002) — and two tiers agreeing is the signal that the bug is in the test, not
+in a back end. It was in the fixture: `movt` writes the top *halfword*, so `movt r7, #0xf000` after
+`movw r7, #2` builds 0xf0000002, which the kernel's r7 masking — faithfully reproduced in
+`Frame::Capture` — folds down to 2. The same masking that makes a malformed guest number harmless made a
+malformed *test* look like an emulator bug. `[1L]`
+
+With that fixed, the case is the strongest self-modifying-code statement available without a guest that
+writes its own text (it cannot: the page is not writable, which is the design): the host patches a byte
+through the same `Protect` transition a guest `mprotect` takes, Tier J answers the *stale* value, a guest
+flush of an **unrelated** range leaves it stale — which is what proves the range travels rather than "any
+cacheflush clears the world" — and then the guest's own `__ARM_NR_cacheflush` over the patched address
+makes Tier J answer the number hardware measured for the other probe, identical to Tier I:
+
+```
+[diff] guest-issued cacheflush: stale=1008 then I=42 J=42 want=42 (arm_cacheflush x3)
+```
+
+Twelve lanes, 1,022 engine checks, 0 failures on the Tab S9; dynarmic's 200,561 assertions unchanged.
+
 ### What this does not do yet
 
-* Nothing calls `Monitor::Handle` — the executor→monitor loop is the next slice, and until then the channel
-  is tested and the monitor is tested and the two are not connected.
-* `docs/20` §C07's review focus still has no answer for `execve`/`fork`: what `docs/10` §10.2 actually lists
-  for them is a **seccomp denial**, which is `SIGSYS`, not an errno — so "refused with the same errno a real
-  32-bit Android would give" may be a question with no errno as its answer. Needs the same treatment as
-  above: a handler-equipped probe that runs them and reports what comes back. `[UNVERIFIED]`
+* `/proc/self`-shaped identities, `clock_gettime`, and anything with an errno that is *policy* rather
+  than a gap — the monitor answers `ENOSYS` for everything it has no handler for, which is a decision the
+  launcher can revisit per app but is not one this component should make up.
+* `docs/20` §C07's review focus still has no answer for `execve`/`fork`: what `docs/10` §10.2 actually
+  lists for them is a **seccomp denial**, which is `SIGSYS`, not an errno — so "refused with the same errno
+  a real 32-bit Android would give" may be a question with no errno as its answer. Needs the same
+  treatment as above: a handler-equipped probe that runs them and reports what comes back. `[UNVERIFIED]`
 * Signals, `clone`/`futex`, and the 32-bit `ucontext` layout: untouched.
-* Forwarding rows, and with them the first thing that must not be able to escape C10's resolver.
+* Forwarding rows, and with them the first thing that must not be able to escape C10's resolver. One
+  monitor per guest instance, which is already how `Monitor` is written.
 
 ## Standing environment facts (so they are not re-derived)
 

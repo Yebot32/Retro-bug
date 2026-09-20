@@ -35,6 +35,12 @@
 #include "rb/exec/machine_state.h"
 #include "rb/mem/guest_memory.h"
 
+namespace rb {
+namespace syscall {
+class Monitor;  ///< forward-declared at rb::syscall scope so this header stays cheap to include
+}
+}  // namespace rb
+
 namespace rb::abi {
 
 using exec::GuestAddr;
@@ -192,6 +198,11 @@ class AbiContext : public exec::HostDispatch {
   /// A nesting level descends by this much, so the mapped stack bounds how deep a guest may call
   /// back into the host — which is a limit to state, not to discover at runtime.
   static constexpr unsigned kCallFrameBytes = 8u << 10;
+  /// How many syscalls one `CallGuest` may service before the loop is treated as stuck. A number rather
+  /// than an unbounded loop because a guest spinning on a refused call would otherwise spin the host
+  /// forever inside one JNI method, and the failure that produces is a hung UI, not an error message.
+  /// Real apps make thousands of syscalls per *launch*; per call, this is generous.
+  static constexpr unsigned kMaxSyscallsPerCall = 100'000u;
 
   /// No executor at construction, deliberately: the bridge *is* the dispatch table the executor has to
   /// consult, so the two reference each other. Taking the executor later keeps that a one-way
@@ -200,6 +211,16 @@ class AbiContext : public exec::HostDispatch {
 
   void set_executor(exec::Executor& executor) { executor_ = &executor; }
   [[nodiscard]] exec::Executor& executor() const { return *executor_; }
+
+  /// The monitor an SVC reaches. Optional in the type and not optional in a real launch: without one, a
+  /// guest syscall stops the call with a `Fault` that says so, because silently continuing past an SVC
+  /// the host never answered is the same silent-ignore mistake in a place where the guest is now holding
+  /// a return value that was never produced.
+  void set_monitor(syscall::Monitor* monitor) { monitor_ = monitor; }
+  [[nodiscard]] syscall::Monitor* monitor() const { return monitor_; }
+
+  /// Set when a call ended in `StopReason::Exited`; the status the guest passed to `exit_group`.
+  [[nodiscard]] std::int32_t exit_status() const { return exit_status_; }
 
   /// Makes host function `slot` callable by the guest. Re-binding replaces, which is what lets a
   /// profile override a default rather than needing a second table.
@@ -235,6 +256,8 @@ class AbiContext : public exec::HostDispatch {
  private:
   mem::GuestMemory& memory_;
   exec::Executor* executor_ = nullptr;
+  syscall::Monitor* monitor_ = nullptr;
+  std::int32_t exit_status_ = 0;
   std::unordered_map<std::uint32_t, HostFn> bound_;
   MachineState state_{};
   GuestAddr slot_base_;

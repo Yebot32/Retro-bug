@@ -16,11 +16,13 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+#include "rb/abi/abi.h"
 #include "rb/exec/interp.h"
 #include "rb/exec/jit.h"
 #include "rb/exec/machine_state.h"
 #include "rb/loader/guest_elf.h"
 #include "rb/mem/guest_memory.h"
+#include "rb/syscall/monitor.h"
 
 #include <unistd.h>
 
@@ -44,6 +46,8 @@ using namespace rb::mem;
 namespace exec = rb::exec;
 namespace isa = rb::isa;
 namespace loader = rb::loader;
+namespace abi = rb::abi;
+namespace sc = rb::syscall;
 
 int failures = 0;
 int checks = 0;
@@ -484,6 +488,161 @@ void both_tiers_stop_at_the_same_svc() {
                static_cast<std::int32_t>(si.r[0]), static_cast<std::int32_t>(sj.r[0]));
 }
 
+/// AD-7 told end to end, from the guest's side: it patches nothing (its code page is not writable, which
+/// is the design) but it *says* the bytes changed, with `__ARM_NR_cacheflush`, and the tier has to stop
+/// believing what it compiled for that address.
+///
+/// The host does the write here only because a guest cannot: the test's patch step is the same
+/// `Protect`→write→`Protect` a guest's `mprotect` would take, and the point of the case is what happens
+/// *after* it. Two things make this more than "call Invalidate and check": the flush range that misses
+/// the patched byte must leave Tier J stale, which is what proves the range reaches the tier rather than
+/// any cacheflush clearing the world; and the value Tier J then returns is the one hardware measured for
+/// the other probe, so a cache that was only half-invalidated could not produce it.
+void a_guest_cacheflush_reaches_the_tier_that_owns_the_cache() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  const auto patch_a = rig.mod->FindExport("Java_com_retrobug_fixture_MainActivity_patch_probe");
+  const auto patch_b = rig.mod->FindExport("Java_com_retrobug_fixture_MainActivity_patch_probe_b");
+  const auto flush = rig.mod->FindExport("Java_com_retrobug_fixture_MainActivity_flush_probe");
+  if (!patch_a || !patch_b || !flush) {
+    ++checks;
+    fail("the fixture has no patch probes or no flush probe", __LINE__);
+    return;
+  }
+
+  // The same window as the other case: the differing byte is at +8, so a window of eight would find no
+  // difference at all and the test would report "not one byte apart" — which is the right diagnosis for
+  // the wrong reason, and exactly what it was the first time this was written.
+  std::uint8_t ba[kPatchWindow] = {};
+  std::uint8_t bb[kPatchWindow] = {};
+  CHECK_CTX(rig.mem->Read(patch_a->addr, ba, sizeof ba), "cannot read patch_probe");
+  CHECK_CTX(rig.mem->Read(patch_b->addr, bb, sizeof bb), "cannot read patch_probe_b");
+  std::size_t at = kPatchWindow;
+  int diffs = 0;
+  for (std::size_t i = 0; i < sizeof ba; ++i) {
+    if (ba[i] != bb[i]) {
+      at = i;
+      ++diffs;
+    }
+  }
+  if (diffs != 1) {
+    ++checks;
+    fail("the probes are not one byte apart any more", __LINE__,
+         std::to_string(diffs) + " differences in " + std::to_string(sizeof ba) + " bytes");
+    return;
+  }
+
+  sc::Monitor mon;
+  abi::AbiContext bridge(*rig.mem, kStackTop, kReturnAddress);
+  bridge.set_executor(*rig.jit);
+  bridge.set_monitor(&mon);
+  // The ranges are recorded, not just "an invalidation happened": a flush of the wrong address also
+  // reaches the invalidator, and a test that only looked at whether it was called would pass while the
+  // guest's range was thrown away.
+  std::vector<std::pair<exec::GuestAddr, exec::GuestAddr>> flushed;
+  mon.set_invalidator([&](exec::GuestAddr lo, exec::GuestAddr hi) {
+    flushed.emplace_back(lo, hi);
+    rig.jit->Invalidate(lo, hi);
+  });
+
+  // The same guest flush driven through Tier I, into its own monitor: both have to hand the monitor the
+  // same number, because everything downstream is interpreted from it. This is what caught a wrong
+  // `movt` immediate in the fixture — both tiers reported the *same* wrong number, which is the shape
+  // that means the bug is in the test's own bytes rather than in a tier.
+  sc::Monitor mon_i;
+  abi::AbiContext bridge_i(*rig.mem, kStackTop, kReturnAddress);
+  bridge_i.set_executor(*rig.interp);
+  bridge_i.set_monitor(&mon_i);
+  mon_i.set_invalidator([&](exec::GuestAddr lo, exec::GuestAddr hi) { rig.interp->Invalidate(lo, hi); });
+  const auto flush_through = [&](abi::AbiContext& b, exec::GuestAddr at, exec::GuestAddr expect_lo,
+                                 exec::GuestAddr expect_hi) {
+    exec::RunResult out{};
+    const auto ret = b.CallGuest(flush->addr,
+                                 {abi::Value32::Ptr(0), abi::Value32::Ptr(0), abi::Value32::S32(at),
+                                  abi::Value32::S32(7)},
+                                 abi::Shorty::For("IILLII"), 100000, &out);
+    CHECK_CTX(out.reason == exec::StopReason::Returned, "flush_probe did not return: " + out.detail);
+    // b+1: the flush returned, the guest kept going, and what it saw in r0 afterwards was its own
+    // argument rather than the syscall's.
+    CHECK_CTX(ret.i() == 8, "flush_probe returned " + std::to_string(ret.i()) + ", want 8");
+    if (expect_hi != 0) {
+      CHECK_CTX(!flushed.empty() && flushed.back().first == expect_lo &&
+                    flushed.back().second == expect_hi,
+                "Tier J's last invalidation was not the range the guest asked for");
+    }
+    return out;
+  };
+  flush_through(bridge_i, patch_a->addr + 64, 0, 0);
+  flush_through(bridge, patch_a->addr + 64, patch_a->addr + 64, patch_a->addr + 80);
+  CHECK_CTX(mon_i.TallyText() == mon.TallyText(),
+            "one guest cacheflush, two tiers, two numbers: I \"" + mon_i.TallyText() + "\" J \"" +
+                mon.TallyText() + "\"");
+  CHECK_CTX(mon.TallyText() == "arm_cacheflush x1",
+            "the guest's r7 reached the monitor as " + mon.TallyText() + "; want arm_cacheflush, which "
+            "is 0xf0002 and nothing else");
+
+  const auto run_patch = [&](exec::Executor* tier, exec::MachineState& s) {
+    s = EntryState(patch_a->addr, 3, 7, true, true);
+    return tier->Run(s, 100000);
+  };
+  exec::MachineState s0{};
+  run_patch(rig.jit.get(), s0);
+  CHECK_CTX(static_cast<std::int32_t>(s0.r[0]) == kPatchA_want, "baseline changed");
+
+  std::string perr;
+  const exec::GuestAddr page = patch_a->addr & ~static_cast<exec::GuestAddr>(mem::kGuestPage - 1);
+  if (!rig.mem->Protect(page, mem::kGuestPage, kRead | kWrite, &perr) ||
+      !rig.mem->Write(patch_a->addr + at, &bb[at], 1) ||
+      !rig.mem->Protect(page, mem::kGuestPage, kRead | kExec, &perr)) {
+    ++checks;
+    fail("could not patch through the permission transition", __LINE__, perr);
+    return;
+  }
+  flushed.clear();
+
+  // A flush of the wrong range must not help. The address is 64 bytes past the patched byte: same page,
+  // no overlap, and Tier J's cache keyed on the block that starts where the code actually is.
+  flush_through(bridge, patch_a->addr + 64, patch_a->addr + 64, patch_a->addr + 80);
+  {
+    exec::MachineState s1{};
+    run_patch(rig.jit.get(), s1);
+    CHECK_CTX(static_cast<std::int32_t>(s1.r[0]) == kPatchA_want,
+              "a flush of an unrelated range cleared the whole cache: it answered " +
+                  std::to_string(static_cast<std::int32_t>(s1.r[0])));
+  }
+  // The right range, from the guest, and nothing else: this is the call the test is really about.
+  flush_through(bridge, patch_a->addr, patch_a->addr, patch_a->addr + 16);
+
+  exec::MachineState sj{};
+  const exec::RunResult rj = run_patch(rig.jit.get(), sj);
+  exec::MachineState si{};
+  const exec::RunResult ri = run_patch(rig.interp.get(), si);
+  CHECK_CTX(static_cast<std::int32_t>(sj.r[0]) == kPatchB_want,
+            "after the guest's own cacheflush, Tier J still answers " +
+                std::to_string(static_cast<std::int32_t>(sj.r[0])) + "; hardware says the bytes it now "
+                "holds answer " + std::to_string(kPatchB_want));
+  CHECK_CTX(static_cast<std::int32_t>(si.r[0]) == kPatchB_want, "Tier I disagrees");
+  Compare("guest cacheflush then patched (3,7)", si, ri, sj, rj);
+  // Three of them by now: the two-tier comparison, the deliberate miss, and the hit. One *number*, and
+  // the number is the only entry — a monitor that had also seen the exit probe would mean this test ran
+  // someone else's guest code.
+  CHECK_CTX(mon.tally().size() == 1u, "expected one number in the tally: " + mon.TallyText());
+  CHECK_CTX(mon.TallyText() == "arm_cacheflush x3", mon.TallyText());
+  std::fprintf(stderr, "[diff] guest-issued cacheflush: stale=%d then I=%d J=%d want=%d (%s)\n",
+               kPatchA_want, static_cast<std::int32_t>(si.r[0]), static_cast<std::int32_t>(sj.r[0]),
+               kPatchB_want, mon.TallyText().c_str());
+
+  // Restore, and flush again so the tier is left holding the bytes the fixture actually has.
+  rig.mem->Protect(page, mem::kGuestPage, kRead | kWrite, &perr);
+  rig.mem->Write(patch_a->addr + at, &ba[at], 1);
+  rig.mem->Protect(page, mem::kGuestPage, kRead | kExec, &perr);
+  rig.jit->Invalidate(patch_a->addr, patch_a->addr + kPatchWindow);
+  exec::MachineState back{};
+  run_patch(rig.jit.get(), back);
+  CHECK_CTX(static_cast<std::int32_t>(back.r[0]) == kPatchA_want,
+            "the fixture was left patched inside its own memory");
+}
+
 /// A fault has to be a fault in both tiers, with a reason rather than a plausible zero.
 void unmapped_code_faults_in_both_tiers() {
   Rig rig = build();
@@ -506,6 +665,7 @@ int main() {
   both_tiers_agree_and_match_hardware();
   invalidation_reaches_the_compiled_code();
   both_tiers_stop_at_the_same_svc();
+  a_guest_cacheflush_reaches_the_tier_that_owns_the_cache();
   unmapped_code_faults_in_both_tiers();
 
   std::printf("%d checks, %d failures\n", checks, failures);
