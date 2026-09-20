@@ -303,8 +303,9 @@ void fp_groups_are_accurate_or_explicitly_refused() {
   // Every probe below takes at most two declared parameters, because that is all a JNI method *can*
   // take in registers: the ARM AAPCS passes arguments in r0-r3 and the rest on the stack, and
   // `JNIEnv*`/`jclass` already occupy r0/r1. A third parameter would be an unmapped read at entry —
-  // which is not an engine defect but would have been reported as one. `fp_args` covers the
-  // stack-argument case with the guest as its own caller.
+  // which is not an engine defect but would have been reported as one. Spilled arguments are covered by
+  // the `intThenDouble` family in `rb_guest_apk_tests`, where RetroBug lays the frame out; `fp_args`
+  // below does not, because its eight doubles all fit in d0-d7.
   const FpCase cases[] = {
       // fp_arith: vmov/vcvt/dmul/dadd/ddiv/vsqrt/fmdrr
       {"Java_com_retrobug_fixture_MainActivity_fp_arith", 3, 7, 13, "scalar f64 +-*/,sqrt"},
@@ -342,12 +343,15 @@ void fp_groups_are_accurate_or_explicitly_refused() {
       {"Java_com_retrobug_fixture_MainActivity_fp_stack", 100, -50, 1023099,
        "FP stack + save/restore"},
       {"Java_com_retrobug_fixture_MainActivity_fp_stack", 0, 1, 11269, "FP stack + save/restore"},
-      // fp_args: eight doubles into one call, so four in d0-d3 and four on the stack.
-      {"Java_com_retrobug_fixture_MainActivity_fp_args", 3, 7, 56, "softfp 8-double args"},
-      {"Java_com_retrobug_fixture_MainActivity_fp_args", 7, 3, 62, "softfp 8-double args"},
-      {"Java_com_retrobug_fixture_MainActivity_fp_args", -5, 3, -13, "softfp 8-double args"},
-      {"Java_com_retrobug_fixture_MainActivity_fp_args", 100, -50, 351, "softfp 8-double args"},
-      {"Java_com_retrobug_fixture_MainActivity_fp_args", 0, 1, 8, "softfp 8-double args"},
+      // fp_args: eight doubles into one *guest-internal* call. All eight go in d0-d7, not the four-plus-
+      // stack split the label used to claim — `sum8` is `static`, and clang gives such a function the VFP
+      // register ABI even under `-mfloat-abi=softfp`. Measured, not reasoned about; see the comment on
+      // `sum8` in tests/corpus/fixture_jni.c and docs/30 §Step 25.
+      {"Java_com_retrobug_fixture_MainActivity_fp_args", 3, 7, 56, "8-double call through d0-d7"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_args", 7, 3, 62, "8-double call through d0-d7"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_args", -5, 3, -13, "8-double call through d0-d7"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_args", 100, -50, 351, "8-double call through d0-d7"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_args", 0, 1, 8, "8-double call through d0-d7"},
       // fp_round: fcvt both directions and a truncating convert to int. `a` is the oracle's argument
       // already shifted (`pairs[i][0] - 2` there), which is why it is not the pair above.
       {"Java_com_retrobug_fixture_MainActivity_fp_round", 1, 0, 6, "fcvt + rounding"},

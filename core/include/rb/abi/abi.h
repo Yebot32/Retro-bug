@@ -21,17 +21,28 @@
  * opposite until `docs/30` §Step 24, and it was confidently wrong in the way that matters: it claimed
  * `-mfloat-abi=softfp` "passes scalars in VFP registers and merely *computes* them in software", which
  * is a description of the *hard*-float variant. Android's `armeabi-v7a` passes and returns
- * floating-point values in **r0-r3 / r0:r1**, and only the arithmetic uses `d[]`. Three independent
+ * floating-point values in **r0-r3 / r0:r1**, and only the arithmetic uses `d[]`. Four independent
  * checks settled it, and they are written down because the wrong version had already been believed
  * once: the tablet's own `/system/lib/libm.so` shows `sqrt` as
  * `vmov d16, r0, r1; vsqrt.f64; vmov r0, r1, d16`; the guest probe compiled for this project ends
- * `vmov r0, r1, d18`; and clang **refuses** `-mfloat-abi=hard` outright for
+ * `vmov r0, r1, d18`; clang **refuses** `-mfloat-abi=hard` outright for
  * `armv7-none-linux-android26` ("unsupported option"), so there is no hard-float variant to be
- * confused about. `d[]` is still needed for the arithmetic, and `ReturnValue` reads it for nothing.
+ * confused about; and the probe's own entry points read their parameters from r2 and r2:r3
+ * (`vmov s4, r2`, `vmov d18, r2, r3`), which is the argument direction rather than the return one.
  *
- * The practical consequence, stated so the next reader does not re-derive it: a `jdouble` argument
- * occupies a core register *pair* and a `jdouble` return arrives in `r0:r1`. `PlaceArgs` still places
- * `F64` arguments in VFP and is wrong for it — tracked as `docs/20` §9's ABI item, not silently.
+ * The consequence, stated so the next reader does not re-derive it: a `jdouble` argument occupies a core
+ * register *pair* and a `jdouble` return arrives in `r0:r1`, exactly like a `jlong`. Both halves of that
+ * sentence used to be wrong in this file, in opposite directions — `ReturnValue` read `d0` and
+ * `PlaceArgs` wrote `d0` — and `PlaceArgs`'s half took five new JNI entry points in a real APK before a
+ * row existed that could fail on it.
+ *
+ * One caveat that is easy to trip over when reading a disassembly of a *guest library*: this is the rule
+ * at the **boundary**. Clang still gives a `static` function whose address never escapes its translation
+ * unit the VFP register ABI under the very same `-mfloat-abi=softfp` (`sum8` in
+ * `tests/corpus/fixture_jni.c` is called with `d0`-`d7`). That is guest-internal and needs no support
+ * here — the CPU emulates whichever convention the compiler chose — but "softfp therefore never VFP" is
+ * false as a statement about disassembly, and true only as a statement about calls crossing into a
+ * library.
  */
 #pragma once
 
@@ -60,9 +71,10 @@ using exec::MachineState;
  * One argument or return value.
  *
  * Held as bits plus a kind, because AAPCS assignment depends on the *type class* and not on the value:
- * an 8-byte integer needs an even/odd core-register **pair** (and so can consume an odd slot for
- * nothing), while a float needs no core register at all. Deciding that later from the bits alone is
- * not possible — `0x0000000100000000` and the double 2.0 are the same 64 bits.
+ * an 8-byte argument needs an even/odd core-register **pair** (and so can consume an odd slot for
+ * nothing), while a 4-byte one takes the next slot whatever it is. Deciding that later from the bits
+ * alone is not possible — `0x0000000100000000` and the double 2.0 are the same 64 bits. Under softfp the
+ * kind selects only the *width*; it never selects a different register bank.
  */
 struct Value32 {
   enum class Kind { S32, U32, Ptr, I64, F32, F64 };
@@ -107,9 +119,10 @@ struct Value32 {
 
 using Args32 = std::vector<Value32>;
 
-/// A return value: `r0`, or the `r0`/`r1` pair for a 64-bit result, plus `d0` for a VFP one. Reading
-/// the wrong half of a `jdouble` is a silent 0.0, so which register a result came from is recorded
-/// rather than guessed from the shorty at every call site.
+/// A return value: `r0`, or the `r0`/`r1` pair for a 64-bit result — which under softfp includes every
+/// `jdouble` as well as every `jlong`. Reading the wrong register for a `jdouble` is a silent truncation
+/// rather than a crash, so which register a result came from is recorded rather than guessed from the
+/// shorty at every call site.
 struct Ret32 {
   Value32::Kind kind = Value32::Kind::U32;
   std::uint64_t bits = 0;
@@ -141,34 +154,45 @@ struct Shorty {
 };
 
 /// Where the argument/return registers are, in one place, so a review can check the numbers against
-/// AAPCS rather than against another call site.
+/// AAPCS rather than against another call site. There is deliberately no entry for a VFP *argument*
+/// register: `PlaceArgs` allocates none, because softfp passes arguments in the core bank.
 struct RegLayout {
   static constexpr int kFirstCoreArg = 0;   ///< r0
   static constexpr int kLastCoreArg = 3;    ///< r3
   static constexpr int kCoreArgCount = 4;   ///< a1-a4
-  static constexpr int kFirstDReg = 0;      ///< d0
-  static constexpr int kDRegCount = 8;      ///< d0-d7, which is where s0-s15 live too
   static constexpr int kLr = 14;
   static constexpr int kSp = 13;
 };
 
 /**
- * Places `args` into `state` per AAPCS32 with the Android VFP variant, sets PC to `fn` and LR to
- * `return_address`, and writes the spilled arguments into the guest stack.
+ * Places `args` into `state` per the ARM Architecture Procedure Call Standard **in its soft-float
+ * variant**, sets PC to `fn` and LR to `return_address`, and writes the spilled arguments into the guest
+ * stack.
  *
  * The rules, and the failure each one prevents:
  *
  *   - Integers and pointers fill r0..r3 in order. Overflow goes to the stack, in order, at ascending
- *     addresses (AAPCS passes stack arguments left-to-right *in memory*, which is where a
- *     little-endian "reverse the args" reflex produces a call that works for one argument and is wrong
- *     for two).
- *   - An 8-byte **integer** needs a consecutive even/odd core-register pair: if the next free register
- *     is odd-numbered, it is skipped and consumed by nothing. Passing a `jlong` in r1/r2 is the classic
- *     failure this file is named for, and it is invisible until a call has an odd number of preceding
- *     4-byte arguments.
- *   - A **float or double** consumes no core register at all: it goes to s0.. / d0.., allocated from
- *     the VFP bank independently of the core bank. Filling r0 with the low half of a `jdouble` makes
- *     integer-only tests pass and every floating call wrong.
+ *     addresses, and the block starts **at the callee's entry SP** — the value SP holds at the `bl`,
+ *     which is also the address its `[sp]` load reads. (AAPCS passes stack arguments left-to-right *in
+ *     memory*, which is where a little-endian "reverse the args" reflex produces a call that works for
+ *     one argument and is wrong for two.)
+ *   - The 16 bytes AAPCS lets a callee write without adjusting SP are *below* that entry SP, not between
+ *     it and the argument block. `PlaceArgs` used to put them between, so every spilled argument sat
+ *     sixteen bytes away from where a real guest looked for it, and the one test that read the spill area
+ *     added the same sixteen and stayed green over the top of it.
+ *   - An 8-byte argument — `jlong` **or** `jdouble` — needs a consecutive even/odd core-register pair:
+ *     if the next free register is odd-numbered, it is skipped and consumed by nothing. Passing a `jlong`
+ *     in r1/r2 is the classic failure this file is named for, and it is invisible until a call has an odd
+ *     number of preceding 4-byte arguments. The `jdouble` case is the same rule and was the same bug.
+ *   - An 8-byte *stack* argument keeps its own 8-byte alignment inside the argument block, so a block
+ *     that currently holds one 4-byte argument gets 4 bytes of padding before it. Packing tightly instead
+ *     is off by four bytes on exactly the calls that have an odd number of spilled 32-bit arguments.
+ *   - **There is no VFP path, and that is the softfp rule rather than a simplification.** A `jfloat` is
+ *     placed as an `int32_t` and a `jdouble` as an `int64_t`, because `armeabi-v7a` is
+ *     `-mfloat-abi=softfp`: arguments and results follow the *soft-float* PCS and only the arithmetic
+ *     uses the VFP registers. `PlaceArgs` used to allocate floats from `d0..d7` independently of the core
+ *     bank, which is the *hard*-float convention — see the note at the top of this header, and the
+ *     disassembly in `core/abi/call.cpp` that measures it rather than recalling it.
  *   - SP is 8-byte aligned on entry to the callee (and 16-byte before a `bl`), so the frame this
  *     builds is rounded to 16 bytes with room for the spilled arguments below it.
  *   - r9/`tp` are left exactly as the caller found them: on Android `tp` is `TPIDRURW` and bionic's
@@ -185,10 +209,12 @@ bool PlaceArgs(mem::GuestMemory& memory, MachineState& state, GuestAddr fn, cons
 Ret32 ReturnValue(const MachineState& state, const Shorty&);
 
 /// A host function the guest can call, reached at `AbiContext::SlotFor(slot)`. It sees the live
-/// `MachineState` (so it reads its AAPCS arguments from r0..r3 / d0.. and writes its result to r0), and
-/// returning false is a refusal that stops execution with `Fault` naming the slot. It is *not* a zero
-/// result: a JNI function that quietly returns NULL is far harder to diagnose than one that says it is
-/// missing, and an app that survives it behaves differently still.
+/// `MachineState` (so it reads its AAPCS arguments from r0..r3, with a 64-bit argument in an even/odd
+/// pair, and writes its result to r0 or r0:r1 — the same softfp placement `PlaceArgs` performs, because
+/// from the guest's side a host function *is* a callee) and returns false is a refusal that stops
+/// execution with `Fault` naming the slot. It is *not* a zero result: a JNI function that quietly returns
+/// NULL is far harder to diagnose than one that says it is missing, and an app that survives it behaves
+/// differently still.
 using HostFn = std::function<bool(MachineState&, std::string* err)>;
 
 /**
@@ -248,8 +274,15 @@ class AbiContext : public exec::HostDispatch {
   /// Marshals, runs until the callee returns, servicing host calls on the way, and returns the result.
   /// `max_steps` bounds the whole call, host calls included, so a guest loop that never returns cannot
   /// take the host with it.
+  ///
+  /// `exit_state` is optional and exists because without it there is no way to ask the question: the
+  /// bridge restores the caller's registers on the way out — correctly, since a nested call's caller is
+  /// mid-instruction — so `state()` after a `CallGuest` is the state *before* it, and reading it as the
+  /// callee's last state reports a set of registers that were never involved. That misreading cost a
+  /// wrong public diagnosis during `docs/30` §Step 24, which is why the field is now explicit rather
+  /// than left to be inferred.
   Ret32 CallGuest(GuestAddr fn, const Args32& args, const Shorty& shorty, unsigned max_steps,
-                  exec::RunResult* outcome);
+                  exec::RunResult* outcome, MachineState* exit_state = nullptr);
 
   /// The JNI-shaped entry point C09 will use: a shorty plus the values already converted. Kept next to
   /// `CallGuest` so there is one marshalling path, not one per caller.

@@ -168,9 +168,20 @@ exec::MachineState Fresh() {
   return s;
 }
 
+/**
+ * Reads the `index`-th 32-bit word of a call's argument block.
+ *
+ * The block starts at the callee's entry SP — that is, at `s.r[13]` after `PlaceArgs` has run — and not
+ * at `s.r[13] + 16`. This helper used to add the 16, which made every spilled-argument row in this file
+ * a restatement of `PlaceArgs`'s own layout instead of a check on it: six rows passed for many revisions
+ * while a real softfp callee was reading `vldr d17, [sp]` and getting somebody else's bytes. The address
+ * is now what `docs/30` §Step 25 measures from disassembly, and the `rb_guest_apk_tests` rows that call
+ * `intThenDouble`/`twoDoubles`/`doubleIntDouble` in a guest library are the second, independent witness:
+ * they do not consult this helper at all, they just ask the guest for an answer.
+ */
 std::uint32_t Spill(const Rig& rig, const exec::MachineState& s, unsigned index) {
   std::uint32_t v = 0;
-  const exec::GuestAddr at = s.r[13] + 16u + index * 4u;
+  const exec::GuestAddr at = s.r[13] + index * 4u;
   if (!rig.mem->Read(at, &v, 4)) fail("cannot read spill slot", __LINE__, Hex(at));
   return v;
 }
@@ -248,27 +259,105 @@ void a_jlong_needs_an_even_odd_pair_and_will_not_take_r1_r2() {
             "r1=" + Hex(after.r[1]) + " r2=" + Hex(after.r[2]) + " r3=" + Hex(after.r[3]));
 }
 
-void floats_and_doubles_take_no_core_register_at_all() {
+/**
+ * Floats and doubles are placed exactly as their integer equivalents of the same width are.
+ *
+ * That *is* the softfp ABI: `-mfloat-abi=softfp` says the arguments follow the **soft-float** procedure
+ * call standard — which means core registers — and only the *arithmetic* uses the VFP instructions. The
+ * VFP-register convention this function used to assert is the hard-float one (`-mfloat-abi=hard`), and
+ * clang refuses that option outright for `armv7-none-linux-androideabi26`, so no guest this project can
+ * build would ever have wanted it. See `docs/30` §Step 24, and the measurement that replaces the argument
+ * from memory: `tests/guest/mathprobe.c` compiled with the project's own flags reads its parameters as
+ * `vmov s4, r2`, `vmov d18, r2, r3`, `vldr d17, [sp]` and `vldr d17, [sp, #8]` — core registers, and the
+ * stack at the callee's entry SP. Not one of them reads `d0..d7`.
+ *
+ * The `d[]` assertions below are the negative control, and they are the reason this row exists in the
+ * unit suite as well as in the APK lane: `guest_apk_test.cpp` can show a *wrong answer*, which is
+ * consistent with half a dozen engine bugs, while this shows the argument went to the wrong **bank**,
+ * which is consistent with exactly one.
+ */
+void float_arguments_take_core_registers_the_way_softfp_says() {
   Rig rig = build();
   if (!rig.ok) return;
   std::string err;
 
-  // softfp *passes* in VFP registers — it only computes in software. A double in d0 must leave r0..r3
-  // untouched for the integers that follow, or every `jdouble` in the corpus shifts its neighbours.
+  // A double and a float and an int, in that order: r0:r1, then r2, then r3. Under the hard-float
+  // convention these would be d0, s0 and r0, and the integer would land in a different register
+  // entirely — which is the failure this row is written to make impossible.
   exec::MachineState s = Fresh();
+  s.d[0] = 0xdead'beef'cafe'babeull;  // poison: a softfp call must leave the VFP bank exactly as found
+  s.d[1] = 0x1111'2222'3333'4444ull;
   CHECK(abi::PlaceArgs(*rig.mem, s, kFn,
                        {abi::Value32::F64(2.0), abi::Value32::S32(7), abi::Value32::F32(1.5f)},
                        kReturnAddress, abi::AbiContext::kCallFrameBytes, &err));
-  CHECK_CTX(s.r[0] == 7, "r0=" + Hex(s.r[0]) + " — the int should be the first core argument");
-  CHECK_CTX(s.d[0] == 0x4000'0000'0000'0000ull, "d0=" + std::to_string(s.d[0]));  // double 2.0
-  // 1.5f in s2 (units 0,1 are d0), and the *other* half of d1 must be left alone.
-  CHECK_CTX((s.d[1] & 0xffff'ffffu) == 0x3fc0'0000u, "d1 low=" + Hex(static_cast<std::uint32_t>(s.d[1])));
+  CHECK_CTX(s.r[0] == 0x0000'0000u && s.r[1] == 0x4000'0000u,
+            "the double 2.0 should be in r0:r1, got r0=" + Hex(s.r[0]) + " r1=" + Hex(s.r[1]));
+  CHECK_CTX(s.r[2] == 7, "r2=" + Hex(s.r[2]) + " — the int follows the double's pair");
+  CHECK_CTX(s.r[3] == 0x3fc0'0000u, "r3=" + Hex(s.r[3]) + " — 1.5f");
+  CHECK_CTX(s.d[0] == 0xdead'beef'cafe'babeull && s.d[1] == 0x1111'2222'3333'4444ull,
+            "PlaceArgs wrote the VFP bank on a softfp call: d0=0x" + std::to_string(s.d[0]) +
+                " d1=0x" + std::to_string(s.d[1]));
 
-  exec::MachineState two = Fresh();
-  CHECK(abi::PlaceArgs(*rig.mem, two, kFn, {abi::Value32::F32(1.0f), abi::Value32::F32(2.0f)},
+  // The pair rule, reached through a double rather than a `jlong`: one 4-byte argument first, so the
+  // double cannot start at r1. r1 is consumed by nothing and the pair lands in r2:r3 — the same shape the
+  // `jlong` row above asserts, and asserted again here because the two kinds are placed by the same rule
+  // and a bridge that special-cases one of them is the bug this whole file exists to prevent.
+  exec::MachineState after = Fresh();
+  CHECK(abi::PlaceArgs(*rig.mem, after, kFn, {abi::Value32::S32(0xaa), abi::Value32::F64(2.0)},
                        kReturnAddress, abi::AbiContext::kCallFrameBytes, &err));
-  CHECK((two.d[0] & 0xffff'ffffu) == 0x3f80'0000u);
-  CHECK((two.d[0] >> 32) == 0x4000'0000u);  ///< s1 is the *high* half of d0 on little-endian ARM
+  CHECK_CTX(after.r[0] == 0xaa && after.r[1] == 0 && after.r[2] == 0 && after.r[3] == 0x4000'0000u,
+            "r1=" + Hex(after.r[1]) + " r2=" + Hex(after.r[2]) + " r3=" + Hex(after.r[3]));
+
+  // Three 4-byte arguments then a double: the last core register is r3, which is odd, so the pair has
+  // nowhere to go and the double becomes a stack argument — with r3 consumed by nothing rather than
+  // holding the double's low half. This is `Java_..._intThenDouble` minus JNI's two hidden parameters,
+  // and it is the case that `jlong` never reaches in this suite because an 8-byte integer has so far
+  // always still found a free pair.
+  //
+  // The double is 0.1 rather than 2.0 because its low word is `0x9999999a`. With `2.0` the low word is
+  // zero and `Fresh()` zeroes the registers, so "r3 holds nothing" and "r3 holds the low half" print the
+  // same thing and the row cannot fail — the shape of mistake this suite now checks for by asking, for
+  // every assertion, what state of the world would make it print.
+  exec::MachineState skip = Fresh();
+  CHECK(abi::PlaceArgs(*rig.mem, skip, kFn,
+                       {abi::Value32::S32(1), abi::Value32::S32(2), abi::Value32::S32(3),
+                        abi::Value32::F64(0.1)},
+                       kReturnAddress, abi::AbiContext::kCallFrameBytes, &err));
+  CHECK_CTX(skip.r[3] == 0u, "r3 should be consumed by nothing, got " + Hex(skip.r[3]));
+  CHECK_CTX(Spill(rig, skip, 0) == 0x9999'999au && Spill(rig, skip, 1) == 0x3fb9'9999u,
+            "0.1 should be the first stack argument, got " + Hex(Spill(rig, skip, 0)) + " " +
+                Hex(Spill(rig, skip, 1)));
+
+  // The core bank full with doubles: 1.0 in r0:r1, 3.0 in r2:r3, 5.0 first in the block. The block starts
+  // at the callee's SP, which is 8-byte aligned, so a double that arrives first needs no pad.
+  exec::MachineState spill = Fresh();
+  CHECK(abi::PlaceArgs(*rig.mem, spill, kFn,
+                       {abi::Value32::F64(1.0), abi::Value32::F64(3.0), abi::Value32::F64(5.0)},
+                       kReturnAddress, abi::AbiContext::kCallFrameBytes, &err));
+  CHECK_CTX(spill.r[0] == 0x0000'0000u && spill.r[1] == 0x3ff0'0000u,
+            "1.0 should be in r0:r1, got " + Hex(spill.r[0]) + ":" + Hex(spill.r[1]));
+  CHECK_CTX(spill.r[2] == 0x0000'0000u && spill.r[3] == 0x4008'0000u,
+            "3.0 should be in r2:r3, got " + Hex(spill.r[2]) + ":" + Hex(spill.r[3]));
+  CHECK_CTX(Spill(rig, spill, 0) == 0x0000'0000u && Spill(rig, spill, 1) == 0x4014'0000u,
+            "5.0 should be the first stack argument at SP+0, got " + Hex(Spill(rig, spill, 0)) + " " +
+                Hex(Spill(rig, spill, 1)));
+
+  /**
+   * The alignment pad — `Java_..._doubleIntDouble`'s shape.
+   *
+   * 1.0 and 2.0 fill the core bank, so `0x55` becomes the block's first word at SP+0 and the third double
+   * arrives when the block is 4 bytes deep. An 8-byte stack argument keeps its own alignment, so it lands
+   * at SP+8 and SP+4 is padding; a bridge that packs the block tightly puts it at SP+4, which is the one
+   * difference none of the rows above can see.
+   */
+  exec::MachineState pad = Fresh();
+  CHECK(abi::PlaceArgs(*rig.mem, pad, kFn,
+                       {abi::Value32::F64(1.0), abi::Value32::F64(2.0), abi::Value32::S32(0x55),
+                        abi::Value32::F64(3.0)},
+                       kReturnAddress, abi::AbiContext::kCallFrameBytes, &err));
+  CHECK_CTX(Spill(rig, pad, 0) == 0x55u, "the int should be at SP+0, got " + Hex(Spill(rig, pad, 0)));
+  CHECK_CTX(Spill(rig, pad, 2) == 0x0000'0000u && Spill(rig, pad, 3) == 0x4008'0000u,
+            "3.0 should be at SP+8, got " + Hex(Spill(rig, pad, 2)) + " " + Hex(Spill(rig, pad, 3)));
 }
 
 void a_frame_too_small_refuses_without_half_applying_it() {
@@ -541,7 +630,7 @@ int main() {
   four_or_less_stay_in_core_registers();
   the_fifth_argument_spills_at_the_lowest_stack_address();
   a_jlong_needs_an_even_odd_pair_and_will_not_take_r1_r2();
-  floats_and_doubles_take_no_core_register_at_all();
+  float_arguments_take_core_registers_the_way_softfp_says();
   a_frame_too_small_refuses_without_half_applying_it();
   return_values_come_from_where_the_type_says();
   a_host_entry_stops_the_executor_and_resumes_at_the_link();

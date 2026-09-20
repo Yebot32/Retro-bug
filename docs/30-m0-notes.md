@@ -882,17 +882,28 @@ review pass concentrates, so the rules that hide are stated where they are appli
 - An 8-byte integer needs a consecutive **even/odd core-register pair** — with one 4-byte argument
   ahead of it, the pair goes to r2/r3 and **r1 is consumed by nothing**. Taking r1/r2 is the classic
   `jlong` failure, invisible until a call has an odd number of preceding 32-bit arguments.
-- `-mfloat-abi=softfp` **passes** scalars in VFP registers; it merely computes them in software. A
+- ~~`-mfloat-abi=softfp` **passes** scalars in VFP registers; it merely computes them in software. A
   `double` goes to `d0..d7` and consumes **no** core register, so `f(double, int)` leaves the int in
-  r0. Treating soft-float as "no VFP arguments" puts a `jdouble` in core registers and is wrong for
-  every floating call, which is most of the audio and geometry surface.
-- VFP allocation is counted in **32-bit units** (a float takes `s(n)`, a double takes an even unit
-  pair, so `s0,s1 == d0`), and a single write leaves the other half of its `D` register alone — the same
-  rule §Step 6d established for `SetExtendedRegister32`, for the same reason.
+  r0.~~ **This bullet was wrong, and it was the origin of a real defect.** softfp passes arguments and
+  results by the *soft-float* PCS — core registers and stack — and only the arithmetic uses VFP
+  instructions; the VFP-register argument convention belongs to `-mfloat-abi=hard`, which clang refuses
+  for this target — re-measured while writing Step 25, and the message is worth having verbatim because it
+  is the whole argument in one line:
+  `clang: error: unsupported option '-mfloat-abi=hard' for target 'thumbv7-none-linux-android26'`.
+  `f(double, int)` leaves the int in **r2**. The rule as written here was implemented
+  literally and stayed in `PlaceArgs` until Step 25; the disassembly that disproves it is in Step 24
+  (results) and Step 25 (arguments).
+- ~~VFP allocation is counted in **32-bit units** (a float takes `s(n)`, a double takes an even unit
+  pair, so `s0,s1 == d0`), and a single write leaves the other half of its `D` register alone.~~ The
+  allocation described no longer exists — `PlaceArgs` allocates nothing from the VFP bank. The
+  half-preserving-write rule it cites is still real and still applies, but inside the *instruction*
+  tier (`SetExtendedRegister32`, §Step 6d), not at the call boundary.
 - Spilled arguments go at **ascending** addresses (reversing them is invisible with one spill and wrong
-  with two), the frame keeps the 16-byte intra-procedure area below SP that AAPCS lets a leaf use
-  across a `bl`, and a frame too small to hold its spills **refuses before mutating any register**, so
-  there is no half-applied call to debug.
+  with two), the frame keeps the 16-byte intra-procedure area **below** SP that AAPCS lets a leaf use
+  across a `bl` — which means the argument block starts *at* the callee's entry SP, and does not begin 16
+  bytes above it — and a frame too small to hold its spills **refuses before mutating any register**, so
+  there is no half-applied call to debug. The middle clause is where `PlaceArgs` and this sentence
+  disagreed for many revisions; Step 25 has the details and the test that could not see them.
 
 **7b — a `JNIEnv` made of guest memory and host-call slots.** What the guest's own instructions say the
 type is, measured out of `jni_utf`:
@@ -1615,8 +1626,8 @@ came off the SM-X710 through `tools/run_armv7_oracle.sh`, and the answer is asym
 | Tier I, the same 35 rows | **35 of 35 refuse** — `FPFixedS32ToDouble` for scalar, `VectorBroadcast64` for ASIMD |
 
 The JIT result is the one M0 wanted: `f64` add/multiply/divide/`vsqrt`, `fcvt` in both directions, `dcmp`
-+ `vmrs` of FPSCR, `vldr`/`vstr` with the callee-saved `d8-d15` traffic, eight-double softfp argument
-passing, NaN comparison semantics, and ASIMD `vmul.i32`/`vadd.i32` with lane extracts — all equal to what
++ `vmrs` of FPSCR, `vldr`/`vstr` with the callee-saved `d8-d15` traffic, an eight-double call through
+`d0`-`d7`, NaN comparison semantics, and ASIMD `vmul.i32`/`vadd.i32` with lane extracts — all equal to what
 real ARMv7 silicon returns for the same bytes. Including the part most likely to be subtly wrong: FPSCR's
 compare field reproduces ARM's rule that a less-than compare *also sets NV* (the row is `34 34 34 129 34`;
 `129` is that case). And the refusal is clean rather than silent: Tier I implements one vector IR opcode
@@ -2134,16 +2145,190 @@ stated: `libm` is the self-contained first target, and `libz` follows `libc`, no
 4. (Small but the cause of a confusing first run) `${@:-$(printf '%s\n' "${!ARCHIVES[@]}")}` keeps newlines
    inside one word, so "build every target" iterated once with a two-line name.
 
-**Not done, deliberately:** `docs/34` §7 step 3 — load the built `libm.so` through C05 and call `sqrt`/
-`fmod`/`sin` on both tiers against the host's own `libm`. That is the increment that closes "no instruction
-of a real guest library has been executed yet", and everything it needs is now measured: the loader already
-applies `R_ARM_JUMP_SLOT`/`GLOB_DAT`/`ABS32`/`RELATIVE` (`guest_elf.cpp:487-493`), `PlaceArgs` does full
-AAPCS incl. 8-byte-aligned spill and `I64` pair alignment, `Value32::Kind::F64` carries `d0` results, and
-`sqrt`'s 16-byte body touches none of the five imports. It wants its own pass rather than the tail of this
-one, because a false "we can run real system libraries" claim is the expensive kind.
+**Not done at the time, deliberately:** `docs/34` §7 step 3 — load the built `libm.so` through C05 and call
+`sqrt`/`fmod`/`sin` on both tiers against the host's own `libm`. That is the increment that closes "no
+instruction of a real guest library has been executed yet", and everything it needs looked measured: the
+loader already applies `R_ARM_JUMP_SLOT`/`GLOB_DAT`/`ABS32`/`RELATIVE` (`guest_elf.cpp:487-493`),
+`PlaceArgs` does full AAPCS incl. 8-byte-aligned spill and `I64` pair alignment, and `sqrt`'s 16-byte body
+touches none of the five imports. It wanted its own pass rather than the tail of this one, because a false
+"we can run real system libraries" claim is the expensive kind. **It is now done** — Step 24 — and two of
+the three premises in that sentence were false: `PlaceArgs`'s pair alignment did not extend to `F64`, and
+`Value32::Kind::F64` did **not** carry `d0` results because `d0` is not where a softfp result lives.
 
 
+## Step 24 — M1's first real APK, and the two ABI halves that were each wrong in a different direction
 
+*Written after the fact, and labelled so here deliberately: the code cites this step number in about a
+dozen places, and at the time of the work it pointed at nothing. The citation was written before the note
+— which is the same mistake as a comment that points at a tool in `tools/` nobody made — and the only
+honest repair is to write the note rather than to delete the pointers.*
+
+**What landed.** `core/tests/guest_apk_test.cpp` is a new lane and the first one in the project that runs
+code nobody here wrote: it reads `rb_guestprobe.apk` from disk, finds the stored
+`lib/armeabi-v7a/libmathprobe.so` in it, loads that plus a real guest `libm.so` through C05, resolves the
+probe's `sin`/`cos`/`sqrt` imports across the two modules, calls `JNI_OnLoad` and a `jdouble`-returning JNI
+method on both tiers, and compares against the bit patterns the same bytes produce on the SM-X710. That
+retires the sentence `tools/run_engine_tests.sh` had carried since M0.
+
+**The return-value bug, and why no test could see it.** The first JNI method to return a `jdouble` produced
+a result whose low 32 bits matched hardware exactly and whose high half was zero. `ReturnValue` was reading
+`d0`. It should have been reading `r0:r1`. Two independent things hid it: the `Shorty` first draft declared
+an *int* return (`"IIDD"` for a method that returns `jdouble`), which made the symptom look like a plausible
+wrong number rather than a truncated one; and every floating call the suites had made so far was
+*guest-to-guest*, where both sides agree with each other regardless of what the bridge does. The corrected
+rows in `abi_call_test.cpp` now poison `d[0]` with `0x33333333` while `r0`/`r1` hold different values, so
+the hard-float read cannot pass by accident.
+
+**softfp means core registers, and the claim needed four checks, not one.** The paragraph in
+`rb/abi/abi.h` had asserted that `-mfloat-abi=softfp` "passes scalars in VFP registers and merely *computes*
+them in software", which describes the *hard*-float variant, and it had been believed while four pieces of
+evidence against it were available: the device's own `/system/lib/libm.so` shows `sqrt` as
+`vmov d16, r0, r1; vsqrt.f64; vmov r0, r1, d16`; the guest probe ends `vmov r0, r1, d18`; and clang
+**refuses** `-mfloat-abi=hard` for `armv7-none-linux-androideabi26` outright, so there is no hard-float
+Android variant to be confused with. Step 25 added the fourth, in the *argument* direction. The lesson is
+the one already recorded for the `VCMP` flag table: a fact recalled from a specification is written with
+more confidence than one measured, and in an emulator a wrong table is a wrong answer rather than a crash.
+
+**The ISA tag (#27), found by review rather than by testing.** `guest_apk_test.cpp` originally resolved
+imports through `FindExport`'s `CodeAddress`, which *splits off* bit 0 — so every GOT entry lost the Thumb
+marker and a Thumb export would be entered in ARM state. Import addresses must carry `Symbol::value`
+verbatim, because bit 0 of a code pointer is what `blx` reads. With the real libm it stayed invisible: the
+three functions this probe imports are all ARM. The same class of "invisible because the corpus happens to
+be one-signed" as the FP rows above.
+
+**A wrong test constant masquerading as a shared engine bug.** `sqrt`'s expected argument was written by
+hand as `0x40c3882000000000` on the way to being 10001.0. That is **10000.25**. The result was a "both tiers
+agree with each other and disagree with hardware" signature — the exact shape of a genuine shared engine
+defect — and it took recomputing the constant in node to see there was nothing to explain. Every bit
+pattern in this lane's tables is now copied from a computation, with the reason stated in the comment, and
+`oracle_linked.c` takes its *inputs* as decimal literals so the two sides cannot drift apart.
+
+**Two conclusions I published and then retracted, both caused by one bad instrument.** The lane's `call()`
+helper printed `ctx.state()` after `CallGuest` as "the bridge after the call". `CallGuest` ends with an
+unconditional `state_ = outer` — correct, because a nested call's caller is mid-instruction and its
+registers are live — so that state is the state *before* the call. Reading it produced the claim that "the
+bridge returns a value its own state does not hold", which was an instrument artifact, not a finding. Fixed
+by giving `CallGuest` an explicit `exit_state` out-parameter filled before the restore, so the question can
+be asked properly instead of answered wrongly by the only field that happened to be reachable. The second
+retraction was the same instrument in a different guise: single-stepping with `Run(state, 1)` and running
+once with `Run(state, 4'000'000)` are supposed to be equivalent and are not, for the tier-diff steppers, so
+`first_states`/`trace_path` address counts moved between runs depending on what the executor had run
+previously. Only `run_to_sentinel` is trustworthy for "where did this call end up", and it is the one that
+settled the question above:
+
+```
+# one-shot sin on Tier I: reason=1 steps=228 r0=0x58      r1=0x1f3ac     d0=0x0000000000000040
+# one-shot sin on Tier J: reason=1 steps=102 r0=0xb78c4db8 r1=0xbfe03425 d0=0x0000000000000040
+```
+
+Both reach the sentinel, so Tier I's `r0:r1` is genuinely `0x0001f3ac00000058` and wrong where hardware says
+`0xbfe03425b78c4db8`. That is the deferred defect — **Tier I mis-executes ARM-state libm code**, not the
+bridge mis-returning it — and it is still open.
+
+
+## Step 25 — softfp arguments: five new JNI entry points, one second bug, and a test that could not fail
+
+**Why five new methods rather than one.** Step 24 fixed the softfp *return* path and left the *argument*
+path wrong: `PlaceArgs` allocated `F32`/`F64` from `s0..s15`/`d0..d7`, which is the hard-float convention,
+and the header even said so in the present tense. Nothing in the suite called a JNI method that *takes* a
+floating parameter, so there was no row that could fail. The fix therefore starts with the workload, as the
+owner directed: `tests/guest/mathprobe.c` gained `floatProbe`, `doubleProbe`, `intThenDouble`,
+`twoDoubles` and `doubleIntDouble` — chosen so that **each one is decided by a different placement rule**
+(one core register; an even/odd pair; a pair that does not fit and skips to the stack; a second pair that
+overflows the bank; an alignment pad inside the block) and so that no two are redundant.
+
+**Measured before written.** `llvm-objdump` of the built probe, with the project's own flags:
+
+| method | first instructions | placement |
+|---|---|---|
+| `floatProbe` | `vmov s4, r2` | `jfloat` → **r2** |
+| `doubleProbe` | `vmov d18, r2, r3` | `jdouble` → **r2:r3** |
+| `intThenDouble` | `vmov s0, r2` · `vldr d17, [sp]` | int → r2, double → **[sp+0]**, r3 consumed by nothing |
+| `twoDoubles` | `vmov d18, r2, r3` · `vldr d17, [sp]` | pair r2:r3, second double at **[sp+0]** |
+| `doubleIntDouble` | `vmov d18, r2, r3` · `vldr s0, [sp]` · `vldr d17, [sp, #8]` | int at [sp+0], double at **[sp+8]** — a 4-byte pad |
+
+Not one of them reads `d0..d7`. The argument path is the same core-register rule as the integer path, so
+`PlaceArgs` got *shorter*: `IsVfp`, `PutS` and `GetS` are gone and `CoreWords` is the whole decision.
+`RegLayout::kFirstDReg`/`kDRegCount` went with them — a constant naming a VFP *argument* register is not
+unused code, it is a false assertion about the ABI.
+
+**The surprise in the middle of it, and the one that mattered most.** `sum8` in
+`tests/corpus/fixture_jni.c` — eight doubles, and the place where a previous session's comment claimed
+"four in d0-d3 and four on the stack" — turned out to be **called with all eight in `d0`-`d7` and reads
+none from the stack**. Built the same scratch file with a `static` and an externally-visible copy of the
+same eight-double function under identical flags:
+
+```
+static   sum8:  caller sets d0-d7, callee reads d0-d7                  (VFP register ABI)
+external x8:    vmov d17, r0, r1 · vmov d16, r2, r3 · vldr d17,[sp] … [sp,#40]
+```
+
+So clang promotes an internal-linkage function that never escapes its TU to the VFP argument ABI *even
+under `-mfloat-abi=softfp`*. Three consequences, each acted on: the two comments that described `fp_args`
+as covering stack arguments were wrong and are corrected (`fixture_jni.c`,
+`exec_tier_diff_test.cpp`, and the four doc sites whose coverage label read "eight-double softfp argument
+passing", now "an eight-double call through `d0`-`d7`"); the rule "softfp therefore never VFP" is false as a
+statement about disassembly and true
+only at the **boundary**, which is now said in `rb/abi/abi.h` because a reader who takes it the other way
+will mis-predict a guest library's code; and the stack-argument case, which `fp_args` was believed to cover,
+turned out to be covered by *nothing* — which is where the next finding sits.
+
+**`PlaceArgs` had a second bug, older than the one being fixed, and it was not about floats.** The five
+register rows above went green immediately; the three rows whose arguments go to the **stack** stayed wrong,
+identically on both tiers. The callee reads its first spilled argument at `[sp]` — `vldr d17, [sp]`, in the
+table, at the bottom of its own frame. `PlaceArgs` set SP to the frame and then wrote the block at
+`frame + 16`, on a reading in which the intra-procedure region sits *between* SP and the arguments. It does
+not: AAPCS puts those 16 bytes **below** the callee's SP — which is what `docs/30` §Step 7a's own text says
+("the 16-byte intra-procedure area below SP"), so the note was right, the code was not, and nobody noticed
+the divergence.
+
+**Why six existing rows never caught it: an assertion that mirrors the code it checks.** The only reader of
+the spill area anywhere in the suite was `abi_call_test.cpp`'s `Spill()` helper, and it read
+`s.r[13] + 16 + index*4`. Both numbers came from the same mistaken model, so the six-int overflow rows and
+the `jlong` spill rows were restating `PlaceArgs`'s layout rather than testing it — the failure class already
+recorded in this document's rules ("a test comparing a value to the default it would hold anyway"), in its
+most dangerous form, because the tests *looked* like coverage of exactly this. `Spill()` now reads
+`s.r[13] + index*4`, and the hardware rows in `rb_guest_apk_tests` are the independent witness that does not
+consult any helper: they just ask a real guest for an answer and compare bits.
+
+**The numbers.** Captured on the SM-X710 from `oracle_linked`, each one then reproduced independently in
+node's IEEE arithmetic before being pasted into the lane:
+
+```
+floatProbe       f=1.75 → 0x40680000    f=-0.125 → 0x3f500000
+doubleProbe      x=10001.0 → 0x40cd4d4000000000    x=0.1 → 0x3ff2666666666666
+intThenDouble    (7,10001.0) → 0x40c38c0000000000  (-3,0.1) → 0xc007333333333333
+twoDoubles       (10001.0,0.5) → 0x40b3898000000000
+doubleIntDouble  (2.25,7,0.125) → 0x401d200000000000   (0.1,-1,65537.0) → 0x40b998b333333334
+```
+
+- Before the fix, on device: `rb_guest_apk_tests` **92 checks, 22 failures** — 18 of them these nine rows,
+  all identical on Tier I and Tier J (which is what said *marshalling*, not engine), plus the four
+  pre-existing Step 24 ones. The printed callee state named the mechanism exactly:
+  `intThenDouble` left `d0=0x40c3888000000007`, the double with the int OR'd into its low half — the VFP
+  bank being written and the core bank not.
+- After: all nine rows match hardware on **both** tiers. `rb_guest_apk_tests` **92 checks, 4 failures**, and
+  the four are Step 24's open Tier I libm defect — unmoved, as intended. `rb_abi_call_tests` 95 → **105
+  checks, 0 failures**; `rb_abi_jni_tests` 41/0; `rb_exec_tier_diff_tests` 298/0 with `0 of 50 FP rows
+  refused`; `tools/run_engine_tests.sh arm64-v8a` exits 0 on the tablet, so the fixture's oracle values
+  survived the comment-only edits to `fixture_jni.c`.
+
+**One row fixed by review rather than by testing.** An independent read-over of the new `PlaceArgs` found
+that the `skip` row asserted `r[3] == 0` for a call passing `F64(2.0)`, whose low word *is* zero — so "r3
+holds nothing" and "r3 holds the double's low half" printed the same value and the assertion could not fail,
+which is the same disease as `Spill()` in a smaller dose. It passes `F64(0.1)` now (low word
+`0x9999999a`). It also asked whether the frame-size guard covered the alignment rounding's worst case; it
+did not, by up to 15 bytes plus the intra-procedure region, so the refusal threshold is now
+`needed + kIpswr` on both the budget and the underflow check.
+
+**Not done.** The 4 remaining failures above (Step 24's Tier I libm defect), deliberately deferred by the
+owner until a real app's calls can trigger it; and `docs/20` §9's item for this increment, which is written
+there rather than duplicated here. One new fact about it came out of the end-of-increment two-device run:
+the defect is **not** a device artifact. The OnePlus 12 (Snapdragon 8 Gen 3) produces the same four
+failures with the same wrong bit patterns as the Tab S9 (8 Gen 2) — `sin` → `0x0001f3ac00000058`,
+`cos` → `0x000194ac00000050` — on a host with no AArch32 support at all, because both numbers come from
+emulation rather than from silicon. That also means the `--interpret-probe` instruments are deterministic
+across hosts, which is worth knowing before spending a device hunt on it.
 
 
 ## Standing environment facts (so they are not re-derived)
@@ -2161,5 +2346,6 @@ one, because a false "we can run real system libraries" claim is the expensive k
 | `openat2`/`io_uring`/`landlock` from an app | unavailable (outside bionic's `SYSCALLS.TXT` allowlist) — see `docs/research/05` §1.4 |
 | Asking the assembler what an encoding actually is | the NDK ships **`llvm-objdump` but no `llvm-mc`**, so: `clang --target=armv7-none-linux-androideabi26 -mthumb -c x.s` then `llvm-objdump -d x.o`. This is how `#5`→`0x1d50` and `#9`→`f102 0009` were settled in Step 9, and it needs no device — the answer is the same bytes the guest will load |
 | ARM AAPCS argument registers, and what a JNI method can take in registers | **r0-r3 only.** r4 upwards are *workspace*, not arguments, so a 32-bit guest's fifth declared argument is on the stack; with `JNIEnv*` in r0 and `jobject`/`jclass` in r1, **a JNI method has exactly two register parameters**. `EntryState` seeds r2/r3 and provides no caller frame, so a probe with three or more declared parameters faults on its first instruction — correctly. Found the expensive way in Step 16 (a four-`jint` NEON probe), and it is a fact about the ABI rather than about RetroBug |
+| Where a softfp guest puts floats, and where it puts spilled arguments | **Core registers, both directions, at the boundary.** A `jfloat` takes one of r0-r3, a `jdouble` an even/odd pair, a `jdouble` result returns in `r0:r1` — `d0..d7` carry arguments only under `-mfloat-abi=hard`, which the NDK refuses for this target (`docs/30` §Step 25's disassembly table is the primary source; §Step 24 the results half). Two traps attached: (1) a `static` function whose address never escapes its TU *does* get the VFP register ABI from clang under `softfp`, so "softfp ⇒ never VFP" is false about a disassembly and true only about a cross-boundary call; (2) the argument **block starts at the callee's entry SP** — a callee reads its fifth-and-later parameters at `[sp]`, `[sp,#8]`, … — and the 16-byte intra-procedure area is *below* that, not between it and SP |
 | Executable memory from an app | permitted: `allow appdomain self:process execmem;` (`private/app.te:189`, read directly) |
 | Exec from app-writable files | forbidden: `app_neverallows.te:69-73` (read directly) → why AD-5 ships one pre-built agent `.so` |

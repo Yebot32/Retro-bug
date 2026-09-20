@@ -165,7 +165,7 @@ identified; correctness against a reference is not yet measured.
 
    The groups covered on the JIT path are scalar `f64` `+ - * /` with `vsqrt`, `fcvt` in both
    directions and a truncating convert, `dcmp.f64` + `vmrs` of FPSCR, `vldr`/`vstr` plus the
-   callee-saved `d8-d15` traffic, eight-double softfp argument passing, NaN comparison semantics, and
+   callee-saved `d8-d15` traffic, an eight-double call through `d0`-`d7`, NaN comparison semantics, and
    ASIMD `vmul.i32`/`vadd.i32` with lane extracts. Two of those deserve emphasis because §2 ranked them
    and nothing had measured them since: **FPSCR flag semantics match silicon including ARM's rule that
    a less-than compare also sets NV** (the row is `34 34 34 129 34`, and `129` is the `t < u` case), and
@@ -183,7 +183,7 @@ identified; correctness against a reference is not yet measured.
    Tier I's refusal was the finding with planning consequences, and `docs/30` §Step 17 has since
    changed its extent: the scalar VFP group is implemented, so Tier I now executes and matches hardware on
    35 of the 40 FP rows (the conversions, `dadd`/`dmul`/`ddiv`/`vsqrt`, `dcmp`+`vmrs` with the measured
-   compare field, `vldr`/`vstr`, the callee-saved bank, eight-double softfp arguments, NaN compares) and
+   compare field, `vldr`/`vstr`, the callee-saved bank, an eight-double call through `d0`-`d7`, NaN compares) and
    refuses only ASIMD, at `VectorBroadcast64` with `StopReason::Unimplemented` — a named refusal, not a
    wrong number. What still stands from the paragraph above: the interpreted path cannot run NEON, which
    reaches AD-2, the `Kind::Interpreted` code-cache backend (C04's third option, i.e. the iOS/`execmem`-

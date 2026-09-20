@@ -277,7 +277,11 @@ exported symbols are irrelevant. Binding proceeds entirely at runtime without to
 2. **At load**: `findLibrary(name)` returns the pre-shipped agent path, so ART's `dlopen` succeeds and
    `UnsatisfiedLinkError` never fires.
 3. **At bind**: RetroBug calls host-side `RegisterNatives` (a fully supported public path **[1A]**) mapping each
-   native method to a host trampoline that marshals per AAPCS32 and enters the emulator.
+   native method to a host trampoline that marshals per AAPCS32 and enters the emulator. "Per AAPCS32" is
+   the **soft-float** variant, so the trampoline passes and reads `jfloat`/`jdouble` in `r0`-`r3` (`jdouble`
+   in an even/odd pair) and never in the VFP registers — the NDK's clang refuses `-mfloat-abi=hard` for
+   `armv7-none-linux-androideabi` outright, so there is no hard-float `armeabi-v7a` to marshal for, and
+   `docs/30` §Step 25 has the disassembly the rule is taken from rather than a reading of the ABI document.
 4. **Guest `JNI_OnLoad`** runs *on the emulator*, against a synthesised 32-bit `JNIEnv*` proxy, invoked by
    RetroBug rather than by ART — ART's own `JNI_OnLoad` call happens under a class-loader override
    (`java_vm_ext.cc:1125-1142` **[1A]**), which the proxy must reproduce exactly.

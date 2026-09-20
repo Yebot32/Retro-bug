@@ -22,7 +22,23 @@ namespace {
 /// calls another one.
 constexpr std::uint32_t kIpswr = 16;
 
-[[nodiscard]] std::uint32_t CoreWords(const Value32::Kind kind) {
+/**
+ * How many core registers an argument occupies.
+ *
+ * Under `-mfloat-abi=softfp` this is the *whole* of the placement rule, which is what makes the function
+ * one switch rather than the two banks it used to be: the soft-float procedure call standard passes
+ * every argument in r0-r3 and the stack, so a `jfloat` is placed exactly as an `int32_t` is and a
+ * `jdouble` exactly as a `jlong` is. The VFP registers are what the *arithmetic* uses.
+ *
+ * The one exception, measured rather than reasoned about, is a `static` function whose address never
+ * escapes its translation unit: clang promotes those to the VFP register ABI even under `softfp`
+ * (`sum8` in `tests/corpus/fixture_jni.c` is called with `d0`-`d7`, while `x8` in a scratch file built
+ * with the identical flags reads `r0:r1`, `r2:r3` and then the stack). Nothing here changes for that,
+ * because a call the guest makes to itself never comes through this file — and it is worth saying so
+ * plainly, because "softfp means core registers, always" is a claim that is true of the *boundary* and
+ * false *inside* a library, and a reader who takes it as a universal law will mis-predict a disassembly.
+ */
+[[nodiscard]] unsigned CoreWords(const Value32::Kind kind) {
   switch (kind) {
     case Value32::Kind::S32:
     case Value32::Kind::U32:
@@ -32,28 +48,6 @@ constexpr std::uint32_t kIpswr = 16;
     case Value32::Kind::F64: return 2;
   }
   return 1;
-}
-
-[[nodiscard]] bool IsVfp(const Value32::Kind kind) {
-  return kind == Value32::Kind::F32 || kind == Value32::Kind::F64;
-}
-
-/// Writes s`unit` (32-bit) or d`unit/2` (64-bit) into the VFP bank without disturbing the neighbouring
-/// half. A single-precision write leaves the other half of its D register exactly as it found it —
-/// same rule the interpreter follows for `SetExtendedRegister32`, and for the same reason: overwriting
-/// it feeds a stale lane into whatever reads the pair next.
-void PutS(MachineState& state, unsigned unit, std::uint32_t bits) {
-  std::uint64_t& slot = state.d[unit / 2];
-  if ((unit & 1u) == 0) {
-    slot = (slot & ~0xffffffffull) | bits;
-  } else {
-    slot = (slot & 0xffffffffull) | (static_cast<std::uint64_t>(bits) << 32);
-  }
-}
-
-std::uint32_t GetS(const MachineState& state, unsigned unit) {
-  const std::uint64_t w = state.d[unit / 2];
-  return static_cast<std::uint32_t>((unit & 1u) ? w >> 32 : w);
 }
 
 }  // namespace
@@ -76,32 +70,24 @@ bool PlaceArgs(mem::GuestMemory& memory, MachineState& state, GuestAddr fn, cons
   // Compute the frame first, so a call whose arguments do not fit fails *before* any register or byte
   // has been mutated: a half-applied argument list is a call that looks like it happened.
   unsigned core = 0;   ///< next free core register, 0..4
-  unsigned vfp = 0;    ///< next free 32-bit VFP unit (s0..s15 == d0..d7), 0..16
   unsigned spill = 0;  ///< bytes of stack argument so far
   for (const Value32& a : args) {
-    if (IsVfp(a.kind)) {
-      const unsigned need = CoreWords(a.kind);
-      if (a.kind == Value32::Kind::F64 && (vfp & 1u) != 0) ++vfp;  // a double needs an even unit
-      if (vfp + need <= 16) {
-        vfp += need;
-        continue;
-      }
-      vfp = 16;
-    } else if (a.kind == Value32::Kind::I64) {
-      if ((core & 1u) != 0) ++core;  // an 8-byte integer needs an even/odd *pair*: the odd slot is
-                                     // consumed by nothing, and skipping this is the classic jlong bug
+    const unsigned need = CoreWords(a.kind);
+    if (need == 2) {
+      // An 8-byte argument needs an even/odd core-register *pair*: if the next free register is odd it
+      // is consumed by nothing, and skipping that step is the classic `jlong` bug — with `softfp` it is
+      // equally the `jdouble` bug, because the two are placed by the same rule.
+      if ((core & 1u) != 0) ++core;
       if (core + 2 <= 4) {
         core += 2;
         continue;
       }
       core = 4;
-    } else {
-      if (core < 4) {
-        ++core;
-        continue;
-      }
+    } else if (core < 4) {
+      ++core;
+      continue;
     }
-    if (a.kind == Value32::Kind::I64 || a.kind == Value32::Kind::F64) {
+    if (need == 2) {
       spill = (spill + 7u) & ~7u;  // stack arguments keep their own 8-byte alignment
       spill += 8;
     } else {
@@ -110,22 +96,39 @@ bool PlaceArgs(mem::GuestMemory& memory, MachineState& state, GuestAddr fn, cons
   }
 
   const unsigned needed = kIpswr + spill;
-  if (stack_bytes < needed) {
+  if (stack_bytes < needed + kIpswr) {
     if (err != nullptr) {
-      *err = "call needs " + std::to_string(needed) + " bytes of guest stack (" +
-             std::to_string(spill) + " spilled + " + std::to_string(kIpswr) +
-             " intra-procedure), the frame has " + std::to_string(stack_bytes);
+      *err = "call needs " + std::to_string(needed + kIpswr) + " bytes of guest stack (" +
+             std::to_string(spill) + " argument block + " + std::to_string(2 * kIpswr) +
+             " for the intra-procedure region and its alignment), the frame has " +
+             std::to_string(stack_bytes);
     }
     return false;
   }
 
   const std::uint32_t caller_sp = state.r[RegLayout::kSp];
-  if (caller_sp < needed) {
+  if (caller_sp < needed + kIpswr) {
     if (err != nullptr) *err = "guest stack would run off its bottom at 0x" + std::to_string(caller_sp);
     return false;
   }
-  // 16-byte aligned, which is what "8-byte aligned on entry, 16-byte before a bl" both reduce to: the
-  // value SP holds at the `bl` is the value the callee sees on entry.
+  /**
+   * 16-byte aligned, which is what "8-byte aligned on entry, 16-byte before a bl" both reduce to: the
+   * value SP holds at the `bl` is the value the callee sees on entry — and, because the argument block
+   * starts *at* that value, it is also the address of the first spilled argument.
+   *
+   * That last clause is the correction. `PlaceArgs` used to lay the block out at `frame + kIpswr`, on
+   * the reading that the intra-procedure region sits between SP and the arguments. It does not: it is
+   * the 16 bytes *below* the callee's SP, which is why a callee can spill into it across its own `bl`
+   * without moving SP. A real softfp callee proves the difference — `Java_..._intThenDouble` in
+   * `tests/guest/mathprobe.c` reads its double with `vldr d17, [sp]`, at the bottom of its own frame and
+   * not 16 bytes above it — and until this was fixed RetroBug wrote every spilled argument sixteen bytes
+   * away from where the guest looked, so each one read as whatever the page happened to hold.
+   *
+   * The reason no test saw it for as long as it did is worth recording separately, because it is a
+   * property of the *tests* and not of the bug: the one reader of the spill area in the suite was
+   * `abi_call_test.cpp`'s `Spill()` helper, which added the same 16. An assertion that mirrors the code
+   * it is checking cannot fail, and this one did not, across six-int rows that passed for many revisions.
+   */
   const GuestAddr frame = (caller_sp - needed) & ~0xFu;
   state.r[RegLayout::kSp] = frame;
 
@@ -134,23 +137,10 @@ bool PlaceArgs(mem::GuestMemory& memory, MachineState& state, GuestAddr fn, cons
   // first spilled argument is at the lowest address — reversing this is invisible for one argument and
   // wrong for two.
   core = 0;
-  vfp = 0;
-  unsigned off = kIpswr;
+  unsigned off = 0;  ///< bytes into the argument block, which starts at the callee's SP
   for (const Value32& a : args) {
-    if (IsVfp(a.kind)) {
-      const unsigned need = CoreWords(a.kind);
-      if (a.kind == Value32::Kind::F64 && (vfp & 1u) != 0) ++vfp;
-      if (vfp + need <= 16) {
-        if (a.kind == Value32::Kind::F32) {
-          PutS(state, vfp, a.w());
-        } else {
-          state.d[vfp / 2] = a.bits;
-        }
-        vfp += need;
-        continue;
-      }
-      vfp = 16;
-    } else if (a.kind == Value32::Kind::I64) {
+    const unsigned need = CoreWords(a.kind);
+    if (need == 2) {
       if ((core & 1u) != 0) ++core;
       if (core + 2 <= 4) {
         state.r[core] = a.w();
@@ -159,15 +149,16 @@ bool PlaceArgs(mem::GuestMemory& memory, MachineState& state, GuestAddr fn, cons
         continue;
       }
       core = 4;
-    } else {
-      if (core < 4) {
-        state.r[core++] = a.w();
-        continue;
-      }
+    } else if (core < 4) {
+      state.r[core++] = a.w();
+      continue;
     }
 
-    const GuestAddr at = frame + off;
-    if (a.kind == Value32::Kind::I64 || a.kind == Value32::Kind::F64) {
+    if (need == 2) {
+      // The 8-byte alignment step belongs to the 8-byte argument alone. Rounding for every argument
+      // would pack a 4-byte one at SP+0, skip to SP+8 for its neighbour, and leave a hole that the
+      // callee reads as the next parameter — so the size pass above has to agree with this one, word
+      // for word, and both only ever align before a double-width value.
       off = (off + 7u) & ~7u;
       const std::uint64_t bits = a.bits;
       if (!memory.Write(frame + off, &bits, 8)) {
@@ -177,8 +168,8 @@ bool PlaceArgs(mem::GuestMemory& memory, MachineState& state, GuestAddr fn, cons
       off += 8;
     } else {
       const std::uint32_t bits = a.w();
-      if (!memory.Write(at, &bits, 4)) {
-        if (err != nullptr) *err = "could not write a stack argument at " + std::to_string(at);
+      if (!memory.Write(frame + off, &bits, 4)) {
+        if (err != nullptr) *err = "could not write a stack argument at " + std::to_string(frame + off);
         return false;
       }
       off += 4;
@@ -226,11 +217,11 @@ Ret32 ReturnValue(const MachineState& state, const Shorty& shorty) {
        *
        * This was wrong for a long time and no test could see it, which is worth stating plainly. Every
        * cross-boundary call the suites made until M1's first real APK either took no floating-point
-       * argument or returned none — the fixture's `fp_args` passes eight doubles *guest to guest*, where
-       * both sides are softfp and therefore agree with each other regardless of what this bridge does.
-       * The first real JNI method to return a `jdouble` produced a result whose low 32 bits matched
-       * hardware exactly and whose high half was zero, because the value was in r0:r1 and this function
-       * was reading d0 (`docs/30` §Step 24).
+       * argument or returned none — the fixture's `fp_args` passes eight doubles *guest to guest* without
+       * ever coming through this file, so neither side was ever asked to agree with the bridge. The first
+       * real JNI method to return a `jdouble` produced a result whose low 32 bits matched hardware
+       * exactly and whose high half was zero, because the value was in r0:r1 and this function was reading
+       * d0 (`docs/30` §Step 24).
        */
       out.kind = Value32::Kind::F32;
       out.bits = state.r[0];
@@ -287,7 +278,8 @@ bool AbiContext::IsHostEntry(GuestAddr pc, std::uint32_t* slot) const {
 }
 
 Ret32 AbiContext::CallGuest(GuestAddr fn, const Args32& args, const Shorty& shorty,
-                            unsigned max_steps, exec::RunResult* outcome) {
+                            unsigned max_steps, exec::RunResult* outcome,
+                            MachineState* exit_state) {
   // A nested call (a JNI function calling back into the guest) runs on a copy and restores the outer
   // state on the way out, because the outer guest is still mid-instruction: its registers, PC and SP
   // are live. A handler that wants a result out of a nested call takes it from the `Ret32`, *not* from
@@ -302,6 +294,13 @@ Ret32 AbiContext::CallGuest(GuestAddr fn, const Args32& args, const Shorty& shor
       outcome->reason = exec::StopReason::Internal;
       outcome->detail = std::move(err);
     }
+    // The two checks above are the transactional ones: `PlaceArgs` refuses a call whose frame is too
+    // small before touching a register, so the state here still *is* the caller's. A `memory.Write`
+    // failing further down is not — SP and the registers are already set by then, and the copy below
+    // reports that half-built state. It is a mapped-memory failure rather than a bad argument list, so
+    // the outcome is a fault either way, but `exit_state` is documented as "the state when the call
+    // ended" and that is what it gets.
+    if (exit_state != nullptr) *exit_state = state_;
     state_ = outer;
     return ret;
   }
@@ -376,6 +375,9 @@ Ret32 AbiContext::CallGuest(GuestAddr fn, const Args32& args, const Shorty& shor
 
   ret = ReturnValue(state_, shorty);
   if (outcome != nullptr) *outcome = run;
+  // Copied out before the restore below, which is the only reason this is a parameter rather than
+  // something a caller reads back from `state()`.
+  if (exit_state != nullptr) *exit_state = state_;
   state_ = outer;
   return ret;
 }

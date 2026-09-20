@@ -359,18 +359,30 @@ Outcome call(exec::Executor& engine, Rig& rig, abi::AbiContext& ctx, const char*
   }
   ctx.set_executor(engine);
   exec::RunResult result{};
-  const abi::Ret32 ret = ctx.CallGuest(fn->tagged(), args, abi::Shorty::For(shorty), 4'000'000, &result);
+  exec::MachineState exit_state{};
+  const abi::Ret32 ret =
+      ctx.CallGuest(fn->tagged(), args, abi::Shorty::For(shorty), 4'000'000, &result, &exit_state);
   out.reason = result.reason;
   out.bits = ret.bits;
   out.detail = result.detail;
   out.steps = result.instructions_executed;
   char buf[256];
-  const auto& st = ctx.state();
+  /**
+   * The callee's own last state, taken from `CallGuest`'s out-parameter.
+   *
+   * This used to read `ctx.state()`, which is the state *before* the call: `CallGuest` restores the
+   * caller's registers on the way out because a nested call's caller is live, and so `ctx.state().r[0]`
+   * after a top-level call is a zero that never had anything to do with the guest. Printing it beside a
+   * non-zero result produced the conclusion that "the bridge returns a value its own state does not
+   * hold" — a wrong diagnosis, published and then retracted, caused entirely by an instrument whose name
+   * described the opposite of what it read.
+   */
+  const auto& st = exit_state;
   std::snprintf(buf, sizeof(buf),
-                "kind=%d pc=0x%08x lr=0x%08x r0=0x%08x r1=0x%08x r2=0x%08x d0=0x%016llx "
-                "d1=0x%016llx cpsr=0x%08x",
-                static_cast<int>(ret.kind), st.pc, st.r[14], st.r[0], st.r[1], st.r[2],
-                static_cast<unsigned long long>(st.d[0]),
+                "kind=%d pc=0x%08x lr=0x%08x r0=0x%08x r1=0x%08x r2=0x%08x r3=0x%08x sp=0x%08x "
+                "d0=0x%016llx d1=0x%016llx cpsr=0x%08x",
+                static_cast<int>(ret.kind), st.pc, st.r[14], st.r[0], st.r[1], st.r[2], st.r[3],
+                st.r[13], static_cast<unsigned long long>(st.d[0]),
                 static_cast<unsigned long long>(st.d[1]), st.cpsr);
   out.state_after = buf;
   return out;
@@ -400,12 +412,14 @@ constexpr Split kSplit100[] = {
  * Calls the guest libm's own `sin`/`cos`/`sqrt` directly, with the double argument *split across two
  * register arguments* rather than passed as a `Value32::F64`.
  *
- * That is not a workaround for convenience — it is the experiment. Android's `armeabi-v7a` ABI is
- * softfp, so a `double` parameter occupies a **core register pair**, and passing the two halves as two
- * `U32` arguments places them in r0:r1 exactly where such a parameter belongs. If these calls return
- * the hardware bits, then the softfp argument convention is confirmed by measurement — and the fact
- * that `dp::PlaceArgs` puts `F64` arguments in `vfp` instead is shown to be a defect rather than a
- * reading of the ABI. `docs/30` §Step 24.
+ * That is not a workaround for convenience — it is the experiment, and at the time it was the *only* way to
+ * ask the question. Android's `armeabi-v7a` ABI is softfp, so a `double` parameter occupies a **core
+ * register pair**, and passing the two halves as two `U32` arguments places them in r0:r1 exactly where such
+ * a parameter belongs. These calls returned the hardware bits while `PlaceArgs` was putting `F64` arguments
+ * in `d0` instead, which is what established the one as a defect rather than a reading of the ABI — and it
+ * is why they still take the split form now, three revisions later: the row's job is to pin down *where a
+ * guest's `double` parameter lives*, and once `PlaceArgs` agrees with them the second witness is worth
+ * keeping rather than folding away. `docs/30` §Step 24, §Step 25.
  *
  * It is also the diagnosis that splits the one failing seed into its parts, because a composite that is
  * wrong while its inputs are right is a different bug from one whose inputs are already wrong.
@@ -646,11 +660,15 @@ void a_real_apk_library_loads_and_answers_like_hardware() {
                          static_cast<exec::Executor*>(rig.jit.get())}) {
       const char* tier = engine->tier() == exec::CodeTier::Interp ? "I" : "J";
       // "DLLI": the FIRST character is the return type (`Shorty::returns()` is `desc[0]`), and this
-      // method returns a `jdouble` — so it comes back in `d0`, not `r0`. The first draft passed
-      // "IIDD", which declared an *int* return; the bridge then read r0, and the symptom was a result
-      // whose low 32 bits matched hardware exactly and whose high half was zero. That is what a
-      // mis-declared return looks like, and it is indistinguishable from a wrong answer unless the
-      // expectation is compared in full.
+      // method returns a `jdouble` — so it comes back in **r0:r1**, because the guest ABI is softfp and
+      // that is where a softfp result of that width lands. An earlier draft of this comment said `d0`,
+      // which is the hard-float answer, and the fix to `ReturnValue` left the sentence behind; a wrong
+      // comment about the ABI in the file that tests the ABI is worth more attention than it looks.
+      // What decided it was not the comment either way but the second draft's symptom: the first attempt
+      // passed "IIDD", which declared an *int* return, so the bridge read r0 alone and the result's low 32
+      // bits matched hardware exactly while its high half was zero. That is what a mis-declared return
+      // looks like, and it is indistinguishable from a wrong answer unless the expectation is compared in
+      // full.
       const Outcome got =
           call(*engine, rig, *rig.abi_ctx, "Java_com_retrobug_guestprobe_Probe_mathProbe",
                {abi::Value32::Ptr(0), abi::Value32::Ptr(0), abi::Value32::S32(e.seed)}, "DLLI");
@@ -686,10 +704,111 @@ void a_real_apk_library_loads_and_answers_like_hardware() {
   }
 }
 
+/**
+ * The five JNI methods that *take* a `jfloat`/`jdouble`, each one decided by a different placement rule.
+ *
+ * Why this is a separate set of rows and not an extension of `mathProbe`: `mathProbe` takes a `jint` and
+ * returns a `jdouble`, so it exercises `ReturnValue` only. Until these existed, RetroBug had never placed
+ * a floating-point argument across the host/guest boundary in anger — which is precisely how `PlaceArgs`
+ * could spend weeks putting `F64` arguments into `d0..d7` (the hard-float convention) in a project whose
+ * guests are all `-mfloat-abi=softfp`, where they belong in core register pairs. The fixture that would
+ * have caught it earlier — `fp_args`, eight doubles passed *guest to guest* — never comes through the
+ * bridge at all, so it could not have shown anything about it.
+ *
+ * The rows are chosen so that each fails for its own reason and no two are redundant:
+ *
+ *   - `floatProbe`      — a `jfloat` is one core register (r2), not `s0`.
+ *   - `doubleProbe`     — a `jdouble` on an even slot is the pair r2:r3.
+ *   - `intThenDouble`   — the pair rule *fails* to find two consecutive registers, so the double goes to
+ *                         the stack and r3 is consumed by nothing. `jlong` cannot reach this case, because
+ *                         an 8-byte integer in the tests below always still has r2:r3 free.
+ *   - `twoDoubles`      — the first double exhausts the core bank, so the second is the first stack
+ *                         argument.
+ *   - `doubleIntDouble` — the block already holds one 4-byte argument when the double arrives, so it gets
+ *                         an alignment pad. Every other row here starts the block at an offset that is
+ *                         already 8-aligned, so none of them can see the pad.
+ *
+ * The expected values come from the same bytes run natively on the SM-X710
+ * (`tools/build-guest-apk.sh` → `adb shell /data/local/tmp/oracle_linked`), and each was reproduced a
+ * second time in node's IEEE arithmetic before being written down here.
+ */
+struct ArgRow {
+  const char* method;
+  const char* shorty;
+  abi::Args32 args;
+  std::uint64_t want;
+};
+
+abi::Args32 JniArgs(abi::Args32 tail) {
+  // The two hidden JNI parameters, `env` and `clazz`, which is why every placement below starts at r2.
+  // Both are null because none of these methods touches them — and that is worth stating, because a
+  // probe that dereferenced `env` would be testing C09 rather than the ABI.
+  abi::Args32 out = {abi::Value32::Ptr(0), abi::Value32::Ptr(0)};
+  for (const abi::Value32& v : tail) out.push_back(v);
+  return out;
+}
+
+void floating_point_arguments_land_where_softfp_puts_them() {
+  Rig rig = build();
+  if (!rig.ok) return;
+
+  const std::vector<ArgRow> rows = {
+      {"Java_com_retrobug_guestprobe_Probe_floatProbe", "FLLF",
+       JniArgs({abi::Value32::F32(1.75f)}), 0x4068'0000ull},
+      {"Java_com_retrobug_guestprobe_Probe_floatProbe", "FLLF",
+       JniArgs({abi::Value32::F32(-0.125f)}), 0x3f50'0000ull},
+      {"Java_com_retrobug_guestprobe_Probe_doubleProbe", "DLLD",
+       JniArgs({abi::Value32::F64(10001.0)}), 0x40cd'4d40'0000'0000ull},
+      {"Java_com_retrobug_guestprobe_Probe_doubleProbe", "DLLD",
+       JniArgs({abi::Value32::F64(0.1)}), 0x3ff2'6666'6666'6666ull},
+      {"Java_com_retrobug_guestprobe_Probe_intThenDouble", "DLLID",
+       JniArgs({abi::Value32::S32(7), abi::Value32::F64(10001.0)}), 0x40c3'8c00'0000'0000ull},
+      {"Java_com_retrobug_guestprobe_Probe_intThenDouble", "DLLID",
+       JniArgs({abi::Value32::S32(-3), abi::Value32::F64(0.1)}), 0xc007'3333'3333'3333ull},
+      {"Java_com_retrobug_guestprobe_Probe_twoDoubles", "DLLDD",
+       JniArgs({abi::Value32::F64(10001.0), abi::Value32::F64(0.5)}), 0x40b3'8980'0000'0000ull},
+      {"Java_com_retrobug_guestprobe_Probe_doubleIntDouble", "DLLDL",
+       JniArgs({abi::Value32::F64(2.25), abi::Value32::S32(7), abi::Value32::F64(0.125)}),
+       0x401d'2000'0000'0000ull},
+      {"Java_com_retrobug_guestprobe_Probe_doubleIntDouble", "DLLDL",
+       JniArgs({abi::Value32::F64(0.1), abi::Value32::S32(-1), abi::Value32::F64(65537.0)}),
+       0x40b9'98b3'3333'3334ull},
+  };
+
+  for (const ArgRow& r : rows) {
+    Outcome interp{}, jit{};
+    for (auto* engine : {static_cast<exec::Executor*>(rig.interp.get()),
+                         static_cast<exec::Executor*>(rig.jit.get())}) {
+      const char* tier = engine->tier() == exec::CodeTier::Interp ? "I" : "J";
+      const Outcome got = call(*engine, rig, *rig.abi_ctx, r.method, r.args, r.shorty);
+      (engine->tier() == exec::CodeTier::Interp ? interp : jit) = got;
+      CHECK_CTX(got.ok(), std::string{r.method} + " on Tier " + tier + ": reason=" +
+                              std::to_string(static_cast<int>(got.reason)) + " " + got.detail);
+      if (got.ok()) {
+        CHECK_CTX(got.bits == r.want, std::string{r.method} + " on Tier " + tier + " = 0x" +
+                                          Hex64(got.bits) + ", hardware said 0x" + Hex64(r.want));
+      }
+    }
+    const char* short_name = strrchr(r.method, '_');
+    std::fprintf(stderr, "[abi] %-16s hardware=0x%016llx I=0x%016llx%s J=0x%016llx%s\n",
+                 short_name != nullptr ? short_name + 1 : r.method, static_cast<unsigned long long>(r.want),
+                 static_cast<unsigned long long>(interp.bits), interp.bits == r.want ? "" : " <-- wrong",
+                 static_cast<unsigned long long>(jit.bits), jit.bits == r.want ? "" : " <-- wrong");
+    if (interp.bits != r.want) std::fprintf(stderr, "       I %s\n", interp.state_after.c_str());
+    if (jit.bits != r.want) std::fprintf(stderr, "       J %s\n", jit.state_after.c_str());
+    if (interp.ok() && jit.ok()) {
+      CHECK_CTX(interp.bits == jit.bits,
+                std::string{"the two tiers disagree about "} + r.method + ": I=0x" +
+                    Hex64(interp.bits) + " J=0x" + Hex64(jit.bits));
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
   guest_libm_direct_calls_pin_the_softfp_convention();
+  floating_point_arguments_land_where_softfp_puts_them();
   the_two_tiers_walk_the_same_path_through_libm();
   a_real_apk_library_loads_and_answers_like_hardware();
   std::printf("%d checks, %d failures\n", checks, failures);

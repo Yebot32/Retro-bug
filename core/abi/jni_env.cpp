@@ -110,7 +110,11 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
   //
   // Each one reads its arguments from the AAPCS registers and writes its result to r0, which is the
   // whole of the contract: the bridge has already placed the guest's arguments, and restores PC from
-  // LR on the way out.
+  // LR on the way out. From the guest's side a host slot *is* a callee, so the softfp rules apply in this
+  // direction too: a slot that eventually takes a `jdouble` — the `Get*Field`/`Call*Method` families
+  // reached through `jvalue`, and `NewObjectV` — must read it from an even/odd core pair, and one that
+  // returns a `jfloat`/`jdouble` writes r0 / r0:r1 rather than s0/d0. None of the slots bound below does
+  // either yet, which is why the note is here and not in a test.
   abi_.Bind(jni::kGetVersion, [](exec::MachineState& s, std::string*) {
     s.r[0] = jni::kVersion;
     return true;

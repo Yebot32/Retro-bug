@@ -364,11 +364,26 @@ JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_fp_stack(JNIEnv* e
 }
 
 /*
- * Eight `double` arguments, which is the softfp ABI's boundary: the first four go in d0-d3 and the rest
- * come off the stack. Worth its own probe because the guest→host and host→guest paths will both have to
- * marshal arguments this shape once JNI starts passing `double`s (`CallStaticDoubleMethod` and its
- * friends), and a tier that reads the fifth argument from the wrong place gets a plausible-looking
- * garbage double rather than a fault.
+ * Eight `double` arguments in one call.
+ *
+ * The comment here used to claim that the first four go in d0-d3 and the rest come off the stack, which
+ * is what `-mfloat-abi=softfp` was assumed to mean. `llvm-objdump` of this very file, built with the
+ * project's own flags, says otherwise: the caller sets d0-d7 and `sum8` reads d0-d7 and *nothing* from
+ * the stack. Two things follow, and both are worth writing down because they are easy to get wrong in a
+ * disassembly.
+ *
+ *   - A `static` function whose address never escapes its translation unit gets the **VFP register ABI**
+ *     from clang even under `softfp`. Make the same eight-parameter function externally visible and the
+ *     identical toolchain emits `vmov d17, r0, r1`, `vmov d16, r2, r3` and then
+ *     `vldr d17, [sp]`/`[sp,#8]`/`[sp,#16]`/`[sp,#24]`/`[sp,#32]`/`[sp,#40]` — two core pairs and six
+ *     stack slots. (Measured with a scratch file; the reproduction is in `docs/30` §Step 25.)
+ *   - So this probe covers *guest-internal* VFP-register calls, and does **not** cover stack arguments.
+ *     Where the stack-argument shape is covered instead: `intThenDouble`, `twoDoubles` and
+ *     `doubleIntDouble` in `tests/guest/mathprobe.c`, where RetroBug is the caller, places the spilled
+ *     arguments itself, and is checked against the value the same bytes produce on real hardware.
+ *
+ * What this probe does test is then the thing it was always best placed to test: a tier that misreads
+ * `d4`-`d7` at entry computes a sum that is plausibly wrong rather than faulting.
  */
 __attribute__((noinline)) static double sum8(double a, double b, double c, double d, double e,
                                              double f, double g, double h) {
@@ -405,8 +420,8 @@ JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_simd_int(JNIEnv* e
    * the stack. A `JNIEnv*` and a `jclass` already eat r0 and r1, so a JNI method has exactly two
    * register parameters. The first draft of this probe took four and clang emitted
    * `ldr r0, [sp, #0x4]` as its first instruction, which a test that enters a function directly with
-   * no caller frame reads as an unmapped read. `fp_args` above covers the stack-argument case, because
-   * there the *guest* is the caller and lays its own frame out.
+   * no caller frame reads as an unmapped read. Where the spilled-argument case is covered instead:
+   * `intThenDouble` and friends in `tests/guest/mathprobe.c`, with RetroBug as the caller.
    */
   int32x4_t v = {a, b, a + b, a - b};
   const int32x4_t w = {a - b, a + b, b, a};

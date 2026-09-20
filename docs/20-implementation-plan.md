@@ -395,12 +395,20 @@ Ret32 CallGuest(Executor&, MachineState&, GuestAddr fn, const Args32&, const Sho
 JValue CallGuestJ(Executor&, GuestAddr fn, const char* shorty, va_list);   // JNI dispatch
 }
 ```
-**Invariants:** soft-float ABI (`-mfloat-abi=softfp`) ⇒ scalars in `d0`–`d7`/`s0`–`s15` per AAPCS **and** the
-Android-VFP variant rules; 8-byte stack alignment on entry, 16-byte before a `bl`; `r9`/`tp` preserved; structs
-by-value copied into the guest window (never a host pointer). `Shorty` is the same descriptor ART uses, so C09 has one
-encoding, not two.
+**Invariants:** soft-float ABI (`-mfloat-abi=softfp`) ⇒ **every argument and every result in the core bank**:
+a scalar takes one of `r0`-`r3`, an 8-byte one (integer *or* `double`) an even/odd pair, a `jdouble` result
+comes back in `r0:r1`, and the argument block starts at the callee's entry SP with the 16-byte
+intra-procedure area *below* it. Nothing is allocated from `d0`-`d7` on either side of the boundary — that is
+the *hard*-float convention (`-mfloat-abi=hard`), which the NDK refuses for `armv7-none-linux-android`, so no
+guest RetroBug can build uses it. `30` §Step 25 has the disassembly table this rule is taken from; §Step 7a
+carried the opposite rule as an invariant until §Step 25, and both directions were separately wrong (§Step 24
+the results, §Step 25 the arguments). Also: 8-byte stack alignment on entry, 16-byte before a `bl`; `r9`/`tp`
+preserved; structs by-value copied into the guest window (never a host pointer). `Shorty` is the same
+descriptor ART uses, so C09 has one encoding, not two.
 **Review focus:** this file is where the ABI-correctness review pass concentrates (brief Phase 3 names it);
-`jvalue`/`va_arg` marshalling and 64-bit-pair alignment for `jlong` are the classic failures.
+`jvalue`/`va_arg` marshalling, 64-bit-pair alignment for `jlong`, **and the float kinds** are the classic
+failures — the third is the one that actually shipped here, twice, and the reason it is not enough to check
+that the integer rows pass.
 
 ### C09 `rb::jni`
 ```cpp
@@ -824,6 +832,11 @@ Progress and the findings that change this plan are tracked in
    Asserted against silicon *and* against a second tier, which is what C02's invariant asked for.
    One dependency note from Tier I: those exports are JNI methods, so `n` arrives in **r2** behind `env`
    and `clazz` — a call bridge that puts the first C argument in r0 will get `fib(0)` and look correct.
+   **Read "Done" with two caveats, both since repaired and both in the same direction:** this item's
+   evidence was integer-only, and the component's float path was wrong in each direction separately — the
+   results first (`30` §Step 24) and the arguments after (§Step 25, item 15 below). An integer suite green
+   across a call bridge says nothing about the bridge's float placement, which is the general lesson and the
+   reason item 15's rows are hardware-shaped rather than register-inspection only.
 8. `docs/research/01` corrections (stale `MemoryProcessor` API; no interpreter upstream) and `docs/00` §2 note that
    the no-Gradle build path is verified.
 9. `rb::diag` (C17) — the recorder the "echo requested vs active" invariants all hang off. **Core is done**
@@ -846,7 +859,7 @@ Progress and the findings that change this plan are tracked in
     §Step 17 moved it. 40 VFP/ASIMD rows carry values captured on the SM-X710; Tier J matches hardware on
     all 40, and Tier I — which refused all 35 it was first shown — now matches on the 35 scalar rows
     (conversions, `f64`/`f32` arithmetic with `vsqrt` and `ddiv`, `dcmp`+`vmrs`, `vldr`/`vstr`, the
-    callee-saved `d8-d15` bank, eight-double softfp argument passing, NaN comparison semantics) and
+    callee-saved `d8-d15` bank, an eight-double call through `d0`-`d7`, NaN comparison semantics) and
     refuses only ASIMD, at `VectorBroadcast64`.
     **What this changes:** `Kind::Interpreted` can run `double`-using guest code, so the iOS/M3 case and a
     FP-using app are no longer blocked; it still cannot run NEON, so an ASIMD-heavy guest on an
@@ -928,6 +941,30 @@ Progress and the findings that change this plan are tracked in
     decides; the first draft of the lane asserted the wrong one for an encoding where both matched, the new
     assertion caught it, and the row is now `ldm r0!, {r4, r5, pc}^` — an encoding where exactly one pattern
     matches, so the name is forced rather than inferred.
+
+15. **`rb::abi`'s argument path was hard-float, and fixing it exposed a second, older defect — Done**
+    (`30` §Step 25). §Step 24 corrected `ReturnValue` and left `PlaceArgs` allocating `F32`/`F64` from
+    `s0..s15`/`d0..d7`, which is the `-mfloat-abi=hard` convention; no test called a JNI method that *takes*
+    a floating parameter, so nothing could fail. Five new JNI entry points in the real probe library —
+    one float, one double, a double that cannot find a pair, a second double that overflows the bank, and a
+    double after an odd-sized argument block — each close a *different* placement rule, and each is checked
+    against bits captured on the SM-X710 and then reproduced in node. Two things came out of doing it.
+    The softfp rule was **measured** rather than recalled, from the probe's own disassembly
+    (`vmov s4, r2`, `vmov d18, r2, r3`, `vldr d17, [sp]`, `vldr d17, [sp, #8]`), and with it the discovery
+    that clang gives an internal-linkage function the VFP argument ABI under the *same* flags — so a claim
+    about softfp is a claim about the boundary, not about a disassembly, and four doc sites plus two probe
+    comments had been conflating them. And the argument **block's address** was wrong for every kind, not
+    just floats: it was written 16 bytes above the callee's entry SP, where the intra-procedure region is
+    *below* it, so a guest's `vldr [sp]` read somebody else's bytes. Six pre-existing unit rows covered
+    spilled arguments and passed throughout, because the helper that read the spill area added the same 16
+    — an assertion that mirrors the implementation it is checking, which is now the standing reason this
+    component's spill rows also exist in hardware-shaped form. `rb_abi_call_tests` 95 → 105 checks 0
+    failures, `rb_guest_apk_tests` 92 checks with the 18 float rows green on both tiers and only §Step 24's
+    deferred Tier I libm defect left failing, and the 1,402-check suite still exits 0 on the tablet.
+    **What this changes:** C09's `'F'`/`'D'` shorties are now correct in both directions, which is what
+    lets a real app's `Canvas.rotate(float)`-class surface be called at all rather than entered with a
+    garbage argument — and it is a precondition for #29, because bionic's own functions take stack
+    arguments constantly (`printf` more than most).
 
 Sequencing constraint the owner should know before M1: **M1's end-to-end acceptance step cannot be verified on this
 machine at all** — it needs a physical 64-bit-only arm64 phone. Everything in §9 and most of M1's code can be written
