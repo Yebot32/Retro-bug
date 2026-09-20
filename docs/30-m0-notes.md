@@ -2467,6 +2467,70 @@ that parses a diagnostic *string* is coupled to its formatting and starts passin
 the `printf` changes.
 
 
+## Step 27 — unresolved relocations now refuse the load, and IFUNC turns out to have a deadline
+
+The owner answered §Step 26's open question — *"silent corruption is worse than a load-time refusal"* — and
+implementing the answer is what turned IFUNC from a task into a design constraint. Two measurements came out
+of it, and the second one corrects something written in the previous step.
+
+**What changed in C05.** `LoadOptions::tolerate_unresolved_relocs` defaults to **false**, and with it a
+relocation the loader cannot apply **fails the load**, naming every slot in one message rather than failing
+on the first:
+
+```
+refused 3 relocation(s) that this loader cannot apply: reloc type 0x13 at guest 0xd67e8 (?);
+reloc type 0x11 at guest 0xd68e8 (?); reloc type 0x11 at guest 0xd68f0 (?) — loading would leave those
+slots holding file data the guest treats as an address.
+```
+
+`rb_guest_libc_tests` asserts on that *text*, including all three slot addresses, because "refused 3
+relocations" would pass on a loader that refused the wrong three. `R_ARM_IRELATIVE` is no longer in the
+refusal list at all — it is now *handled*, in the sense that the slot gets the resolver's biased address
+written into it and the slot is recorded for the linker — so the lane's assertion flipped from
+`irelative == 1` to `irelative == 0` plus "and it appears in `ifunc_slots`", which is the pair that
+distinguishes "handled" from "lost".
+
+**Correction to §Step 26, first-hand.** That step says the image's undefined symbols are nine non-weak plus
+three weak **"plus one nameless LOCAL entry"**. There is no nameless import. `R_ARM_IRELATIVE` has no symbol
+field and the three TLS relocations here have `r_sym == 0`, and the old code ran *those four* through the
+symbol lookup anyway — so the caller was asked to resolve `""`, the null symbol's name, and a `readelf`
+row for symbol index 0 read like an import with a blank name. Fixed as part of this step: relocations that
+have no symbol no longer consult the resolver. Worth keeping in the log as its own kind of mistake — a
+`readelf` column and a resolver call produced the same phantom, and I wrote it into a document.
+
+**IFUNC has a deadline, and it is RELRO.** `ifunc_slots` on the device's `libc.so` holds **eight** entries,
+not one: the `R_ARM_IRELATIVE`, plus GOT entries for `strcmp`, `strlen`, `memcpy`, `memmove`, `memset`,
+`__strcpy_chk`, `__memset_chk`. Calling each resolver through the ordinary bridge works as far as execution
+goes — and the split is informative:
+
+```
+resolve strcmp     reason=Returned steps=4  r0=0x956c1   slot write REFUSED
+resolve memcpy     reason=Returned steps=4  r0=0x94ac0   slot write REFUSED
+resolve memmove    reason=Returned steps=4  r0=0x94ac0   slot write REFUSED
+resolve strlen     reason=Syscall  steps=16 r0=0xffffff9c slot write REFUSED
+resolve memset     reason=Syscall  steps=16 r0=0xffffff9c slot write REFUSED
+resolve __strcpy_chk / __memset_chk / <IRELATIVE>  — same, Syscall at 16 steps
+```
+
+Three resolvers return an implementation pointer with no syscall at all (four steps; the set low bit says the
+chosen implementations are Thumb), and five stop at the `/dev/cpu_variant:arm` probe because this lane attaches
+no monitor. **And all eight slot writes are refused**, because `enforce_relro` has already stripped write from
+that memory by the time `LoadFromBytes` returns.
+
+That is the fact that sizes #30: IFUNC cannot be resolved after the load, so the resolution call has to
+happen **inside** it, between relocation and the RELRO protection pass — which is where bionic's own linker
+puts it (`relocate()` runs before `protect_relro()` **[1A]**). For RetroBug that means C05 needs a reentrant
+hook: the loader handing each `IfuncSlot` to a caller-provided resolver while the image is still writable,
+which in turn needs an executor and a syscall monitor to exist before the module is "loaded". A lane now
+asserts the writes are refused, so if a future change makes them succeed the assertion fires and says why
+that is a regression somewhere else rather than permission.
+
+Suite: `rb_guest_libc_tests` **83 checks, 13 failures** — the same 13 named gaps, unchanged, and the new
+rows green. `rb_guest_elf_tests` 156/0, `rb_guest_apk_tests` 92/4, so the stricter default broke no image
+that was loading cleanly before: nothing in the corpus has an unapplied relocation except the device's
+`libc.so`.
+
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |

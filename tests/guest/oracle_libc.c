@@ -112,6 +112,45 @@ int main(void) {
   }
   printf("\n");
 
+  /* --- the IFUNC set: strlen/strcmp/memcpy are resolvers, so these rows are #30's finish line ----------
+   *
+   * Deliberately last and deliberately here already. RetroBug cannot call any of them yet — the GOT slot
+   * holds a resolver and RELRO makes the slot read-only before the load returns (`docs/30` §Step 27) — so
+   * there is no lane to read these numbers today. Capturing them with the rest of the file means the
+   * increment that implements IFUNC resolution asserts against silicon the moment it lands, rather than
+   * spending its first hour working out what to compare to.
+   *
+   * The inputs are chosen so a resolver that picked the *wrong* implementation is still caught: `strlen`
+   * over a 43-byte string crosses a word boundary twice, and the `memmove` is a genuine overlap.
+   *
+   * **One trap for whoever asserts against these, found while capturing them:** `strcmp("abc","abd")`
+   * returned **-32** on this device, not `-1`. `strcmp`'s contract is the sign, and the word-at-a-time
+   * implementations return a word-derived difference; `-32` is that kind of value. It matters for #30
+   * specifically because the device resolves the IFUNC for *its* SoC while RetroBug's resolver will fall
+   * back to the generic implementation when `/dev/cpu_variant:arm` answers `ENOENT` — so the two sides can
+   * legitimately run different bodies of the same function. Assert the **sign** for `strcmp` and
+   * `strncmp`, and reserve magnitude assertions for the results the standard pins: lengths, and bytes.
+   */
+  printf("strlen(hay)                      %zu\n", strlen(hay));
+  printf("strcmp(\"abc\",\"abd\")              %d\n", strcmp("abc", "abd"));
+  printf("strcmp(hay,hay)                  %d\n", strcmp(hay, hay));
+  {
+    static const char src[] = "0123456789abcdef0123456789abcdef";
+    char dst[40];
+    memcpy(dst, src, 33);
+    dst[33] = '\0';
+    printf("memcpy round trip                %s len=%zu\n", dst, strlen(dst));
+    char ov[24];
+    memset(ov, 'z', 8);
+    ov[8] = '\0';
+    printf("memset(ov,'z',8)                 %s\n", ov);
+    char mv[16];
+    memcpy(mv, "ABCDEFGH", 8);
+    memmove(mv + 2, mv, 8);
+    mv[10] = '\0';
+    printf("memmove overlap                  %s\n", mv);
+  }
+
   /* `snprintf` is in the lane's *reported* group rather than its asserted one, because it is the row most
    * likely to need state RetroBug has not got (stdio's `FILE` machinery and its lock). Capturing the
    * answer anyway costs one line and turns "what would it have to return?" into a lookup the next time

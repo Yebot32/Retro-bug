@@ -37,6 +37,8 @@ using elf::STB_GLOBAL; using elf::STB_WEAK;
 using elf::ELF32_ST_BIND; using elf::ELF32_ST_TYPE; using elf::ELF32_R_SYM; using elf::ELF32_R_TYPE;
 using elf::R_ARM_NONE; using elf::R_ARM_ABS32; using elf::R_ARM_COPY;
 using elf::R_ARM_GLOB_DAT; using elf::R_ARM_JUMP_SLOT; using elf::R_ARM_RELATIVE;
+using elf::R_ARM_IRELATIVE; using elf::R_ARM_TLS_DTPMOD32; using elf::R_ARM_TLS_DTPOFF32;
+using elf::R_ARM_TLS_TPOFF32;
 using elf::DT_NULL; using elf::DT_NEEDED; using elf::DT_PLTGOT; using elf::DT_PLTRELSZ;
 using elf::DT_STRTAB; using elf::DT_STRSZ; using elf::DT_SYMTAB; using elf::DT_SYMENT;
 using elf::DT_INIT; using elf::DT_FINI; using elf::DT_SONAME;
@@ -440,10 +442,24 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
         const std::uint32_t type = ELF32_R_TYPE(r_info);
         const std::uint32_t sidx = ELF32_R_SYM(r_info);
 
+        /**
+         * Which relocations have a symbol at all.
+         *
+         * `R_ARM_IRELATIVE` has no symbol field by definition, and a TLS relocation with `r_sym == 0`
+         * refers to *this* module's TLS block. Passing either through the resolver anyway was not
+         * harmless: the caller got asked to resolve `""` — the null symbol's name — and an `libc.so`
+         * with three TLS slots and one IRELATIVE produced four such queries, which is exactly the noise
+         * that had a test reporting a "nameless LOCAL import" that does not exist in the image.
+         */
+        const bool tls_kind =
+            type == R_ARM_TLS_DTPMOD32 || type == R_ARM_TLS_DTPOFF32 || type == R_ARM_TLS_TPOFF32;
+        const bool needs_symbol = type != R_ARM_NONE && type != R_ARM_RELATIVE &&
+                                  type != R_ARM_IRELATIVE && !(tls_kind && sidx == 0);
+
         Sym32 sym{};
         std::string sname;
         bool have_sym = false;
-        if (type != R_ARM_RELATIVE && type != R_ARM_NONE) {
+        if (needs_symbol) {
           have_sym = symbol_at(sidx, sym);
           sname = have_sym ? sym_name(sym.st_name) : std::string{};
           // A relocation that names a symbol we cannot read must stop the load. Without this the
@@ -496,16 +512,42 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
               if (err) *err = "failed writing GOT slot";
               return false;
             }
+            // A GOT entry for an IFUNC symbol holds the *resolver*, and every caller of it wants the
+            // resolver's answer. Writing the resolver is the right placeholder — a guest that calls it
+            // today gets the resolver running, which is measurably close to correct (`memcpy`'s returns
+            // an implementation pointer in four steps) — but the slot still has to be noticed, because
+            // `strlen`'s resolver probes `/dev/cpu_variant:arm` with a syscall and a half-resolved IFUNC
+            // otherwise looks like a bug in the string code rather than an unfinished load.
+            if (have_sym && ELF32_ST_TYPE(sym.st_info) == STT_GNU_IFUNC) {
+              mod.ifunc_slots.push_back(IfuncSlot{
+                  r_offset, CodeAddress{sym_addr & ~1u, (sym_addr & 1u) != 0}, sym_addr, sname});
+            }
             break;
+          case R_ARM_IRELATIVE: {
+            /**
+             * AArch32's REL form has no addend field, so the slot's own contents are the addend: bionic's
+             * rule is `*slot = resolver(load_bias + *slot)` **[1A]**, `linker_relocate.cpp` at
+             * `android-16.0.0_r1`. This writes the biased resolver — the pre-call value — and records the
+             * slot for the linker to finish.
+             */
+            const std::uint32_t resolver = static_cast<std::uint32_t>(addend + base);
+            if (!write32(r_offset, resolver)) {
+              if (err) *err = "failed writing R_ARM_IRELATIVE slot";
+              return false;
+            }
+            mod.ifunc_slots.push_back(IfuncSlot{
+                r_offset, CodeAddress{resolver & ~1u, (resolver & 1u) != 0}, resolver, {}});
+            break;
+          }
           default:
-            // Unsupported kinds are reported, not applied wrongly. TLS and COPY are the realistic
-            // ones; a silent skip here would corrupt a guest pointer instead.
-            //
-            // Worth stating for whoever loads a real `libc.so` next: bionic fills its TLS slots
-            // unconditionally during relocation, so a *recorded* refusal is a silent wrong value in the
-            // guest, not a fault waiting to happen. `rb_guest_libc_tests` asserts on the exact multiset
-            // so it cannot be mistaken for a clean load; whether C05 should fail the load instead is an
-            // open decision, recorded in docs/20 §9 rather than made here.
+            // Refused kinds are recorded with their address and type, and — unless the caller set
+            // `tolerate_unresolved_relocs` — they fail the load at the end of relocation with every slot
+            // named. That flag exists for one reason: IFUNC needs a guest call, so the linker loads the
+            // module, resolves the slots itself, and *then* the image is complete. Nobody else should get
+            // the permissive behaviour, because a skipped TLS slot is not a missing pointer waiting to be
+            // dereferenced at a clean address — bionic computes those offsets unconditionally at load, so
+            // the guest simply reads a wrong value and carries on. `docs/30` §Step 26 measured three such
+            // slots in a real `libc.so` under the old always-record default.
             mod.unsupported_reloc_types.push_back(type);
             char buf[96];
             std::snprintf(buf, sizeof buf, "reloc type 0x%02x at guest 0x%x (%s)", type, r_offset,
@@ -535,6 +577,20 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
                  rela_form)) {
         return std::nullopt;
       }
+    }
+
+    // Every table has now been walked, so the refusals are final and can be reported together. One error
+    // naming all of them beats failing on the first: a library with three TLS slots and one IFUNC is one
+    // piece of work, not three debug sessions.
+    if (!mod.unsupported_relocs.empty() && !opts.tolerate_unresolved_relocs) {
+      std::string what = "refused " + std::to_string(mod.unsupported_relocs.size()) +
+                         " relocation(s) that this loader cannot apply: ";
+      for (std::size_t i = 0; i < mod.unsupported_relocs.size(); ++i) {
+        what += (i ? "; " : "") + mod.unsupported_relocs[i];
+      }
+      what += " — loading would leave those slots holding file data the guest treats as an address. "
+              "Resolve them through the linker, or pass tolerate_unresolved_relocs to say you will";
+      return fail(what);
     }
   }
 

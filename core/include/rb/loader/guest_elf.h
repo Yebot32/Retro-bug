@@ -68,6 +68,26 @@ struct Symbol {
   bool ifunc = false;
 };
 
+/// One relocation whose target is the **result of a guest call** rather than an address in the file.
+///
+/// `where` is the guest address to write the answer into; `resolver` is the function to call, with its
+/// Thumb tag attached, and `slot_value` is what `where` holds now — which for `R_ARM_IRELATIVE` is the
+/// resolver's own biased address, and is the argument AArch32's REL form passes (there is no addend
+/// field, so the slot *is* the addend).
+///
+/// C05 cannot call it: resolution means running guest code, which needs an executor and, for bionic's
+/// arm32 resolvers, a syscall monitor to answer the `openat("/dev/cpu_variant:arm")` they probe with. So
+/// the loader writes the resolver into the slot, records the fact here, and leaves the calling to the
+/// linker. Measured, both halves: `memcpy` called in that state runs the resolver and it *returns* an
+/// implementation pointer in four steps, and `strlen` reaches the `openat` instead — so the execution is
+/// not the missing part, only the load-time call.
+struct IfuncSlot {
+  std::uint32_t where = 0;
+  CodeAddress resolver;
+  std::uint32_t slot_value = 0;
+  std::string name;  ///< the exported name for a GOT entry, empty for a symbolless `R_ARM_IRELATIVE`
+};
+
 /// The linker-facing facts about one loaded module.
 struct GuestModule {
   std::string path;
@@ -81,6 +101,10 @@ struct GuestModule {
   std::vector<Symbol> exports;
   std::vector<Symbol> imports;
   std::vector<std::string> unsupported_relocs;  ///< Relocation kinds refused, named for diagnostics.
+  /// Relocations whose target has to come from a guest call. Empty for every library built from an NDK
+  /// archive so far — `libm.a` and `libz.a` contain no IFUNC — which is why this only shows up once a
+  /// *real* system library is loaded.
+  std::vector<IfuncSlot> ifunc_slots;
   /// The same refusals as raw `r_type` values, in order. Separate from the strings above because a test
   /// that asserts by *parsing a diagnostic message* is coupled to its formatting: change the printf and
   /// the assertion starts passing for the wrong reason. `rb_guest_libc_tests` counts these.
@@ -107,6 +131,23 @@ struct LoadOptions {
   bool apply_relocations = true;
   bool enforce_relro = true;           ///< Strip write from PT_GNU_RELRO after relocation.
   SymbolResolver resolve;
+  /**
+   * When false — the default — a relocation this loader cannot apply **fails the load**, naming every
+   * slot involved.
+   *
+   * The default used to be the other way round: refusals were collected into
+   * `unsupported_relocs` and the load reported success, which reads as a diagnostic affordance and is
+   * actually a silent-wrong-value machine. A skipped `R_ARM_TLS_TPOFF32` leaves a thread-pointer offset
+   * holding whatever the file had in it, and the guest then dereferences that as if it were an address
+   * — no fault anywhere, and the corruption surfaces far from here. `docs/30` §Step 26 is what the
+   * permissive default produced on a real `libc.so`: three TLS slots left unfilled in a library that
+   * would have been reported as loaded cleanly.
+   *
+   * Setting this true is a caller saying out loud that it intends to finish the job itself, which is what
+   * the guest linker does for IFUNC slots. It does not make the refusals invisible: they are still
+   * recorded, and `rb_guest_libc_tests` asserts on the exact multiset either way.
+   */
+  bool tolerate_unresolved_relocs = false;
 };
 
 /// Reads a whole image from `fd` (seekable) and maps it into `mem`.

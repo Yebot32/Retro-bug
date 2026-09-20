@@ -359,6 +359,10 @@ Rig build() {
   rig.mem->Write(kTp + 4, &block, 4);
 
   loader::LoadOptions opts;
+  // The TLS slots stay unresolved here and only here: this lane is measuring a real `libc.so` with no
+  // guest linker yet, and `LoadOptions::tolerate_unresolved_relocs` is exactly the flag for "the caller
+  // will finish this". The default is the opposite — see `a_load_without_that_flag_refuses_and_names_the_slots`.
+  opts.tolerate_unresolved_relocs = true;
   opts.resolve = [&](const std::string& name) -> std::optional<std::uint32_t> {
     rig.libc_asked.push_back(name);
     return kUnimplemented;
@@ -545,14 +549,19 @@ void the_load_reports_exactly_what_retrobug_cannot_yet_do() {
   std::fprintf(stderr, "[libc] %zu refused relocations: %zu IRELATIVE, %zu TLS_DTPMOD32, "
                        "%zu TLS_DTPOFF32, %zu TLS_TPOFF32, %zu other\n",
                types.size(), irelative, dtpmod, dtpoff, tpoff, other);
-  CHECK_CTX(irelative == 1, "R_ARM_IRELATIVE count is " + std::to_string(irelative) +
-                                "; llvm-readelf said 1 for this file");
+  // `R_ARM_IRELATIVE` is no longer in this list, and that is the change, not an omission: it is handled
+  // now (recorded into `ifunc_slots`, slot written with the resolver as the placeholder), so a refusal
+  // count of zero for it is the assertion that says so. The three TLS slots are what remains.
+  CHECK_CTX(irelative == 0, "R_ARM_IRELATIVE was refused rather than recorded; " +
+                                std::to_string(irelative) + " slot(s)");
   CHECK_CTX(dtpmod == 2, "R_ARM_TLS_DTPMOD32 count is " + std::to_string(dtpmod) + "; readelf said 2");
   CHECK_CTX(dtpoff == 0, "R_ARM_TLS_DTPOFF32 count is " + std::to_string(dtpoff) + "; readelf said 0");
   CHECK_CTX(tpoff == 1, "R_ARM_TLS_TPOFF32 count is " + std::to_string(tpoff) + "; readelf said 1");
   CHECK_CTX(other == 0, "the loader refused " + std::to_string(other) +
                             " kinds beyond the four expected. A new kind is a new feature and should be "
                             "named here before it is implemented.");
+  CHECK_CTX(rig.libc->ifunc_slots.size() >= 1u,
+            "the IRELATIVE was neither refused nor recorded, so it went missing entirely");
 
   // 2. The IFUNC set, by name. "Eleven IFUNCs" without the list is a number nobody can act on.
   std::vector<std::string> ifuncs;
@@ -907,10 +916,134 @@ void what_libc_needs_that_retrobug_does_not_have() {
   std::fprintf(stderr, "[libc] snprintf buffer holds \"%s\" (hardware wrote \"42/xy/!\")\n", buf);
 }
 
+/**
+ * The same image loaded under the default, and the load has to fail.
+ *
+ * This row exists because the alternative is the failure mode the owner named explicitly: a module that
+ * "loads cleanly" while three of its relocation slots still contain file data. A TLS offset is not a
+ * null pointer someone might notice — bionic computes it into a real address and the guest dereferences it
+ * as if the load had finished, so the first symptom is a wrong value somewhere far from here.
+ *
+ * Asserting the *text* of the failure is deliberate too. "Refused 3 relocations" would pass on a loader
+ * that refused the wrong three, and the whole value of the refusal is that it says which.
+ */
+void a_load_without_that_flag_refuses_and_names_the_slots() {
+  const auto image = read_file(RB_DEVICE_LIBC_PATH);
+  if (image.empty()) {
+    ++checks;
+    fail("read the device's libc.so for the strict-load row", __LINE__, RB_DEVICE_LIBC_PATH);
+    return;
+  }
+  AddressModel model;
+  model.kind = AddressModel::kBiased;
+  model.host_page_shift = HostPageShift();
+  std::string merr;
+  auto mem = GuestMemory::Create(64u << 20, model, &merr);
+  if (!mem) {
+    ++checks;
+    fail("guest memory for the strict-load row", __LINE__, merr);
+    return;
+  }
+  loader::LoadOptions strict;  // default: tolerate_unresolved_relocs == false
+  strict.resolve = [](const std::string&) -> std::optional<std::uint32_t> { return kUnimplemented; };
+  std::string err;
+  const auto mod = loader::LoadFromBytes(*mem, image, "libc.so", strict, &err);
+  CHECK_CTX(!mod.has_value(),
+            "the device's libc.so loaded under the default options, with " +
+                std::to_string(mod ? mod->unsupported_relocs.size() : 0u) +
+                " unapplied relocations. It should refuse");
+  if (mod) return;
+  std::fprintf(stderr, "[libc] strict load refused: %s\n", err.c_str());
+  // Three TLS slots are the reason, and each has to appear with its address.
+  CHECK_CTX(err.find("0x11") != std::string::npos, "the refusal does not name the DTPMOD32 type: " + err);
+  CHECK_CTX(err.find("0x13") != std::string::npos, "the refusal does not name the TPOFF32 type: " + err);
+  std::size_t named = 0;
+  for (const char* a : {"0xd67e8", "0xd68e8", "0xd68f0"}) {
+    if (err.find(a) != std::string::npos) ++named;
+  }
+  CHECK_CTX(named == 3u, "only " + std::to_string(named) +
+                             " of the three TLS slot addresses appear in the refusal: " + err);
+  // And the IRELATIVE must *not* be in there: it is handled, recorded, and left for the linker.
+  CHECK_CTX(err.find("0xa0") == std::string::npos,
+            "R_ARM_IRELATIVE was refused as if it were unknown, rather than recorded as needing a call: " +
+                err);
+}
+
+/**
+ * The IFUNC slots the load left for the linker, and what calling one of them costs.
+ *
+ * `ifunc_slots` is C05's new record of "this word holds a resolver; the value the guest wants is what it
+ * returns". Two things were measured about the slots rather than assumed, and both are asserted: the count
+ * (one symbolless `R_ARM_IRELATIVE` plus however many GOT entries name an IFUNC symbol — printing it is the
+ * point, since the number is a property of the image and nobody has guessed it correctly so far), and
+ * whether the slot is still *writable* after load, which is what decides where IFUNC resolution has to
+ * happen. `DT_FLAGS`-driven RELRO strips write from `.data.rel.ro` at the end of a load, and an IFUNC GOT
+ * entry lives there — so a linker that resolves after `LoadFromBytes` returns may be trying to write into
+ * read-only guest memory, and RetroBug's memory model is allowed to say no.
+ */
+void the_ifunc_slots_are_recorded_for_the_linker() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  std::fprintf(stderr, "[libc] %zu IFUNC slot(s) left to resolve:\n", rig.libc->ifunc_slots.size());
+  std::size_t in_text = 0;
+  for (const auto& s : rig.libc->ifunc_slots) {
+    const bool inside = s.resolver.addr >= rig.libc->base &&
+                        s.resolver.addr < rig.libc->base + rig.libc->extent;
+    in_text += inside ? 1 : 0;
+    std::fprintf(stderr, "  slot 0x%s <- resolver 0x%s%s  %s\n", Hex(s.where).c_str(),
+                 Hex(s.resolver.tagged()).c_str(), s.resolver.thumb ? " (Thumb)" : "",
+                 s.name.empty() ? "<R_ARM_IRELATIVE, no name>" : s.name.c_str());
+  }
+  CHECK_CTX(!rig.libc->ifunc_slots.empty(), "no IFUNC slot was recorded at all");
+  CHECK_CTX(in_text == rig.libc->ifunc_slots.size(),
+            "a recorded resolver points outside the module — the slot value was not the biased address");
+
+  // Try resolving one, on Tier J, through the same bridge every other row uses.
+  //
+  // **None of the slot writes succeed, and that is the finding.** Every IFUNC GOT entry in this image sits
+  // in memory that `enforce_relro` has already made read-only by the time `LoadFromBytes` returns, so a
+  // linker that resolves after the load cannot write the answer back. Which decides #30's shape: the call
+  // has to happen *inside* the load, between relocation and the RELRO protection pass — exactly where
+  // bionic's own linker does it (`relocate()` runs before `protect_relro()` **[1A]**). It is asserted here
+  // rather than reasoned about, because "the write is refused" is a fact about the guest memory model and
+  // not about a document, and a future change that let these writes through would silently move the
+  // resolution point back to where it does not belong.
+  //
+  // The two resolver families are worth reading off the same table: `strcmp`, `memcpy` and `memmove` return
+  // an implementation pointer in four steps with no syscall at all (and the low bit of `0x956c1` / `0x94ac0`
+  // says those implementations are Thumb), while `strlen`, `memset` and the `_chk` variants stop at an SVC
+  // after 16 steps — the `/dev/cpu_variant:arm` probe, which needs a monitor this lane does not attach. So
+  // resolving all eleven is a strict superset of "call a guest function": it also needs the syscall path.
+  std::size_t refused = 0;
+  for (const auto& s : rig.libc->ifunc_slots) {
+    rig.abi_ctx->set_executor(*rig.jit);
+    exec::RunResult out{};
+    exec::MachineState exit_state{};
+    const abi::Ret32 r = rig.abi_ctx->CallGuest(
+        s.resolver.tagged(), {abi::Value32::U32(s.slot_value)}, abi::Shorty::For("ILI"), 200'000,
+        &out, &exit_state);
+    const std::uint32_t answer = static_cast<std::uint32_t>(r.bits);
+    const bool writable = rig.mem->Write(s.where, &answer, 4);
+    if (!writable) ++refused;
+    std::fprintf(stderr,
+                 "[libc] resolve %-30s reason=%d steps=%u r0=0x%s  slot write %s\n",
+                 s.name.empty() ? "<IRELATIVE>" : s.name.c_str(), static_cast<int>(out.reason),
+                 out.instructions_executed, Hex(answer).c_str(), writable ? "ok" : "REFUSED");
+  }
+  CHECK_CTX(refused == rig.libc->ifunc_slots.size(),
+            std::to_string(rig.libc->ifunc_slots.size() - refused) +
+                " IFUNC slot(s) were writable after the load — resolution is supposed to be impossible at "
+                "this point, which is what puts it inside LoadFromBytes. If this became writable because "
+                "RELRO stopped being enforced, that is a regression elsewhere, not permission to resolve "
+                "here.");
+}
+
 }  // namespace
 
 int main() {
   the_load_reports_exactly_what_retrobug_cannot_yet_do();
+  a_load_without_that_flag_refuses_and_names_the_slots();
+  the_ifunc_slots_are_recorded_for_the_linker();
   string_scanning_matches_bionic();
   numeric_conversion_matches_bionic();
   libc_calls_back_into_a_guest_function();

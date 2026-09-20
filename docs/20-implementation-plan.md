@@ -299,7 +299,8 @@ LoadResult Load(const std::vector<uint8_t>& image, C03::GuestMemory&, LinkerHook
 | `SymbolIndex exports` | `std::vector<Symbol> exports` + `FindExport` | A map is an optimisation over a table that is eight entries in the fixture; revisit against the first corpus `.so` rather than guessing the size now |
 | `BuildId build_id` (*"sha256, C15's match key"*) | `std::vector<uint8_t> build_id`, read from `PT_NOTE`, **no hash computed** | The NDK fixture has no build-id at all, so a hash of the content is the only key that works for every image. That belongs with tier-3 patching, which is deliberately held — the gap is named here so it is not rediscovered as a surprise in C15 |
 | `entry` as an address | `CodeAddress{addr, thumb}`, on `entry`/`init`/`fini` and on `FindExport`; `Symbol::value` keeps the raw tagged value | The review focus above. Masking bit 0 loses the ARM/Thumb choice, which is unrecoverable downstream and does not fault — it executes different instructions. Data relocations need the tagged value, execution needs it split out, so both are exposed |
-| `ExIdxTable unwinding` | **not implemented** | `PT_ARM_EXIDX` is recognised and discarded. Needed before a guest can unwind a C++ exception across a `.so` boundary, which is a corpus-app behaviour, so it is M1 work — not silently dropped: `R_ARM_THM_CALL`/`R_ARM_COPY` and `PT_GNU_STACK` are likewise unhandled and land in `unsupported_relocs` or are ignored |
+| `ExIdxTable unwinding` | **not implemented** | `PT_ARM_EXIDX` is recognised and discarded. Needed before a guest can unwind a C++ exception across a `.so` boundary, which is a corpus-app behaviour, so it is M1 work — not silently dropped: `R_ARM_COPY` and the TLS kinds are unhandled and now refuse the load, and `PT_GNU_STACK` is ignored |
+| (no such field) | `LoadOptions::tolerate_unresolved_relocs`, **default false**; `GuestModule::ifunc_slots`, `unsupported_relocs`, `unsupported_reloc_types`, `Symbol::ifunc` | The three TLS slots in a real `libc.so` made the old record-and-continue default a silent-wrong-value machine: bionic computes those offsets into addresses at load, so a skipped one is read as a live pointer with nothing to indicate it was never filled. Refusing by default, with every slot named, is the owner's call (`30` §Step 27). IFUNC is the one case the caller *can* finish itself, so it is recorded rather than refused — and `30` §Step 27 measured that its slot is **read-only by the time the load returns**, which puts the resolution call inside `LoadFromBytes`, before the RELRO pass |
 
 ### C06 `rb::linker`
 ```cpp
@@ -997,6 +998,16 @@ Progress and the findings that change this plan are tracked in
     `android_get_application_target_sdk_version`, `__loader_shared_globals` — not the ~1,300 it exports. C11's
     scope, measured off an image instead of estimated. Suite otherwise unchanged: 1,418 checks, 0 failures,
     plus dynarmic's 200,561 assertions.
+    **Followed immediately by §Step 27**, which took the owner's decision on the TLS question — refuse the
+    load, name every slot, `tolerate_unresolved_relocs` as the explicit opt-in — and in doing it found the
+    constraint that sizes IFUNC: a real `libc.so` has **eight** slots needing a resolver call, three of the
+    eleven resolvers return an implementation pointer in four steps with no syscall, five stop at the
+    `/dev/cpu_variant:arm` probe, and **every one of the eight writes is refused**, because RELRO has made
+    that memory read-only before the load returns. So resolution cannot be a post-load step: it belongs
+    *inside* `LoadFromBytes`, between relocation and protection, which is where bionic puts it too
+    (**[1A]**). That also corrected something §Step 26 had written down from a `readelf` column: the
+    "nameless import" was really this loader asking the resolver to resolve `""`, because `R_ARM_IRELATIVE`
+    and the `r_sym == 0` TLS kinds have no symbol and used to be looked up anyway.
 
 Sequencing constraint the owner should know before M1: **M1's end-to-end acceptance step cannot be verified on this
 machine at all** — it needs a physical 64-bit-only arm64 phone. Everything in §9 and most of M1's code can be written
