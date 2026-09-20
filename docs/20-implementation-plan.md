@@ -795,6 +795,25 @@ Progress and the findings that change this plan are tracked in
     as a working configuration rather than a failure, and the backend choice echoed through C17. The
     `AnonRwx`/`MemfdDualAlias` allocators themselves are M1's, next to the probe that selects them, and
     nothing is wired into Tier J yet — which still runs on Dynarmic's cache.
+12. **Tier I cannot execute floating point, measured rather than assumed** (`30` §Step 16, `docs/32` §5
+    item 3). 35 VFP/ASIMD rows, values captured on the SM-X710: Tier J matches hardware on all 35 — including
+    `dcmp`/`vmrs` FPSCR flag semantics with ARM's less-than-sets-NV rule, `vsqrt`, `ddiv`, `fcvt` both ways,
+    the callee-saved `d8-d15` traffic and eight-double softfp argument passing — and Tier I refuses all 35,
+    cleanly and by name (`FPFixedS32ToDouble`, `VectorBroadcast64`), because it implements one vector IR opcode
+    out of the ~70 the front end emits.
+    **What this changes:** `Kind::Interpreted` is not a working configuration for FP code, so it is *not* a
+    safe fallback for iOS (M3, where `execmem` is the open question rather than a measured grant) or for any
+    T1 policy that trades `execmem` for isolation; and an app whose native `.so` uses `double` cannot run on
+    Tier I today, which is a C17-visible fact rather than a performance one.
+    **Experiment, before it is scoped:** objdump the M1 corpus's own `.so` files (not bionic) for the FP-heavy
+    groups, and time a `Math.sqrt`-free vs `Math.sqrt`-heavy guest on Tier J to see whether the exception-bit
+    caveat in Dynarmic ("FPSR state is approximate") is reachable at all — the probes here read the cumulative
+    bits and both hardware and the emulator returned 0, so the caveat is unexercised rather than cleared.
+    **Fallback, in cost order:** (a) gate the interpreted path per app and say so in the report, which is a
+    day and honest; (b) implement the scalar VFP subset Tier I is missing — `FP*ToFloat`/`FloatToFP*`,
+    `Scalar{Add,Sub,Mul,Div,Compare}*`, `Vector{Load,Store}*` and `VectorPush/Pop`, which is most of what
+    libm-style guest code needs, and is the M1-sized option; (c) full ASIMD in Tier I, which nothing yet
+    asks for.
 
 Sequencing constraint the owner should know before M1: **M1's end-to-end acceptance step cannot be verified on this
 machine at all** — it needs a physical 64-bit-only arm64 phone. Everything in §9 and most of M1's code can be written

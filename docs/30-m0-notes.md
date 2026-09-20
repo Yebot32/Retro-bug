@@ -1601,6 +1601,78 @@ pinned to C12/C02 by spelling, not by a compile-time link, which is the one plac
 an experiment: when C12's `Executor` lands, add a `static_assert` that each word maps to an enumerator, which is the
 same "asserted by a test, not by convention" rule §C14 asks for.
 
+## Step 16 — 35 floating-point rows, hardware on one side and a refusal on the other
+
+`docs/32` §5 item 3 was M0's next-ranked work: IT-blocks and FP-status vectors, "where Dynarmic's own
+suite is thinnest relative to measured demand". IT-blocks had been settled in Steps 7c and 9. FP had not
+been measured at all — not because it was forgotten, but because nothing in the fixture used the FPU, so
+there was no question to ask the tiers. Seven probes went into `tests/corpus/fixture_jni.c`, their values
+came off the SM-X710 through `tools/run_armv7_oracle.sh`, and the answer is asymmetric:
+
+| | result |
+|---|---|
+| Tier J, 35 rows across 7 VFP/ASIMD groups | **35 of 35 equal hardware** |
+| Tier I, the same 35 rows | **35 of 35 refuse** — `FPFixedS32ToDouble` for scalar, `VectorBroadcast64` for ASIMD |
+
+The JIT result is the one M0 wanted: `f64` add/multiply/divide/`vsqrt`, `fcvt` in both directions, `dcmp`
++ `vmrs` of FPSCR, `vldr`/`vstr` with the callee-saved `d8-d15` traffic, eight-double softfp argument
+passing, NaN comparison semantics, and ASIMD `vmul.i32`/`vadd.i32` with lane extracts — all equal to what
+real ARMv7 silicon returns for the same bytes. Including the part most likely to be subtly wrong: FPSCR's
+compare field reproduces ARM's rule that a less-than compare *also sets NV* (the row is `34 34 34 129 34`;
+`129` is that case). And the refusal is clean rather than silent: Tier I implements one vector IR opcode
+out of the ~70 the front end can emit, so it stops at the first FP instruction with the op named. That is
+now a measured fact with consequences for `Kind::Interpreted`, recorded in `docs/20` §9 item 12.
+
+**Three ways this lane was nearly worthless, all found before it was believed.**
+
+1. `fpsr_flags` did not measure FPSCR. `if ((double)a < (double)b)` is provable to clang as `a < b`, so it
+   emitted `cmp`, and the `vmrs` that followed read an FPSCR no FP instruction in the function had ever
+   written — i.e. whatever the process happened to start with, which is a different number on a device
+   and in an emulator for reasons that have nothing to do with the FPU. The tell was five identical
+   columns; the fix was to make the ordering a real FP question (`x/3.0 + y` versus `y/7.0`). Same class
+   as Step 13's "an assertion that cannot fail": a probe whose subject never executes is a probe that
+   passes.
+2. Four of the five argument pairs took the same branch. `t > u` for all of them until `(100, -50)` was
+   added, so the compare's other leg was unmeasured — the same "identical columns" symptom one level
+   down.
+3. The first `simd_int` took four declared `jint` parameters, and **the ARM AAPCS passes arguments in
+   r0-r3 only**: r4 upwards are workspace, so the fifth and sixth arguments arrive on the stack, and a
+   `JNIEnv*` plus a `jclass` already consume r0 and r1. Clang's first instruction was `ldr r0, [sp, #4]`,
+   which the harness — that enters a function with a stack *top* and no caller frame, on purpose —
+   correctly reported as an unmapped read. Two of my own assumptions in one line: I had written `si.r[4]
+   = c; si.r[5] = d;` as if those were argument registers, in a file whose own `EntryState` comment says
+   arguments go in r2 and r3. The probe now takes two parameters and derives its vectors from them; the
+   stack-argument case is still covered, by `fp_args`, where the guest is its own caller and lays out its
+   own frame.
+
+**The lane's negative control came from the broken probe.** With `simd_int` mis-entered, Tier J's check
+*failed* — not on the value (it had computed 3, and hardware said 3) but on `reason == Returned`, which
+the assertion ANDs with the value. So the shape that would have hidden a fault behind a plausible number
+is already excluded, and it was demonstrated rather than reasoned about. Tier I's half of the contract —
+`Returned` with hardware's value, *or* `Unimplemented` — was exercised the same way: that probe produced a
+`Fault`, and the check refused it. Two tiers agreeing is not evidence, which Step 7c already learned the
+hard way; hence every row here carries hardware's number.
+
+**Not done, and not pretended done:**
+
+- **The `ext_regs` ↔ `d[]` packing has no behavioural test.** `jit.cpp` maps `S<2n>`/`S<2n+1>` onto
+  `d[n]` with a `static_assert` on the *size* of the array and nothing on the *order*, and the tier
+  comparison that would catch a swapped half is the one Tier I refuses to participate in. The experiment
+  is to land one scalar VFP op in Tier I and re-run these rows: any transposition shows up as a
+  disagreement in `d[]`, not as a wrong `r0`, because every probe here returns an integer.
+- **FPSCR's cumulative exception bits are unexercised, not cleared.** The probes read `(f >> 8) & 0x1f`
+  and hardware and Tier J both answered 0 — which is consistent with Dynarmic's "FPSR state is
+  approximate" caveat rather than evidence against it. Raising an exception (divide by zero, invalid
+  conversion, underflow) is the test that would say something, and it needs a probe that triggers one.
+- **A guest method with more than two declared parameters has no differential coverage.** That is the
+  bridge's argument marshalling (C08), not the tiers', and `fp_args` only covers the case where the guest
+  is its own caller. `CallGuest` with a 4-int shorty is the shape to add.
+- **Tier I's `Fault` detail string is a mess** — `guest memory read at 0x100004 refused (unmapped or not
+  readable) at ReadMemory32 arg0=imm:0x100003be8 arg1=%Add32 arg2=imm(type 0x8000)` — against Tier J's
+  `guest memory read at 1048580 is unmapped or not readable`. The op-rendering branch prints an IR
+  operand's `type` enum as a hex number and an `Imm` where a resolved address belongs. Not wrong exactly,
+  but unreadable at 2 a.m. on a device with no debugger, which is the only place it will ever be read.
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |
@@ -1615,5 +1687,6 @@ same "asserted by a test, not by convention" rule §C14 asks for.
 | Emulator image | `android-37.1/google_apis_playstore_ps16k/x86_64`, `abilist=x86_64,arm64-v8a`, **`abilist32=` empty** |
 | `openat2`/`io_uring`/`landlock` from an app | unavailable (outside bionic's `SYSCALLS.TXT` allowlist) — see `docs/research/05` §1.4 |
 | Asking the assembler what an encoding actually is | the NDK ships **`llvm-objdump` but no `llvm-mc`**, so: `clang --target=armv7-none-linux-androideabi26 -mthumb -c x.s` then `llvm-objdump -d x.o`. This is how `#5`→`0x1d50` and `#9`→`f102 0009` were settled in Step 9, and it needs no device — the answer is the same bytes the guest will load |
+| ARM AAPCS argument registers, and what a JNI method can take in registers | **r0-r3 only.** r4 upwards are *workspace*, not arguments, so a 32-bit guest's fifth declared argument is on the stack; with `JNIEnv*` in r0 and `jobject`/`jclass` in r1, **a JNI method has exactly two register parameters**. `EntryState` seeds r2/r3 and provides no caller frame, so a probe with three or more declared parameters faults on its first instruction — correctly. Found the expensive way in Step 16 (a four-`jint` NEON probe), and it is a fact about the ABI rather than about RetroBug |
 | Executable memory from an app | permitted: `allow appdomain self:process execmem;` (`private/app.te:189`, read directly) |
 | Exec from app-writable files | forbidden: `app_neverallows.te:69-73` (read directly) → why AD-5 ships one pre-built agent `.so` |

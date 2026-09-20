@@ -14,6 +14,7 @@
  * end-to-end emulation on the OnePlus 12 (docs/21 §3).
  */
 #include <jni.h>
+#include <stdint.h>
 #include <stdio.h>
 
 /* ARMv7-only materialisations: 0x12345 requires movw+movt, not a single literal move. */
@@ -252,4 +253,156 @@ JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_flush_probe(JNIEnv
       "adds   r0, r3, #1\n"
       "bx     lr\n" ::: "r0", "r1", "r7", "cc");
   __builtin_unreachable();
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * The VFP/NEON probes: where Tier I's boundary actually is, in units of real code.
+ *
+ * `docs/32` §1 measured the demand — 14,723 vector/FP instructions across bionic and libc++, including
+ * `vmul.f64` 786 times and `vldr` 2,290 — and §5 item 3 ranked FP-status vectors as the next lane after
+ * IT-blocks. It did not say what RetroBug *does* about them, and the answer is not obvious from the
+ * handler list: Tier I implements one vector opcode (`VectorAdd32`) out of the ~70 the A32 front end can
+ * emit, so a double-precision `dadd` reaches `Fail(inst, "no Tier I semantics yet")`. That is a clean
+ * stop rather than a wrong answer, which is the good news; the bad news is that Tier I is the path an
+ * `execmem`-denied host has to run everything on, so "it stops" is a M1-sized gap that needs to be
+ * measured rather than assumed.
+ *
+ * Hence these. Each one is a *distinct IR group*, not a distinct arithmetic result:
+ *
+ *   fp_arith   — scalar d-register arithmetic: `dmul`/`dadd`/`ddiv` and a `vsqrt`, plus the
+ *                `fmdrr`/`ftosi` conversion out. This is the `vmul.f64` group `docs/32` §2 item 2 calls
+ *                required rather than optional.
+ *   fp_round   — single/double mixing: `fcvt` both ways and a truncating convert to int. Rounds and
+ *                conversions are where a 32-bit emulation of `fmod`-style library code diverges.
+ *   fpsr_flags — `dcmp.f64` writing the NV/ZF/C field, then `vmrs` reading FPSCR back out. This is the
+ *                group Dynarmic's own README warns about ("FPSR state is approximate"), which is exactly
+ *                why it needs a hardware number in front of it rather than a reading of the code.
+ *   fp_stack   — `vldr`/`vstr` through a real stack array, and a call with enough live doubles to want
+ *                the callee-saved `d8-d15` bank: the `vpush`/`vpop` prologue every compiled FP function
+ *                has, and the one whose absence would show up as corrupt arguments rather than a crash.
+ *   fp_nan     — `0.0/0.0`, then four comparisons against the result. NaN *semantics* rather than NaN
+ *                bit patterns: on a correct engine exactly one of the four is true, and a tier that
+ *                invents a payload still gets this right, which is the point — the payload is not what
+ *                app code branches on.
+ *   simd_int   — ASIMD integer lanes: `vmul.i32`, `vadd.i32`, and two lane extracts. The
+ *                `vst1`/`vld1` structure group's nearest cheap relative.
+ *
+ * All six return `jint`, so the existing bridge drives them unchanged, and none of them calls into a
+ * library: every instruction that runs is in this file's own text, which is what makes the hardware
+ * value and the emulator value the same question about the same bytes.
+ */
+#include <arm_neon.h>
+
+__attribute__((noinline)) static double use_one(double v) { return v * 1.0000001 + 0.5; }
+
+JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_fp_arith(JNIEnv* env, jclass clazz,
+                                                                      jint a, jint b) {
+  (void)env; (void)clazz;
+  const double x = a, y = b;
+  const double z = x * y + (x / y) - __builtin_sqrt(x * x + y * y);
+  return (int)z;
+}
+
+JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_fp_round(JNIEnv* env, jclass clazz,
+                                                                      jint a) {
+  (void)env; (void)clazz;
+  const double big = a * 2.5;
+  const float small = (float)big * 3.0f;
+  return (int)(double)small - a;
+}
+
+JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_fpsr_flags(JNIEnv* env, jclass clazz,
+                                                                        jint a, jint b) {
+  (void)env; (void)clazz;
+  const double x = a, y = b;
+  /*
+   * The divides are not padding. Given `(double)a < (double)b`, clang proves it equivalent to `a < b`
+   * and emits `cmp` — which was what the first version of this probe did, leaving `vmrs` reading an
+   * FPSCR that no FP instruction in this function had ever written. The comparison then measures
+   * whatever the process started with: a different number on a device and in an emulator for a reason
+   * that has nothing to do with either. Dividing by 3 and by 7 makes the ordering a real FP question.
+   */
+  const double t = x / 3.0 + y;
+  const double u = y / 7.0;
+  int r = 0;
+  if (t < u) r |= 1;
+  if (t > u) r |= 2;
+  if (t == u) r |= 4;
+  uint32_t f = 0;
+  __asm__ volatile("vmrs %0, fpscr" : "=r"(f));
+  /* Bits 31:28 are the compare result (NV, Z, C, GE); bit 16 is DXC and 12:8 the cumulative set. */
+  return r + (int)((f >> 27) & 0x1fu) * 8 + (int)((f >> 16) & 1u) * 256 +
+         (int)((f >> 8) & 0x1fu) * 512;
+}
+
+JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_fp_stack(JNIEnv* env, jclass clazz,
+                                                                      jint a, jint b) {
+  (void)env; (void)clazz;
+  const double p = a, q = b;
+  volatile double s[8];
+  for (int i = 0; i < 8; ++i) s[i] = p * (i + 1) + q;
+  /*
+   * Seven doubles have to survive the call below, and only d0-d3 are caller-saved, so the prologue is
+   * forced into `vpush {d8-…}`. The first version of this probe kept four live and clang solved it
+   * inside d0-d3: the instruction group this is supposed to cover never appeared, and a tier that
+   * cannot save a callee-saved register would have passed anyway.
+   */
+  double x0 = p, x1 = q, x2 = p + q, x3 = p - q, x4 = p * q, x5 = p / q, x6 = x0 * x1 + x2;
+  for (int i = 0; i < 8; ++i) {
+    x0 += use_one(s[i]);
+    x1 += x0; x2 += x1; x3 += x2; x4 += x3; x5 += x4; x6 += x5;
+  }
+  return (int)(x0 + x1 + x2 + x3 + x4 + x5 + x6);
+}
+
+/*
+ * Eight `double` arguments, which is the softfp ABI's boundary: the first four go in d0-d3 and the rest
+ * come off the stack. Worth its own probe because the guest→host and host→guest paths will both have to
+ * marshal arguments this shape once JNI starts passing `double`s (`CallStaticDoubleMethod` and its
+ * friends), and a tier that reads the fifth argument from the wrong place gets a plausible-looking
+ * garbage double rather than a fault.
+ */
+__attribute__((noinline)) static double sum8(double a, double b, double c, double d, double e,
+                                             double f, double g, double h) {
+  return a + b + c + d + e + f + g + h;
+}
+
+JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_fp_args(JNIEnv* env, jclass clazz,
+                                                                     jint a, jint b) {
+  (void)env; (void)clazz;
+  const double p = a, q = b;
+  const double t = sum8(p, q, p + 1, q + 2, p * 3, q * 4, p - q, p / q);
+  return (int)t;
+}
+
+JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_fp_nan(JNIEnv* env, jclass clazz,
+                                                                    jint a) {
+  (void)env; (void)clazz;
+  const double z = (double)a * 0.0;
+  const double m = (z / z) * 1.5;
+  int r = 0;
+  if (m < 0.0) r |= 1;
+  if (m > 0.0) r |= 2;
+  if (m == 0.0) r |= 4;
+  if (m != m) r |= 8;
+  return r;
+}
+
+JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_simd_int(JNIEnv* env, jclass clazz,
+                                                                      jint a, jint b) {
+  (void)env; (void)clazz;
+  /*
+   * Two declared parameters, not four, and that is an ABI fact rather than a style choice: the ARM
+   * AAPCS passes arguments in r0-r3 only — r4 upwards are workspace, and a fifth argument arrives on
+   * the stack. A `JNIEnv*` and a `jclass` already eat r0 and r1, so a JNI method has exactly two
+   * register parameters. The first draft of this probe took four and clang emitted
+   * `ldr r0, [sp, #0x4]` as its first instruction, which a test that enters a function directly with
+   * no caller frame reads as an unmapped read. `fp_args` above covers the stack-argument case, because
+   * there the *guest* is the caller and lays its own frame out.
+   */
+  int32x4_t v = {a, b, a + b, a - b};
+  const int32x4_t w = {a - b, a + b, b, a};
+  v = vaddq_s32(vmulq_s32(v, w), w);
+  return vgetq_lane_s32(v, 0) + vgetq_lane_s32(v, 3);
 }

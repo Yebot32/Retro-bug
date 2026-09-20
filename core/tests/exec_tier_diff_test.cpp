@@ -257,6 +257,131 @@ void both_tiers_agree_and_match_hardware() {
   }
 }
 
+/// The VFP/NEON groups, per instruction class, with hardware as the authority and a refusal allowed.
+///
+/// `docs/32` §1 measured the demand (14,723 vector/FP instructions in bionic and libc++, `vmul.f64`
+/// 786 times, `vldr` 2,290) and §5 item 3 ranked this lane next after IT-blocks. What it did not
+/// answer is what RetroBug *does* about them, and the answer is asymmetric: Tier I implements one
+/// vector IR opcode (`VectorAdd32`) out of the ~70 the A32 front end can emit, so a `dadd` stops it
+/// with `StopReason::Unimplemented`. That is a clean refusal rather than a wrong number, which is the
+/// part worth having; the part worth *knowing* is which groups those are, in units of real code,
+/// before M1 discovers them by an app producing garbage on the `execmem`-denied path.
+///
+/// So each row asserts two different things, deliberately not the same one:
+///   - Tier J must equal the hardware number. A miss here is a bug, and it fails.
+///   - Tier I must *either* equal it *or* stop with `Unimplemented` naming the op. A third outcome —
+///     a completed run with a different value — is the one this cannot allow, because two tiers that
+///     agree with each other are not evidence: they can both be wrong together, which is exactly what
+///     §Step 7c found for IT blocks. Hence the hardware column rather than a tier-vs-tier diff.
+/// The stderr summary is the deliverable: which group, which op, how far Tier I gets today.
+struct FpCase {
+  const char* name;
+  std::int32_t a, b;
+  std::int32_t want;  ///< one value from tests/corpus/oracle-armv7.txt, in that row's order
+  const char* group;  ///< what the probe is supposed to be exercising, for the summary
+};
+
+void fp_groups_are_accurate_or_explicitly_refused() {
+  Rig rig = build();
+  if (!rig.ok) return;
+
+  // Every probe below takes at most two declared parameters, because that is all a JNI method *can*
+  // take in registers: the ARM AAPCS passes arguments in r0-r3 and the rest on the stack, and
+  // `JNIEnv*`/`jclass` already occupy r0/r1. A third parameter would be an unmapped read at entry —
+  // which is not an engine defect but would have been reported as one. `fp_args` covers the
+  // stack-argument case with the guest as its own caller.
+  const FpCase cases[] = {
+      // fp_arith: vmov/vcvt/dmul/dadd/ddiv/vsqrt/fmdrr
+      {"Java_com_retrobug_fixture_MainActivity_fp_arith", 3, 7, 13, "scalar f64 +-*/,sqrt"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_arith", 7, 3, 15, "scalar f64 +-*/,sqrt"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_arith", -5, 3, -22, "scalar f64 +-*/,sqrt"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_arith", 100, -50, -5113, "scalar f64 +-*/,sqrt"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_arith", 0, 1, -1, "scalar f64 +-*/,sqrt"},
+      // fpsr_flags: dcmp.f64 then vmrs of FPSCR — the flag *semantics*, not the value. `129` is the
+      // `t < u` case and it is the row that carries ARM's odd rule that a less-than compare also sets
+      // NV; four of the five pairs land on the same number, which is why that pair is in the set.
+      {"Java_com_retrobug_fixture_MainActivity_fpsr_flags", 3, 7, 34, "dcmp + FPSCR flags"},
+      {"Java_com_retrobug_fixture_MainActivity_fpsr_flags", 7, 3, 34, "dcmp + FPSCR flags"},
+      {"Java_com_retrobug_fixture_MainActivity_fpsr_flags", -5, 3, 34, "dcmp + FPSCR flags"},
+      {"Java_com_retrobug_fixture_MainActivity_fpsr_flags", 100, -50, 129, "dcmp + FPSCR flags"},
+      {"Java_com_retrobug_fixture_MainActivity_fpsr_flags", 0, 1, 34, "dcmp + FPSCR flags"},
+      // fp_stack: vldr/vstr through a stack array, and the callee-saved d8-d15 bank across a call.
+      {"Java_com_retrobug_fixture_MainActivity_fp_stack", 3, 7, 110125, "FP stack + save/restore"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_stack", 7, 3, 144035, "FP stack + save/restore"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_stack", -5, 3, -55957, "FP stack + save/restore"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_stack", 100, -50, 1023099,
+       "FP stack + save/restore"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_stack", 0, 1, 11269, "FP stack + save/restore"},
+      // fp_args: eight doubles into one call, so four in d0-d3 and four on the stack.
+      {"Java_com_retrobug_fixture_MainActivity_fp_args", 3, 7, 56, "softfp 8-double args"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_args", 7, 3, 62, "softfp 8-double args"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_args", -5, 3, -13, "softfp 8-double args"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_args", 100, -50, 351, "softfp 8-double args"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_args", 0, 1, 8, "softfp 8-double args"},
+      // fp_round: fcvt both directions and a truncating convert to int. `a` is the oracle's argument
+      // already shifted (`pairs[i][0] - 2` there), which is why it is not the pair above.
+      {"Java_com_retrobug_fixture_MainActivity_fp_round", 1, 0, 6, "fcvt + rounding"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_round", 5, 0, 32, "fcvt + rounding"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_round", -7, 0, -45, "fcvt + rounding"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_round", 98, 0, 637, "fcvt + rounding"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_round", -2, 0, -13, "fcvt + rounding"},
+      // fp_nan: 0.0/0.0 then four compares. `8` on all five is the point — exactly one of the four
+      // branches may be taken, and a tier that invents its own NaN payload still gets this right,
+      // which is deliberate: the payload is not what app code branches on.
+      {"Java_com_retrobug_fixture_MainActivity_fp_nan", 1, 0, 8, "NaN comparison semantics"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_nan", 5, 0, 8, "NaN comparison semantics"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_nan", -7, 0, 8, "NaN comparison semantics"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_nan", 98, 0, 8, "NaN comparison semantics"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_nan", -2, 0, 8, "NaN comparison semantics"},
+      // simd_int: vmul.i32/vadd.i32 on q registers plus two lane extracts.
+      {"Java_com_retrobug_fixture_MainActivity_simd_int", 3, 7, -25, "ASIMD i32 lanes"},
+      {"Java_com_retrobug_fixture_MainActivity_simd_int", 7, 3, 67, "ASIMD i32 lanes"},
+      {"Java_com_retrobug_fixture_MainActivity_simd_int", -5, 3, 67, "ASIMD i32 lanes"},
+      {"Java_com_retrobug_fixture_MainActivity_simd_int", 100, -50, 30250, "ASIMD i32 lanes"},
+      {"Java_com_retrobug_fixture_MainActivity_simd_int", 0, 1, -1, "ASIMD i32 lanes"},
+  };
+
+  int refused = 0;
+  std::string ops;
+  for (const auto& c : cases) {
+    const auto where = rig.mod->FindExport(c.name);
+    if (!where) {
+      ++checks;
+      fail("no export", __LINE__, c.name);
+      continue;
+    }
+    exec::MachineState si = EntryState(where->addr, c.a, c.b, where->thumb, /*two=*/true);
+    exec::MachineState sj = si;  // Run() mutates the state it is handed, so neither copy can be const
+
+    const exec::RunResult rj = rig.jit->Run(sj, 8'000'000);
+    CHECK_CTX(rj.reason == exec::StopReason::Returned &&
+                  static_cast<std::int32_t>(sj.r[0]) == c.want,
+              std::string{c.name} + " on Tier J gave " +
+                  std::to_string(static_cast<std::int32_t>(sj.r[0])) + ", hardware said " +
+                  std::to_string(c.want) + "\n      " + Describe("jit", rj, sj));
+
+    const exec::RunResult ri = rig.interp->Run(si, 8'000'000);
+    const bool i_ran = ri.reason == exec::StopReason::Returned;
+    const int i_got = static_cast<std::int32_t>(si.r[0]);
+    CHECK_CTX(i_ran ? i_got == c.want : ri.reason == exec::StopReason::Unimplemented,
+              std::string{c.name} + " on Tier I: reason=" +
+                  std::to_string(static_cast<int>(ri.reason)) + " r0=" + std::to_string(i_got) +
+                  " hardware=" + std::to_string(c.want) + " detail=" + ri.detail);
+    if (!i_ran) {
+      ++refused;
+      const std::string op = ri.detail.substr(0, ri.detail.find(':'));
+      if (ops.find(op) == std::string::npos) ops += (ops.empty() ? "" : ", ") + op;
+    }
+    if (i_ran) Compare(c.name, si, ri, sj, rj);
+    std::fprintf(stderr, "[fp] %-28s %-26s hardware=%-8d jit=%-8d interp=%s%s\n", c.name + 39,
+                 c.group, c.want, static_cast<std::int32_t>(sj.r[0]),
+                 i_ran ? std::to_string(i_got).c_str() : "refused",
+                 i_ran ? "" : (" (" + ri.detail + ")").c_str());
+  }
+  std::fprintf(stderr, "[fp] Tier I refused %d of %zu FP rows; missing ops: %s\n", refused,
+               sizeof cases / sizeof cases[0], ops.empty() ? "none" : ops.c_str());
+}
+
 /// Tier J owns a code cache and Tier I does not, so invalidation has to be tested where it means
 /// something: patch a byte of guest code, and both tiers must then produce the *new* answer.
 ///
@@ -663,6 +788,7 @@ void unmapped_code_faults_in_both_tiers() {
 
 int main() {
   both_tiers_agree_and_match_hardware();
+  fp_groups_are_accurate_or_explicitly_refused();
   invalidation_reaches_the_compiled_code();
   both_tiers_stop_at_the_same_svc();
   a_guest_cacheflush_reaches_the_tier_that_owns_the_cache();

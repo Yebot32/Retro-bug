@@ -32,6 +32,18 @@ extern jint Java_com_retrobug_fixture_MainActivity_patch_probe(JNIEnv* env, jcla
 extern jint Java_com_retrobug_fixture_MainActivity_patch_probe_b(JNIEnv* env, jclass clazz, jint a,
                                                                  jint b);
 extern jint Java_com_retrobug_fixture_MainActivity_jni_utf(JNIEnv* env, jclass clazz, jint seed);
+extern jint Java_com_retrobug_fixture_MainActivity_fp_arith(JNIEnv* env, jclass clazz, jint a,
+                                                            jint b);
+extern jint Java_com_retrobug_fixture_MainActivity_fp_round(JNIEnv* env, jclass clazz, jint a);
+extern jint Java_com_retrobug_fixture_MainActivity_fpsr_flags(JNIEnv* env, jclass clazz, jint a,
+                                                              jint b);
+extern jint Java_com_retrobug_fixture_MainActivity_fp_stack(JNIEnv* env, jclass clazz, jint a,
+                                                            jint b);
+extern jint Java_com_retrobug_fixture_MainActivity_fp_args(JNIEnv* env, jclass clazz, jint a,
+                                                           jint b);
+extern jint Java_com_retrobug_fixture_MainActivity_fp_nan(JNIEnv* env, jclass clazz, jint a);
+extern jint Java_com_retrobug_fixture_MainActivity_simd_int(JNIEnv* env, jclass clazz, jint a,
+                                                            jint b);
 
 /*
  * A JNIEnv for the guest to call out through, so the oracle can measure the *JNI call path* on real
@@ -168,6 +180,54 @@ int main(int argc, char** argv) {
       }
       printf("\n");
     }
+  }
+
+  // The VFP/NEON group, one row per probe, five argument pairs per row.
+  //
+  // Why these are here at all: Tier I implements one vector IR opcode out of the ~70 the A32 front end
+  // can emit, so the interesting question is not whether the tiers agree with each other — they can
+  // agree while both being wrong — but which of them agrees with silicon, per instruction group. These
+  // rows are the hardware column of that table, from the same compiled text both tiers load.
+  {
+    // (100, -50) is the pair that makes `t < u` reachable: the other four all take the `t > u` branch,
+    // which is how the first capture of this row came back with five identical numbers — a probe whose
+    // argument set cannot reach both legs of a compare measures the compare's absence, not its presence.
+    static const jint pairs[][2] = {{3, 7}, {7, 3}, {-5, 3}, {100, -50}, {0, 1}};
+    static const unsigned npairs = sizeof pairs / sizeof pairs[0];
+    typedef jint (*fn2)(JNIEnv*, jclass, jint, jint);
+    typedef jint (*fn1)(JNIEnv*, jclass, jint);
+    const struct {
+      const char* label;
+      fn2 f2;
+    } two[] = {{"fp_arith", Java_com_retrobug_fixture_MainActivity_fp_arith},
+               {"fpsr_flags", Java_com_retrobug_fixture_MainActivity_fpsr_flags},
+               {"fp_stack", Java_com_retrobug_fixture_MainActivity_fp_stack},
+               {"fp_args", Java_com_retrobug_fixture_MainActivity_fp_args}};
+    for (unsigned p = 0; p < sizeof two / sizeof two[0]; ++p) {
+      printf("%s:", two[p].label);
+      for (unsigned i = 0; i < npairs; ++i) {
+        printf(" %d", two[p].f2(NULL, NULL, pairs[i][0], pairs[i][1]));
+      }
+      printf("\n");
+    }
+    const struct {
+      const char* label;
+      fn1 f1;
+    } one[] = {{"fp_round", Java_com_retrobug_fixture_MainActivity_fp_round},
+               {"fp_nan", Java_com_retrobug_fixture_MainActivity_fp_nan}};
+    for (unsigned p = 0; p < sizeof one / sizeof one[0]; ++p) {
+      printf("%s:", one[p].label);
+      for (unsigned i = 0; i < npairs; ++i) {
+        printf(" %d", one[p].f1(NULL, NULL, pairs[i][0] - 2));
+      }
+      printf("\n");
+    }
+    printf("simd_int:");
+    const fn2 simd = Java_com_retrobug_fixture_MainActivity_simd_int;
+    for (unsigned i = 0; i < npairs; ++i) {
+      printf(" %d", simd(NULL, NULL, pairs[i][0], pairs[i][1]));
+    }
+    printf("\n");
   }
 
   // jni_utf, against a JNIEnv built right here.

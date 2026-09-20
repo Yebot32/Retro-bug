@@ -1,13 +1,20 @@
 # device=SM-X710 serial=R52Y106BECZ abilist32=armeabi-v7a,armeabi page=4096
-# built from a666e3e 2026-09-20T03:52:14+04:00
+# built from 5d1503d 2026-09-20T09:35:46+04:00
 --- numeric oracle
-thumb=1 fib_addr=0x1b42d
+thumb=1 fib_addr=0x1b58d
 fib(0)=0 fib(1)=1 fib(2)=1 fib(20)=6765 fib(20)again=6765
 fib-curve: 0 1 1 2 3 5 8 13 21 34 55 89 144
 wide(0)=52 wide(2)=50 wide(-1)=55
 it_probe: 42 1008 42 104 1005 1000
 patch_probe: 1008 42 1005
 patch_probe_b: 42 42 1007
+fp_arith: 13 15 -22 -5113 -1
+fpsr_flags: 34 34 34 129 34
+fp_stack: 110125 144035 -55957 1023099 11269
+fp_args: 56 62 -13 351 8
+fp_round: 6 32 -45 637 -13
+fp_nan: 8 8 8 8 8
+simd_int: -25 67 67 30250 -1
 jni_utf(1)=115 jni_utf(0)=114 calls=2 utf=retrobug
 string=fib(20)=6765 wide=50
 cp15: run `--cp15 <name>` per register; a refused one kills this process
@@ -17,14 +24,14 @@ midr: attempting
 rc=132
 Illegal instruction 
 ctr: attempting
-rc=132
 Illegal instruction 
+rc=132
 mpidr: attempting
 rc=132
 Illegal instruction 
 tpidrurw: attempting
-tpidrurw: 0xf55affe0
+tpidrurw: 0xeba7bfe0
 rc=0
 fpsid: attempting
-rc=132
 Illegal instruction 
+rc=132

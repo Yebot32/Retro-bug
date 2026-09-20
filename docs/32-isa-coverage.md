@@ -154,6 +154,34 @@ identified; correctness against a reference is not yet measured.
      `--no-show-raw-insn` currently suppresses.
 3. **IT-block and FP-status vectors first.** Ranked by §2: IT-blocks, `f64` VFP paths, `vmrs`/FPSCR,
    ASIMD structures — these are where Dynarmic's own suite is thinnest relative to measured demand.
+   **IT-blocks: done** (`30` §Step 7c found and fixed Tier I's bug; §Step 9 made the six shapes a
+   differential with hardware values). **FP/ASIMD: done** (`30` §Step 16, `exec_tier_diff_test.cpp`'s
+   `fp_groups_are_accurate_or_explicitly_refused`), and its result is asymmetric in a way that matters:
+
+   | | Tier J (JIT) | Tier I (interpreter) |
+   |---|---|---|
+   | 35 rows × 7 VFP/ASIMD groups, values measured on the SM-X710 | **35 of 35 equal hardware** | **35 of 35 refuse**, at the first FP/ASIMD instruction |
+
+   The groups covered on the JIT path are scalar `f64` `+ - * /` with `vsqrt`, `fcvt` in both
+   directions and a truncating convert, `dcmp.f64` + `vmrs` of FPSCR, `vldr`/`vstr` plus the
+   callee-saved `d8-d15` traffic, eight-double softfp argument passing, NaN comparison semantics, and
+   ASIMD `vmul.i32`/`vadd.i32` with lane extracts. Two of those deserve emphasis because §2 ranked them
+   and nothing had measured them since: **FPSCR flag semantics match silicon including ARM's rule that
+   a less-than compare also sets NV** (the row is `34 34 34 129 34`, and `129` is the `t < u` case), and
+   `vmul.f64`-class arithmetic — the group §2 item 2 called required rather than optional — is right to
+   the returned integer on every pair. Dynarmic's "FPSR state is approximate" caveat is about the
+   *cumulative exception* bits, which these probes read (`(f>>8) & 0x1f`) and which came back 0 on
+   hardware and in the emulator alike; the caveat therefore stands, unfalsified and unexercised, and
+   narrowing it needs a program that raises an exception, not one that only compares.
+
+   Tier I's refusal is the finding with planning consequences. It stops at `FPFixedS32ToDouble` for
+   scalar code and `VectorBroadcast64` for ASIMD, both with `StopReason::Unimplemented` — a named
+   refusal, not a wrong number — but the extent is total: Tier I implements **one** vector IR opcode
+   (`VectorAdd32`) out of the ~70 the front end emits. So the interpreted path cannot run any
+   floating-point guest code at all, which reaches AD-2 (Tier I's priority was argued on
+   correctness-first grounds), the `Kind::Interpreted` code-cache backend (C04's third option, i.e.
+   the iOS/`execmem`-denied case where M3 has no other choice), and any T1 policy that trades
+   `execmem` for isolation. Consequence recorded in `docs/20` §9 item 12.
 4. Repeat on the **app-level** corpus once `docs/research/10`'s APK fixtures are downloaded, since
    bionic will under-represent what games' hand-written assembly and codec libraries use.
 
