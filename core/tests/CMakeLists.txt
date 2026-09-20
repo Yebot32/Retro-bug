@@ -52,3 +52,8 @@ target_compile_definitions(rb_abi_call_tests PRIVATE RB_FIXTURE_PATH="/data/loca
 add_executable(rb_exec_tier_diff_tests exec_tier_diff_test.cpp)
 target_link_libraries(rb_exec_tier_diff_tests PRIVATE rb_exec rb_loader)
 target_compile_definitions(rb_exec_tier_diff_tests PRIVATE RB_FIXTURE_PATH="/data/local/tmp/librb_fixture.so")
+
+# C17's recorder is pure string work, so it needs neither the fixture nor a guest program — and that is
+# part of the point: the component whose job is to say what a launch did must be testable without one.
+add_executable(rb_diag_tests diag_test.cpp)
+target_link_libraries(rb_diag_tests PRIVATE rb_diag)

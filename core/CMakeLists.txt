@@ -54,9 +54,16 @@ add_library(rb_abi STATIC abi/call.cpp abi/jni_env.cpp)
 target_compile_features(rb_abi PUBLIC cxx_std_20)
 target_link_libraries(rb_abi PUBLIC rb_exec rb_mem)
 
+# rb::diag (C17) has no engine dependency and must not gain one: it is the component that reports on the
+# others, so a report that could not be produced because something else failed to build would be the
+# worst possible failure mode for it. Header-only dependency is <string>/<vector>.
+add_library(rb_diag STATIC diag/diag.cpp)
+target_compile_features(rb_diag PUBLIC cxx_std_20)
+target_include_directories(rb_diag PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+
 # rb_core is the aggregate the engine-facing components will hang off.
 add_library(rb_core INTERFACE)
-target_link_libraries(rb_core INTERFACE rb_mem rb_loader rb_isa rb_exec rb_abi dynarmic)
+target_link_libraries(rb_core INTERFACE rb_mem rb_loader rb_isa rb_exec rb_abi rb_diag dynarmic)
 
 if(DEFINED RB_COMPAT_INCLUDE_DIR)
   target_include_directories(rb_core INTERFACE "${RB_COMPAT_INCLUDE_DIR}")

@@ -1143,6 +1143,71 @@ code written to be rigorous, and both were only caught by asking "what value wou
 thing it tests were broken?" The differential makes that question cheap to ask, which may be the best reason
 to have built Tier J when the plan said "later".
 
+## Step 10 — `rb::diag`: the rule is "nothing is applied without an echo", so make discarding impossible
+
+C17 is the component the plan leans on to turn every other component's *"must be reviewed"* line into
+something mechanical: `docs/20` §C17 says each of those lines is expressed as a diag field, and `docs/10`
+§12.3 names the pattern (Xenia's Vulkan diagnostics, audited in `docs/research/08`): an ordered set of
+stages, **the report rewritten in full after every append** so a hang or a crash mid-initialisation leaves
+the last stage visible, and `>>> INITIALIZATION FAILED AT: <stage> <<<`.
+
+The audit's own bill is the reason the API is shaped the way it is: six silent-ignore interfaces in that
+codebase — a wrong TOML section, restricted entitlements that were silently inert, a patch DB's filename
+rules, a driver fallback nobody was told about, an evidence file deleted by the reset that produced it, and
+a `buildTypes.debug.packaging` block "silently ignored by AGP 8" — and "every one cost a debug session".
+That wording is what `docs/research/08` says; where `docs/20` had been citing it as *"the most expensive
+lesson"* it now cites the list, because the superlative was mine and the source makes no ranking.
+
+`core/include/rb/diag/diag.h` + `core/diag/diag.cpp` + `core/tests/diag_test.cpp`: 105 checks, 0 failures,
+on both devices, no fixture and no guest program — the recorder is pure string work, which is also the
+point: what reports on a launch must be testable without one.
+
+**Three decisions that carry the rule, each with a test that fails if it is removed.**
+
+1. **`Record` cannot discard.** A record missing its stage, its requested side, or its active side — or an
+   `inert`/`failed` outcome with no reason — is stored anyway as a *failure naming the field whose echo
+   went missing*, and it sets the banner. The tempting implementation, `if (!valid) return false;`, is the
+   bug: it is a silent-ignore interface in a component whose subject matter is silent-ignore interfaces.
+   A caller that ignores the return value still gets a legible report, which is the only way "mandatory
+   echo" survives contact with a caller in a hurry.
+2. **A failed echo does not satisfy a requirement.** `MissingRequired()` ignores `kFailed` entries, so a
+   field cannot be closed out by its own complaint. Required fields come from a static set — code tier,
+   address model, guest base, code-cache backend, both page sizes, isolation entry — plus whatever
+   `Require()` demands at runtime (a profile that declares patches makes `patch-match` required). The two
+   OEM probes are deliberately *not* in the static set: they are Android-shaped questions, and `core/` may
+   not encode one platform's answer set as a universal requirement; the Android glue asks for them, which
+   is also what turns "this build forgot to probe" into a report line.
+3. **`EnterStage` is an append.** It stamps the stage and flushes *before* the work, which is the whole
+   reason the rewrite-in-full cost is worth paying. `EnterStage("")` stamps nothing rather than un-stamping
+   the real one.
+
+Two smaller shapes worth naming: the **first** failure keeps the banner (a later, vaguer one must not
+overwrite what actually went wrong — the same rule `JitExecutor::SetPending` reached independently), and
+rendering caps each value at 512 bytes with the true length in the marker while `entries()` keeps the real
+string — the *report* is the bounded artifact, since it is what gets copied out of a UI, and the
+programmatic view should not be a truncation. The recorder has no clock and no launch id, on purpose: two
+launches that did the same thing must render byte-identically, which is what makes the determinism test and
+any future "diff these two launches" UI feature possible. A caller that wants a timestamp puts one in a
+record's evidence.
+
+**A sink failure reports itself one flush late** (`written = FAILED n times: …`) — it cannot be inside the
+payload that just failed to be written, and saying so beats retrying quietly. That is also the only
+deliberate inconsistency in the file format, so it is stated in the header rather than left to be
+discovered.
+
+**M1's exit criterion is now an assertion.** "`rb::diag` shows active tier + address model + code-cache
+backend" was a sentence about a UI; it is now `MissingRequired().empty()` over those fields, checked in
+this suite, and `unrecorded = …` is the line a support report shows when they are not there.
+
+**What is left for the glue to do, and is not done here.** Nothing populates a `Recorder` yet: the launch
+path has to call it from the address-model probe (AD-6), the app-domain probes (U-2/U-13, which `30` §Step
+8 asks be recorded *per launch* so bench data becomes fleet data), the code-cache backend selection (§8.3's
+"probed, never assumed"), the T0/T1 transition, and C14/C15's profile overrides. Each is a one-line
+`Record` at the place the decision is already made — and each one that is forgotten will show up as an
+`unrecorded` name rather than as a plausible-looking report, which is the asymmetry this component was
+built to create. The privacy surface is also still unstated by any doc: the report is copyable from the UI,
+so *what may not go in it* wants a decision before M1's export button exists, not after.
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |

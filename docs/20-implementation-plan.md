@@ -360,7 +360,9 @@ enum class Executor { kHostNativeGLES3, kHostNativeGLES1, kAngleGLES1, kSwANGLE,
 ```
 **Invariants:** guest GL proxy code is executor-agnostic and links against `Channel` only, so T1's software path and
 the CI oracle are the same binary as T0's; a per-instance executor choice comes from C14/C15 and is echoed "requested
-vs active" through C17 (never silently substituted — `docs/research/08`'s most expensive lesson).
+vs active" through C17 (never silently substituted — `docs/research/08` §"silent-ignore interfaces
+everywhere", which lists six such interfaces in that codebase and says of them "every one cost a debug
+session"; the executor-substitution case is one instance of that class, not the whole of it).
 
 ### C13 `rb::audio` / `rb::input`
 Same channel discipline. Audio's guest interface tables hand-modelled (§1). Input's `MotionEvent` is a **real 32-bit
@@ -420,6 +422,21 @@ processes eagerly), so nothing may be process-resident-only. `SelfTest` gates th
 Stage recorder with the `>>> INITIALIZATION FAILED AT: <stage> <<<` shape and mandatory requested-vs-active echo;
 serialised into the instance dir and copyable from the UI. Every other component's "must be reviewed" line above is
 expressed as a `diag` field, because that is what makes review findings mechanical rather than aspirational.
+
+**As built** (`30` §Step 10, 105 checks green on both devices). Three properties make the sentence above
+enforceable rather than aspirational, and each has a test that fails if it is removed: `Record` **cannot
+discard** a malformed echo (it stores a failure naming the field instead, which is the only version that is
+not itself a silent-ignore interface); a `kFailed` entry does **not** satisfy a required field, so a field
+cannot be closed out by its own complaint; and entering a stage is itself an append, which is what makes the
+rewrite-in-full survive a hang. Required fields are a small cross-platform set plus whatever `Require()`
+adds at run time — the Android-specific probes are demanded by the glue, not by `core/`, because `core/` may
+not encode one platform's answer set as universal. `Field` is the current list of "must be reviewed" lines
+that have a component to review them from; adding a component with a review requirement means adding a
+field, and the name table is checked against the enum by test rather than by care.
+
+**Still open in C17, and it is glue work not core work:** nothing populates a recorder yet, and no doc says
+what must *not* appear in a report that a user can copy out of a UI — that decision belongs before M1's
+export button, not after.
 
 ### C18 `rb::import` / C19 UI
 Import: read manifest, gate on `native-code: 'armeabi-v7a'`/ABI presence, parse DEX for `native` methods,
@@ -635,6 +652,10 @@ Progress and the findings that change this plan are tracked in
    and `clazz` — a call bridge that puts the first C argument in r0 will get `fib(0)` and look correct.
 8. `docs/research/01` corrections (stale `MemoryProcessor` API; no interpreter upstream) and `docs/00` §2 note that
    the no-Gradle build path is verified.
+9. `rb::diag` (C17) — the recorder the "echo requested vs active" invariants all hang off. **Core is done**
+   (`30` §Step 10): 105 checks, and M1's "shows active tier + address model + code-cache backend" is now
+   `MissingRequired().empty()` rather than a review note. Populating it is M1's launch-path work, listed
+   there rather than assumed here.
 
 Sequencing constraint the owner should know before M1: **M1's end-to-end acceptance step cannot be verified on this
 machine at all** — it needs a physical 64-bit-only arm64 phone. Everything in §9 and most of M1's code can be written
