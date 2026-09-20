@@ -431,8 +431,159 @@ void guest_libm_direct_calls_pin_the_softfp_convention() {
       std::fprintf(stderr, "[apk] libm %-4s on Tier %s = 0x%s (hardware 0x%s)%s\n", s.name, tier,
                    Hex64(got.bits).c_str(), Hex64(s.want).c_str(),
                    got.bits == s.want ? "" : "   <-- differs");
+      // The bridge's own view after the call, printed when the value is wrong. It is what settles
+      // whether a disagreement between two instruments is in the engine or in one of the instruments:
+      // the trace above walks its own `MachineState` with a budget of one, this is the state the call
+      // itself left behind, and they have to describe the same moment.
+      if (got.bits != s.want || !got.ok()) {
+        std::fprintf(stderr, "       bridge after: %s\n", got.state_after.c_str());
+      }
     }
   }
+}
+
+/// Appends `pc` unless it repeats the previous entry. Tier I runs several IR ops per guest encoding, so
+/// its raw step trace repeats one address several times where Tier J's does not; collapsing the repeats
+/// is what makes the two paths comparable at all.
+void push_unique(std::vector<exec::GuestAddr>& path, exec::GuestAddr pc) {
+  if (path.empty() || path.back() != pc) path.push_back(pc);
+}
+
+/**
+ * Single-steps one tier through a guest call and returns the *guest* PC path it took.
+ *
+ * Why this exists rather than a comparison of end states: the tiers count different units (IR ops
+ * against guest instructions), so their step counts are not comparable and never were meant to be — but
+ * the sequence of addresses they visit is, and it is the only thing that localises a divergence to an
+ * instruction instead of to a function. Consecutive repeats are collapsed, because Tier I executes
+ * several IR ops per guest encoding and Tier J one; what is left is the path through the code.
+ *
+ * `docs/30` §Step 24's `sin`/`cos` failure was found this way after per-function probes had narrowed it
+ * to "the reduction path" and no further: "the call returns with a leftover result" is consistent with
+ * a wrong value and with a branch taken differently, and only the path distinguishes them.
+ */
+std::vector<exec::GuestAddr> trace_path(exec::Executor& engine, Rig& rig, const char* name,
+                                        std::uint64_t arg_bits, std::size_t max_steps) {
+  std::vector<exec::GuestAddr> path;
+  const auto fn = rig.libm->FindExport(name);
+  if (!fn) return path;
+  exec::MachineState s{};
+  s.r[13] = kStackTop;
+  s.r[14] = kReturnAddress;
+  const abi::Args32 args = {abi::Value32::U32(static_cast<std::uint32_t>(arg_bits)),
+                            abi::Value32::U32(static_cast<std::uint32_t>(arg_bits >> 32))};
+  std::string err;
+  if (!abi::PlaceArgs(*rig.mem, s, fn->tagged(), args, kReturnAddress,
+                      abi::AbiContext::kCallFrameBytes, &err)) {
+    return path;
+  }
+  push_unique(path, s.pc);
+  for (std::size_t i = 0; i < max_steps; ++i) {
+    const exec::RunResult r = engine.Run(s, 1);
+    push_unique(path, s.pc);
+    if (s.pc == kReturnAddress) break;
+    if (r.reason != exec::StopReason::Budget && r.reason != exec::StopReason::Returned) {
+      std::fprintf(stderr, "# trace of %s stopped early: reason=%d %s\n", name,
+                   static_cast<int>(r.reason), r.detail.c_str());
+      break;
+    }
+  }
+  return path;
+}
+
+/// The first state each *distinct* PC was seen in, for one tier.
+///
+/// Comparing register values at the same address is the only instrument that finds a value bug when the
+/// two tiers execute the same program: a path comparison cannot see it (they agree), and an end-state
+/// comparison cannot localise it (it only says the answers differ). Where the two maps first disagree is
+/// the instruction immediately after the one that computed something wrong.
+std::map<exec::GuestAddr, exec::MachineState> first_states(exec::Executor& engine, Rig& rig,
+                                                           const char* name,
+                                                           std::uint64_t arg_bits) {
+  std::map<exec::GuestAddr, exec::MachineState> seen;
+  const auto fn = rig.libm->FindExport(name);
+  if (!fn) return seen;
+  exec::MachineState s{};
+  s.r[13] = kStackTop;
+  s.r[14] = kReturnAddress;
+  const abi::Args32 args = {abi::Value32::U32(static_cast<std::uint32_t>(arg_bits)),
+                            abi::Value32::U32(static_cast<std::uint32_t>(arg_bits >> 32))};
+  std::string err;
+  if (!abi::PlaceArgs(*rig.mem, s, fn->tagged(), args, kReturnAddress,
+                      abi::AbiContext::kCallFrameBytes, &err)) {
+    return seen;
+  }
+  seen.emplace(s.pc, s);
+  for (std::size_t i = 0; i < 200'000; ++i) {
+    const exec::RunResult r = engine.Run(s, 1);
+    seen.emplace(s.pc, s);
+    if (s.pc == kReturnAddress) break;
+    if (r.reason != exec::StopReason::Budget && r.reason != exec::StopReason::Returned) {
+      // Printed rather than swallowed. The first version of this loop broke here silently, and the
+      // instrument then reported "no register divergence anywhere" on a tier whose trace had simply
+      // stopped early — a confident negative produced by a loop that gave up. A trace that ends for any
+      // reason other than the sentinel is not a trace of the same thing the other tier ran.
+      std::fprintf(stderr, "# trace[%s] stopped at 0x%s after %zu steps: reason=%d %s\n", name,
+                   Hex(s.pc).c_str(), i, static_cast<int>(r.reason), r.detail.c_str());
+      break;
+    }
+  }
+  return seen;
+}
+
+std::string state_diff(const exec::MachineState& a, const exec::MachineState& b) {
+  std::string out;
+  for (int r = 0; r < 16; ++r) {
+    if (a.r[r] != b.r[r]) {
+      out += " r" + std::to_string(r) + "=0x" + Hex(a.r[r]) + "/0x" + Hex(b.r[r]);
+    }
+  }
+  for (int d = 0; d < 8; ++d) {
+    if (a.d[d] != b.d[d]) {
+      out += " d" + std::to_string(d) + "=0x" + Hex64(a.d[d]) + "/0x" + Hex64(b.d[d]);
+    }
+  }
+  if (a.cpsr != b.cpsr) out += " cpsr=0x" + Hex(a.cpsr) + "/0x" + Hex(b.cpsr);
+  if (a.fpscr != b.fpscr) out += " fpscr=0x" + Hex(a.fpscr) + "/0x" + Hex(b.fpscr);
+  return out;
+}
+
+void the_two_tiers_walk_the_same_path_through_libm() {
+  Rig rig = build();
+  if (!rig.ok) return;
+
+  // sin(100.0): the one input of this function whose answer already differs between the tiers.
+  const auto i_states = first_states(*rig.interp, rig, "sin", 0x4059'0000'0000'0000ull);
+  const auto j_states = first_states(*rig.jit, rig, "sin", 0x4059'0000'0000'0000ull);
+
+  std::fprintf(stderr, "# trace: Tier I reached %zu distinct addresses, Tier J %zu\n",
+               i_states.size(), j_states.size());
+
+  // Walk Tier J's visitation order is not recorded, so compare over the shared addresses in address
+  // order: the first one whose state differs is still after the offending instruction, and printing a
+  // handful of neighbours gives the reader the instruction to look at.
+  unsigned compared = 0;
+  bool found = false;
+  exec::GuestAddr first_bad = 0;
+  for (const auto& [pc, js] : j_states) {
+    const auto it = i_states.find(pc);
+    if (it == i_states.end()) continue;
+    ++compared;
+    if (!found) {
+      const std::string diff = state_diff(it->second, js);
+      if (!diff.empty()) {
+        found = true;
+        first_bad = pc;
+        std::fprintf(stderr, "# trace: first register divergence at 0x%s:%s\n", Hex(pc).c_str(),
+                     diff.c_str());
+      }
+    }
+  }
+  std::fprintf(stderr, "# trace: compared %u addresses both tiers reached\n", compared);
+  CHECK_CTX(!found,
+            "the tiers hold different registers at 0x" + Hex(first_bad) +
+                " on the same input — the instruction before that address computed something "
+                "differently");
 }
 
 void a_real_apk_library_loads_and_answers_like_hardware() {
@@ -506,6 +657,7 @@ void a_real_apk_library_loads_and_answers_like_hardware() {
 
 int main() {
   guest_libm_direct_calls_pin_the_softfp_convention();
+  the_two_tiers_walk_the_same_path_through_libm();
   a_real_apk_library_loads_and_answers_like_hardware();
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;
