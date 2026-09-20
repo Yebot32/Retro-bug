@@ -187,11 +187,11 @@ identified; correctness against a reference is not yet measured.
    wrong number. What still stands from the paragraph above: the interpreted path cannot run NEON, which
    reaches AD-2, the `Kind::Interpreted` code-cache backend (C04's third option, i.e. the iOS/`execmem`-
    denied case where M3 has no other choice) and any T1 policy that trades `execmem` for isolation. And
-   the FP work surfaced something §2's ranking had not: **`VCMP`'s FPSCR compare field on this ARMv8 host
-   is not the ARMv7 manual's table** — three of four relations differ, in the GE bit and in NV for
-   unordered — with both tiers following the host. Whether a genuine ARMv7 VFP agrees with the manual
-   here is the next question in this lane, and it is [UNVERIFIED]: `docs/30` §Step 17 states the table,
-   the experiment and the fallback.
+   the FP work also settled §2 item 2's other half. The compare field both tiers produce — as
+   FPSCR[31:28] NV:Z:C:GE, `0x8` less, `0x6` equal, `0x2` greater, `0x3` unordered — **is Arm's
+   published VFP comparison table**, checked against the measurement *and* against Arm's own text
+   (`docs/30` §Step 17). Note the shape, because it is not an integer-flags shape: unordered leaves NV
+   **and** Z clear and sets C+GE, so `!=` after a floating-point compare is `VS`, taken from GE.
 4. Repeat on the **app-level** corpus once `docs/research/10`'s APK fixtures are downloaded, since
    bionic will under-represent what games' hand-written assembly and codec libraries use.
 

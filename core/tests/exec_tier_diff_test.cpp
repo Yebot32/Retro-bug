@@ -308,8 +308,9 @@ void fp_groups_are_accurate_or_explicitly_refused() {
       {"Java_com_retrobug_fixture_MainActivity_fpsr_flags", 0, 1, 34, "dcmp + FPSCR flags"},
       // fp_cmp: the compare field per relation, measured with FPSCR cleared first, so the low byte is
       // this compare's own exception state rather than the process's history. Both tiers must produce
-      // the same four values — and the point of putting them in a row at all is that Tier I's first
-      // version came from the ARMv7 manual and disagreed with hardware on three of the four.
+      // the same five values. The row exists because Tier I's first version used a compare table recalled
+      // from the manual rather than looked up, disagreed with hardware on three of four relations, and
+      // was wrong — the measurement here is also Arm's published VFP table. See docs/30 §Step 17.
       {"Java_com_retrobug_fixture_MainActivity_fp_cmp", 0, 0, 0x800, "compare field: less"},
       {"Java_com_retrobug_fixture_MainActivity_fp_cmp", 1, 0, 0x600, "compare field: equal"},
       {"Java_com_retrobug_fixture_MainActivity_fp_cmp", 2, 0, 0x200, "compare field: greater"},

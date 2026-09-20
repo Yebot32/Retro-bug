@@ -1290,25 +1290,22 @@ bool BlockRunner::Step(const Inst* inst) {
 
     case Opcode::FPCompare32: case Opcode::FPCompare64: {
       /**
-       * ARM's floating-point compare writes FPSCR[31:28] as NV : Z : C : GE, and this table is
-       * **measured, not copied from the manual** — which is worth saying because the manual's version is
-       * what this file had first, and it disagreed with hardware on three of four relations. The
-       * fixture's `fp_cmp` probe clears FPSCR, performs one compare, reads the field back, and gives
-       * (`docs/30` §Step 16):
+       * ARM's floating-point compare writes FPSCR[31:28] as NV : Z : C : GE:
        *
-       *   less        NV          0x8
-       *   equal       Z,   C      0x6
-       *   greater        C        0x2
-       *   unordered      C,   GE  0x3
+       *   less        NV           0x8
+       *   equal       Z,   C       0x6
+       *   greater     C            0x2
+       *   unordered   C,   GE      0x3
        *
-       * The manual has unordered as all four (0xF) and carries GE in the equal and greater rows.
-       * Hardware and Dynarmic's AArch64 back end both produce the table above — Tier I now agrees with
-       * both on all four — but *why* is not something four measurements can establish, so this is a
-       * reproduction of an observation rather than an explanation, and it is marked as one.
+       * Both measured (`fp_cmp` in the fixture, which clears FPSCR so the field is this compare's and
+       * not the process's) and matching Arm's published VFP comparison table — see `docs/30` §Step 17,
+       * which also records that this file's first version used a table recalled from the manual rather
+       * than looked up, was wrong on three of these four, and the differential said so.
        *
-       * GE is the bit that reaches beyond these rows: `it vs` tests V, which `vmrs APSR_nzcv, fpscr`
-       * fills from GE, so a NaN's `x != y` is decided by it — which is how the fixture's `fp_nan` gets
-       * its hardware-measured answer of 8.
+       * The pair worth memorising is the last two: a *less-than* sets NV alone, and an *unordered*
+       * leaves NV and Z clear. So `!=` after a float compare is tested with `VS` — V, which
+       * `vmrs APSR_nzcv, fpscr` takes from **GE** — which is how `fp_nan` reaches its hardware-measured
+       * answer of 8. Anyone reading this table as an integer-flags shape gets that wrong.
        */
       bool unordered = false;
       std::uint8_t exc_on_qnan = 0;

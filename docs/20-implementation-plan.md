@@ -806,15 +806,13 @@ Progress and the findings that change this plan are tracked in
     `execmem`-denied host needs either the vector group implemented or a visible per-app gate in C17 — the
     gate is a day, the vector group is M1-sized, and `vmov`-only ASIMD (a `vmul.i32` in a codec's setup
     path) is the part most likely to be reached for first.
-    **Open, and the reason not to call this closed:** `VCMP`'s FPSCR compare field measured here is *not*
-    the ARMv7 manual's table — three of four relations differ (GE is absent on equal and greater; NV is
-    absent on unordered) — and **both** tiers follow the host rather than the manual. The host is an
-    ARMv8 core executing AArch32, so the agreement is with the machine RetroBug runs on, not with the one
-    a legacy app was written against. [UNVERIFIED] which a genuine ARMv7 VFP does.
-    *Experiment:* `fp_cmp` on real ARMv7 hardware, or on the `qemu-arm` linux-user oracle in CI, which
-    needs no device. *Fallback:* implement the manual's table in Tier I and route the JIT's compares
-    through the same per-op helper; if instead the manual is the thing that is wrong, that has to be
-    written down here rather than left as a passing difference of opinion between a table and a core.
+    **Verified rather than assumed, and the way it was verified matters:** the FPSCR compare field both
+    tiers produce (`0x8` less, `0x6` equal, `0x2` greater, `0x3` unordered, as NV:Z:C:GE) was first
+    written from a recalled manual table, disagreed with hardware on three of four, and was documented as
+    a suspected ARMv7-vs-ARMv8 divergence. It is not one: the measurement matches Arm's published VFP
+    comparison table exactly, so the recalled table was the defect and the `[UNVERIFIED]` label on it is
+    what caught that. Recorded in `docs/30` §Step 17 as the same lesson this project keeps being given —
+    a table remembered from an architecture document is a claim, not a citation.
     **Related, and cheap:** the guest's cumulative FP flags are the *host's* on both tiers (native
     `FDIV`/`FMADD` raise them; Tier I folds the same `<cfenv>` state in), so an app that branches on
     FPSCR's exception bits inherits its host. `FPDoubleToSingle` honours round-to-nearest only.

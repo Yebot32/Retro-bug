@@ -1691,32 +1691,32 @@ implemented (`core/exec/interp.cpp`'s new `FPAdd/Sub/Mul/Div/Max/Min/Sqrt/Neg/Ab
 `A32Get/SetFpscrNZCV`), and every row it runs matches hardware — with ASIMD (`VectorBroadcast64`) the
 only group left refusing. Four things came out of it that are worth more than the opcodes.
 
-**1. `VCMP`'s FPSCR compare field on this silicon is not the table in the ARMv7 manual, and I wrote the
-first version from the manual.** Measured with a probe that clears FPSCR, performs one compare and reads
-the field back — so the value is this compare's, not the process's:
+**1. `VCMP`'s FPSCR compare field: the measurement was right, my memory of the manual was not.** I wrote
+Tier I's first compare from what I remembered of the ARMv7 table, saw it disagree with hardware on three
+of four relations, and documented that as a possible ARMv7-vs-ARMv8 divergence. It isn't one. The probe
+that clears FPSCR, performs one compare and reads the field back gives:
 
-| relation | measured, FPSCR[31:28] (NV:Z:C:GE) | ARMv7 manual |
+| relation | measured FPSCR[31:28] (NV:Z:C:GE) | Arm's published VFP table |
 |---|---|---|
-| less | `0x8` — NV | NV ✓ |
-| equal | `0x6` — Z, C | `0x7`, adds GE |
-| greater | `0x2` — C | `0x3`, adds GE |
-| unordered | `0x3` — C, GE | `0xF` — all four |
+| less | `0x8` — NV | (1,0,0,0) ✓ |
+| equal | `0x6` — Z, C | (0,1,1,0) ✓ |
+| greater | `0x2` — C | (0,0,1,0) ✓ |
+| unordered | `0x3` — C, GE | (0,0,1,1) ✓ |
 
-Three of four rows differ, and Tier J matches the *measurement* on all four, which is how I found out my
-reading of the architecture was the odd one out. Tier I now reproduces the measured table and both tiers
-plus hardware agree on all five `fp_cmp` rows.
+which is exactly the table in Arm's own [Condition Codes 4: Floating-Point Comparisons Using
+VFP](https://developer.arm.com/community/arm-community-blogs/b/architectures-and-processors-blog/posts/condition-codes-4-floating-point-comparisons-using-vfp)
+(2013, i.e. the AArch32 VFP generation this emulates), where GE maps to `N==V` and `VS` to `V==1`.
+**Hardware, Tier J and Tier I agree with the published architecture on all four.** The recorded lesson is
+the one this project keeps being given: a table recalled from an architecture manual is a claim, and the
+`[UNVERIFIED]` label on it was the only reason it did not become a permanent wrong answer — the fix
+happened because the sentence said "unverified" and so invited a check rather than a citation.
 
-**The consequence is uncomfortable and should not be smoothed over.** The host is an ARMv8 core running
-AArch32, so "what hardware says" here is what an *ARMv8* core does with a VFP compare — not necessarily
-what the ARMv7 VFP a 2012 app was written against did. If real ARMv7 sets GE on the equal and greater
-rows, then a guest branching on `it hi`/`it vs` after a float compare sees RetroBug answer differently
-from the device it was tested on, and both our tiers are wrong together in the same direction. That is
-exactly the shape of bug `docs/32` §2's IT-block finding had, and it is [UNVERIFIED] which way.
-*Experiment:* run `fp_cmp` on a genuine ARMv7 device, or on the `qemu-arm` linux-user oracle in CI —
-the latter needs no hardware at all and is the cheaper half. *Fallback:* implement the manual's table in
-Tier I and route the JIT's compares through the same, which is a per-op helper rather than a rewrite.
-What must not happen is the current state being read as settled: the tiers agreeing with the host is not
-the same as agreeing with ARMv7.
+What the check did confirm is worth keeping: the ordering of the four bits has an oddity that only the
+measurement makes obvious. `less than` sets NV and nothing else, while `unordered` leaves **both NV and Z
+clear** and sets C and GE. So a guest testing `!=` after a compare is testing `VS` — V, which
+`vmrs APSR_nzcv, fpscr` fills from **GE**, not from a Z the comparison never touched. That is how the
+fixture's `fp_nan` reaches its answer of 8 on all five inputs, and it is now asserted against both the
+silicon and the architecture document rather than inferred from either.
 
 **2. Tier J's sticky exception bits are the host's, so Tier I's have to be too.** The state diff after
 `fp_arith` showed FPSCR `0x10` on one side and `0` on the other: IXC, the inexact flag, left raised by
@@ -1749,6 +1749,14 @@ that no per-block test can see. The known gap in the same place: `FPDoubleToSing
 conversion, so it honours round-to-nearest only, and the mode immediate is `(void)`-discarded with a
 comment saying so. Nothing in the corpus reaches it (every compiler measured here emits the reset RM),
 and the differential would report it the moment something does.
+
+**5. Step 16's `ext_regs` ↔ `d[]` no-behaviour-test gap closed itself.** That item said the mapping had a
+`static_assert` on size and nothing on order, because the tier comparison that would catch a swapped
+half was the one Tier I refused to take part in. With Tier I running the scalar rows, `Compare()` now
+diffs all 32 `d[]` registers and `fpscr` between the tiers on 35 rows — Tier I building them from its own
+get/set paths, Tier J from `jit.cpp`'s `S<2n>`/`S<2n+1>` packing — so a transposition is a failure rather
+than an unobserved possibility. This is the one item in the list below that needed no new work, only the
+work above; the rest are still open.
 
 **Suite:** 14 lanes, **1 303 engine checks**, dynarmic's 200 561 assertions — identical counts and all
 green on both the SM-X710 and the CPH2573. Neither device runs ARMv7 for these rows except as the oracle;
