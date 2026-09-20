@@ -88,6 +88,14 @@ struct RunResult {
   StopReason reason = StopReason::Budget;
   /// Op name or address involved, for `Unimplemented`/`Fault`. Empty otherwise.
   std::string detail;
+  /// Work done against `max_instructions`, and **the tiers count different things**: Tier I advances
+  /// per Dynarmic IR operation, Tier J per guest instruction (Dynarmic's cycle counting, one tick per
+  /// fetched encoding). Two tiers that agree on state are not two tiers that agree on a unit, and an
+  /// IR-op count is typically several times the guest-instruction count for the same program — so this
+  /// number is a progress report, not a comparison, and the ratio between the two tiers says something
+  /// about IR density rather than about speed. Unifying it belongs with C02 before C14 or C15 put a
+  /// per-app budget on top of it, because a budget whose meaning depends on which tier took the block
+  /// is a budget an app can escape by being hot enough to compile.
   unsigned instructions_executed = 0;
   /// Meaningful only for `HostCall`: the index the `HostDispatch` reported, which is the host
   /// function's identity. Zero is a valid slot, so it is the reason code that says this is set, not

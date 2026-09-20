@@ -244,9 +244,12 @@ void both_tiers_agree_and_match_hardware() {
                std::to_string(c.want) + "\n      " + Describe("jit", rj, sj));
     }
     Compare(what.c_str(), si, ri, sj, rj);
-    std::fprintf(stderr, "[diff] %-58s interp=%d jit=%d want=%d steps I=%u J=%u\n", what.c_str(),
-                 static_cast<std::int32_t>(si.r[0]), static_cast<std::int32_t>(sj.r[0]), c.want,
-                 ri.instructions_executed, rj.instructions_executed);
+    // Labelled, because `steps I=… J=…` reads as a speedup and is not one: the tiers count different
+    // units (see `RunResult::instructions_executed`), so this pair says how dense the IR is for this
+    // program and nothing at all about how fast either tier runs.
+    std::fprintf(stderr, "[diff] %-58s interp=%d jit=%d want=%d ir-ops I=%u guest-insn J=%u\n",
+                 what.c_str(), static_cast<std::int32_t>(si.r[0]), static_cast<std::int32_t>(sj.r[0]),
+                 c.want, ri.instructions_executed, rj.instructions_executed);
   }
 }
 

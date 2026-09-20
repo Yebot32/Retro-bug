@@ -1041,6 +1041,108 @@ policy, so it should get *worse* not better with a bigger runtime, but that is a
 one. `rb::diag` (C17) should record the probe's answer per launch, which is what turns these into fleet
 data instead of bench data.
 
+## Step 9 — Tier J exists, and the two tiers agree on numbers hardware produced
+
+`30` §Step 7 left item 7's second half open — *"both tiers, identical state"* — because there was no second
+tier. `core/exec/jit.cpp` is it: `JitExecutor` over `Dynarmic::A32::Jit`, and
+`core/tests/exec_tier_diff_test.cpp` is the comparison. 65 checks, 0 failures, **identical output on both
+devices** (SM-X710 and CPH2573), on top of dynarmic's own 200,561 assertions.
+
+**Config, pinned for accuracy rather than for speed** (`[1A]`, read from `interface/A32/config.h` and set
+line by line): `arch_version = v7` (the default is `v8`, and the difference is architectural, not cosmetic);
+`always_little_endian`; `check_halt_on_memory_access = true`, so a fault can be raised between accesses
+rather than at block end; `enable_cycle_counting = true` because that is Tier J's only progress counter;
+`code_cache_size = 8 MiB` (the documented minimum — sizing is C04's job and this leaves it there); and
+**no `fastmem_pointer`, no page table**. The last one is the design decision that makes the test worth
+running: every guest read and write from compiled code goes through the same `GuestMemory` the interpreter
+uses, so a disagreement can only come from the back end, not from two different memory models. What it
+costs is a second pass at speed — fastmem is the point at which Tier J earns its keep, and it is C03/C04
+work, not this.
+
+`[INFER]` **The step counts are not a speedup and are now labelled as such.** Tier I advances per Dynarmic
+*IR operation*; Tier J advances per *guest instruction* (one tick per fetched encoding). `fib(20)` printed
+`735,946` against `160,005` and the ratio is IR density, not throughput. `RunResult::instructions_executed`
+carries the warning where the interface can't be misread, and unifying the unit is a C02 item that has to
+land **before** C14/C15 put a per-app budget on top of it — a budget whose meaning depends on whether the
+code got hot enough to compile is a budget an app escapes by being hot.
+
+**The comparison is over every field.** Registers, all 32 `d` lanes, `cpsr`, `fpscr`, `tp`, `pc`, `mode`,
+`itstate`, and the stop reason — unfiltered, because a tier that disagrees about a VFP lane nothing read is
+invisible unless it is looked for. All 15 shapes carry hardware values from `tests/corpus/oracle-armv7.txt`
+(six `it_probe`, six `fib` including `fib(20)=6765`, three `wide_probe`), so a shared bug in both tiers
+would still show up as a disagreement with the tab.
+
+### Three findings, each one only available because two tiers could finally be compared
+
+**1. `GuestMemory::MapFile` kept the caller's file descriptor instead of duplicating it.** `Page::fd` is
+re-read by every later re-granulation, and a loader that closes its fd once the mapping exists is doing
+nothing wrong — the mapping holds its own reference. First symptom: `Protect` on a loaded module's text
+page failing with `Bad file descriptor (errno 9)`, hundreds of lines and one function away from the cause.
+`dup()` on entry, owned and closed with the instance, and the file-backed memory case now closes the
+caller's fd immediately to keep the contract honest. `[1A]` **Negative control run**: reverting the `dup`
+fails 12 checks across both host page shifts, with the reads after the failed re-map faulting on memory
+`Protect`'s error path had already dropped — the mapping does not half-work.
+
+**2. Dynarmic caches the block it builds for an address it cannot read.** A fetch at an unmapped guest
+address reaches `MemoryReadCode` *once*; the second time through the same code the answer comes from the
+cached block and the callback never fires, so Tier J ended its run with no reason at all. The fix is
+`SurfaceNonCodeDestination()`, called from `MemoryReadCode` **and** from
+`ExceptionRaised(NoExecuteFault)`, with `SetPending` keeping the first reason recorded so a later, vaguer
+one cannot overwrite it. `[1A]` Both paths are exercised: the tier-diff suite's unmapped-fetch case now
+faults in both tiers with a message from each.
+
+**3. The invalidation test asserted something it could not fail.** Its first version flipped a bit of
+`it_probe` and required the answer to change. It did not change, and the reason is in `docs/32` §2.1's own
+subject matter: **inside an IT block the legs are encoded unpredicated** — the condition lives in CPSR's IT
+field — so `addgt r0, r2, #3` and `addle r0, r2, #5` are just two immediates, and the bit that was being
+flipped was inert. `[1A]` Measured, not recalled: `#3`→`0x1cd0`, `#5`→`0x1d50`, `#7`→`0x1dd0`, while `#9`
+leaves the narrow form entirely (`f102 0009`), which is also why the pair the test uses is 5 and 7 — 9 and
+5 are four bytes apart, not one.
+
+The replacement is the shape the original should have been. `patch_probe` and `patch_probe_b` in the fixture
+differ in **exactly one byte** (checked at run time before anything relies on it, so a toolchain that
+changes its encoding choices fails the test instead of silently voiding it), hardware has measured both
+(`patch_probe: 1008 42 1005`, `patch_probe_b: 42 42 1007`), and the patch makes the first function's bytes
+*equal* the second's — verified by comparison, not by inference. The expectation after invalidation is then
+a hardware number, which a stale cache cannot produce. And the test asserts the premise:
+
+```
+[diff] patched, not yet invalidated: I=42 (want 42)  J=1008 (1008 means still cached)
+[diff] patched probe, one byte at +8: before=1008 after I=42 J=42 want=42
+```
+
+Tier J answering the *old* 1008 before `Invalidate` is what makes the second line evidence about
+invalidation rather than about two tiers that never cached anything. If a future back end reads 42 there,
+the test should be deleted, and it now fails loudly enough to force that conversation.
+
+### What Tier J does not do yet
+
+- **TLS.** Dynarmic models no `tpidrurw` anywhere in its tree `[1A]`, so `tp` is a `MachineState` field
+  nothing in compiled code can read or write; it needs a `Coprocessor` hook on `c13, c0, 4`. The guest's
+  expectation is real — the tab's 32-bit process reads `tpidrurw` as `0xf55affe0` while `midr`/`ctr`/
+  `mpidr`/`fpsid` all raise SIGILL (`oracle-armv7.txt`, reconfirmed this step). Until then, any bionic
+  code that touches `__get_tls()` misbehaves in Tier J and *also* in Tier I, which is why this is a gap
+  rather than a difference.
+- **`GetGEFromOp` / SIMD32** (`docs/32` §5.2's two demanded-without-handler rows) — Tier I refuses them and
+  Tier J has the same hole via the shared front end.
+- **An IT sequence straddling a block boundary** — still untested; forcing one needs a branch inside a
+  block whose split point is chosen by the translator, not by the test.
+- **C04's own job.** Tier J runs on *Dynarmic's* cache. `rb::codecache` — instance tagging, eviction,
+  per-app limits, the invalidation bookkeeping above moved out of the executor — is unbuilt, and until it
+  exists the "two address models, one cache" claims in `docs/10` §8.2 are design, not behaviour. Worth
+  stating precisely because `docs/10` §13.1 lists the host-cache discipline as platform glue: the
+  `dc civac` / `ic iallu` / `isb` sequence is **Dynarmic's and stays Dynarmic's** — `JitExecutor::Invalidate`
+  calls `InvalidateCacheRange` and touches no host cache itself. C04 therefore owns *policy* (what to drop,
+  when, on whose behalf), not maintenance, and the row in §13.1 needs no correction.
+- **16 KiB host pages.** The x86_64 emulator lane has not been re-run since Tier J existed; the ARMv7 guest
+  is 4 KiB-granular either way, but `AddressModel` and the granule tests are the parts that would notice.
+
+**On the lesson rather than the findings:** twice now the failure has been an assertion that could not fail
+— `|| true` in Step 7, a patch that patched nothing here. Both were invisible in a green run, both were in
+code written to be rigorous, and both were only caught by asking "what value would this line print if the
+thing it tests were broken?" The differential makes that question cheap to ask, which may be the best reason
+to have built Tier J when the plan said "later".
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |
@@ -1054,5 +1156,6 @@ data instead of bench data.
 | Emulator acceleration | AEHD 2.2 **installed but stoppable**: it was "usable" for two boots, then the `aehd` service was found `Stopped` and the AVD refused to start. Re-arm with an elevated `net start aehd`; check `Get-Service aehd` before trusting `-accel-check`'s "not installed" wording. AVD `Medium_Phone` exists |
 | Emulator image | `android-37.1/google_apis_playstore_ps16k/x86_64`, `abilist=x86_64,arm64-v8a`, **`abilist32=` empty** |
 | `openat2`/`io_uring`/`landlock` from an app | unavailable (outside bionic's `SYSCALLS.TXT` allowlist) — see `docs/research/05` §1.4 |
+| Asking the assembler what an encoding actually is | the NDK ships **`llvm-objdump` but no `llvm-mc`**, so: `clang --target=armv7-none-linux-androideabi26 -mthumb -c x.s` then `llvm-objdump -d x.o`. This is how `#5`→`0x1d50` and `#9`→`f102 0009` were settled in Step 9, and it needs no device — the answer is the same bytes the guest will load |
 | Executable memory from an app | permitted: `allow appdomain self:process execmem;` (`private/app.te:189`, read directly) |
 | Exec from app-writable files | forbidden: `app_neverallows.te:69-73` (read directly) → why AD-5 ships one pre-built agent `.so` |

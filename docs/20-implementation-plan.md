@@ -150,6 +150,23 @@ survive every block boundary.
   IR instruction. One mutable `Flags` in `MachineState`-adjacent state is how `push` came to set `C` and
   every recursive `fib` call returned an arithmetic series instead.
 
+**As built** for Tier J (`30` §Step 9) — the sketch's `Executor` held, and four things became visible only
+when a second tier had to be compared with the first:
+
+- The config is pinned for accuracy: `arch_version = v7` (Dynarmic's default is **v8**), forced
+  little-endian, `check_halt_on_memory_access`, and **no `fastmem_pointer` and no page table** — so compiled
+  code reaches the same `GuestMemory` the interpreter walks, and a disagreement can only be a back-end
+  disagreement. Fastmem is the speed story and belongs with C03/C04, not with the equivalence test.
+- **Dynarmic caches the block it builds for an unreadable address**, so an unmapped fetch reaches
+  `MemoryReadCode` exactly once and the second visit yields no callback at all. The fault reason therefore
+  has to be surfaced from `ExceptionRaised(NoExecuteFault)` as well, and the first reason recorded wins.
+- `instructions_executed` is a count **in the tier's own unit** today — IR ops in Tier I, guest instructions
+  in Tier J — which is documented on the field and is C02 work to unify *before* C14/C15 put a per-app
+  budget on it. `Run(state, max_instructions)` reading as one number per tier is the wrong assumption.
+- What Tier J still cannot do: read or write `tp` (`tpidrurw` needs a `Coprocessor` hook; Dynarmic models it
+  nowhere), reach `GetGEFromOp`/SIMD32 for the same reason Tier I cannot, or run under C04's cache. None of
+  these is a *difference* between the tiers, which is the point of listing them here rather than in U-13.
+
 ### C03 `rb::mem` — guest memory
 ```cpp
 namespace rb::mem {
@@ -459,7 +476,7 @@ tests against. Linux CI carries the `qemu-arm` oracle and the arm64 build.
 | Decoder coverage audit | `llvm-objdump` over corpus `.so`s ⇒ every mnemonic in `CoverageReport` or a triaged gap list. **This closes U-8 host-side** |
 | `rb::mem` + address models | 4 KiB guest / 16 KiB host mixed-granule tests (the local image is a `ps16k` build — confirm `getconf PAGESIZE`, §1); `guest_base != 0` exercised under x86_64 Android so no identity-only code path survives |
 | `rb::loader` | loads a real `armeabi-v7a` `.so` (the one built in §1) into a host process, applies relocations, resolves `libc.so` symbols to our own implementations. **First half done and hardware-verified** (`30` §Step 5e: 71 checks, expectations cross-checked against `llvm-readelf`); the second half — binding imports to RetroBug's own `libc` — belongs to C06 and C11 rather than the loader, and its test has only ever used a synthetic resolver |
-| `fib(20) == 6765` | **the M0 exit test**: call the loaded `Java_..._stringFromJNI` through `rb::abi` with a fake `JNIEnv`, under Tier I and Tier J, assert identical result. Expected values are **measured, not assumed** — `tools/run_armv7_oracle.sh` runs the fixture's own `fib`/`wide_probe` as native Thumb-2 on an AArch32-capable device and reports `fib(0)=0 fib(1)=1 fib(2)=1 fib(20)=6765`, the short curve `fib(0..12) = 0 1 1 2 3 5 8 13 21 34 55 89 144`, `wide(0)=52 wide(2)=50 wide(-1)=55`, string `fib(20)=6765 wide=50`. Tier I already reproduces all of it (`30` §Step 6d); the curve is there so a recursion defect localises at n=4 rather than at n=20 |
+| `fib(20) == 6765` | **the M0 exit test**: call the loaded `Java_..._stringFromJNI` through `rb::abi` with a fake `JNIEnv`, under Tier I and Tier J, assert identical result. Expected values are **measured, not assumed** — `tools/run_armv7_oracle.sh` runs the fixture's own `fib`/`wide_probe` as native Thumb-2 on an AArch32-capable device and reports `fib(0)=0 fib(1)=1 fib(2)=1 fib(20)=6765`, the short curve `fib(0..12) = 0 1 1 2 3 5 8 13 21 34 55 89 144`, `wide(0)=52 wide(2)=50 wide(-1)=55`, string `fib(20)=6765 wide=50`. Tier I already reproduces all of it (`30` §Step 6d); the curve is there so a recursion defect localises at n=4 rather than at n=20. **Both tiers now do** (`30` §Step 9): 15 call shapes × every field of `MachineState`, identical on two devices, plus the SMC half — a one-byte patch whose new value hardware also measured, answered correctly only after `Invalidate`. The row's `stringFromJNI` remains M1's, not this lane's: `fib`/`wide`/`it_probe`/`patch_probe` are the JNI-only exports the tiers drive, because a `jstring` return needs the bridge to be real rather than fake |
 | Audio proxy strategy locked | one stub-lib sweep confirms §1's finding for every remaining guest library, so no interface-vtable API is ever assumed symbol-generatable |
 
 M0 is the plan's risk-killer: it validates AD-1 (Dynarmic fit), U-8 (ARMv7 coverage), C8's oracle strategy, and
@@ -573,7 +590,7 @@ A profile for a **T0** app carrying `kReportNetworkAvailable` must work with no 
 ## 9. M0 task breakdown (the immediate next work, all local)
 
 Progress and the findings that change this plan are tracked in
-[`30-m0-notes.md`](30-m0-notes.md). Status as of `30` §Step 6d:
+[`30-m0-notes.md`](30-m0-notes.md). Status as of `30` §Step 9:
 
 1. `core/` + `external/dynarmic` vendoring with `patches/` layout and `NOTICE.md`/`LICENSES/`/`REUSE.toml` in the
    same commit (AD-16: obligations start now). **Done** (`419fe9f`), with the one mechanical deviation recorded in
@@ -601,15 +618,19 @@ Progress and the findings that change this plan are tracked in
    hardware oracle reported them, 80 checks, 0 failures. Getting there corrected three beliefs about the
    IR — `Add32`/`Sub32`/shift operand 2 is a **carry-in**, not a set-flags bit; flags are read back through
    pseudo-operations naming their producer, so they cannot live in one mutable copy; and a shift's
-   carry-in never reaches its result. **Tier J behind `RbCodeCache` (C04) is still open**, and with it
-   item 7's both-tiers exit test.
+   carry-in never reaches its result. **Tier J is built and green** (`30` §Step 9): `JitExecutor` over
+   `Dynarmic::A32::Jit`, no fastmem and no page table so both tiers share one `GuestMemory`, and the
+   field-by-field differential agrees with hardware on all 15 shapes on two devices. What is *still* open
+   is the `RbCodeCache` half — Tier J runs on Dynarmic's own cache, so C04 (instance tagging, eviction,
+   per-app limits) remains unbuilt and is now the last thing between this and a shippable JIT.
 7. `rb::abi` `CallGuest` + fake `JNIEnv`; **M0 exit test: `fib(20) == 6765`, both tiers, identical state**.
-   **Bridge and `JNIEnv` done** (`30` §Step 7a/7b): guest calls through AAPCS32 match the hardware
-   values, and the fake `JNIEnv`'s table is built from indices measured twice over (NDK `offsetof`, and
-   the fixture's own `ldr.w r2, [r2, #0x29c]`). Building it found Tier I's IT-block defect (`7c`), which
-   is now fixed against six measured values. **What remains of item 7 is its second half: `both tiers,
-   identical state`** — there is no Tier J yet, so the M0 exit test is asserted against silicon, not
-   against a second tier.
+   **Done** (`30` §Step 7a/7b/9). Bridge and `JNIEnv` were 7a/7b — guest calls through AAPCS32 match the
+   hardware values and the fake table is built from indices measured twice over (NDK `offsetof`, and the
+   fixture's own `ldr.w r2, [r2, #0x29c]`); building them found Tier I's IT-block defect (`7c`), now fixed
+   against six measured values. The second half landed with Tier J: 65 checks comparing **every** field of
+   `MachineState` across both tiers on 15 call shapes whose expected values are SM-X710 measurements, plus
+   self-modifying-code invalidation proved against a one-byte patch whose new value hardware also produced.
+   Asserted against silicon *and* against a second tier, which is what C02's invariant asked for.
    One dependency note from Tier I: those exports are JNI methods, so `n` arrives in **r2** behind `env`
    and `clazz` — a call bridge that puts the first C argument in r0 will get `fib(0)` and look correct.
 8. `docs/research/01` corrections (stale `MemoryProcessor` API; no interpreter upstream) and `docs/00` §2 note that
