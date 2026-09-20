@@ -1495,6 +1495,112 @@ thread* until C16's threading story exists; and the eviction *policy* has no mea
 LRU-with-per-instance-quotas is a reasoned choice, `[INFER]`, and the experiment is a real app's block
 access trace against `bytes_per_instance` at 1, 4 and 16 MiB, which also closes C04's sizing question.
 
+## Step 14 — the guest-library sweep, and the §1 paragraph it falsified
+
+M0's last unstarted row was **"Audio proxy strategy locked"** (`20` §5). It was the cheapest row in the milestone —
+one `llvm-readelf` sweep over the NDK's AArch32 stub dirs plus a header reading per library — and the most
+consequential to get wrong, because its output is the C11/C12/C13 work list. Delegated to a sub-agent while Step 13
+was being written up, on the grounds that a wide file-tree enumeration is exactly what a second pair of hands is for.
+
+**Result: `docs/33-guest-library-inventory.md`, 27 libraries, and §1's conclusion falsified rather than confirmed.**
+The claim under test was `20` §1's "*audio is the **only** category where the generator approach breaks down*". The
+sweep found nine more: `libandroid` (`ANativeActivityCallbacks`, 15 fn ptrs in a struct the guest calls through),
+`libmediandk` (a **struct of 4 fn ptrs passed by value**), `libz` (`z_stream` inline-allocated by the guest, plus
+`(int)sizeof(z_stream)` as a runtime argument), `libvulkan`, `libdl`, `libEGL` (one symbol: `eglGetProcAddress`),
+`libaaudio`, `libcamera2ndk`, `libbinder_ndk` — and that `20` §C13 already contradicted §1 *inside the same file*,
+since C13 hand-models input as well as audio.
+
+**Its numbers were re-measured here before any of it was written down**, because a report is a claim:
+
+| Checked | Sub-agent | Measured here |
+|---|---|---|
+| `34/libc++.so` is not a stub | 19 bytes, `INPUT(-lc++_shared)` | **identical**, `cat` of the file |
+| libraries in the newest API dir / union across dirs | 26 / 27 | **26 / 27** |
+| `libOpenSLES.so` FUNC / OBJECT | 3 / 53 | **3 / 53** |
+| `libmediandk.so` FUNC / OBJECT | 161 / 143 | **161 / 143** |
+| `AMediaCodec_setAsyncNotifyCallback` by-value struct | `NdkMediaCodec.h:145-150`, `:499` | struct of 4 fn ptrs at `:150-154`, call at `:499-502`, signature takes it **by value** |
+| `deflateInit_` passes the guest's `sizeof` | `zlib.h:1856-1864` | `deflateInit_(strm, level, ZLIB_VERSION, (int)sizeof(z_stream))` at `:1856`; `zalloc`/`zfree` in the struct at `:124-143` |
+
+Two line-number drifts, no substantive disagreement. What the sweep *cannot* close it says so about: nothing was
+executed, so every classification is **[1L]** for "the header and the symbol table say this" and **[UNVERIFIED]**
+for "a generated stub would actually fail this way". The `z_stream` case is the sharpest — `Z_VERSION_ERROR` on a
+32/64 `sizeof` mismatch is a header reading, not a crash anyone has seen — and its experiment is M1's: generate one
+`libz` proxy and call `inflateInit_` from a guest program. The fallback if it turns out fine is the cheap one
+(forward it and mirror the struct); the fallback if `dlsym`/`eglGetProcAddress` turn out to be the only
+pointer-returning hazards is to special-case five symbols, which `docs/33` §4 item 2 already isolates as a
+generated-code case for exactly that reason.
+
+**Reconciled, not overridden** (brief: a Phase 0–4 finding that conflicts with something committed gets flagged and
+reconciled): §1's measurements were kept and its generalisation replaced with a block quote naming what was wrong and
+where the rule now lives; §5's row was marked done *with the falsification in the cell*; `20` §C11's two buckets were
+corrected in place — `libc++` out of "symbol authority", `libz`/`libmediandk` out of "generated proxies", and the
+FUNC-only filter called out as emitting half a library (`libOpenSLES` 3 of 56). The 53 `SL_IID_*` are the reason that
+matters rather than tidiness: they are *inputs* to the vtable lookup, so item 1 of the hand-modelled list cannot even
+be tested until the generator emits `OBJECT` symbols too.
+
+## Step 15 — `rb::profile` (C14): the three mistakes that had to become types
+
+`20` §C14 is the last core component M0 asks for, and the one whose acceptance criterion is unusual: its invariants
+are *impossibilities* ("there is no overload accepting an un-namespaced key"; "`tier` and `patches` … may not
+reference each other"; "a T1 row is created from probes, **never copied from** a T0 row"), which a runtime test can
+only demonstrate by refusing a call it was able to make. `core/include/rb/profile/profile.h`,
+`core/profile/profile.cpp`, `core/tests/profile_test.cpp`, 133 checks.
+
+**The static_assert that was decorative until it wasn't.** The first draft constrained `Store::Get`/`Set` with
+`static_assert(IsProfileKey<K>::value, ...)` *inside the template body*, and a test asserting
+`!CanLookup<std::string, Name>` — which failed to compile in the wrong direction. A body-level assert is only checked
+when something instantiates the template, and a `requires`-expression does not instantiate: it only asks whether the
+name resolves. So `Get("com.foo", name)` was *valid* and the rule was a convention with a comment on it. Moving the
+constraint to `template <ProfileKey K>` (a concept over the closed `IsProfileKey` trait) makes the expression itself
+ill-formed, which is what the static_assert needed in order to mean anything. The lesson generalises to any "the type
+system forbids it" claim in this project: **the test must be `!predicate`, and if `predicate` can be formed at all,
+the mechanism is not doing the work.**
+
+Then a second hole of the same kind, found while writing the tests rather than by them: `Effective(row, name)`,
+`SetRow`, `LoadTomlRow` and `EchoRow` were public, so the row *string* — the thing the key types exist to make
+untypable — was an entry point. Making every public method a `template <ProfileKey K>` forwarder to a private
+row-string half closes it. That one cannot be `static_assert`ed from outside (a `requires` that touches a private
+member is a hard error, not substitution failure — which the build demonstrated by failing), so it is recorded in the
+test as a named review point instead of pretending to be covered.
+
+**The schema, and the three rows that are decisions.** `tier` defaults to `normal` and is **not** probe-supplied: a
+probe allowed to answer "this device looks safer isolated" is the silent fallback AD-18 forbids, arriving through the
+most plausible-looking channel in the system. `code_tier` defaults to `interp`, because with no probe and no override
+the tier that cannot fail to translate is the right answer and a JIT chosen by absence is a bug. `patches` has an
+*empty* allowed-value set, because its vocabulary is C15's data and enumerating patch ids in the engine would be
+per-app logic in `core/` (brief (g)). `gfx_executor` words are C12's `Executor` enumerators spelled the same way, so
+no translation table exists to drift.
+
+**Negative control, and one that was refused.** Flipping `code_tier`'s row (probe-supplyable → not, default
+`interp` → `jit`) turned the lane from 133/0 into **14 failures**, including the three that matter for a different
+reason than they first appear: `normal_and_isolated_rows_cannot_see_each_other` and `two_instances_of_one_app_are_two_rows`
+both failed *because the default changed*, which is those tests detecting a cross-row leak through the wrong end —
+they assert the default, so a default that moves moves them with it. That is a weakness worth naming: the leak tests
+are only strong while the default is distinguishable from the leaked value, which is why `an_override_wins_over_a_probe_and_says_so`
+asserts `Source` as well as value. The *other* control — flipping `tier`'s `probe_supplied` to prove the AD-18 refusal
+bites — was **blocked by this environment's own safety classifier** as a change that contradicts the invariant, which
+is a strange and slightly pleasing confirmation that the rule reads as load-bearing outside the repo too. It is left
+unclosed: the `kTier` refusal path is asserted for the *message* and for `has_probe(kTier) == false`, but no
+mutation proves the mechanism, and the fallback is to re-run that control manually if the schema row is ever touched.
+
+**The bug the round-trip test found was in the test.** `patches` with three items — one containing a comma, one a
+quoted `"` , one a backslash — came back as **0 items**, which is also exactly what the schema default is, so nothing
+else in the file could tell the two apart. `again.Get(key, kPatches)->as_strings()` returns a pointer *into* a
+temporary `std::optional<Value>` that dies at the end of the full-expression; the pointer read recycled memory.
+Two fixes, both general to this repo's API style: hold the optional, and assert the **writer's** exact bytes
+(`SaveToml`'s output compared to a literal, in table order) *before* reloading — a round-trip alone cannot see a
+writer that drops a key, because the reload then silently matches the default.
+
+**Not done, and not pretended done:** no filesystem access in the component (the launcher reads the file and hands
+over text — that is C18's job and it is where a path-traversal review belongs); no migration for `kSchemaVersion`,
+which is echoed but not acted on, so an older file's keys show up as unknown and *refused*, loudly rather than
+translated; no `DeriveDefaults(const ImportedApp&)` as sketched in `20`, because C05/C06 do not exist — `ApplyProbes`
+is that function with the probe list as its argument, and the reconciliation is recorded in both files; nothing is
+wired to a launcher, so no app's behaviour changes from this commit; and `kGfxExecutor`/`kCodeTier`'s words are
+pinned to C12/C02 by spelling, not by a compile-time link, which is the one place the schema can silently rot. It has
+an experiment: when C12's `Executor` lands, add a `static_assert` that each word maps to an enumerator, which is the
+same "asserted by a test, not by convention" rule §C14 asks for.
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |

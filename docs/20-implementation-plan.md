@@ -37,9 +37,24 @@ Two corrections to earlier planning assumptions fall out of this:
    `xaQuerySupportedEngineInterfaces`, `xaQueryNumSupportedEngineInterfaces`) — measured here, not inferred. Both
    real APIs sit behind opaque object/interface vtables, so a symbol-list-driven proxy generator cannot produce a
    working audio proxy: audio's guest-side surface is **hand-modelled interface tables**, and its estimate is revised
-   upward (§9 R-4). By contrast `libjnigraphics.so` (4) and `libmediandk.so` (90) are ordinary flat-symbol APIs and
-   generate cleanly, and `libGLESv1_CM`/`libGLESv2`/`libEGL`/`libandroid` are large flat-symbol APIs — so audio is the
-   *only* category where the generator approach breaks down.
+   upward (§9 R-4).
+   > **Corrected by [`docs/33`](33-guest-library-inventory.md), which ran the sweep this paragraph should have run
+   > before generalising.** Every measurement above is right and re-confirmed; the conclusion drawn from them is not.
+   > Audio is **not** the *only* category where the generator approach breaks down — `libandroid`
+   > (`ANativeActivityCallbacks`, 15 function pointers in a struct the guest calls through), `libmediandk`
+   > (`AMediaCodec_setAsyncNotifyCallback` takes a **struct of 4 function pointers by value** — `NdkMediaCodec.h:150-154,499-502`,
+   > verified here **[1L]**, so 4 guest words vs 4 host words is not the same AAPCS expansion), `libz`
+   > (`z_stream` carries `zalloc`/`zfree`, is laid out *inline* by the guest, and `deflateInit_`/`inflateInit_` pass
+   > `(int)sizeof(z_stream)` as a runtime argument the callee compares against its own — `zlib.h:124-143,1856-1864`
+   > **[1L]**), `libdl`/`libEGL`/`libvulkan` (pointer-returning entry points: `dlsym`, `eglGetProcAddress`,
+   > `vkGetInstanceProcAddr`), `libaaudio`, `libcamera2ndk` and `libbinder_ndk` each break it too. And
+   > `libjnigraphics`/`libmediandk` are *not* "ordinary flat-symbol APIs": `libmediandk` is 161 FUNC against 143
+   > `AMEDIAFORMAT_KEY_*` OBJECT symbols. **The discriminator is not "audio vs not-audio"**, it is whether any value
+   > crossing the boundary is a guest-callable pointer or a layout both sides must agree on — `docs/33` §6 states it
+   > as a rule and §4 lists what must be hand-modelled before C12/C13 can claim coverage. Also from that sweep:
+   > `libc++.so` in the stub dirs is a 19-byte `INPUT(-lc++_shared)` linker script, not a stub, so the C++ ABI
+   > surface has no stub table and belongs to `libc++_shared.so`/AOSP; and a generator filtered on `FUNC` silently
+   > emits a half-complete library (`libOpenSLES` 3 of 56, `libmediandk` 161 of 304).
 2. The **decoder-coverage audit and the API-availability table are both doable today, host-only.** They move from
    "device work" to "M0 work", which is what makes M0 worth its cost.
 
@@ -406,6 +421,16 @@ real escapes), and that synthetic `/proc` returns **guest** paths from `readlink
 Build-time artefacts, not runtime codegen. Two kinds: **built from AOSP source** (`libc.so`, `libm`, `libdl`,
 `libc++` — BSD-3/Apache-2.0, AD-10) and **generated proxies** (`libEGL`, `libGLESv1_CM`, `libGLESv2`, `libandroid`,
 `liblog`, `libz`, `libjnigraphics`, `libmediandk`).
+> **Two of those three buckets are wrong as written**, per `docs/33` §6: `libc++.so` in the NDK stub dirs is a
+> 19-byte `INPUT(-lc++_shared)` linker script with no `.dynsym`, so it is a symbol authority for nothing and the
+> C++ ABI surface has to come from `libc++_shared.so`'s own `.dynsym` or from AOSP **[1L]**; and `libz` and
+> `libmediandk` are not generatable from an export list at all — `z_stream` is laid out by the guest, carries
+> `zalloc`/`zfree`, and is *size-asserted* at runtime through `deflateInit_(strm, level, ZLIB_VERSION,
+> (int)sizeof(z_stream))`, while `AMediaCodec_setAsyncNotifyCallback` takes a struct of four function pointers
+> **by value** **[1L]**. Both move to `libandroid`'s mixed bucket: flat exports that generate, entry points that
+> must be hand-modelled. The third correction is to the generator itself: filtering `--dyn-syms` on `FUNC`
+> silently emits half a library (`libOpenSLES` 3 of 56, `libmediandk` 161 of 304), so `OBJECT` data symbols —
+> the `SL_IID_*` interface IDs the vtable lookup takes as *input* — have to be emitted too.
 ```
 generate:  NDK stub .so (arm-linux-androideabi/<api>/)  ─┐
            AOSP native_bridge_support/android_api        ─┼→ guest-libs/*.c  → clang armv7 → .so
@@ -440,6 +465,18 @@ Same channel discipline. Audio's guest interface tables hand-modelled (§1). Inp
 mirror object**, not a pointer to the host C++ object (`docs/research/03`). Deferred after M2; interface fixed now so
 M1 doesn't grow a second input path.
 
+**Scope widened by [`docs/33`](33-guest-library-inventory.md)** (the stub sweep §1's audio finding was generalised
+from, which that sweep then falsified — see §1's correction). The hand-modelled surface is not audio's alone, and the
+list C13/C11/C12 must cover is in `docs/33` §4: the **vtable machinery built once** as a C11/C08 seam (six customers
+besides audio — `libmediandk`'s by-value callback struct, `libandroid`'s `ANativeActivityCallbacks`, `libaaudio`,
+`libcamera2ndk`, `libbinder_ndk`, `libvulkan` — and `docs/30` §Step 7b's fake `JNIEnv` is already that shape, so it is
+a generalisation of something green rather than new machinery); **pointer-returning entry points** as a distinct
+generated-code case (`dlsym`, `dlvsym`, `eglGetProcAddress`, `vk*GetInstanceProcAddr` — five symbols across four
+libraries, all invisible in a FUNC-count sweep); **host→guest callbacks on threads RetroBug does not own**, which
+extends `docs/research/03` §4.2 item 3's attach/real-time consequences to every one of them, not only to audio; and
+**`OBJECT` data symbols**, since the 53 `SL_IID_*` are *inputs* to the interface lookup — item 1 cannot be tested
+until the generator emits them.
+
 ### C14 `rb::profile`
 ```cpp
 namespace rb::profile {
@@ -456,6 +493,25 @@ class Store {   // one store, one schema (AD-12)
 versioned table; `tier` and `patches` are separate fields and neither may reference the other in the schema
 (AD-18, §12.1) — asserted by a schema test, not by convention. A T1 row is created from probes, **never copied from**
 a T0 row.
+
+**As built** (`30` §Step 15, 133 checks green on both devices). Three deltas from the sketch, each of which made an
+invariant harder to violate rather than softer:
+`Domain` is not a parameter — it is *in the key type*, so `NormalKey`/`IsolatedKey` carry their domain in the row
+string they build and a wrong `Domain` argument cannot be written (a runtime parameter is a thing you can pass
+wrong; a type is not). `DeriveDefaults(const ImportedApp&)` became `ApplyProbes(vector<ProbeResult>)`, because C05/C06
+do not exist yet and the probe results are held by the launcher anyway — the rule the sketch is protecting ("probes,
+never a package table") is unchanged and is enforced per name by `Schema::probe_supplied`. And `Value` is
+`string | string[]` only: the four sketched kinds reduced to two once `tier` became a word from a closed set rather
+than an int someone could pass 7 to, and a store that can hold an unvalidated number is a store with a hole in it.
+**The rule that the closed lookup is a compile-time fact needed a `concept` to be true**: a `static_assert` inside the
+template body only fires on instantiation, and a `requires`-expression does not instantiate — so the first draft's
+`!CanLookup<std::string, Name>` assertion was false, i.e. the hole it was testing for was open. `template <ProfileKey K>`
+fixes that, and every public method is now a key-taking forwarder to a private row-string half, because a `Get` that
+is closed next to a public `Effective(row, name)` is a closed lookup with the door off its hinges.
+`tier`'s schema row is `probe_supplied = false` and defaults to `normal`: **a probe that could choose T1 would be
+the silent fallback AD-18 forbids**, and it would arrive through the most plausible channel in the system. That makes
+`ApplyProbes`' refusal the mechanism enforcing the isolation-entry rule at the data layer, with the launcher's gesture
+still the only way in.
 
 ### C15 `rb::revival` — see §6 for the v1 scope decision.
 ```cpp
@@ -565,7 +621,7 @@ tests against. Linux CI carries the `qemu-arm` oracle and the arm64 build.
 | `rb::mem` + address models | 4 KiB guest / 16 KiB host mixed-granule tests (the local image is a `ps16k` build — confirm `getconf PAGESIZE`, §1); `guest_base != 0` exercised under x86_64 Android so no identity-only code path survives |
 | `rb::loader` | loads a real `armeabi-v7a` `.so` (the one built in §1) into a host process, applies relocations, resolves `libc.so` symbols to our own implementations. **First half done and hardware-verified** (`30` §Step 5e: 71 checks, expectations cross-checked against `llvm-readelf`); the second half — binding imports to RetroBug's own `libc` — belongs to C06 and C11 rather than the loader, and its test has only ever used a synthetic resolver |
 | `fib(20) == 6765` | **the M0 exit test**: call the loaded `Java_..._stringFromJNI` through `rb::abi` with a fake `JNIEnv`, under Tier I and Tier J, assert identical result. Expected values are **measured, not assumed** — `tools/run_armv7_oracle.sh` runs the fixture's own `fib`/`wide_probe` as native Thumb-2 on an AArch32-capable device and reports `fib(0)=0 fib(1)=1 fib(2)=1 fib(20)=6765`, the short curve `fib(0..12) = 0 1 1 2 3 5 8 13 21 34 55 89 144`, `wide(0)=52 wide(2)=50 wide(-1)=55`, string `fib(20)=6765 wide=50`. Tier I already reproduces all of it (`30` §Step 6d); the curve is there so a recursion defect localises at n=4 rather than at n=20. **Both tiers now do** (`30` §Step 9): 15 call shapes × every field of `MachineState`, identical on two devices, plus the SMC half — a one-byte patch whose new value hardware also measured, answered correctly only after `Invalidate`. The row's `stringFromJNI` remains M1's, not this lane's: `fib`/`wide`/`it_probe`/`patch_probe` are the JNI-only exports the tiers drive, because a `jstring` return needs the bridge to be real rather than fake |
-| Audio proxy strategy locked | one stub-lib sweep confirms §1's finding for every remaining guest library, so no interface-vtable API is ever assumed symbol-generatable |
+| Audio proxy strategy locked | one stub-lib sweep confirms §1's finding for every remaining guest library, so no interface-vtable API is ever assumed symbol-generatable. **Done — and it falsified §1's generalisation instead of confirming it** (`docs/33`, `30` §Step 14): 27 libraries enumerated from the NDK's AArch32 stub dirs at API 21→35 with per-library FUNC/OBJECT counts, classified against headers with file:line citations. Nine non-audio libraries break the generator approach the way audio does, `libc++.so` turns out not to be a stub at all, and a FUNC-filtered generator emits half-complete libraries. §1's correction note carries the outcome; the discriminator is now stated as a rule (`docs/33` §6), not as a category |
 
 M0 is the plan's risk-killer: it validates AD-1 (Dynarmic fit), U-8 (ARMv7 coverage), C8's oracle strategy, and
 AD-6/AD-7 (address/page model) before a single line of Android UI or JNI code exists.

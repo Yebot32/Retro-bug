@@ -68,3 +68,10 @@ target_link_libraries(rb_syscall_monitor_tests PRIVATE rb_syscall rb_diag rb_exe
 # platform backend will have to honour.
 add_executable(rb_codecache_tests codecache_test.cpp)
 target_link_libraries(rb_codecache_tests PRIVATE rb_codecache)
+
+# C14's store needs no device, no guest program and no filesystem: the file format is a string in and a
+# string out, which is what makes "unknown key reported, mistyped value refused" testable here rather
+# than only in a launch. Most of the assertions are compile-time ones, so this target failing to build *is*
+# several of its cases passing.
+add_executable(rb_profile_tests profile_test.cpp)
+target_link_libraries(rb_profile_tests PRIVATE rb_profile rb_diag)

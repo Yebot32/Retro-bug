@@ -77,10 +77,18 @@ add_library(rb_codecache STATIC codecache/codecache.cpp)
 target_compile_features(rb_codecache PUBLIC cxx_std_20)
 target_link_libraries(rb_codecache PUBLIC rb_exec rb_diag)
 
+# rb::profile (C14): the one store for per-app settings. It reaches no guest memory, no executor and no
+# filesystem — the launcher hands it text it has already read and hands back the lines it could not
+# apply. That narrow surface is what lets the closed-lookup rule be a compile-time fact: the store's only
+# entry points are the two key types, so there is nothing for a caller to route around.
+add_library(rb_profile STATIC profile/profile.cpp)
+target_compile_features(rb_profile PUBLIC cxx_std_20)
+target_link_libraries(rb_profile PUBLIC rb_diag)
+
 # rb_core is the aggregate the engine-facing components will hang off.
 add_library(rb_core INTERFACE)
 target_link_libraries(rb_core INTERFACE rb_mem rb_loader rb_isa rb_exec rb_abi rb_diag rb_syscall
-                                        rb_codecache dynarmic)
+                                        rb_codecache rb_profile dynarmic)
 
 if(DEFINED RB_COMPAT_INCLUDE_DIR)
   target_include_directories(rb_core INTERFACE "${RB_COMPAT_INCLUDE_DIR}")
