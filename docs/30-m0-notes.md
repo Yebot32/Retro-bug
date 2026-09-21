@@ -3050,6 +3050,9 @@ directions, and settling it took three steps because the first two disagreed wit
   ARM-state-only instruction planted in a Thumb probe `SIGILL`s for encoding reasons, which looks
   identical to an availability refusal from outside. Nothing in this repo may cite "media ops are
   undefined at EL0" as a measured fact until it is re-probed in ARM state with the encodings printed.
+  (Written before §Step 36: the oracle has since run every one of them natively on both devices without
+  faulting, so that probe is withdrawn rather than doubted. The sentence is left because the *rule* it
+  records — a refusal from the real artifact outranks a probe about the artifact — is what caught it.)
   The ordering rule generalises: a refusal produced by loading and running the actual artifact outranks a
   probe about what that artifact could contain.
 
