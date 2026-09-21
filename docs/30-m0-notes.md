@@ -2995,6 +2995,106 @@ still open as recorded — this is the own-loader branch, and it now carries a c
 which was the part that made it look risky.
 
 
+## Step 34 — C06 replaces the APK lane's hand-built map, `strcmp`'s blocker turns out to be `SEL`, and two instruments were wrong
+
+Verified on both devices (SM7250 `e99abf39` · SM8550 `R52Y106BECZ`), engine `EXIT=0`:
+
+| Lane | Before | After |
+|---|---|---|
+| `rb_linker_tests` | 26 / 0 | **35 / 0** both devices |
+| `rb_guest_apk_tests` (advisory) | 92 / 0 | **1376 / 0** both devices |
+| `rb_guest_libc_tests` (advisory) | 135 / 8 · 132 / 9 | **135 / 7 · 132 / 8** |
+| `rb_exec_tier_diff_tests` | 133 / 0 | 133 / 0 (unchanged — the new ops have no rows yet) |
+
+### C06's scope replaces the APK rig's name→address map
+
+`guest_apk_test.cpp` had built a `std::map<std::string, std::uint32_t>` over `libm->exports` and used it
+as the app's resolver. Its own comment called that "a stand-in for what the C06 guest linker will do". It
+is gone: the rig now owns a `linker::GuestLinker`, links `libm.so` through it, and resolves the app's
+imports with `GuestLinker::Lookup`. The map's old Thumb-tag bug (resolving via `CodeAddress::addr`, which
+has bit 0 masked out) is now asserted against rather than avoided — **every** defined function export of a
+real `libm.so` (315 of them, 28 Thumb) is checked for `Lookup(name) == st_value`, which is where ~1260 of
+the lane's checks come from. That is the first time C06's lookup has been exercised over a whole library
+instead of three imported names.
+
+Two smaller things came out of wiring it:
+
+- `LinkAt` now consults its own scope **before** asking the provider for a `DT_NEEDED` soname. The old
+  order re-requested a library that was already loaded, and a provider that answered with a second copy
+  would have placed it at a different address, leaving two instances of one library's globals. Forced by
+  a provider that hands back the leaf only until the linker has it, counts every call, and asserts
+  `order()[0]` is the *same* instance the caller holds (`an_already_loaded_dependency_is_not_asked_for_again`).
+  This row cannot pass without the change, which is what makes it worth having.
+- The APK's real dependency gap is now an assertion instead of an absence. `libmathprobe.so`'s
+  `DT_NEEDED` is `libdl.so libc.so`, there is no guest libc, so `Link` refuses — and the lane asserts
+  that the refusal names one of those two, then loads the image directly. Two of those rows are a
+  tripwire pointed at #29: the day a `libc.so` exists for the provider, `Link` stops refusing and the row
+  goes red telling the reader to delete the fallback and run `RunInitializers`. The app is *not* in
+  `order()`, and a check on `order().size() == 1` keeps that visible rather than letting "loaded" and
+  "linked" quietly become the same word.
+
+### The `strcmp` blocker was `PackedSelect`, and the plan to skip it was wrong twice over
+
+Task #33's premise ("7 IR ops stand between the interpreter and real bionic") was wrong in both
+directions, and settling it took three steps because the first two disagreed with each other:
+
+- A sub-agent's own report contradicted itself — its summary line said 5 ops were missing, its later
+  section said all 34 `Packed*` ops. `grep -c "Opcode::Packed" core/exec/interp.cpp` → **0** settled it in
+  one command: Tier I had none of them, and no GE state at all. **A sub-agent's headline is not its
+  evidence; run the one grep that the load-bearing claim rests on.**
+- I then chose to *skip* `SEL` on the grounds that the ARMv6 media instructions are unreachable on
+  ARMv7-A hardware, citing a probe that had `uqadd8`/`usat8`/`usad8` taking `SIGILL` at EL0 on both
+  devices. The device's own `libc.so` answered: the Tier I refusal for `strcmp` was
+  `PackedSelect: no Tier I semantics yet`. Code that runs natively on the fleet cannot contain an
+  instruction the fleet refuses, so **that probe's conclusion is now doubted, not just superseded** — an
+  ARM-state-only instruction planted in a Thumb probe `SIGILL`s for encoding reasons, which looks
+  identical to an availability refusal from outside. Nothing in this repo may cite "media ops are
+  undefined at EL0" as a measured fact until it is re-probed in ARM state with the encodings printed.
+  The ordering rule generalises: a refusal produced by loading and running the actual artifact outranks a
+  probe about what that artifact could contain.
+
+Implemented in Tier I: the 4 packed add/subtract kinds with GE, the 8 saturating and 8 halving kinds,
+`PackedSelect`, `GetGEFromOp`, `A32{Get,Set}GEFlags`, `A32SetGEFlagsCompressed`, and CPSR's GE bits as the
+storage. Still refusing, by name and with the reason in the code: the four `PackedAddSub*`/`PackedSubAdd*`
+and `PackedAbsDiffSumU8`, whose lane-to-GE and half-lane-accumulation recipes in dynarmic's AArch64 emitter
+I have not read. `strcmp` passing is the evidence that the parts implemented are right; it is a
+hardware-oracled row, not a tier-vs-tier one.
+
+Three things derived from dynarmic's source rather than from the ARM manual, because the invariant is
+agreement with the tier that ships: GE is stored **one full byte lane per bit** (`0xFF`) and reaches
+CPSR's [19:16] through bit 7/15/23/31, so `GE0` is the *least* significant lane; the signed GE test is
+`>= 0` (arm64) and not `> 0` (x64) — they differ on exactly-zero lanes; and the halving ops truncate,
+without the `+1` that `(a+b+1)>>1` invites. `PackedSelect`'s polarity is the one place where I could not
+read the answer off the AArch64 emitter's single `BSL` line, so it follows the architecture and the
+portable x64 law, and `strcmp`'s hardware-oracled row is named as the arbiter.
+
+### Two instruments that misreported, found by their own output
+
+- **The rig's `app` module was a dangling pointer.** `rig.app = &*app_mod` addressed a local
+  `std::optional` that died with `build()`, which came out as "the loaded library does not export
+  `floatProbe`" on the Tab S9 and as an unhandled `SIGSEGV` at a host address on the Reno — two unrelated
+  symptoms, one cause, and the message pointed at the loader rather than at the rig. It is the third
+  by-reference-into-a-short-lived-object bug in this project (after `provider_for`'s capture and the
+  per-tier `MachineState` copy), so as a rule: **a pointer into anything that is moved or returned by
+  value is a bug even when it "works"** — `libm` may be a pointer only because it addresses a node of the
+  linker's heap-owned `deque`.
+- **`A32ExceptionRaised` said "at this instruction" and could not say which.** Adding the PC and the bytes
+  made the next run informative immediately (`memcpy`'s block reports `0xe92d4001` = `stmdb sp!, {r0, lr}`)
+  and *also* showed the new message overclaiming: a front-end exception does not necessarily end the
+  block, and Tier I has no PC between a block's entry and its terminator, so the address is the block
+  start and the raising instruction is at or after it. The comment said "the block's own PC *is* the
+  instruction". Corrected to name the block and the range, because an instrument that is precise-looking
+  and wrong is worse than one that is vague and honest.
+
+### What is left in the advisory lanes, precisely
+
+`memcpy`/`memmove` on Tier I: a front-end exception in the block beginning at the `push` above (Tab S9
+`0x949c4`, Reno `0x577d0`, ARM state) — Tier J runs the same export, so this is a tier asymmetry and the
+only remaining one that blocks a bionic routine. `strtod`/`qsort`: the probe's own null-base pointer
+reaching low absolute addresses (`read at 2889`, `write at 11077`) with both tiers agreeing, i.e. the
+rig's fault rather than the engine's. `rb_guest_libc_tests`' other 6 rows are the TLS relocations, which
+#32 still has to apply.
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |

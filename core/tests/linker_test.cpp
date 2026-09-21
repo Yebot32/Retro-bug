@@ -237,6 +237,100 @@ void the_chain_loads_dependencies_first() {
                                              std::to_string(linker.order().size()));
 }
 
+/// A dependency already in the scope must not be asked of the provider again.
+///
+/// The lane forces that with a provider that hands back the leaf **only** until the linker has it, then
+/// refuses it, and counts every call. If `LinkAt` consulted the provider first, `mid`'s `DT_NEEDED` would
+/// hit the refusal and the chain would fail for a reason that is not the linker's semantics but its order
+/// of lookup — and at the same time the counter would show two requests for one soname, which is how a
+/// loader ends up with two instances of a library whose globals are supposed to be shared. `dlopen` of a
+/// library an app already links reaches this path in production, not just here.
+void an_already_loaded_dependency_is_not_asked_for_again() {
+  std::string err;
+  auto fx = load_fixture();
+  if (!fx) return;
+  AddressModel model;
+  model.kind = AddressModel::kBiased;
+  model.host_page_shift = HostPageShift();
+  auto mem = GuestMemory::Create(64u << 20, model, &err);
+  if (!mem) {
+    fail("guest memory", __LINE__, err);
+    return;
+  }
+  if (!mem->Map(kStackTop - (64u << 10), 64u << 10, kRead | kWrite, &err) ||
+      !mem->Map(kReturnAddress, kGuestPage, kRead | kWrite, &err)) {
+    fail("map the guest stack and sentinel", __LINE__, err);
+    return;
+  }
+
+  int calls = 0;
+  bool hand_back_leaf = true;
+  /**
+   * `fx` by value (the linker copies this callback and could outlive the call — see `provider_for`), the
+   * two counters by reference (they are this function's own locals and every `Link` happens below).
+   */
+  lnk::ImageProvider provider = [fx, &calls, &hand_back_leaf](const std::string& soname)
+      -> std::optional<std::vector<std::uint8_t>> {
+    ++calls;
+    if (soname == "librbmid.so") return fx->mid;
+    if (soname == "librbleaf.so" && hand_back_leaf) return fx->leaf;
+    return std::nullopt;
+  };
+  lnk::GuestLinker linker{*mem, provider};
+
+  const auto leaf = linker.LinkNamed("librbleaf.so", &err);
+  CHECK_CTX(leaf.has_value(), "linking the leaf alone failed: " + err);
+  CHECK_CTX(calls == 1, "the provider was called " + std::to_string(calls) +
+                            " times for one explicit LinkNamed");
+  // From here the provider cannot supply the leaf. Anything that still asks for it fails, so a passing
+  // chain below can only mean the linker looked at its own scope first.
+  hand_back_leaf = false;
+
+  const auto mid = linker.LinkNamed("librbmid.so", &err);
+  CHECK_CTX(mid.has_value(),
+            "linking the dependent failed after the leaf was already loaded: " + err +
+                " — the linker re-requested a dependency it had, which the provider now refuses");
+  CHECK_CTX(calls == 2, "the provider was consulted " + std::to_string(calls) +
+                            " times; the leaf should have been found in the scope, not asked for");
+  CHECK_CTX(linker.order().size() == 2u,
+            "the scope holds " + std::to_string(linker.order().size()) +
+                " modules; a second copy of the leaf means two instances of one library's globals");
+  if (!mid) return;
+  CHECK_CTX(linker.order()[0] == *leaf,
+            "the leaf already in the scope was replaced, so the dependent's relocations resolved against "
+            "a different instance than the one the caller holds");
+
+  // The dependent's call still reaches the *first* leaf instance, which is the property the whole
+  // lookup-order rule exists for: `mid_call` goes through a GOT slot filled during `mid`'s relocation.
+  const auto fn = (*mid)->FindExport("mid_call");
+  CHECK_CTX(fn.has_value(), "mid_call is not exported by the dependent");
+  if (!fn) return;
+  exec::MachineState s{};
+  s.pc = fn->addr;
+  s.r[0] = 11;
+  s.r[13] = kStackTop;
+  s.r[14] = kReturnAddress;
+  s.mode = fn->thumb ? isa::Mode::Thumb : isa::Mode::Arm;
+  s.cpsr = fn->thumb ? (1u << 5) : 0u;
+  exec::InterpExecutor engine{*mem, kReturnAddress};
+  bool returned = false;
+  for (int guard = 0; guard < 100; ++guard) {
+    const exec::RunResult r = engine.Run(s, 500);
+    if (r.reason == exec::StopReason::Returned) {
+      returned = true;
+      break;
+    }
+    if (r.reason != exec::StopReason::Budget) {
+      err = r.detail;
+      break;
+    }
+  }
+  // A different argument from `a_linked_call_reaches_the_other_module`'s, on purpose: 11 here and 7 there
+  // means a value that was baked in rather than computed cannot satisfy both rows.
+  CHECK_CTX(returned, "mid_call did not return: " + err);
+  CHECK_CTX(s.r[0] == 23u, "mid_call(11) = " + Hex(s.r[0]) + ", expected leaf_add(11,11)+1 = 23");
+}
+
 // ------------------------------------------------------------------ the scope
 
 void a_symbol_resolves_from_the_wider_scope() {
@@ -438,6 +532,7 @@ void a_linked_call_reaches_the_other_module() {
 int main() {
   a_missing_dependency_refuses_naming_it();
   the_chain_loads_dependencies_first();
+  an_already_loaded_dependency_is_not_asked_for_again();
   a_symbol_resolves_from_the_wider_scope();
   guest_constructors_run_in_dependency_order();
   a_linked_call_reaches_the_other_module();

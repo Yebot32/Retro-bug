@@ -89,7 +89,7 @@ target_link_libraries(rb_profile_tests PRIVATE rb_profile rb_diag)
 # both the APK and that oracle). It needs the engine and the loader, so like the tier-diff lane it is
 # not in the "runs without the DBT" group.
 add_executable(rb_guest_apk_tests guest_apk_test.cpp)
-target_link_libraries(rb_guest_apk_tests PRIVATE rb_exec rb_abi rb_loader)
+target_link_libraries(rb_guest_apk_tests PRIVATE rb_exec rb_abi rb_loader rb_linker)
 target_compile_definitions(rb_guest_apk_tests PRIVATE
   RB_GUEST_APK_PATH="/data/local/tmp/rb_guestprobe.apk"
   RB_GUEST_LIBM_PATH="/data/local/tmp/libm.so")

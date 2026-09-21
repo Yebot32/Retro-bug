@@ -127,6 +127,210 @@ Flags Tst(std::uint64_t value, unsigned width) {
 }
 
 /**
+ * CPSR's GE field ([19:16]) to the form dynarmic's `cpsr_ge` actually holds: one *whole byte lane*
+ * (`0xFF`) per set GE bit, not a nibble.
+ *
+ * The two layouts are not interchangeable and the mismatch is silent. The back end expands on every
+ * `MRS` and compresses on every `MSR` with a magic multiply (`emit_arm64_a32.cpp:333-338, 362-373`),
+ * reading the GE bits out of **bit 7/15/23/31** of that word — so `GE0` corresponds to byte lane 0, the
+ * *least* significant one, and an implementation that shifted the nibble into place instead of
+ * expanding it would put every GE bit one lane high. `SEL` would then pick bytes from the wrong half of
+ * the word, and `UADD8`'s carry reports would be off by a byte.
+ */
+std::uint32_t ExpandGe(std::uint32_t cpsr) {
+  const std::uint32_t ge = (cpsr >> 16) & 0xFu;
+  std::uint32_t out = 0;
+  for (unsigned lane = 0; lane < 4; ++lane) {
+    if (ge & (1u << lane)) out |= 0xFFu << (8 * lane);
+  }
+  return out;
+}
+
+/// The inverse: bit 7/15/23/31 of a 0xFF-per-lane GE word into CPSR [19:16].
+std::uint32_t CompressGe(std::uint32_t lanes) {
+  std::uint32_t out = 0;
+  for (unsigned lane = 0; lane < 4; ++lane) {
+    if (lanes & (0x80u << (8 * lane))) out |= 1u << (16 + lane);
+  }
+  return out;
+}
+
+/// A lane of a packed operand, as an unsigned or a signed value of `width` bits.
+std::int64_t LaneOf(std::uint32_t v, unsigned shift, unsigned width, bool is_signed) {
+  const std::uint32_t mask = (1u << width) - 1u;
+  const std::uint32_t raw = (v >> shift) & mask;
+  if (!is_signed) return raw;
+  return raw & (1u << (width - 1)) ? std::int64_t(raw) - (1ll << width) : std::int64_t(raw);
+}
+
+/// Per-lane add or subtract, each result truncated back to the lane width.
+///
+/// There is no signed form of this on purpose: two's-complement addition and subtraction are the same
+/// bit operation, which is why dynarmic's back end emits one `ADD Vd.8B, Vn.8B, Vm.8B` for both
+/// `PackedAddU8` and `PackedAddS8` (`emit_arm64_packed.cpp:57,77`) and lets the *GE* word carry the
+/// difference between them. An interpreter that branched on signedness here would produce the same
+/// result by accident and hide the fact that the flag is the only thing that differs.
+std::uint32_t LaneAddSub(std::uint32_t a, std::uint32_t b, unsigned width, bool subtract) {
+  const std::uint32_t mask = (1u << width) - 1u;
+  std::uint32_t out = 0;
+  for (unsigned shift = 0; shift < 32; shift += width) {
+    const std::uint32_t x = (a >> shift) & mask, y = (b >> shift) & mask;
+    out |= ((subtract ? x - y : x + y) & mask) << shift;
+  }
+  return out;
+}
+
+/// Per-lane saturating add or subtract: clamp to the lane's own range instead of wrapping.
+std::uint32_t LaneSaturate(std::uint32_t a, std::uint32_t b, unsigned width, bool subtract,
+                           bool is_signed) {
+  const std::uint32_t mask = (1u << width) - 1u;
+  const std::int64_t lo = is_signed ? -(1ll << (width - 1)) : 0;
+  const std::int64_t hi = is_signed ? (1ll << (width - 1)) - 1 : std::int64_t{mask};
+  std::uint32_t out = 0;
+  for (unsigned shift = 0; shift < 32; shift += width) {
+    const std::int64_t x = LaneOf(a, shift, width, is_signed);
+    const std::int64_t y = LaneOf(b, shift, width, is_signed);
+    const std::int64_t r = subtract ? x - y : x + y;
+    out |= (static_cast<std::uint32_t>(r < lo ? lo : r > hi ? hi : r) & mask) << shift;
+  }
+  return out;
+}
+
+/**
+ * Per-lane halving add or subtract: the wider sum is shifted right one place and truncated, with **no
+ * rounding** — which is the difference between these and AArch64's `URHADD`-family, and the thing
+ * easiest to get wrong by writing the obvious `(x + y + 1) >> 1`.
+ *
+ * Two independent dynarmic paths say the same thing, which is why this is stated rather than assumed:
+ * the AArch64 back end emits `UHADD`/`UHSUB`/`SHADD`/`SHSUB` (`emit_arm64_packed.cpp:286,296`), and the
+ * x64 back end's portable route derives `~pavg(~a, ~b) == (a + b) >> 1` from `pavg`'s `+1` and then
+ * removes it (`emit_x64_packed.cpp:256-259, 275-285`). A `+1` here would agree with neither and would
+ * survive any test that only checked a small positive operand.
+ */
+std::uint32_t LaneHalve(std::uint32_t a, std::uint32_t b, unsigned width, bool subtract) {
+  const std::uint32_t mask = (1u << width) - 1u;
+  const std::uint32_t wide = (mask << 1) | 1u;  // the lane plus its carry/borrow bit
+  std::uint32_t out = 0;
+  for (unsigned shift = 0; shift < 32; shift += width) {
+    const std::uint32_t x = (a >> shift) & mask, y = (b >> shift) & mask;
+    const std::uint32_t d = (subtract ? x - y : x + y) & wide;
+    // Bits [width:1] of the wider intermediate, ARM's own wording for UHADD8/UHSUB8/SHADD8/SHSUB8. For
+    // the signed forms this is the arithmetic shift; the bit pattern is the same expression either way.
+    out |= (d >> 1) << shift;
+  }
+  return out;
+}
+
+/**
+ * The three things every `Packed*` opcode encodes in its name, factored out so a case list can stay a
+ * list. The naming is dynarmic's (`opcodes.inc:221-255`) and follows ARM's: `U`/`S` is the lane's
+ * signedness, `Add`/`Sub` the operation, and the trailing width is the *lane* width — 4 lanes of 8 bits
+ * or 2 lanes of 16, both over the same 32-bit word.
+ *
+ * Spelled as switches over the opcodes rather than by reading `GetNameOf`, because these three answers
+ * are what the arithmetic is built from: a name-parser that mis-reads `PackedAddSubU16` as an addition
+ * of 8-bit lanes computes a plausible word for an instruction that is nothing of the kind, and the
+ * failure surfaces as a wrong byte in a string comparison a thousand instructions later.
+ */
+bool IsPackedSub(Opcode op) {
+  switch (op) {
+    case Opcode::PackedSubU8:
+    case Opcode::PackedSubS8:
+    case Opcode::PackedSubU16:
+    case Opcode::PackedSubS16:
+    case Opcode::PackedSaturatedSubU8:
+    case Opcode::PackedSaturatedSubS8:
+    case Opcode::PackedSaturatedSubU16:
+    case Opcode::PackedSaturatedSubS16:
+    case Opcode::PackedHalvingSubU8:
+    case Opcode::PackedHalvingSubS8:
+    case Opcode::PackedHalvingSubU16:
+    case Opcode::PackedHalvingSubS16:
+      return true;
+    default:
+      return false;
+  }
+}
+unsigned PackedLaneWidth(Opcode op) {
+  switch (op) {
+    case Opcode::PackedAddU16:
+    case Opcode::PackedAddS16:
+    case Opcode::PackedSubU16:
+    case Opcode::PackedSubS16:
+    case Opcode::PackedSaturatedAddU16:
+    case Opcode::PackedSaturatedAddS16:
+    case Opcode::PackedSaturatedSubU16:
+    case Opcode::PackedSaturatedSubS16:
+    case Opcode::PackedHalvingAddU16:
+    case Opcode::PackedHalvingAddS16:
+    case Opcode::PackedHalvingSubU16:
+    case Opcode::PackedHalvingSubS16:
+      return 16;
+    default:
+      return 8;
+  }
+}
+bool IsPackedSigned(Opcode op) {
+  switch (op) {
+    case Opcode::PackedAddS8:
+    case Opcode::PackedSubS8:
+    case Opcode::PackedAddS16:
+    case Opcode::PackedSubS16:
+    case Opcode::PackedSaturatedAddS8:
+    case Opcode::PackedSaturatedSubS8:
+    case Opcode::PackedHalvingAddS8:
+    case Opcode::PackedHalvingSubS8:
+    case Opcode::PackedSaturatedAddS16:
+    case Opcode::PackedSaturatedSubS16:
+    case Opcode::PackedHalvingAddS16:
+    case Opcode::PackedHalvingSubS16:
+      return true;
+    default:
+      return false;
+  }
+}
+
+/**
+ * The GE word for the four packed add/subtract kinds, lane-for-lane as `0xFF` (or `0xFFFF`) per set bit.
+ *
+ * Written out per kind because the back end's four NEON recipes only look uniform:
+ *
+ *   - `UADD8`   `CMHI(Va, Vresult)` → carry out of the lane, i.e. `a > a+b`.
+ *   - `USUB8`   `UHSUB` then `CMGE #0` → the halving difference is negative exactly when a borrow
+ *              occurred, so this is `a >= b` — not `a > b`, which is the off-by-one this row exists
+ *              to keep out.
+ *   - `SADD8`   `SHADD` then `CMGE #0` → `(a+b+1)>>1 >= 0` as a signed lane, i.e. `a+b >= -1`.
+ *   - `SSUB8`   `SHSUB` then `CMGE #0` → `(a-b)>>1 >= 0`, i.e. `a >= b` signed.
+ *
+ * The `>= 0` versus `> 0` question is real and has no single answer in dynarmic: the x64 back end
+ * compares the *saturating* sum strictly greater than zero (`emit_x64_packed.cpp:41-63`), which differs
+ * from arm64 on the exactly-zero lane (say `0x01 + 0xFF` as signed bytes). Tier I matches **arm64**,
+ * because that is the back end that ships on this host and the tiers' agreement is the invariant the
+ * differential lane enforces; where two of dynarmic's own back ends disagree, the one under test wins
+ * and the disagreement gets recorded, not averaged.
+ */
+std::uint32_t GeOfPackedAddSub(Opcode op, std::uint32_t a, std::uint32_t b, unsigned width) {
+  const bool is_sub = op == Opcode::PackedSubU8 || op == Opcode::PackedSubU16 ||
+                      op == Opcode::PackedSubS8 || op == Opcode::PackedSubS16;
+  const bool is_signed = op == Opcode::PackedAddS8 || op == Opcode::PackedAddS16 ||
+                         op == Opcode::PackedSubS8 || op == Opcode::PackedSubS16;
+  const std::uint32_t mask = (1u << width) - 1u;
+  std::uint32_t out = 0;
+  for (unsigned shift = 0; shift < 32; shift += width) {
+    const std::uint32_t x = (a >> shift) & mask, y = (b >> shift) & mask;
+    bool set = false;
+    if (is_signed) {
+      const std::int64_t sx = LaneOf(a, shift, width, true), sy = LaneOf(b, shift, width, true);
+      set = is_sub ? (sx - sy >= 0) : (sx + sy >= -1);
+    } else {
+      set = is_sub ? (x >= y) : ((x + y) & ~mask) != 0;  // carry out of the lane
+    }
+    if (set) out |= mask << shift;
+  }
+  return out;
+}
+
+/**
  * Scalar VFP helpers.
  *
  * The IR carries floats as *bit patterns* in `U32`/`U64` operands — `GetExtendedRegister32` hands out
@@ -619,6 +823,12 @@ class BlockRunner {
   /// (`TST`) than their C does (`GetCarryFromOp`), and merging them would make Tier I disagree with
   /// the back end about what a `GetNZCVFromOp` on a shift means.
   std::unordered_map<const Inst*, bool> carry_;
+  /// The GE word a packed add/subtract produced, in dynarmic's expanded one-lane-per-bit form, keyed by
+  /// the instruction that produced it — the same shape as `carry_` and for the same reason: the IR names
+  /// the *producer* in `GetGEFromOp`, so the value has to be recorded where a producer can leave it and
+  /// read where a consumer asks. Held apart from `produced_` because it is not a flag: it survives an
+  /// unrelated `ADDS` in between, and `MRS rD, CPSR` reads it out of CPSR's own bits.
+  std::unordered_map<const Inst*, std::uint32_t> ge_;
   bool check_bit = false;
   /// An SVC noted by `A32CallSupervisor`, waiting to be surfaced at the block's `CheckHalt` terminal —
   /// see the two places that read it. Pending rather than immediate so the PC is already past the
@@ -708,8 +918,34 @@ bool BlockRunner::Step(const Inst* inst) {
       stop.detail = "guest breakpoint";
       return false;
 
-    case Opcode::A32ExceptionRaised:
-      return Fault("the front end raised an exception at this instruction");
+    case Opcode::A32ExceptionRaised: {
+      /**
+       * Named with the guest's own coordinates, because "the front end raised an exception at this
+       * instruction" is not something a reader can act on. Six banked-register and privileged forms, the
+       * unpredictable-operands forms (`d == PC` in the media translators, for instance), `NEONUnimplemented`
+       * and a handful of others all arrive here, and the only way to tell them apart is to disassemble the
+       * halfwords.
+       *
+       * What this is **not** is the address of the instruction that raised. There is no PC between a
+       * block's entry and its terminator in this interpreter — the location descriptor only moves on a
+       * `BranchWritePC`/`BXWritePC` — and not every front-end exception ends the block, so the address
+       * below is the start of the block the raising instruction is in, and the instruction is at or after
+       * it. The first run that used this said so: `memcpy`'s refusal reported `0xe92d4001` at the named
+       * PC, which is `stmdb sp!, {r0, lr}`, an instruction with nothing wrong with it. A precise-looking
+       * wrong address is worse than a range, so the range is what is stated.
+       */
+      const GuestAddr at = location_.PC();
+      std::uint32_t w = 0;
+      const bool readable = memory_.Read(at, &w, 4);
+      const std::string bytes =
+          readable
+              ? (location_.TFlag()
+                     ? Hex(w & 0xFFFFu) + " " + Hex(static_cast<std::uint32_t>(w >> 16))
+                     : Hex(w))
+              : std::string{"<unreadable>"};
+      return Fault("the front end raised an exception in the block entering at 0x" + Hex(at) +
+                   (location_.TFlag() ? " (Thumb, halfwords " : " (ARM, word ") + bytes + ")");
+    }
 
     /**
      * Coprocessor 15, and only the thread pointer.
@@ -901,6 +1137,146 @@ bool BlockRunner::Step(const Inst* inst) {
     case Opcode::A32GetCFlag:
       Put(inst, V{Flags::from_cpsr(state_.cpsr).c ? 1u : 0u, 0});
       return true;
+
+    // ---------------------------------------------------------------- CPSR's GE bits
+    //
+    // GE exists because four instructions report a *per-lane* result and none of them has a flag field
+    // wide enough: `UADD8`'s carry, `USUB8`'s no-borrow, and the signed pair. It is also the only thing
+    // `SEL` reads, which is why the state has to be right rather than merely present — a GE that is
+    // never written lets `UADD8` look fine and `SEL` silently pick the wrong bytes.
+    //
+    // Tier I keeps these bits inside `state_.cpsr` at their architectural positions [19:16]; dynarmic's
+    // back end keeps a separate expanded `cpsr_ge` word and converts at every read and write. That is a
+    // representation difference, not a semantic one, and the rows that pin it down are `MRS rD, CPSR`
+    // after a `UADD8` (which reads exactly what this packing produced) and `MSR` (which writes it).
+    case Opcode::A32GetGEFlags:
+      Put(inst, V{ExpandGe(state_.cpsr), 0});
+      return true;
+    case Opcode::A32SetGEFlags: {
+      std::uint32_t v = 0;
+      if (!W32(inst, 0, v)) return false;
+      state_.cpsr = (state_.cpsr & ~0x000f'0000u) | CompressGe(v);
+      return true;
+    }
+    case Opcode::A32SetGEFlagsCompressed: {
+      // The `MSR` route: the translator hands over `value & 0x000F0000`, already in CPSR's layout, so
+      // this is a masked store with no lane arithmetic — and the mask has to be applied to the *source*
+      // as well as the destination here rather than trusting the caller, because this opcode is also
+      // reachable from an IR the translator did not build.
+      std::uint32_t v = 0;
+      if (!W32(inst, 0, v)) return false;
+      state_.cpsr = (state_.cpsr & ~0x000f'0000u) | (v & 0x000f'0000u);
+      return true;
+    }
+    case Opcode::GetGEFromOp: {
+      if (!HasArgs(inst, 1)) return false;
+      const Value arg = inst->GetArg(0);
+      if (arg.IsImmediate()) return Fail(inst, "a GE pseudo-operation on an immediate has no producer");
+      const auto it = ge_.find(arg.GetInst());
+      if (it == ge_.end()) {
+        // Refusing rather than answering 0: the back end asserts the producer defined the value
+        // (`emit_arm64.cpp:80-84`), so a missing producer means this file computed the op without
+        // recording its GE, which is a bug in the row above and not a state the guest can be in. Zero
+        // would turn that bug into quietly-wrong `SEL` results.
+        return Fail(inst, "no GE recorded for " +
+                              std::string{Dynarmic::IR::GetNameOf(arg.GetInst()->GetOpcode())});
+      }
+      Put(inst, V{it->second, 0});
+      return true;
+    }
+
+    // ---------------------------------------------------------------- the ARMv5TE/v6 media ("packed") ops
+    //
+    // Implemented as one set rather than one at a time on demand, because the arithmetic below is shared
+    // and because a per-byte subset invites the mistake this shape has: `UADD8` wrapping while `UQADD8`
+    // clamping are four lines apart in the same table, and adding only the first leaves the second
+    // refusing in a library that needed both.
+    //
+    // Deliberately **not** here: `PackedAddSubU16`/`PackedAddSubS16`/`PackedSubAddU16`/`PackedSubAddS16`
+    // (the `UADDASX` family, whose lane-to-GE mapping dynarmic does with a `shl 15; sar 31` recipe I have
+    // not read in the AArch64 emitter) and `PackedAbsDiffSumU8` (`USAD8`, whose arm64 path ends in an
+    // `AND` with a replicated `0x0F` and a `UADDLV` whose half-lane accumulation I have not derived).
+    // Each still refuses by name, and the refusal is the reason: an op I cannot state precisely is one I
+    // cannot tell apart from a correct one when the guest's answer looks plausible.
+    //
+    // `PackedSelect` **is** here, because the device's own `strcmp` asked for it: `rb_guest_libc_tests`
+    // refused `PackedSelect: no Tier I semantics yet` on a real `libc.so` (`docs/30` §Step 34). That is
+    // worth recording as a correction, because the plan two revisions ago excluded `SEL` on the grounds
+    // that the media instructions are "not reachable on ARMv7-A hardware" — a claim resting on a probe
+    // whose own provenance is now doubtful (an instruction that SIGILLs in Thumb may be an encoding
+    // artifact rather than an unavailable instruction, since `SEL` is ARM-state only). A refusal text
+    // produced by loading and running the actual library outranks a probe about what the library could
+    // contain, and the library won.
+    case Opcode::PackedSelect: {
+      if (!HasArgs(inst, 3)) return false;
+      std::uint32_t ge = 0, to = 0, from = 0;
+      if (!W32(inst, 0, ge) || !W32(inst, 1, to) || !W32(inst, 2, from)) return false;
+      /**
+       * `SEL`: byte lane *i* takes `Rn` (`from`) where GE_i is set and `Rm` (`to`) where it is clear —
+       * ARM's definition, and the law dynarmic's x64 back end implements (`(from & ge) | (to & ~ge)`,
+       * `emit_x64_packed.cpp:654-690`).
+       *
+       * Stated as a choice, because its AArch64 sibling expresses the same thing as
+       * `FMOV(Vresult, Vge); BSL(Vresult, Vb, Va)` (`emit_arm64_packed.cpp:395-407`) and the operand
+       * order in that one line is not something I can read the polarity out of without running it. If
+       * the two dynarmic back ends differ here, **this is the row that will show it**: `strcmp` on a real
+       * `libc.so` is compared against the hardware answer on both tiers, so a reversed `SEL` shows up as
+       * Tier I disagreeing with hardware, or Tier J doing so — not as a quiet pass. Until that lane says
+       * otherwise, this follows the architecture and the portable path, and the differential is the
+       * arbiter.
+       */
+      Put(inst, V{(from & ge) | (to & ~ge), 0});
+      return true;
+    }
+    case Opcode::PackedAddU8:
+    case Opcode::PackedAddS8:
+    case Opcode::PackedSubU8:
+    case Opcode::PackedSubS8:
+    case Opcode::PackedAddU16:
+    case Opcode::PackedAddS16:
+    case Opcode::PackedSubU16:
+    case Opcode::PackedSubS16: {
+      if (!HasArgs(inst, 2)) return false;
+      std::uint32_t a = 0, b = 0;
+      if (!W32(inst, 0, a) || !W32(inst, 1, b)) return false;
+      const unsigned width = PackedLaneWidth(op);
+      Put(inst, V{LaneAddSub(a, b, width, IsPackedSub(op)), 0});
+      ge_[inst] = GeOfPackedAddSub(op, a, b, width);
+      return true;
+    }
+    case Opcode::PackedSaturatedAddU8:
+    case Opcode::PackedSaturatedAddS8:
+    case Opcode::PackedSaturatedSubU8:
+    case Opcode::PackedSaturatedSubS8:
+    case Opcode::PackedSaturatedAddU16:
+    case Opcode::PackedSaturatedAddS16:
+    case Opcode::PackedSaturatedSubU16:
+    case Opcode::PackedSaturatedSubS16: {
+      if (!HasArgs(inst, 2)) return false;
+      std::uint32_t a = 0, b = 0;
+      if (!W32(inst, 0, a) || !W32(inst, 1, b)) return false;
+      // No GE, no C, no Q: the saturating forms report nothing, which is what makes them a different
+      // instruction rather than a flag variant (`parallel.cpp:295-308` gives the translator's own
+      // `SetRegister` and nothing else). dynarmic's AArch64 emitter adds an FPSR spill around these
+      // (`emit_arm64_packed.cpp:35,42`) for the *FP* state its host shares, not for anything an
+      // AArch32 guest can observe here.
+      Put(inst, V{LaneSaturate(a, b, PackedLaneWidth(op), IsPackedSub(op), IsPackedSigned(op)), 0});
+      return true;
+    }
+    case Opcode::PackedHalvingAddU8:
+    case Opcode::PackedHalvingAddS8:
+    case Opcode::PackedHalvingSubU8:
+    case Opcode::PackedHalvingSubS8:
+    case Opcode::PackedHalvingAddU16:
+    case Opcode::PackedHalvingAddS16:
+    case Opcode::PackedHalvingSubU16:
+    case Opcode::PackedHalvingSubS16: {
+      if (!HasArgs(inst, 2)) return false;
+      std::uint32_t a = 0, b = 0;
+      if (!W32(inst, 0, a) || !W32(inst, 1, b)) return false;
+      Put(inst, V{LaneHalve(a, b, PackedLaneWidth(op), IsPackedSub(op)), 0});
+      return true;
+    }
 
     // ---------------------------------------------------------------- reading an op's flags back
     case Opcode::GetCarryFromOp: {

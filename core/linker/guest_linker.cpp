@@ -174,6 +174,13 @@ std::optional<loader::GuestModule*> GuestLinker::LinkAt(const std::string& sonam
     return fail("reading the dependencies of '" + soname + "': " + peek_err);
   }
   for (const auto& dep : deps) {
+    // Already in the scope beats asking the provider for it. A `vector`-of-modules hit here would not be
+    // a performance detail: the provider would hand back a second copy of a library that is loaded, the
+    // copy would be placed at a different address, and the two would each answer part of the global
+    // scope — so a data symbol the first one initialises would read as uninitialised through the second.
+    // That is the same fault as loading `libc.so` twice, which is why bionic looks at its loaded list
+    // before it searches the namespace.
+    if (auto already = Find(dep)) continue;
     auto dep_image = provider_ ? provider_(dep) : std::nullopt;
     if (!dep_image) return fail("'" + dep + "' is needed by '" + soname + "' but no image was provided");
     auto loaded = LinkAt(dep, *dep_image, depth + 1, err);

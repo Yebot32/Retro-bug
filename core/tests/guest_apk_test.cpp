@@ -42,6 +42,7 @@
 #include "rb/abi/abi.h"
 #include "rb/exec/interp.h"
 #include "rb/exec/jit.h"
+#include "rb/linker/guest_linker.h"
 #include "rb/loader/guest_elf.h"
 #include "rb/mem/guest_memory.h"
 
@@ -218,12 +219,22 @@ std::optional<std::vector<std::uint8_t>> zip_stored_entry(const std::vector<std:
 
 struct Rig {
   std::unique_ptr<GuestMemory> mem;
-  std::optional<loader::GuestModule> libm;
+  /// The global symbol scope. Owned here because the two modules below are its, not copies: `GuestLinker`
+  /// keeps loaded modules in a `deque`, so these pointers stay valid for the linker's lifetime.
+  std::unique_ptr<linker::GuestLinker> scope;
+  loader::GuestModule* libm = nullptr;
+  /// Held **by value**, not as a pointer into the `optional` that `LoadFromBytes` returned. The first
+  /// version of this rig did the latter, and it produced a dangling `GuestModule*` the moment `build()`
+  /// returned: every app-module lookup after that read freed memory, which presented as "the loaded
+  /// library does not export `floatProbe`" on one device and as an unhandled SIGSEGV on the other. Two
+  /// different symptoms, one cause, and neither of them where the message pointed.
+  ///
+  /// `libm` can be a pointer because it addresses a node of the linker's `deque`, which is heap-owned
+  /// and stable; this one addresses a member of a `Rig` that is moved out of `build()` by value.
   std::optional<loader::GuestModule> app;
   std::unique_ptr<abi::AbiContext> abi_ctx;
   std::unique_ptr<exec::InterpExecutor> interp;
   std::unique_ptr<exec::JitExecutor> jit;
-  std::size_t unanswered = 0;
   bool ok = false;
 };
 
@@ -266,63 +277,130 @@ Rig build() {
   const std::uint32_t guard = 0xdead'beefu;  // the value a libc would keep; never expected to trip
   rig.mem->Write(kGuardPage, &guard, 4);
 
-  // The guest's own libm first, so its exports can answer the app's imports. This stands in for what
-  // the C06 guest linker will do at M1 — a name-to-address map over the loaded module asks the same
-  // question without the lookup machinery.
-  const auto libm_import = [&](const std::string& name) -> std::optional<std::uint32_t> {
+  /**
+   * What a library cannot answer from the loaded scope is asked of the host, and the host is this thin:
+   * one slot that exists so a stack-protector prologue can read it, and the unmapped guard for anything
+   * else. See the file header for why the unmapped binding is the deliberate choice.
+   */
+  const loader::SymbolResolver host = [&](const std::string& name) -> std::optional<std::uint32_t> {
     if (name == "__stack_chk_guard") return kGuardPage;
     return kUnresolved;
   };
-  loader::LoadOptions libm_opts;
-  libm_opts.resolve = libm_import;
-  rig.libm = loader::LoadFromBytes(*rig.mem, libm_image, "libm.so", libm_opts, &err);
-  if (!rig.libm) {
+  /**
+   * `libm_image` is captured **by value**, which is not a stylistic choice: the linker keeps this
+   * `std::function` for its whole lifetime, and a `[&]` here would leave it holding a reference to a
+   * local that dies with `build()`. Nothing in this lane calls the provider after that, so the bug would
+   * have been invisible — until a `dlopen` path did, which is what `DlopenGuest` is.
+   */
+  const linker::ImageProvider provider = [libm_image](const std::string& soname)
+      -> std::optional<std::vector<std::uint8_t>> {
+    if (soname == "libm.so") return libm_image;
+    return std::nullopt;
+  };
+  rig.scope = std::make_unique<linker::GuestLinker>(*rig.mem, provider, host);
+
+  // The guest's own libm first, so its exports can answer the app's imports.
+  auto libm_mod = rig.scope->Link("libm.so", libm_image, &err);
+  if (!libm_mod) {
     ++checks;
-    fail("load the guest libm.so", __LINE__, err);
+    fail("link the guest libm.so through C06", __LINE__, err);
     return rig;
   }
-
-  std::map<std::string, std::uint32_t> exported;
-  std::size_t thumb_exports = 0;
+  rig.libm = *libm_mod;
+  std::size_t functions = 0, thumb_functions = 0;
   for (const auto& sym : rig.libm->exports) {
     if (!sym.defined || !sym.is_function) continue;
-    // `Symbol::value` keeps the bit-0 Thumb tag, and that is what a GOT entry must hold: it is the
-    // callee's `st_value`, which the branch that reads it interprets as the ISA selector.
-    // `FindExport`'s `CodeAddress` splits that bit out and is the right thing to *execute* through —
-    // using it here instead was a real bug (caught by an independent review, not by this lane): every
-    // import resolved to an address with bit 0 clear, so a Thumb export would have been entered in ARM
-    // state. With the real libm it stayed invisible because the functions this probe imports are all
-    // ARM; a synthetic Thumb libm aborted the guest instead.
-    if (sym.thumb) ++thumb_exports;
-    exported[sym.name] = sym.value;
+    ++functions;
+    if (sym.thumb) ++thumb_functions;
+    /**
+     * The linker's answer has to be the symbol's `st_value` **including the bit-0 Thumb tag**, which is
+     * what a GOT entry and a `blx` expect: `FindExport`'s `CodeAddress` splits the tag out, and using
+     * `.addr` instead was a real bug (caught by an independent review, not by this lane) — every import
+     * resolved to an address with bit 0 clear, so a Thumb export would have been entered in ARM state.
+     * With the real libm it stayed invisible because the functions this probe imports are all ARM; a
+     * synthetic Thumb libm aborted the guest instead.
+     *
+     * Asserted over every export rather than over the three this app happens to import, because the
+     * historical bug was invisible exactly when the imports were ARM-only, and a row that only covers the
+     * imported three cannot see the tag going missing from the rest.
+     */
+    const auto got = rig.scope->Lookup(sym.name);
+    CHECK_CTX(got.has_value() && *got == sym.value,
+              "C06 Lookup('" + sym.name + "') = " + (got ? Hex(*got) : std::string{"<none>"}) +
+                  ", the image's st_value is 0x" + Hex(sym.value));
   }
-  std::fprintf(stderr, "# guest libm: %zu exported functions, %zu of them Thumb\n", exported.size(),
-               thumb_exports);
+  std::fprintf(stderr, "# guest libm: %zu exported functions, %zu of them Thumb\n", functions,
+               thumb_functions);
+
+  /**
+   * The app's own `DT_NEEDED` cannot be walked yet, and this lane says so out loud rather than by never
+   * asking: `libmathprobe.so` needs `libdl.so` and `libc.so` and there is no guest libc to provide
+   * (task #29). So the dependency-first path is *tried*, its refusal is *asserted* to be that and not
+   * something else, and only then is the image placed directly into the same scope.
+   *
+   * The first two rows are a tripwire pointed at #29: the day a `libc.so` exists for the provider to
+   * hand back, `Link` stops refusing and these checks go red with a message saying what to do — delete
+   * the fallback below and let `RunInitializers` run the chain. Loading past an unresolvable `NEEDED` is
+   * not something `GuestLinker` should ever learn to do silently.
+   */
+  std::string dep_err;
+  const auto walked = rig.scope->Link("libmathprobe.so", *so, &dep_err);
+  const std::string needed = [&] {
+    std::string peek_err;
+    std::string out;
+    for (const auto& n : linker::PeekNeeded(*so, &peek_err)) out += (out.empty() ? "" : " ") + n;
+    CHECK_CTX(peek_err.empty(), "pre-scanning the app's DT_NEEDED: " + peek_err);
+    return out;
+  }();
+  std::fprintf(stderr, "# app DT_NEEDED [%s]; GuestLinker::Link refused: %s\n", needed.c_str(),
+               dep_err.empty() ? "<no refusal>" : dep_err.c_str());
+  CHECK_CTX(needed == "libdl.so libc.so",
+            "the app's DT_NEEDED is '" + needed +
+                "', which the readelf output recorded in docs/30 does not match — this lane's fallback "
+                "below is justified by exactly that pair, so re-read why it exists if it changed");
+  CHECK_CTX(!walked,
+            "GuestLinker::Link resolved the app after all (" + dep_err +
+                ") — a guest libc.so now exists, so #29 is done: drop the direct-load fallback below and "
+                "run the chain through RunInitializers");
+  CHECK_CTX(walked || dep_err.find("libc.so") != std::string::npos ||
+                dep_err.find("libdl.so") != std::string::npos,
+            "the refusal names neither of the two missing dependencies, so it is not the one this "
+            "fallback exists for: " +
+                dep_err);
 
   loader::LoadOptions app_opts;
   app_opts.resolve = [&](const std::string& name) -> std::optional<std::uint32_t> {
-    if (const auto it = exported.find(name); it != exported.end()) return it->second;
-    ++rig.unanswered;
-    std::fprintf(stderr, "# app import '%s' is not exported by the guest libm; bound to the guard\n",
-                 name.c_str());
-    return kUnresolved;
+    if (const auto found = rig.scope->Lookup(name)) return found;
+    return host(name);
   };
-  rig.app = loader::LoadFromBytes(*rig.mem, *so, "libmathprobe.so", app_opts, &err);
-  if (!rig.app) {
+  auto app_mod = loader::LoadFromBytes(*rig.mem, *so, "libmathprobe.so", app_opts, &err);
+  if (!app_mod) {
     ++checks;
     fail("load the APK's native library into guest memory", __LINE__, err);
     return rig;
   }
+  // Deliberately *not* `scope->Adopt()`: the app is placed at the end of the address window but is not in
+  // `order_`, so `RunInitializers` would skip its constructors. Nothing here calls it, and the reason it
+  // cannot is the `DT_NEEDED` refusal asserted above. Recorded as a check so that the gap between "loaded"
+  // and "linked" cannot quietly become the same word in someone's reading of this lane.
+  rig.app = std::move(app_mod);
+  CHECK_CTX(rig.scope->order().size() == 1,
+            "C06's load order has " + std::to_string(rig.scope->order().size()) +
+                " module(s), not the one this lane expects; the app is loaded outside the linker and so "
+                "gets no constructors run — see the comment above");
   // `imports.size()` is NOT the number of symbols this library needs resolved, and printing it as if it
   // were is how "0 imports (0 unanswered)" appeared on a library that imports three functions: the
   // loader's `imports` vector only carries entries whose `.dynsym` type it recognises, and this probe's
-  // are `NOTYPE`. What matters is that `app_opts.resolve` was consulted and answered, so that count is
-  // printed instead.
+  // are `NOTYPE`. What matters is which names went to the host, so `host_requests()` is printed.
+  std::string asked;
+  for (const auto& n : rig.scope->host_requests()) asked += (asked.empty() ? "" : " ") + n;
   std::fprintf(stderr,
-               "# app .so: base 0x%s, extent 0x%s, %zu exported, %zu dynsym imports, %zu name lookups "
-               "unanswered\n",
+               "# app .so: base 0x%s, extent 0x%s, %zu exported, %zu dynsym imports, host asked for "
+               "[%s]\n",
                Hex(rig.app->base).c_str(), Hex(rig.app->extent).c_str(), rig.app->exports.size(),
-               rig.app->imports.size(), rig.unanswered);
+               rig.app->imports.size(), asked.c_str());
+  CHECK_CTX(asked.find("libc.so") == std::string::npos,
+            "a DT_NEEDED soname was asked of the host as if it were a symbol: " + asked);
 
   if (!rig.mem->Map(kStackTop - (64u << 10), 64u << 10, kRead | kWrite, &err)) {
     ++checks;
@@ -434,7 +512,7 @@ void guest_libm_direct_calls_pin_the_softfp_convention() {
     for (auto* engine : {static_cast<exec::Executor*>(rig.interp.get()),
                          static_cast<exec::Executor*>(rig.jit.get())}) {
       const char* tier = engine->tier() == exec::CodeTier::Interp ? "I" : "J";
-      const Outcome got = call(*engine, rig, *rig.abi_ctx, s.name, args, "DLL", &*rig.libm);
+      const Outcome got = call(*engine, rig, *rig.abi_ctx, s.name, args, "DLL", rig.libm);
       CHECK_CTX(got.ok(), std::string{"guest libm "} + s.name + " on Tier " + tier +
                               ": reason=" + std::to_string(static_cast<int>(got.reason)) + " " +
                               got.detail);
