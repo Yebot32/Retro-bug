@@ -1,0 +1,39 @@
+== pldrows: what an AArch32 core does with a preload hint ==
+
+Captured 2026-09-21 by pushing the binary built from ../pldrows.c + ../pld_rows.s and running it
+natively at EL0. Source of the run: /data/local/tmp/pldrows.
+
+Device: model=CPH2145 platform=lito android=13 sdk=33 page=4096 kernel=4.19.157-perf+ abilist32=armeabi-v7a,armeabi
+
+This is the SM7250 half only. The SM8550 (Tab S9, R52Y106BECZ) was not attached when this was run, so
+the Tab S9 column is an open item, not a duplicate of this one -- see docs/30 §Step 37.
+
+----------------------------------------------------------------------
+
+page=4096  sizeof(void*)=4
+
+-- preload hints, three address classes (want: no fault, block continues, nothing changed) --
+pld [r1,#-0x400] arm   @ readable  0xecbf5000 ... OK   lo=0x11223346 hi=0xecbf5000 (want lo=0x11223346 hi=0xecbf5000)
+pld [r1,#0x400] arm    @ readable  0xecbf5000 ... OK   lo=0x11223346 hi=0xecbf5000 (want lo=0x11223346 hi=0xecbf5000)
+pld [r1] arm           @ readable  0xecbf5000 ... OK   lo=0x11223346 hi=0xecbf5000 (want lo=0x11223346 hi=0xecbf5000)
+pld+flags arm          @ readable  0xecbf5000 ... OK   lo=0x11223344 hi=0xecbf5000 (want lo=0x11223344 hi=0xecbf5000)
+pld [r0] thumb         @ readable  0xecbf5000 ... OK   lo=0xecbf5000 hi=0x000000a6 (want lo=0xecbf5000 hi=0x000000a6)
+pld [r0,#0x100] thumb  @ readable  0xecbf5000 ... OK   lo=0xecbf5000 hi=0x000000a6 (want lo=0xecbf5000 hi=0x000000a6)
+ldr @ readable  0xecbf5000 -> survived, exit 0
+pld [r1,#-0x400] arm   @ prot_none 0xecbf2000 ... OK   lo=0x11223346 hi=0xecbf2000 (want lo=0x11223346 hi=0xecbf2000)
+pld [r1,#0x400] arm    @ prot_none 0xecbf2000 ... OK   lo=0x11223346 hi=0xecbf2000 (want lo=0x11223346 hi=0xecbf2000)
+pld [r1] arm           @ prot_none 0xecbf2000 ... OK   lo=0x11223346 hi=0xecbf2000 (want lo=0x11223346 hi=0xecbf2000)
+pld+flags arm          @ prot_none 0xecbf2000 ... OK   lo=0x11223344 hi=0xecbf2000 (want lo=0x11223344 hi=0xecbf2000)
+pld [r0] thumb         @ prot_none 0xecbf2000 ... OK   lo=0xecbf2000 hi=0x000000a6 (want lo=0xecbf2000 hi=0x000000a6)
+pld [r0,#0x100] thumb  @ prot_none 0xecbf2000 ... OK   lo=0xecbf2000 hi=0x000000a6 (want lo=0xecbf2000 hi=0x000000a6)
+ldr @ prot_none 0xecbf2000 -> SIG11
+pld [r1,#-0x400] arm   @ hole      0xecbef000 ... OK   lo=0x11223346 hi=0xecbef000 (want lo=0x11223346 hi=0xecbef000)
+pld [r1,#0x400] arm    @ hole      0xecbef000 ... OK   lo=0x11223346 hi=0xecbef000 (want lo=0x11223346 hi=0xecbef000)
+pld [r1] arm           @ hole      0xecbef000 ... OK   lo=0x11223346 hi=0xecbef000 (want lo=0x11223346 hi=0xecbef000)
+pld+flags arm          @ hole      0xecbef000 ... OK   lo=0x11223344 hi=0xecbef000 (want lo=0x11223344 hi=0xecbef000)
+pld [r0] thumb         @ hole      0xecbef000 ... OK   lo=0xecbef000 hi=0x000000a6 (want lo=0xecbef000 hi=0x000000a6)
+pld [r0,#0x100] thumb  @ hole      0xecbef000 ... OK   lo=0xecbef000 hi=0x000000a6 (want lo=0xecbef000 hi=0x000000a6)
+ldr @ hole      0xecbef000 -> SIG11
+
+summary: 18 OK, 0 BAD
+RC=0

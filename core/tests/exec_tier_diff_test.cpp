@@ -2197,36 +2197,72 @@ void packed_media_rows_agree_with_the_arm64_recipes() {
    * routines do not, and Tier I refuses inside that routine while Tier J runs it to completion.
    *
    * The encodings are `llvm-objdump`'s output over an assembler-produced file, not recalled: ARM
-   * `pld [r1, #-0x400]` = `f551f400`, ARM `pld [r1, #0x400]` = `f5d1f400`, Thumb
-   * `pld [r0]` = `f890 f000`.
+   * `pld [r1, #-0x400]` = `f551f400`, ARM `pld [r1, #0x400]` = `f5d1f400`, ARM `pld [r1]` = `f5d1f000`,
+   * Thumb `pld [r0]` = `f890 f000`, Thumb `pld [r0, #0x100]` = `f890 f100`.
    *
-   * What a real device does with them is already on record from `docs/30` §Step 34's EL0 probe: it
-   * executes them as no-ops and takes no fault, even for an address nothing is mapped at — which is what
-   * the architecture says (PLD reports no MMU fault of any kind). So the question here is only which of
-   * *RetroBug's* two tiers matches that, and the answer decides whether the remaining `memcpy` refusal is
-   * `pld` at all. Nothing is asserted yet: this run exists to find out, and the row becomes an assertion
-   * once there is something to assert.
+   * What hardware does with them is measured rather than quoted from the manual:
+   * `tests/guest/pld_rows.s` + `tests/guest/pldrows.c` run these same encodings natively at three address
+   * classes -- readable, mapped `PROT_NONE`, and a hole left by `munmap` -- and on the SM7250 on
+   * 2026-09-21 all 18 rows passed: no fault from any of them, the instruction after the hint always ran,
+   * the address register came back unchanged, and the flag row showed CPSR untouched. The same binary's
+   * control load (`ldr` at the identical addresses) took `SIGSEGV` at `PROT_NONE` and at the hole and
+   * survived at the readable page, which is what makes "it did not fault" a statement about the hint
+   * rather than about the address. [`docs/30` §Step 35 attributes that hardware answer to an earlier EL0
+   * probe. There was no such probe: the claim was a citation to a run nobody had done, and the SM8550
+   * half of it is still open until `pldrows` runs on the Tab S9 -- §Step 37.]
    */
+  /// What both tiers have to agree on for this row. A hint either has no architectural effect and the
+  /// guest carries on, or RetroBug refuses it by policy -- but the two tiers must not disagree about
+  /// which, because that would make the guest's instruction stream depend on which tier got there first.
+  enum class Expect {
+    Continue,  ///< reach the `bx lr` on both tiers
+    Refuse,    ///< stop on both tiers, with a reason from both
+    Control,   ///< contains no hint at all
+  };
   struct PreloadRow {
     const char* name;
     bool thumb;
-    bool is_pld;           ///< false for the controls, which are the same blocks with the preload removed
+    Expect expect;
+    /**
+     * Whether the hint's base register points at memory. `false` is the case the architecture is emphatic
+     * about -- a preload reports no MMU fault of any kind -- and the case a row can only be testing if the
+     * address really is unmapped, which the read below establishes before the row runs.
+     */
+    bool mapped_addr;
     std::uint32_t words[4];  ///< 32-bit words in ARM state, halfword-pairs packed little-endian in Thumb
   };
   constexpr PreloadRow kPreloadRows[] = {
-      {"pld [r1,#-0x400] arm", false, true,
+      {"pld [r1,#-0x400] arm", false, Expect::Continue, true,
        {0xf551f400u, 0xe2800001u /*add r0,r0,#1*/, 0xe12fff1eu /*bx lr*/}},
-      {"pld [r1,#0x400] arm", false, true, {0xf5d1f400u, 0xe12fff1eu}},
-      {"pld [r0] thumb", true, true, {0xf000f890u /* f890 f000 */, 0x4770u /*bx lr*/}},
+      {"pld [r1,#0x400] arm", false, Expect::Continue, true, {0xf5d1f400u, 0xe12fff1eu}},
+      {"pld [r1,#0x400] @hole", false, Expect::Continue, false, {0xf5d1f400u, 0xe12fff1eu}},
+      {"pld [r1] @hole", false, Expect::Continue, false, {0xf5d1f000u, 0xe12fff1eu}},
+      {"pld [r0] thumb", true, Expect::Continue, true, {0xf000f890u /* f890 f000 */, 0x4770u /*bx lr*/}},
+      {"pld [r0,#0x100] @hole", true, Expect::Continue, false, {0xf100f890u /* f890 f100 */, 0x4770u}},
+      /**
+       * The other hints, added because the preloads turned out to raise on one tier and not the other for
+       * a *configuration* reason (`docs/30` §Step 37): Dynarmic emits nothing at all for a hint unless
+       * `hook_hint_instructions` is set, and only Tier I's front end set it. `yield` and `sev` are here to
+       * show the two tiers now answer the same way for the whole hint class, and `wfi`/`wfe` are here to
+       * show the refusal is also the same on both -- those two wait, and RetroBug has no wake path, so a
+       * tier that silently stepped over them would be a tier that turns a guest spin loop into a host one.
+       *
+       * Encodings from `llvm-objdump` over an assembler-produced file: `yield` = `e320f001`, `sev` =
+       * `e320f004`, `wfi` = `e320f003`, `wfe` = `e320f002`.
+       */
+      {"yield arm", false, Expect::Continue, true, {0xe320f001u, 0xe12fff1eu}},
+      {"sev arm", false, Expect::Continue, true, {0xe320f004u, 0xe12fff1eu}},
+      {"wfi arm", false, Expect::Refuse, true, {0xe320f003u, 0xe12fff1eu}},
+      {"wfe arm", false, Expect::Refuse, true, {0xe320f002u, 0xe12fff1eu}},
       // The two controls, and the reason this table has them: without a row that differs from a `pld` row
       // by exactly one instruction, "Tier I refuses `pld`" is an inference from where the refusal was
       // *attributed* — and this file has already been wrong once about what an attribution means. These
       // two are the same blocks with the `pld` removed, so if both tiers walk them the only thing left to
       // account for the refusal is the preload itself.
-      {"add r0,r0,#1 arm", false, false, {0xe2800001u, 0xe12fff1eu}},
-      {"movs r0,#1 thumb", true, false, {0x2001u, 0x4770u}},
+      {"add r0,r0,#1 arm", false, Expect::Control, true, {0xe2800001u, 0xe12fff1eu}},
+      {"movs r0,#1 thumb", true, Expect::Control, true, {0x2001u, 0x4770u}},
   };
-  unsigned pld_rows = 0, control_rows = 0;
+  unsigned continue_rows = 0, refuse_rows = 0, control_rows = 0;
   for (const PreloadRow& row : kPreloadRows) {
     cursor = (cursor + 3u) & ~3u;
     const exec::GuestAddr at = cursor;
@@ -2249,47 +2285,114 @@ void packed_media_rows_agree_with_the_arm64_recipes() {
     }
     cursor += len + 4u;  // again: a distinct address per row, which is the bug §Step 36 was
     exec::MachineState si = EntryState(at, 0, 0, row.thumb);
-    si.r[1] = kExclDataPage + 0x40u;  // a mapped r1, so a fault here cannot be blamed on the address
+    const std::uint32_t base = row.mapped_addr ? kExclDataPage + 0x40u : kExclUnmapped + 0x40u;
+    if (!row.mapped_addr) {
+      /**
+       * Prove the premise before trusting the row. A "hint at an unmapped address" whose address is
+       * actually readable is a row about nothing, and it would pass on both tiers -- so the assertion is
+       * that the three addresses the encodings in this table can reach all fail to read. `kExclUnmapped`
+       * is never mapped by this lane, which is the point of giving it its own constant.
+       */
+      std::uint32_t junk = 0;
+      CHECK_CTX(!rig.mem->Read(base, &junk, 4) && !rig.mem->Read(base + 0x400u, &junk, 4) &&
+                    !rig.mem->Read(base - 0x400u, &junk, 4),
+                std::string{row.name} + ": 0x" + Hex(base) + " is supposed to be a hole but reads, so" +
+                    " this row cannot show that a preload takes no MMU fault");
+    }
+    si.r[1] = base;  // the ARM-state encodings here address through r1
+    if (row.thumb && row.expect != Expect::Control) si.r[0] = base;  // Thumb hints address through r0
     exec::MachineState sj = si;
+    const std::uint32_t entry_cpsr = si.cpsr;  // read before either tier runs, as always
     const exec::RunResult ri = rig.interp->Run(si, 200);
     const exec::RunResult rj = rig.jit->Run(sj, 200);
-    std::printf("  PROBE[pld] %-20s I r0=0x%s reason=%d | J r0=0x%s reason=%d  %s%s\n", row.name,
-                Hex(si.r[0]).c_str(), static_cast<int>(ri.reason), Hex(sj.r[0]).c_str(),
-                static_cast<int>(rj.reason), ri.reason == rj.reason ? "" : "TIERS DISAGREE  ",
+    std::printf("  PROBE[pld] %-22s I r0=0x%s reason=%d steps=%u | J r0=0x%s reason=%d steps=%u  %s%s\n",
+                row.name, Hex(si.r[0]).c_str(), static_cast<int>(ri.reason),
+                ri.instructions_executed, Hex(sj.r[0]).c_str(), static_cast<int>(rj.reason),
+                rj.instructions_executed, ri.reason == rj.reason ? "" : "TIERS DISAGREE  ",
                 ri.reason == rj.reason ? "" : ri.detail.c_str());
-    if (row.is_pld) {
-      ++pld_rows;
+    if (row.expect == Expect::Continue) {
+      ++continue_rows;
       /**
-       * Both tiers, equal, and both returning. This row was a print-only diagnostic until Tier I learned
-       * to execute a preload as the no-op the architecture says it is (`docs/30` §Step 37): hardware
-       * faults on none of these three encodings on either SoC, Tier J already continued, and Tier I
-       * stopped — which is what made bionic's `memmove_a15` unreachable on the interpreter while the JIT
-       * ran it. Asserting agreement rather than a specific `r0` keeps the row honest about the one thing
-       * that matters here: the two tiers must not disagree, whatever the value is.
+       * Both tiers, equal, and both returning. `tests/guest/pldrows.c` is what says what the tiers have to
+       * agree *on*: every encoding here ran natively on the SM7250 with no fault at all three address
+       * classes, with the address register unchanged, with CPSR unchanged, and with the next instruction
+       * executed -- while a real `ldr` at the same unmapped address took `SIGSEGV`. Tier J already
+       * continued and Tier I stopped, which is what made bionic's `memmove_a15` unreachable on the
+       * interpreter. Asserting agreement alone would let a shared wrong answer through, so the checks
+       * below are about the hint not having done anything, not only about the two tiers matching.
        */
       CHECK_CTX(ri.reason == exec::StopReason::Returned && rj.reason == exec::StopReason::Returned,
                 std::string{row.name} + ": I reason=" +
                     std::to_string(static_cast<int>(ri.reason)) + " J reason=" +
                     std::to_string(static_cast<int>(rj.reason)) + " — a preload has to be a no-op that"
-                    " continues on both tiers; hardware takes no fault from it on either device");
+                    " continues on both tiers; pldrows measured no fault and a continued block on the"
+                    " SM7250 at all three address classes");
       CHECK_CTX(si.r[0] == sj.r[0],
                 std::string{row.name} + ": the tiers disagree about the register state after a preload:" +
                     " I r0=0x" + Hex(si.r[0]) + " J r0=0x" + Hex(sj.r[0]));
+      CHECK_CTX(si.cpsr == sj.cpsr && si.r[1] == sj.r[1] && si.r[14] == sj.r[14],
+                std::string{row.name} + ": a preload changed state the oracle says it must not:" +
+                    " I cpsr=0x" + Hex(si.cpsr) + " J cpsr=0x" + Hex(sj.cpsr) + " I r1=0x" + Hex(si.r[1]) +
+                    " J r1=0x" + Hex(sj.r[1]));
+      /**
+       * Neither tier may have skipped the block, and neither may have come back with flags a device would
+       * not have left. The counters are deliberately NOT compared to each other: Tier I counts IR steps
+       * (`interp.cpp:2460` says so in its own comment) and Tier J accumulates dynarmic's ticks per code
+       * block (`jit.cpp:670`), and this run measured 6 vs 3 and 9 vs 4 over two- and three-encoding blobs,
+       * in the control rows too. An equality assertion there compares two currencies; it was written on
+       * the assumption that a field named `instructions_executed` means the same thing in both tiers,
+       * which is the third instance of the instrument-units class in `docs/30`.
+       *
+       * The CPSR check is what the hardware oracle actually pins: no instruction in any preload row sets
+       * flags (`pld`, `add` without S, `bx`), so both tiers have to hand back the flags they were given,
+       * and `pldrows.c`'s flag row measures that same property on a device by folding C into the result.
+       */
+      CHECK_CTX(ri.instructions_executed > 0u && rj.instructions_executed > 0u,
+                std::string{row.name} + ": a tier reported zero steps (I " +
+                    std::to_string(ri.instructions_executed) + " J " +
+                    std::to_string(rj.instructions_executed) +
+                    "), so 'it continued' cannot also mean 'it never ran the block'");
+      CHECK_CTX(si.cpsr == entry_cpsr && sj.cpsr == entry_cpsr,
+                std::string{row.name} + ": the flags changed across a block that cannot change them:" +
+                    " entry=0x" + Hex(entry_cpsr) + " I=0x" + Hex(si.cpsr) + " J=0x" + Hex(sj.cpsr));
+    } else if (row.expect == Expect::Refuse) {
+      ++refuse_rows;
+      /**
+       * `wfi` and `wfe` wait for something RetroBug has no source for, so the policy is to stop and say
+       * so -- and the property this row checks is not the wording of the stop, which differs between the
+       * tiers by construction (Tier I names the exception number, Tier J its name), but that **both**
+       * stop. Before `docs/30` §Step 37 the shipping tier had `hook_hint_instructions` clear, so Dynarmic
+       * emitted nothing for these two and Tier J stepped straight over a wait instruction.
+       */
+      CHECK_CTX(ri.reason == rj.reason && ri.reason != exec::StopReason::Returned,
+                std::string{row.name} + ": I reason=" +
+                    std::to_string(static_cast<int>(ri.reason)) + " J reason=" +
+                    std::to_string(static_cast<int>(rj.reason)) + " — a wait RetroBug cannot wake from has"
+                    " to stop on both tiers, with the same reason. 'Different reason, both stopped' is not"
+                    " agreement: Tier I reported a Fault where Tier J reported Unimplemented here until"
+                    " `docs/30` §Step 37 made both tiers answer a front-end raise the same way.");
+      CHECK_CTX(!ri.detail.empty() && !rj.detail.empty(),
+                std::string{row.name} + ": a stop that names nothing is not a refusal (I '" + ri.detail +
+                    "' J '" + rj.detail + "')");
+      CHECK_CTX(si.pc == sj.pc,
+                std::string{row.name} + ": the tiers stopped at different pc: I 0x" + Hex(si.pc) +
+                    " J 0x" + Hex(sj.pc) + " — one of them walked past the hint");
     } else {
       ++control_rows;
       CHECK_CTX(ri.reason == exec::StopReason::Returned && rj.reason == exec::StopReason::Returned,
                 std::string{row.name} + " (control): I reason=" +
                     std::to_string(static_cast<int>(ri.reason)) + " J reason=" +
                     std::to_string(static_cast<int>(rj.reason)) +
-                    " — a control block that does not run makes the preload rows above meaningless");
+                    " — a control block that does not run makes the hint rows above meaningless");
       CHECK_CTX(si.r[0] == 1u && sj.r[0] == 1u,
                 std::string{row.name} + " (control): I r0=0x" + Hex(si.r[0]) + " J r0=0x" +
                     Hex(sj.r[0]) + ", both expected 1");
     }
   }
-  CHECK_CTX(pld_rows == 3u && control_rows == 2u,
-            "the preload table ran " + std::to_string(pld_rows) + " preload and " +
-                std::to_string(control_rows) + " control rows, expected 3 and 2");
+  CHECK_CTX(continue_rows == 8u && refuse_rows == 2u && control_rows == 2u,
+            "the hint table ran " + std::to_string(continue_rows) + " continue, " +
+                std::to_string(refuse_rows) + " refuse and " + std::to_string(control_rows) +
+                " control rows, expected 8, 2 and 2");
 }
 
 }  // namespace

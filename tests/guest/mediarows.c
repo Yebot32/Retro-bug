@@ -83,8 +83,15 @@ static const struct Row kRows[] = {
     {"uhadd8 truncating", row_uhadd8, 0x7E7E7E7Eu, 0x01010101u, 0x3F3F3F3Fu, 0u},
     {"uhsub8 through zero", row_uhsub8, 0x00000000u, 0x02020202u, 0xFFFFFFFFu, 0u},
     {"shadd8 positive", row_shadd8, 0x7F7F7F7Fu, 0x7F7F7F7Fu, 0x7F7F7F7Fu, 0u},
-    {"uadd16 lane map", row_uadd16, 0x0000FFFFu, 0x00010001u, 0x00010000u, 2u},
-    {"usub16 lane map", row_usub16, 0x00010000u, 0x00000001u, 0x0001FFFFu, 8u},
+    /* A 16-bit lane sets the GE bits of *both* bytes it spans, so lane 0 gives 3 and lane 1 gives 12.
+     * These two rows used to say 2 and 8, which was a reading of Dynarmic's halfword-packed 0xFFFF as
+     * bit-15-only; `docs/30` §Step 35 records the correction, and this file's want column had never been
+     * brought round to it -- so the last run of this oracle printed two DIFFERS that were this table's
+     * own staleness, not the device disagreeing with anything. `tests/guest/output/` now keeps the
+     * captured lines, which are the part with independent content: the MATCHES/DIFFERS column below only
+     * compares a transcription against a transcription. */
+    {"uadd16 lane map", row_uadd16, 0x0000FFFFu, 0x00010001u, 0x00010000u, 3u},
+    {"usub16 lane map", row_usub16, 0x00010000u, 0x00000001u, 0x0001FFFFu, 12u},
     {"sel from mixed GE", row_sel, 0x00FF7F80u, 0x01010101u, 0x01FF0101u, 4u},
 };
 

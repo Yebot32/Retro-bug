@@ -1,0 +1,31 @@
+== mediarows: what an AArch32 core says for the 16 packed-media rows ==
+
+Captured 2026-09-21 from ../mediarows.c + ../media_rows.s, built -static -O0 for armv7 and run natively.
+
+Device: model=CPH2145 platform=lito android=13 sdk=33 page=4096 kernel=4.19.157-perf+ abilist32=armeabi-v7a,armeabi
+
+What is independent here is the printed r0=/ge= columns: those are the device's answers. The MATCHES/
+DIFFERS column is only this file's own transcription of the lane table compared against that
+transcription, so it proves the two copies agree with each other and nothing about hardware. The two
+rows that used to print DIFFERS (uadd16/usub16) were the transcription being stale after docs/30
+§Step 35's GE correction, not a device disagreement; with the table brought round, 16 of 16 match.
+
+----------------------------------------------------------------------
+
+[orace] uadd8 all-carry      A=ffffffff B=01010101 ... r0=00000000 ge=15  MATCHES   (lane wants r0=00000000 ge=15)
+[orace] uadd8 no-carry       A=7f7f7f7f B=01010101 ... r0=80808080 ge=0  MATCHES   (lane wants r0=80808080 ge=0)
+[orace] uadd8 one lane       A=00ff7f80 B=01010101 ... r0=01008081 ge=4  MATCHES   (lane wants r0=01008081 ge=4)
+[orace] usub8 mixed borrow   A=01000080 B=01010101 ... r0=00ffff7f ge=9  MATCHES   (lane wants r0=00ffff7f ge=9)
+[orace] sadd8 zero lane      A=01ff007f B=01010101 ... r0=02000180 ge=15  MATCHES   (lane wants r0=02000180 ge=15)
+[orace] sadd8 all-negative   A=80808080 B=ffffffff ... r0=7f7f7f7f ge=0  MATCHES   (lane wants r0=7f7f7f7f ge=0)
+[orace] ssub8 signed-only    A=00000000 B=ffffffff ... r0=01010101 ge=15  MATCHES   (lane wants r0=01010101 ge=15)
+[orace] uqsub8 no clamp      A=ffffffff B=01010101 ... r0=fefefefe ge=15  MATCHES   (lane wants r0=fefefefe ge=15)
+[orace] uqadd8 clamped       A=ffffffff B=ffffffff ... r0=ffffffff ge=15  MATCHES   (lane wants r0=ffffffff ge=15)
+[orace] qsub8 clamped        A=80808080 B=01010101 ... r0=80808080 ge=0  MATCHES   (lane wants r0=80808080 ge=0)
+[orace] uhadd8 truncating    A=7e7e7e7e B=01010101 ... r0=3f3f3f3f ge=0  MATCHES   (lane wants r0=3f3f3f3f ge=0)
+[orace] uhsub8 through zero  A=00000000 B=02020202 ... r0=ffffffff ge=0  MATCHES   (lane wants r0=ffffffff ge=0)
+[orace] shadd8 positive      A=7f7f7f7f B=7f7f7f7f ... r0=7f7f7f7f ge=0  MATCHES   (lane wants r0=7f7f7f7f ge=0)
+[orace] uadd16 lane map      A=0000ffff B=00010001 ... r0=00010000 ge=3  MATCHES   (lane wants r0=00010000 ge=3)
+[orace] usub16 lane map      A=00010000 B=00000001 ... r0=0001ffff ge=12  MATCHES   (lane wants r0=0001ffff ge=12)
+[orace] sel from mixed GE    A=00ff7f80 B=01010101 ... r0=01ff0101 ge=4  MATCHES   (lane wants r0=01ff0101 ge=4)
+16 rows ran, 0 differ from the lane's expectation

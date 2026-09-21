@@ -941,31 +941,46 @@ bool BlockRunner::Step(const Inst* inst) {
                      (readable ? Hex(w & 0xFFFFu) + " " + Hex(w >> 16) : "<unreadable>") + ")");
       }
       using Exception = Dynarmic::A32::Exception;
-      constexpr std::uint64_t kPreload = static_cast<std::uint64_t>(Exception::PreloadData);
-      constexpr std::uint64_t kPreloadWrite =
-          static_cast<std::uint64_t>(Exception::PreloadDataWithIntentToWrite);
-      constexpr std::uint64_t kPreloadInst = static_cast<std::uint64_t>(Exception::PreloadInstruction);
-      if (kind == kPreload || kind == kPreloadWrite || kind == kPreloadInst) {
+      if (isa::HintIsNoOp(static_cast<Exception>(kind))) {
         /**
-         * A preload is a hint. ARM's rule is that it never reports a fault of any kind and changes no
-         * architectural state, so executing it as nothing and continuing at the next encoding is the
-         * correct semantics, not a tolerance — and it is what the shipping tier and real hardware both
-         * do with these bytes: `tests/guest/mediarows.c`-style probes on the SM7250 and the SM8550 run
-         * `pld` at EL0 without faulting, and Tier J's own answer for the same three encodings is
-         * "continue", which is what the divergence rows in the differential lane record. Bionic's
-         * selected `memcpy`/`memmove` (`memmove_a15` on both devices) contains ten of them, which is how
-         * this was found: refusing one made Tier I stop inside `memcpy` while Tier J ran it to the end.
+         * A hint, executed as the no-op the architecture says it is. `pld` specifically is the case that
+         * was blocking real code: bionic's selected `memcpy`/`memmove` on both test devices is
+         * `memmove_a15`, which contains ten of them, and refusing one stopped Tier I inside `memcpy`
+         * while Tier J ran the routine to the end.
          *
-         * Deliberately not `HaltExecution`-adjacent state: the raise op is *not* the block terminator, so
-         * returning true lets the rest of the block — and then its terminal — run as if the instruction
-         * had never been there, which is precisely the effect the hint has on hardware.
+         * Tier J ran it because Dynarmic's `arm_PLD_imm` emits **nothing at all** unless
+         * `hook_hint_instructions` is set (`frontend/A32/translate/impl/hint.cpp:11-18`), and Tier J's
+         * `UserConfig` never set it — so until `docs/30` §Step 37 the two tiers were not handed the same IR
+         * here: Tier I got an `A32ExceptionRaised` to answer and Tier J got no opcode to answer with. The
+         * policy is now `isa::HintIsNoOp`, one predicate both tiers consult, with Tier J's config brought
+         * in line so the raise actually reaches it.
+         *
+         * Not a tolerance: the raise op is not the block terminator, so returning true lets the rest of the
+         * block run as if the instruction had not been there, which is what the hint does on hardware.
+         * `tests/guest/pldrows.c` measured that on the SM7250 across three address classes, including a
+         * hole where a real `ldr` took `SIGSEGV`.
          */
         return true;
       }
       // The exception *number* rather than a name: `jit.cpp`'s `ExceptionName` owns that table, and a
       // second copy here would be a second thing allowed to drift. The number indexes that table directly.
-      return Fault("the A32 front end raised exception " + std::to_string(kind) + " at 0x" +
-                   Hex(static_cast<std::uint32_t>(where)));
+      //
+      // The reason code is chosen to match Tier J's `ExceptionRaised` for the same event, because the
+      // differential compares reasons and two tiers naming one raise differently is the thing it exists to
+      // catch. That mapping is: a failed instruction fetch is a `Fault` the guest would have seen, a
+      // breakpoint suspends, and anything else -- an undefined or unmodelled encoding, an unimplemented
+      // hint -- is `Unimplemented`, not a fault. Making every raise a `Fault` was my error two revisions
+      // ago and the two lanes that caught it are `docs/30` §Step 37's record of it.
+      const Exception raised = static_cast<Exception>(kind);
+      const std::string where_text = "the A32 front end raised exception " + std::to_string(kind) +
+                                     " at 0x" + Hex(static_cast<std::uint32_t>(where));
+      if (raised == Exception::NoExecuteFault) return Fault(where_text);
+      if (raised == Exception::Breakpoint) {
+        stop.reason = StopReason::Suspended;
+        stop.detail = where_text;
+        return false;
+      }
+      return Fail(inst, where_text);
     }
 
     /**
@@ -1866,19 +1881,37 @@ bool BlockRunner::Step(const Inst* inst) {
                   0});
       return true;
     }
+    /**
+     * The widening converts, from 8, 16 or 32 bits to a word or a long.
+     *
+     * The four `…ToLong` forms from 8 and 16 bits were the last thing standing between Tier I and
+     * bionic's `memmove_a15`: Dynarmic's only A32 producer of them is the ASIMD structure load with
+     * one-byte elements (`frontend/A32/translate/impl/asimd_load_store_structures.cpp:160`,
+     * `ZeroExtendToLong(ReadMemory(ebytes * 8, …))` with `ebytes == 1`), which is what `vld1`/`vld4` of
+     * `.8` decode to. They reached the `default:` branch below and refused as "no Tier I semantics yet".
+     */
     case Opcode::ZeroExtendByteToWord:
     case Opcode::SignExtendByteToWord:
+    case Opcode::ZeroExtendByteToLong:
+    case Opcode::SignExtendByteToLong:
     case Opcode::ZeroExtendHalfToWord:
     case Opcode::SignExtendHalfToWord:
+    case Opcode::ZeroExtendHalfToLong:
+    case Opcode::SignExtendHalfToLong:
     case Opcode::ZeroExtendWordToLong:
     case Opcode::SignExtendWordToLong: {
       std::uint64_t a = 0;
       if (!W64(inst, 0, a)) return false;
-      const bool byte = op == Opcode::ZeroExtendByteToWord || op == Opcode::SignExtendByteToWord;
-      const bool half = op == Opcode::ZeroExtendHalfToWord || op == Opcode::SignExtendHalfToWord;
+      const bool byte = op == Opcode::ZeroExtendByteToWord || op == Opcode::SignExtendByteToWord ||
+                        op == Opcode::ZeroExtendByteToLong || op == Opcode::SignExtendByteToLong;
+      const bool half = op == Opcode::ZeroExtendHalfToWord || op == Opcode::SignExtendHalfToWord ||
+                        op == Opcode::ZeroExtendHalfToLong || op == Opcode::SignExtendHalfToLong;
       const unsigned from = byte ? 8 : half ? 16 : 32;
-      const bool to_long = op == Opcode::ZeroExtendWordToLong || op == Opcode::SignExtendWordToLong;
-      const bool sgn = op == Opcode::SignExtendByteToWord || op == Opcode::SignExtendHalfToWord ||
+      const bool to_long = op == Opcode::ZeroExtendByteToLong || op == Opcode::SignExtendByteToLong ||
+                           op == Opcode::ZeroExtendHalfToLong || op == Opcode::SignExtendHalfToLong ||
+                           op == Opcode::ZeroExtendWordToLong || op == Opcode::SignExtendWordToLong;
+      const bool sgn = op == Opcode::SignExtendByteToWord || op == Opcode::SignExtendByteToLong ||
+                       op == Opcode::SignExtendHalfToWord || op == Opcode::SignExtendHalfToLong ||
                        op == Opcode::SignExtendWordToLong;
       if (!sgn) {
         Put(inst, V{a & ((1ull << from) - 1), 0});

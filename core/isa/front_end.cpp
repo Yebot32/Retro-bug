@@ -61,6 +61,42 @@ TranslationOptions Options() {
   return opts;
 }
 
+bool HintIsNoOp(Dynarmic::A32::Exception exception) {
+  using Dynarmic::A32::Exception;
+  switch (exception) {
+    // The three preloads. `pld`/`pldw` are what bionic's selected `memcpy`/`memmove` uses (`pld` x10 in
+    // `memmove_a15`), and they are the reason this function exists.
+    //
+    // `PreloadInstruction` is reachable from Thumb only: Dynarmic's ARM decoder has no `pli` entry, so an
+    // ARM-state `pli` word decodes as `arm_LDC` and becomes a coprocessor load (`Exception::Preload*` has
+    // exactly one producer for the instruction, `thumb32_load_byte.cpp`). It is listed because the
+    // exception is the same one; a guest `pli` in ARM state is refused today by both tiers, which is a
+    // named gap in `docs/30` §Step 37 rather than a silent one.
+    case Exception::PreloadData:
+    case Exception::PreloadDataWithIntentToWrite:
+    case Exception::PreloadInstruction:
+    // `yield` is a scheduling hint; `sev`/`sevl` set an event register nothing in a single-threaded guest
+    // can observe, and RetroBug refuses `wfe` rather than waiting on it, so there is no waiter to mislead.
+    case Exception::Yield:
+    case Exception::SendEvent:
+    case Exception::SendEventLocal:
+      return true;
+    // `wfi`/`wfe` wait. Continuing past one is a host spin loop with no wake source, and halting is the
+    // answer that names itself, so they stay out of the no-op set on purpose.
+    case Exception::WaitForInterrupt:
+    case Exception::WaitForEvent:
+    // `bkpt` has to reach the caller, and `UndefinedInstruction`/`UnpredictableInstruction`/`DecodeError`
+    // and the no-execute fault are all real stops.
+    case Exception::Breakpoint:
+    case Exception::UndefinedInstruction:
+    case Exception::UnpredictableInstruction:
+    case Exception::DecodeError:
+    case Exception::NoExecuteFault:
+      return false;
+  }
+  return false;  // an exception number from a Dynarmic this file has not read: stop, naming the number
+}
+
 std::string TerminalName(const Term::Terminal& terminal) {
   const std::size_t index = terminal.which();
   return index < kTerminalNames.size() ? kTerminalNames[index] : "unknown";

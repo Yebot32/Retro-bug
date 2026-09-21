@@ -1,0 +1,103 @@
+== launcher APK: an installed app runs a 32-bit guest library through both tiers ==
+
+Captured 2026-09-21 from "adb logcat -s RBLAUNCH" after tools/build_launcher_apk.sh and
+"adb install -r -g", with the engine at this commit -- rebuilt because the previous 24 PASS run
+was against the tree before the hint-config parity. 6 seeds x (JNI_OnLoad on I, JNI_OnLoad on J,
+mathProbe on I, mathProbe on J) = 24 calls, 24 PASS, 0 FAIL.
+
+Device: model=CPH2145 platform=lito android=13 sdk=33 page=4096 kernel=4.19.157-perf+
+abilist32=armeabi-v7a,armeabi
+
+This is a 32-bit-capable device, so it is an oracle and not the launch proof: an APK that runs here
+could be running through the OS's own AArch32 support. The launch claim needs the OnePlus 12
+(docs/21), which was not attached.
+
+----------------------------------------------------------------------
+
+--------- beginning of main
+09-21 22:47:42.874  3815 10499 I RBLAUNCH: assets: lib/armeabi-v7a/libmathprobe.so=3284B guest/libm.so=131776B
+09-21 22:47:42.880  3815 10499 I RBLAUNCH: JNI_OnLoad on tier I
+09-21 22:47:42.880  3815 10499 I RBLAUNCH: JNI_OnLoad on tier J
+09-21 22:47:42.881  3815 10499 I RBLAUNCH: mathProbe seed=0 on tier I
+09-21 22:47:42.985  3815 10499 I RBLAUNCH: mathProbe seed=0 on tier J
+09-21 22:47:42.987  3815 10499 I RBLAUNCH: launch: libmathprobe.so=3284 bytes libm.so=131776 bytes method=mathProbe seed=0 host_page_shift=12
+09-21 22:47:42.987  3815 10499 I RBLAUNCH: mem: 67108864-byte window, guest model kBiased, stack 0xf0000..0x100000, sentinel 0xc00000, guard 0x800000
+09-21 22:47:42.987  3815 10499 I RBLAUNCH: linker: libm.so at 0x2000, 315 defined functions, 1 module(s) in load order
+09-21 22:47:42.987  3815 10499 I RBLAUNCH: app: libmathprobe.so at 0x25000 extent 0x3000, 9 exports, 0 recorded dynsym imports
+09-21 22:47:42.987  3815 10499 I RBLAUNCH: app: imports the guest scope did not answer: [none]
+09-21 22:47:42.987  3815 10499 I RBLAUNCH: JNI_OnLoad tier=I reason=Returned steps=10 value=0x0000000000010006 hardware=0x0000000000010006 PASS
+09-21 22:47:42.987  3815 10499 I RBLAUNCH: JNI_OnLoad tier=J reason=Returned steps=4 value=0x0000000000010006 hardware=0x0000000000010006 PASS
+09-21 22:47:42.987  3815 10499 I RBLAUNCH: mathProbe seed=0 tier=I reason=Returned steps=430 value=0x3ff0000000000000 hardware=0x3ff0000000000000 PASS
+09-21 22:47:42.987  3815 10499 I RBLAUNCH: mathProbe seed=0 tier=J reason=Returned steps=105 value=0x3ff0000000000000 hardware=0x3ff0000000000000 PASS
+09-21 22:47:42.987  3815 10499 I RBLAUNCH: summary: 4 PASS, 0 FAIL over 4 calls
+09-21 22:47:42.994  3815 10499 I RBLAUNCH: JNI_OnLoad on tier I
+09-21 22:47:42.994  3815 10499 I RBLAUNCH: JNI_OnLoad on tier J
+09-21 22:47:42.994  3815 10499 I RBLAUNCH: mathProbe seed=1 on tier I
+09-21 22:47:42.995  3815 10499 I RBLAUNCH: mathProbe seed=1 on tier J
+09-21 22:47:42.997  3815 10499 I RBLAUNCH: launch: libmathprobe.so=3284 bytes libm.so=131776 bytes method=mathProbe seed=1 host_page_shift=12
+09-21 22:47:42.997  3815 10499 I RBLAUNCH: mem: 67108864-byte window, guest model kBiased, stack 0xf0000..0x100000, sentinel 0xc00000, guard 0x800000
+09-21 22:47:42.997  3815 10499 I RBLAUNCH: linker: libm.so at 0x2000, 315 defined functions, 1 module(s) in load order
+09-21 22:47:42.997  3815 10499 I RBLAUNCH: app: libmathprobe.so at 0x25000 extent 0x3000, 9 exports, 0 recorded dynsym imports
+09-21 22:47:42.997  3815 10499 I RBLAUNCH: app: imports the guest scope did not answer: [none]
+09-21 22:47:42.997  3815 10499 I RBLAUNCH: JNI_OnLoad tier=I reason=Returned steps=10 value=0x0000000000010006 hardware=0x0000000000010006 PASS
+09-21 22:47:42.997  3815 10499 I RBLAUNCH: JNI_OnLoad tier=J reason=Returned steps=4 value=0x0000000000010006 hardware=0x0000000000010006 PASS
+09-21 22:47:42.997  3815 10499 I RBLAUNCH: mathProbe seed=1 tier=I reason=Returned steps=931 value=0x3ffde6dc2133a8df hardware=0x3ffde6dc2133a8df PASS
+09-21 22:47:42.997  3815 10499 I RBLAUNCH: mathProbe seed=1 tier=J reason=Returned steps=220 value=0x3ffde6dc2133a8df hardware=0x3ffde6dc2133a8df PASS
+09-21 22:47:42.997  3815 10499 I RBLAUNCH: summary: 4 PASS, 0 FAIL over 4 calls
+09-21 22:47:43.002  3815 10499 I RBLAUNCH: JNI_OnLoad on tier I
+09-21 22:47:43.002  3815 10499 I RBLAUNCH: JNI_OnLoad on tier J
+09-21 22:47:43.002  3815 10499 I RBLAUNCH: mathProbe seed=4 on tier I
+09-21 22:47:43.004  3815 10499 I RBLAUNCH: mathProbe seed=4 on tier J
+09-21 22:47:43.007  3815 10499 I RBLAUNCH: launch: libmathprobe.so=3284 bytes libm.so=131776 bytes method=mathProbe seed=4 host_page_shift=12
+09-21 22:47:43.007  3815 10499 I RBLAUNCH: mem: 67108864-byte window, guest model kBiased, stack 0xf0000..0x100000, sentinel 0xc00000, guard 0x800000
+09-21 22:47:43.007  3815 10499 I RBLAUNCH: linker: libm.so at 0x2000, 315 defined functions, 1 module(s) in load order
+09-21 22:47:43.007  3815 10499 I RBLAUNCH: app: libmathprobe.so at 0x25000 extent 0x3000, 9 exports, 0 recorded dynsym imports
+09-21 22:47:43.007  3815 10499 I RBLAUNCH: app: imports the guest scope did not answer: [none]
+09-21 22:47:43.007  3815 10499 I RBLAUNCH: JNI_OnLoad tier=I reason=Returned steps=10 value=0x0000000000010006 hardware=0x0000000000010006 PASS
+09-21 22:47:43.007  3815 10499 I RBLAUNCH: JNI_OnLoad tier=J reason=Returned steps=4 value=0x0000000000010006 hardware=0x0000000000010006 PASS
+09-21 22:47:43.007  3815 10499 I RBLAUNCH: mathProbe seed=4 tier=I reason=Returned steps=941 value=0x4012789c90b279ff hardware=0x4012789c90b279ff PASS
+09-21 22:47:43.007  3815 10499 I RBLAUNCH: mathProbe seed=4 tier=J reason=Returned steps=226 value=0x4012789c90b279ff hardware=0x4012789c90b279ff PASS
+09-21 22:47:43.007  3815 10499 I RBLAUNCH: summary: 4 PASS, 0 FAIL over 4 calls
+09-21 22:47:43.011  3815 10499 I RBLAUNCH: JNI_OnLoad on tier I
+09-21 22:47:43.012  3815 10499 I RBLAUNCH: JNI_OnLoad on tier J
+09-21 22:47:43.012  3815 10499 I RBLAUNCH: mathProbe seed=7 on tier I
+09-21 22:47:43.013  3815 10499 I RBLAUNCH: mathProbe seed=7 on tier J
+09-21 22:47:43.019  3815 10499 I RBLAUNCH: launch: libmathprobe.so=3284 bytes libm.so=131776 bytes method=mathProbe seed=7 host_page_shift=12
+09-21 22:47:43.019  3815 10499 I RBLAUNCH: mem: 67108864-byte window, guest model kBiased, stack 0xf0000..0x100000, sentinel 0xc00000, guard 0x800000
+09-21 22:47:43.019  3815 10499 I RBLAUNCH: linker: libm.so at 0x2000, 315 defined functions, 1 module(s) in load order
+09-21 22:47:43.019  3815 10499 I RBLAUNCH: app: libmathprobe.so at 0x25000 extent 0x3000, 9 exports, 0 recorded dynsym imports
+09-21 22:47:43.019  3815 10499 I RBLAUNCH: app: imports the guest scope did not answer: [none]
+09-21 22:47:43.019  3815 10499 I RBLAUNCH: JNI_OnLoad tier=I reason=Returned steps=10 value=0x0000000000010006 hardware=0x0000000000010006 PASS
+09-21 22:47:43.019  3815 10499 I RBLAUNCH: JNI_OnLoad tier=J reason=Returned steps=4 value=0x0000000000010006 hardware=0x0000000000010006 PASS
+09-21 22:47:43.019  3815 10499 I RBLAUNCH: mathProbe seed=7 tier=I reason=Returned steps=963 value=0x401e43f6e346d0a4 hardware=0x401e43f6e346d0a4 PASS
+09-21 22:47:43.019  3815 10499 I RBLAUNCH: mathProbe seed=7 tier=J reason=Returned steps=231 value=0x401e43f6e346d0a4 hardware=0x401e43f6e346d0a4 PASS
+09-21 22:47:43.019  3815 10499 I RBLAUNCH: summary: 4 PASS, 0 FAIL over 4 calls
+09-21 22:47:43.023  3815 10499 I RBLAUNCH: JNI_OnLoad on tier I
+09-21 22:47:43.023  3815 10499 I RBLAUNCH: JNI_OnLoad on tier J
+09-21 22:47:43.023  3815 10499 I RBLAUNCH: mathProbe seed=100 on tier I
+09-21 22:47:43.025  3815 10499 I RBLAUNCH: mathProbe seed=100 on tier J
+09-21 22:47:43.029  3815 10499 I RBLAUNCH: launch: libmathprobe.so=3284 bytes libm.so=131776 bytes method=mathProbe seed=100 host_page_shift=12
+09-21 22:47:43.029  3815 10499 I RBLAUNCH: mem: 67108864-byte window, guest model kBiased, stack 0xf0000..0x100000, sentinel 0xc00000, guard 0x800000
+09-21 22:47:43.029  3815 10499 I RBLAUNCH: linker: libm.so at 0x2000, 315 defined functions, 1 module(s) in load order
+09-21 22:47:43.029  3815 10499 I RBLAUNCH: app: libmathprobe.so at 0x25000 extent 0x3000, 9 exports, 0 recorded dynsym imports
+09-21 22:47:43.029  3815 10499 I RBLAUNCH: app: imports the guest scope did not answer: [none]
+09-21 22:47:43.029  3815 10499 I RBLAUNCH: JNI_OnLoad tier=I reason=Returned steps=10 value=0x0000000000010006 hardware=0x0000000000010006 PASS
+09-21 22:47:43.029  3815 10499 I RBLAUNCH: JNI_OnLoad tier=J reason=Returned steps=4 value=0x0000000000010006 hardware=0x0000000000010006 PASS
+09-21 22:47:43.029  3815 10499 I RBLAUNCH: mathProbe seed=100 tier=I reason=Returned steps=1057 value=0x4058e45fddd281af hardware=0x4058e45fddd281af PASS
+09-21 22:47:43.029  3815 10499 I RBLAUNCH: mathProbe seed=100 tier=J reason=Returned steps=245 value=0x4058e45fddd281af hardware=0x4058e45fddd281af PASS
+09-21 22:47:43.029  3815 10499 I RBLAUNCH: summary: 4 PASS, 0 FAIL over 4 calls
+09-21 22:47:43.034  3815 10499 I RBLAUNCH: JNI_OnLoad on tier I
+09-21 22:47:43.034  3815 10499 I RBLAUNCH: JNI_OnLoad on tier J
+09-21 22:47:43.035  3815 10499 I RBLAUNCH: mathProbe seed=-3 on tier I
+09-21 22:47:43.037  3815 10499 I RBLAUNCH: mathProbe seed=-3 on tier J
+09-21 22:47:43.042  3815 10499 I RBLAUNCH: launch: libmathprobe.so=3284 bytes libm.so=131776 bytes method=mathProbe seed=-3 host_page_shift=12
+09-21 22:47:43.042  3815 10499 I RBLAUNCH: mem: 67108864-byte window, guest model kBiased, stack 0xf0000..0x100000, sentinel 0xc00000, guard 0x800000
+09-21 22:47:43.043  3815 10499 I RBLAUNCH: linker: libm.so at 0x2000, 315 defined functions, 1 module(s) in load order
+09-21 22:47:43.043  3815 10499 I RBLAUNCH: app: libmathprobe.so at 0x25000 extent 0x3000, 9 exports, 0 recorded dynsym imports
+09-21 22:47:43.043  3815 10499 I RBLAUNCH: app: imports the guest scope did not answer: [none]
+09-21 22:47:43.043  3815 10499 I RBLAUNCH: JNI_OnLoad tier=I reason=Returned steps=10 value=0x0000000000010006 hardware=0x0000000000010006 PASS
+09-21 22:47:43.043  3815 10499 I RBLAUNCH: JNI_OnLoad tier=J reason=Returned steps=4 value=0x0000000000010006 hardware=0x0000000000010006 PASS
+09-21 22:47:43.043  3815 10499 I RBLAUNCH: mathProbe seed=-3 tier=I reason=Returned steps=955 value=0x400a6a775385657f hardware=0x400a6a775385657f PASS
+09-21 22:47:43.043  3815 10499 I RBLAUNCH: mathProbe seed=-3 tier=J reason=Returned steps=232 value=0x400a6a775385657f hardware=0x400a6a775385657f PASS
+09-21 22:47:43.044  3815 10499 I RBLAUNCH: summary: 4 PASS, 0 FAIL over 4 calls
+09-21 22:47:43.044  3815 10499 I RBLAUNCH: === launcher done ===

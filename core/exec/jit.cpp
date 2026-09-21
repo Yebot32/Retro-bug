@@ -291,6 +291,22 @@ JitExecutor::JitExecutor(mem::GuestMemory& memory, GuestAddr return_address,
   // two tiers have to agree on the *architecture*, or a differential disagreement would be an
   // configuration difference wearing its clothes.
   conf.arch_version = Dynarmic::A32::ArchVersion::v7;
+  // The other two options `rb::isa::Options()` sets, and which this config was missing.
+  //
+  // `hook_hint_instructions` decides whether Dynarmic *tells the caller* about a hint instruction at all:
+  // `arm_PLD_imm` and its neighbours emit nothing when it is clear (`frontend/A32/translate/impl/
+  // hint.cpp:11-18`) and an `A32ExceptionRaised` when it is set. Tier I's front end sets it, Tier J's did
+  // not, so for every hint -- `pld`, `yield`, `sev`, and `bkpt` -- the two tiers were handed different IR
+  // rather than the same IR answered differently, which is the one divergence a differential cannot see
+  // from its own output. It also meant `bkpt` decoded to a NOP on the shipping tier, where the front-end
+  // comment's stated policy is that a trap has to reach RetroBug.
+  //
+  // `define_unpredictable_behaviour` is the same kind of mismatch in the other direction: with it clear,
+  // an unpredictable encoding raises `UnpredictableInstruction` and stops the guest here, while Tier I ran
+  // Dynarmic's defined behaviour for it. `docs/30` §Step 37 records what each of the four lanes did before
+  // and after, because this pair of lines is the first time both tiers were asked the same question.
+  conf.hook_hint_instructions = true;
+  conf.define_unpredictable_behaviour = true;
   // Android's guest is little-endian and CPSR.E is not reachable from an app; forcing it removes a
   // whole axis of state that neither tier can test.
   conf.always_little_endian = true;
@@ -651,6 +667,13 @@ void JitExecutor::CallSVC(std::uint32_t swi) {
 }
 
 void JitExecutor::ExceptionRaised(GuestAddr pc, Dynarmic::A32::Exception exception) {
+  /**
+   * A hint whose architectural effect is nothing executes as nothing, and the guest carries on -- the
+   * same rule Tier I applies to the same IR op, from the same predicate. Returning without halting is
+   * what "continue" means here: the raise is not the block's terminal, so the compiled block walks on to
+   * the encoding after the hint exactly as hardware does.
+   */
+  if (isa::HintIsNoOp(exception)) return;
   const char* name = ExceptionName(exception);
   if (exception == Dynarmic::A32::Exception::NoExecuteFault) {
     // The other half of the sentinel/slot check — see MemoryReadCode for why both are needed.

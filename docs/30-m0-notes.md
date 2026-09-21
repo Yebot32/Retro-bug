@@ -3104,6 +3104,15 @@ rig's fault rather than the engine's. `rb_guest_libc_tests`' other 6 rows are th
 one cached block, not dynarmic. The hardware half of this section stands — Tier I agrees with the oracle
 on all 16 rows, and the two 16-bit GE corrections and the withdrawn EL0 claim are all still true.]**
 
+**[§Step 37 amends the hardware half in three places. (1) "identical on the SM7250 and the SM8550" is
+withdrawn for the media set: only the SM7250 ever ran `mediarows`, and its output is now an artifact at
+`tests/guest/output/`. (2) Two of the oracle's rows still reported DIFFERS on a re-run because
+`mediarows.c`'s expectation column had never been brought round to this section's own GE correction; with
+it brought round the run is 16/16, so the correction is confirmed and the file that carried the old numbers
+was this project's own transcription. (3) The sentence below about hardware's answer being "on record from
+§Step 34's EL0 probe" is false: no such probe ran any preload, and `pldrows` is what now measures it — on
+one device.]**
+
 ### The media lane, and the first Tier-J-vs-hardware finding
 
 §Step 34 left Tier I implementing the packed-media set with **no differential rows** — verified by nothing
@@ -3260,6 +3269,130 @@ while one premise about the harness went unread. The signature of this class is 
 mis-decoding looks like, it is what one shared cause looks like. When a failure has that shape, the next
 question is what the rows have in common in the harness, not what the emulator has in common with itself.
 
+## Step 37 — the self-audit: `pld` was a configuration difference wearing a semantics fix, and three claims turned out to be citations to runs nobody had done
+
+The owner asked for a full session audit before new work: re-check every "fixed/confirmed/verified" against
+evidence rather than my own reasoning, re-examine what I had already corrected, and look for regressions by
+re-running. Three independent read-only audit passes over the tree, plus re-runs on the SM7250. What
+followed is the ordered list of what changed.
+
+### The `pld` fix was masking a config asymmetry, and it is now closed
+
+`[1L]` **Confirmed by code, then closed by measurement.** Tier I's front end asks for
+`hook_hint_instructions = true` (`core/isa/front_end.cpp:60`) and `JitExecutor`'s `UserConfig` never set it
+(`core/exec/jit.cpp:288` onward), so Dynarmic's default applied — `false`
+(`interface/A32/config.h:211`), forwarded into the arm64 back end's translate call at
+`backend/arm64/a32_address_space.cpp:165`. `arm_PLD_imm` returns early emitting **no IR at all** when that
+option is clear (`frontend/A32/translate/impl/hint.cpp:11-18`), so for every hint instruction the two tiers
+were handed *different IR*: Tier I got an `A32ExceptionRaised` to answer, Tier J got nothing to answer with.
+"Tier J runs `memmove_a15` to completion" was therefore never evidence about Tier J's hint handling — it was
+the front-end NOP — and the same pair of flags meant `bkpt` decoded to a NOP on the shipping tier while the
+front-end comment says a trap has to reach RetroBug. Fixed by making Tier J's config match
+(`conf.hook_hint_instructions`, `conf.define_unpredictable_behaviour`) and by putting the hint policy in one
+place both tiers consult, `isa::HintIsNoOp` (`core/isa/front_end.cpp`), used from `interp.cpp`'s raise case
+and `JitExecutor::ExceptionRaised`. The class is closed and small: exactly those two booleans gate
+`{PLD, PLDW, PLI, SEV, SEVL, WFE, WFI, YIELD}` plus conditional `BKPT`.
+
+`[1L]` **The lane now measures it.** `core/tests/exec_tier_diff_test.cpp`'s hint table went from 3 preload
+rows to 12: 6 preloads (three at a deliberate hole), `yield`, `sev`, `wfi`, `wfe`, and the two controls. All
+green on the SM7250: `rb_exec_tier_diff_tests` **805 checks, 0 failures** (was 759).
+
+`[1L]` **A second divergence, found by the rows themselves**: for `wfi` Tier I reported reason 6
+(`Fault`) and Tier J reason 5 (`Unimplemented`) over the same raised exception. "Both stopped" is not
+agreement when a lane compares reasons, so Tier I's raise path now picks its reason by exception kind the
+way `JitExecutor::ExceptionRaised` does — a no-execute fault is a `Fault` the guest would have seen, a
+breakpoint suspends, anything else is `Unimplemented` — and the `wfi`/`wfe` rows assert `ri.reason ==
+rj.reason`. Making every raise a `Fault` was the wrong half of that fix and cost two lanes:
+`rb_exec_interp_tests:313` and `rb_exec_tier_diff_tests:832` both assert an unmapped *fetch* reports
+`Fault`, and they went red on the first cut, which is the re-run earning its keep.
+
+`[UNVERIFIED, and now named]` ARM-state `pli` is *not* covered by any of this: Dynarmic's ARM decoder has no
+`pli` entry, so the word decodes as `arm_LDC` → `CoprocLoadWords` (`coprocessor.cpp:47`), which Tier J
+refuses as "LDC c15" and Tier I has no case for at all. `Exception::PreloadInstruction` has exactly one
+producer in the tree, `thumb32_load_byte.cpp`.
+
+### Two claims that were citations to runs that had not happened
+
+1. `[1L]` **`pld` at EL0 is now actually measured.** §Step 35 says hardware's answer is "on record from
+   §Step 34's EL0 probe". §Step 34's probe is the withdrawn `uqadd8`/`usat8` SIGILL run and never mentions a
+   preload; there was no hardware evidence about `pld` anywhere in the repo. So `tests/guest/pld_rows.s` +
+   `tests/guest/pldrows.c` were written and run: the same five encodings (objdump-verified `f551f400`,
+   `f5d1f400`, `f5d1f000`, `f890 f000`, `f890 f100`) at **readable, mapped-`PROT_NONE`, and a `munmap`
+   hole**, each row announced before it executes. **18 OK / 0 BAD on the SM7250** — no fault from any hint
+   at any class, the instruction after the hint always ran, the address register came back unchanged, and
+   the flag row (`cmn` to clear C, hint, `adc` to fold C in) returned the sentinel exactly, so CPSR survived.
+   The falsifier ran too: a real `ldr` at the *same* addresses survived on the readable page and took
+   `SIG11` at `PROT_NONE` and at the hole, which is what makes "no fault" a statement about the hint.
+   Captured at `tests/guest/output/pldrows-cph2145-lito-2026-09-21.txt`. **The SM8550 half is open** — the
+   Tab S9 was not attached, and `abilist32` on this device is `armeabi-v7a,armeabi`, so it is an oracle and
+   never the launch proof.
+2. `[1L]` **"Hardware agrees with Tier I on all 16 media rows, identically on both devices" was half
+   recollection and half transcription.** Re-running `mediarows` printed **2 DIFFERS**, and they were the
+   `uadd16`/`usub16` rows: `mediarows.c`'s expectation column still carried the pre-§Step-35 values (2 and
+   8) that the hardware run had already overturned, so the oracle was disagreeing with a stale copy of my
+   own table. With the two values brought round: **16 rows ran, 0 differ** on the SM7250, captured at
+   `tests/guest/output/mediarows-cph2145-lito-2026-09-21.txt`. Two honest limits follow from that file's own
+   structure: the `MATCHES`/`DIFFERS` column compares a transcription against a transcription, so the only
+   independent content is the printed `r0=`/`ge=` columns — which is why they are now saved rather than
+   quoted — and "identical on both devices" is withdrawn for the media set until the Tab S9 runs it.
+
+`[1L]` **And the contrast §Step 35 drew was wrong.** It presented "both bytes of a 16-bit lane" as the
+architecture's rule *against* Dynarmic's. Dynarmic gives the same answer: `thumb32_parallel.cpp:126` stores
+the halfword-packed GE raw, `emit_arm64_a32.cpp:333-338` extracts bit 7 of **every** byte, and
+`PackedAddU16` compares at `H4` granularity (`emit_arm64_packed.cpp:140-147`) → `0xFFFF` → bits 7 *and* 15 →
+GE 3, and lane 1 → 12. The x64 back end does the same (`a32_jitstate.cpp:61-64`,
+`emit_x64_packed.cpp:65-102`'s `pcmpgtw`). So the rule is shared by four implementations and one device, and
+what remains inference is only that it matches the ARM ARM prose — which no audit pass could read, because
+every mirror of DDI 0406 returned compressed or app-shell content rather than text.
+
+### An instrument whose units I had assumed
+
+`[1L]` `RunResult::instructions_executed` is **not one thing**. Tier I counts IR pseudo-ops
+(`interp.cpp:2460` says so in its own comment); Tier J accumulates Dynarmic's ticks
+(`jit.cpp:670`). Measured over the same blobs: 6 vs 3 for two encodings, 9 vs 4 for three — and in the
+*control* rows too, where no hint is involved. A step-equality assertion between the tiers was therefore
+comparing two currencies, and it was written by assuming a field name. This is the third instance of the
+class in this file (after §Step 30's `#35` and §Step 36's code cache), so the rows now assert only what the
+units allow — each tier non-zero, plus state equality — and say why in the comment. Related:
+`jit.cpp:301-303` claims `executed_` "is a real guest-instruction count"; the measurement above says it is
+ticks, which run about one ahead of the encoding count. Harmless as a budget, wrong as a claim.
+
+### The Tier I gaps, re-attributed
+
+`[1L]` `rb_guest_libc_tests` on the SM7250 went from **135 checks / 13 failures to 135 / 4** with the hint
+parity in place, and `rb_guest_apk_tests` holds at **1376 / 0**. `[1L]` Tier I now implements the four
+widening converts it lacked (`{Zero,Sign}Extend{Byte,Half}ToLong`, `interp.cpp`'s existing widening case).
+
+`[UNVERIFIED]` **but that does not close `memcpy`, and the reason was misattributed.** Two audit passes
+derived `ZeroExtendByteToLong` from ARM-state `uxtb`/byte loads; the disassembly says otherwise — the only
+A32 producer is the ASIMD structure load with one-byte elements
+(`asimd_load_store_structures.cpp:160`, `ZeroExtendToLong(ReadMemory(ebytes * 8, …))`, dispatched at
+`ir_emitter.cpp:404-408`), and `memmove_a15` is full of exactly that (`vld1.8` ×20, `vld4.8` ×2). So the
+next thing in `memcpy`'s way is Tier I's NEON structure-load path — with `LSL`/`Or` on U64,
+`SetExtendedRegister` and writeback behind it — and the four converts I added, while correct, are
+non-discriminating (Tier I's U8 operands are already masked, and Dynarmic's own arm64 lowering of the op is
+a bare rename). New named gap from the same run: `strstr` now refuses **`Not32`** on Tier I.
+
+`[UNVERIFIED, contradictory]` The `strtod`/`malloc` undefined-instruction refusals are still open and the
+PC attribution is now *disputed between audit passes* rather than settled: one pass reports `0xa782c` as a
+`vld1.8` inside `unw_init_local` and `0x8543c` as `movs r0, #0` inside `__sched_cpucount` — and a `movs`
+cannot raise `UndefinedInstruction`, so at least one reported PC is not a raising instruction. The `strtod`
+line in this run reads `the A32 front end raised exception 0 at 0xa782c`, which is consistent with the NEON
+hypothesis and not with the earlier "rig's null pointer" story. Ask it again from the artifact rather than
+from any of these three accounts.
+
+### Regressions checked by re-running, not by reasoning
+
+`[1L]` Full harness on the SM7250 (`RB_SERIAL=e99abf39 tools/run_engine_tests.sh arm64-v8a`),
+**`EXIT=0`**, all 15 suites green: `rb_linker_tests` 35/0, `rb_isa_front_end_tests` 101/0,
+`rb_exec_census_tests` 41/0, `rb_exec_interp_tests` 80/0, `rb_abi_call_tests` 105/0, `rb_abi_jni_tests`
+41/0, `rb_exec_tier_diff_tests` 805/0, `rb_diag_tests` 108/0, `rb_syscall_monitor_tests` 84/0,
+`rb_codecache_tests` 95/0, `rb_profile_tests` 133/0, Dynarmic's own 47 cases / 200,561 assertions, plus the
+advisory lanes above. `[UNVERIFIED]` Every one of those numbers is **SM7250-only this time**: the Tab S9 was
+not attached, so the two-device differential for §Steps 34-36 is not re-established. `[UNVERIFIED]` The
+launcher APK has not been rebuilt since `interp.cpp`, `jit.cpp` and `front_end.cpp` changed under it, so its
+24 PASS / 0 FAIL is a claim about the previous tree.
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |
@@ -3273,6 +3406,7 @@ question is what the rows have in common in the harness, not what the emulator h
 | Emulator acceleration | AEHD 2.2 **installed but stoppable**: it was "usable" for two boots, then the `aehd` service was found `Stopped` and the AVD refused to start. Re-arm with an elevated `net start aehd`; check `Get-Service aehd` before trusting `-accel-check`'s "not installed" wording. AVD `Medium_Phone` exists |
 | Emulator image | `android-37.1/google_apis_playstore_ps16k/x86_64`, `abilist=x86_64,arm64-v8a`, **`abilist32=` empty** |
 | `openat2`/`io_uring`/`landlock` from an app | unavailable (outside bionic's `SYSCALLS.TXT` allowlist) — see `docs/research/05` §1.4 |
+| A `RunResult` step count means two different things | **Tier I's `instructions_executed` is IR pseudo-ops and Tier J's is Dynarmic ticks**, so the two are not comparable and neither is a guest-instruction count. Measured on the SM7250 over the same blobs: 6 vs 3 for a two-encoding block, 9 vs 4 for three, and the same skew in blocks containing no hint at all (`interp.cpp:2460` owns the first half, `jit.cpp:670` the second). Assert a tier's own count is non-zero — which is what stops a refusal meaning "skipped it and carried on" — and compare *state* across tiers, never these two numbers to each other (§Step 37) |
 | Asking the assembler what an encoding actually is | the NDK ships **`llvm-objdump` but no `llvm-mc`**, so: `clang --target=armv7-none-linux-androideabi26 -mthumb -c x.s` then `llvm-objdump -d x.o`. This is how `#5`→`0x1d50` and `#9`→`f102 0009` were settled in Step 9, and it needs no device — the answer is the same bytes the guest will load |
 | ARM AAPCS argument registers, and what a JNI method can take in registers | **r0-r3 only.** r4 upwards are *workspace*, not arguments, so a 32-bit guest's fifth declared argument is on the stack; with `JNIEnv*` in r0 and `jobject`/`jclass` in r1, **a JNI method has exactly two register parameters**. `EntryState` seeds r2/r3 and provides no caller frame, so a probe with three or more declared parameters faults on its first instruction — correctly. Found the expensive way in Step 16 (a four-`jint` NEON probe), and it is a fact about the ABI rather than about RetroBug |
 | Where a softfp guest puts floats, and where it puts spilled arguments | **Core registers, both directions, at the boundary.** A `jfloat` takes one of r0-r3, a `jdouble` an even/odd pair, a `jdouble` result returns in `r0:r1` — `d0..d7` carry arguments only under `-mfloat-abi=hard`, which the NDK refuses for this target (`docs/30` §Step 25's disassembly table is the primary source; §Step 24 the results half). Two traps attached: (1) a `static` function whose address never escapes its TU *does* get the VFP register ABI from clang under `softfp`, so "softfp ⇒ never VFP" is false about a disassembly and true only about a cross-boundary call; (2) the argument **block starts at the callee's entry SP** — a callee reads its fifth-and-later parameters at `[sp]`, `[sp,#8]`, … — and the 16-byte intra-procedure area is *below* that, not between it and SP |

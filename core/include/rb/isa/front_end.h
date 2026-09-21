@@ -22,6 +22,7 @@
 #include "dynarmic/frontend/A32/a32_location_descriptor.h"
 #include "dynarmic/frontend/A32/translate/a32_translate.h"
 #include "dynarmic/frontend/A32/translate/translate_callbacks.h"
+#include "dynarmic/interface/A32/config.h"  // Exception, for HintIsNoOp
 #include "dynarmic/ir/basic_block.h"
 #include "dynarmic/ir/terminal.h"
 
@@ -114,6 +115,21 @@ struct TranslatedBlock {
 /// not part of this — it travels on the block's location descriptor, because the front end reads it
 /// as the CPSR.T bit.
 Dynarmic::A32::TranslationOptions Options();
+
+/// True when an exception the A32 front end raises names an instruction whose only architectural
+/// effect is a performance hint, so executing it as a no-op and continuing is what hardware does.
+///
+/// This is the single answer for **both** tiers, and it has to be one answer: `Options()` turns on
+/// `hook_hint_instructions` for the Tier I front end, and Dynarmic's default for that option is off,
+/// which is the state Tier J's `UserConfig` was left in. The two tiers therefore did not see the same
+/// IR for a hint at all — Tier I was handed an `A32ExceptionRaised` and Tier J was handed nothing — and
+/// a hint that one tier can walk through while the other stops on is a tier-dependent answer about the
+/// guest's instruction stream, which is the property the whole differential exists to protect.
+///
+/// `WaitForInterrupt` and `WaitForEvent` are deliberately **not** here. Their architectural effect is to
+/// stop until something wakes the core, and RetroBug has no wake path to be waiting for: silently
+/// continuing would turn a guest spin loop into a host spin loop, and a refusal at least names itself.
+bool HintIsNoOp(Dynarmic::A32::Exception exception);
 
 /// Translate the block starting at exactly this location.
 ///
