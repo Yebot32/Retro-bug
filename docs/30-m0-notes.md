@@ -2945,6 +2945,56 @@ attached, and until then every launch statement in this project has to carry the
 hardware" in front of it.
 
 
+## Step 33 — C06 first cut: a dependency chain, one scope, and two guest constructors that actually ran
+
+`rb::linker` exists (`core/linker/guest_linker.cpp`, `core/include/rb/linker/guest_linker.h`), holding
+the two things C05 could not: a `DT_NEEDED` walk and a symbol scope wider than one image. Its shape is
+set by C05's own guarantees rather than by linker convention — the bytes arrive through an
+`ImageProvider` callback and initializers run through an injected `ExecFn`, so the component opens no
+files and executes no guest code by itself, and `rb::linker` depends on nothing but `rb::loader`.
+
+New gated lane `rb_linker_tests`, **26 checks, 0 failures on both devices**, on a purpose-built pair of
+guest libraries (`tests/corpus/link_leaf.c`, `link_mid.c`, `-nostdlib` so the chain is two modules and
+not libc wearing a hat, one `DT_NEEDED` edge and one `.init_array` entry each). What it holds the linker
+to:
+
+- a missing dependency **refuses the load and names the soname** — paired with the positive case, because
+  a chain test that only checks success also passes when `DT_NEEDED` is ignored entirely;
+- dependencies finish loading before their dependents, one instance per soname, distinct bases;
+- `PeekNeeded` (the linker's own pre-scan) agrees with `GuestModule::needed` (the loader's parse) — two
+  readings of the same file, so neither can drift into a private notion of the graph;
+- `Lookup` returns the defining module's address **with the Thumb tag** and the dependent does not claim
+  to define what it imports;
+- and the claim the whole thing was for: after `RunInitializers`, guest memory holds `0xA11A11`,
+  `0xB22B27` and — the ordering evidence — `g_leaf_seen_by_mid == 0xA11A11`, which is what `mid_init`
+  read of the leaf's marker *while it ran*. A linker that ran the two in the wrong order leaves 0 there,
+  and one that never called them leaves both absent. `mid_call(7) == 15` is a cross-module PLT call
+  through a GOT slot the scope filled.
+
+**The bug this found in C05, in the same family as the IFUNC slot one.** `.init_array` slots carry
+`R_ARM_RELATIVE` relocations, so after relocation each entry is *already* a guest address; recording
+them through the same `code()` helper that biases `DT_INIT` added the load base a second time, and the
+first attempt to execute a constructor faulted on "an instruction that plainly exists" at an address
+0x2000 too high. The tell was the bytes at the entry point being zero — hence the lane now prints the
+address, both bases and the four halfwords on any failure, so this class of error names itself instead
+of becoming a mystery decode failure. The device-libc row that checks those entries is a structural
+smoke check only: an offset of one page stays inside the module's own range, so **it cannot catch a
+double bias** — the fixture's real execution is what catches it, and the comment says so rather than
+letting a green row imply coverage it does not have.
+
+Also found in my own harness on the way: `provider_for` returned a lambda capturing its parameter by
+reference, so the linker was reading a dead `Fixture` — which surfaced as *the chain loading with its
+dependency missing*, an outcome so impossible that it took the negative test passing-by-accident to
+trace it to the capture list rather than to the linker.
+
+**C06's remaining list**, in the order that unblocks the launch path: apply the recorded TLS slots
+(2 `DTPMOD32` + 1 `TPOFF32` on the Tab S9's libc); `DlopenGuest`/`DlsymGuest` as host-callable entry
+points, which needs the nine host symbols a real `libc.so` imports (#29) and a handle identity; then
+`android_dlopen_ext`. `docs/20` §C06's "own loader vs running AOSP's linker under emulation" choice is
+still open as recorded — this is the own-loader branch, and it now carries a chain and constructors,
+which was the part that made it look risky.
+
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |

@@ -17,6 +17,14 @@ target_link_libraries(rb_guest_memory_tests PRIVATE rb_mem)
 
 add_executable(rb_guest_elf_tests guest_elf_test.cpp)
 target_link_libraries(rb_guest_elf_tests PRIVATE rb_loader)
+
+# C06. Built on two purpose-made guest libraries rather than a system one, so the dependency graph and
+# the constructors are the thing under test and not incidental to a big library that happens to work.
+add_executable(rb_linker_tests linker_test.cpp)
+target_link_libraries(rb_linker_tests PRIVATE rb_linker rb_exec rb_abi rb_loader rb_mem)
+target_compile_definitions(rb_linker_tests PRIVATE
+  RB_LINK_LEAF_PATH="/data/local/tmp/librbleaf.so"
+  RB_LINK_MID_PATH="/data/local/tmp/librbmid.so")
 # Path the fixture is pushed to on the device by tools/run_engine_tests.sh.
 target_compile_definitions(rb_guest_elf_tests PRIVATE RB_FIXTURE_PATH="/data/local/tmp/librb_fixture.so")
 

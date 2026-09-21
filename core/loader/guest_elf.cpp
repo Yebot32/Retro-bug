@@ -694,6 +694,19 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
      * index that failed is what makes that visible instead of loading a module whose constructors are
      * whatever the next page happened to hold.
      */
+    /**
+     * Read from live guest memory, which matters more than it looks: `.init_array` slots carry
+     * `R_ARM_RELATIVE` (or `R_ARM_ABS32` against a local symbol) relocations, so after the relocation
+     * pass each entry is **already a guest address**. Adding the load bias a second time aims every
+     * constructor at `base` bytes above its target, which is not a crash but a fetch of whatever is
+     * there — zeros in a mapped page, which the front end reports as an unallocated encoding. That is
+     * exactly how this was found: the first `rb::linker` run of a real constructor faulted on an
+     * instruction that plainly exists, and the address in the message was 0x2000 too high.
+     *
+     * With relocations switched off the slots still hold image-relative vaddrs, so the bias is theirs to
+     * take. Both cases are stated because the difference is invisible in the value and visible the moment
+     * something tries to execute it.
+     */
     if (dyn.init_array != 0 && dyn.init_array_sz != 0) {
       if (dyn.init_array_sz % 4u != 0u) {
         return fail(Stage("reading DT_INIT_ARRAY",
@@ -709,9 +722,9 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
                             "entry " + std::to_string(i) + " of " + std::to_string(count) +
                                 " is at an unmapped vaddr"));
         }
-        // A zero entry is a gap some linkers leave, not a function to call; the runner skips it, and
-        // recording it here keeps the count comparable against `readelf`'s.
-        mod.init_array.push_back(code(fn));
+        const std::uint32_t entry = opts.apply_relocations ? fn : base + fn;
+        mod.init_array.push_back(
+            CodeAddress{entry ? (entry & ~1u) : 0u, (entry & 1u) != 0u});
       }
     }
     if (dyn.soname && strtab) mod.soname = std::string(strtab + dyn.soname);

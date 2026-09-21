@@ -42,7 +42,7 @@ ADB="$SDK/platform-tools/adb.exe"
 
 # One list for build, push and run: a suite that is missing here silently does not execute, which is
 # the least useful kind of green.
-SUITES="rb_interval_compat_tests rb_variant_compat_tests rb_guest_memory_tests rb_guest_elf_tests rb_isa_front_end_tests rb_exec_census_tests rb_exec_interp_tests rb_abi_call_tests rb_abi_jni_tests rb_exec_tier_diff_tests rb_diag_tests rb_syscall_monitor_tests rb_codecache_tests rb_profile_tests dynarmic_tests"
+SUITES="rb_interval_compat_tests rb_variant_compat_tests rb_guest_memory_tests rb_guest_elf_tests rb_linker_tests rb_isa_front_end_tests rb_exec_census_tests rb_exec_interp_tests rb_abi_call_tests rb_abi_jni_tests rb_exec_tier_diff_tests rb_diag_tests rb_syscall_monitor_tests rb_codecache_tests rb_profile_tests dynarmic_tests"
 # Lanes that are red on purpose because every failure names a real gap (a Tier I refusal, an unlinked
 # loader step), so they cannot gate a green run. They are still built and run here: before this list
 # existed they were in no build at all, which let a stale binary report the same failure count for hours
@@ -63,6 +63,18 @@ FIXTURE="$BUILD/librb_fixture.so"
 "$TC/bin/clang.exe" --target=armv7-none-linux-androideabi26 --sysroot="$TC/sysroot" \
   -mthumb -mfloat-abi=softfp -mfpu=neon -fPIC -shared -Os \
   -o "$FIXTURE" "$ROOT/tests/corpus/fixture_jni.c" -llog
+
+# C06's fixture: two libraries with a real DT_NEEDED edge and a constructor each, built `-nostdlib` so
+# the chain under test is two modules and not libc wearing a hat. `-Wl,-soname` is what makes the
+# dependent's DT_NEEDED read `librbleaf.so`, which is the string the linker is asked to place.
+LEAF="$BUILD/librbleaf.so"
+MID="$BUILD/librbmid.so"
+"$TC/bin/clang.exe" --target=armv7-none-linux-androideabi26 --sysroot="$TC/sysroot" \
+  -mthumb -mfloat-abi=softfp -mfpu=neon -fPIC -shared -nostdlib -Os \
+  -Wl,-soname,librbleaf.so -o "$LEAF" "$ROOT/tests/corpus/link_leaf.c"
+"$TC/bin/clang.exe" --target=armv7-none-linux-androideabi26 --sysroot="$TC/sysroot" \
+  -mthumb -mfloat-abi=softfp -mfpu=neon -fPIC -shared -nostdlib -Os \
+  -Wl,-soname,librbmid.so -o "$MID" "$ROOT/tests/corpus/link_mid.c" -L"$BUILD" -lrbleaf
 
 # MSYS hands native programs /c/... paths and converts them on the way out — which is wrong for the
 # *device* path in `adb push a /data/local/tmp/b`, hence the MSYS_NO_PATHCONV=1 on every adb call
@@ -107,6 +119,8 @@ adb wait-for-device
 } >&2
 
 adb push "$(to_host "$FIXTURE")" /data/local/tmp/librb_fixture.so >/dev/null
+adb push "$(to_host "$LEAF")" /data/local/tmp/librbleaf.so >/dev/null
+adb push "$(to_host "$MID")" /data/local/tmp/librbmid.so >/dev/null
 for t in $SUITES $ADVISORY; do
   src="$BUILD/core/tests/$t"
   [ -f "$src" ] || src="$BUILD/external/dynarmic/tests/$t"
