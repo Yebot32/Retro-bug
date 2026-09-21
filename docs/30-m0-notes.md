@@ -3097,6 +3097,10 @@ rig's fault rather than the engine's. `rb_guest_libc_tests`' other 6 rows are th
 
 ## Step 35 — hardware adjudicates the media instructions (Tier J loses), and an installed app runs a 32-bit library through the engine
 
+**[§Step 35's Tier J finding was wrong and §Step 36 retires it: the 13 divergences were this lane reusing
+one cached block, not dynarmic. The hardware half of this section stands — Tier I agrees with the oracle
+on all 16 rows, and the two 16-bit GE corrections and the withdrawn EL0 claim are all still true.]**
+
 ### The media lane, and the first Tier-J-vs-hardware finding
 
 §Step 34 left Tier I implementing the packed-media set with **no differential rows** — verified by nothing
@@ -3130,12 +3134,36 @@ faulting. The earlier probe's `SIGILL` readings were an artifact of the path it 
 that the claim was "now doubted" was too generous: it is withdrawn. `docs/32` §6.4's "USAT8 never reaches
 the IR" and the fleet-table line about the media set should be read against this row, not that probe.
 
-Recorded as **task #43**: Tier J does not apply Thumb-2 media instructions. It is *latent* against today's
-libc because the device's IFUNC resolvers select the NEON `strcmp`/`strlen`/`memcpy` (which is why
-`strcmp` passes on Tier J while its `sel` row does not), and live for any app library that uses them —
-wrong values on the fast tier, right ones on the fallback, and no crash to notice. The lane pins
-`rows_diverged == 13` with a message telling whoever fixes it to replace the bound with an equality
-assertion, so the finding cannot quietly become a pass.
+Recorded at the time as **task #43**, "Tier J does not apply Thumb-2 media instructions". §Step 36 shows
+that was wrong: the lane planted all sixteen blobs at one guest address and Tier J answered each row with
+row 1's cached block. Dynarmic is clean on all 16, on both devices, with Tier I and with hardware.
+
+Two of this paragraph's other claims were also overturned by the disassembly that came in the same hour,
+and they are worth more than the retraction:
+
+* **Which libc variant runs.** Reading each IFUNC resolver's `get_cpu_variant()` literal against the string
+  each device's `/dev/cpu_variant:arm` really returns (`cortex-a9` on the Reno 5, `cortex-a75` on the Tab
+  S9) selects **`strcmp_a15` on both** — and `strcmp_a15` uses `uadd8` ×10 and `sel` ×10, in Thumb state.
+  So the sentence above ("latent because the resolvers select the NEON `strcmp`/`strlen`/`memcpy`") is
+  backwards: the routine that runs *does* use the media instructions, which is precisely why Tier J passing
+  `strcmp` against hardware should have made me doubt a lane reporting thirteen failures before I doubted
+  the back end. Also selected: `memmove_a15` for **both** `memcpy` and `memmove` (ARM state), `strlen_a9`
+  (Reno) / `strlen_a15` (Tab S9), `strcpy_a9`/`_a15`, `memset_a9`/`_a7`, `__memcpy_a9`/`__memcpy_a55`.
+* **What bionic's string code does not use.** `uqadd8`, `uqsub8`, `usub8`, `usad8`, `ssat`, `qadd8` and
+  `strexd` have **zero occurrences in the whole `.text` of both** `libc.so` files, so this step's earlier
+  sentence about `strcmp` needing `uqsub8` was wrong; the live set is `uadd8`, `sel`, `rev`, `clz`, `ldrd`,
+  `strd` and `pld`.
+
+That last list also hands the remaining Tier I `memcpy`/`memmove` refusal its prime suspect: `pld` appears 2
+to 10 times in every selected string/memory variant, it is encoded as an `LDC` coprocessor transfer (which
+is what dynarmic's front end raises an exception on, and what `tests/guest/mediarows.c`-style native runs
+show the hardware treating as a no-op), and the refusal sits at the top of an ARM-state block beginning
+`stmdb sp!, {r0, lr}` — the shape of a `memmove_a15` entry. Not yet confirmed; it is the next thing to ask.
+
+Tooling trap from the same exercise: `llvm-objdump -d` desyncs at the odd-address IFUNC alias labels in
+these files, yielding `<unknown>` and bogus 4-byte reads inside the resolvers. Disassembling a range that
+starts at `st_value | 1` is reliable; disassembling the whole `.text` is not unless the odd `st_value`s are
+zeroed in a scratch copy first.
 
 ### M1's launcher: `com.retrobug.launcher`, installed and run on both devices
 
@@ -3186,6 +3214,48 @@ One code-review catch on the launcher's first cut, recorded because it is the sa
 `emit()` compared a call's value against `want_bits`, which is 0 for a seed with no captured hardware row
 — so a call returning 0 would have PASSed while the comment claimed a guard existed against exactly that.
 The comparison now carries `have_hardware` and a seed without an oracle row cannot pass.
+
+## Step 36 — the 13 Tier J media divergences were this lane's own code cache
+
+§Step 35 reported that dynarmic's AArch64 back end failed 13 of 16 Thumb-2 media rows while hardware and
+Tier I agreed. **That was wrong, and it was my lane's bug.** A background analysis sub-agent pinned the
+mechanism by reading the loop rather than the emulator:
+
+```
+core/tests/exec_tier_diff_test.cpp:2001   cursor = (cursor + 3u) & ~3u;   // aligns
+                                  :2004   rig.mem->Write(cursor + i*2, …) // plants the blob
+                                          /* no `cursor +=` anywhere */    // ← every row at 0x01940800
+```
+
+All sixteen blobs went to one guest address, and Tier J — which owns a block cache — answered every row
+with row 1's compiled code. The exclusive lane twelve lines above it does advance (`:1858`
+`cursor = cursor + ((len + 3) & ~3)`); only the new loop omitted it.
+
+The same report also **ruled out, with `file:line`, every mechanism I had suspected**, which is why it was
+worth the delegation rather than more of my own guessing: the AArch64 register allocator cannot bind two
+`Inst*` to one location (`reg_alloc.cpp:378` asserts it, `:386` spills first), both
+`A32GetSetElimination` passes delete the *earlier* store and the symptom was the later one
+(`a32_get_set_elimination_pass.cpp:47-49, 200-203`), `A32GetCpsr` *is* `ReadsFromCPSR()`
+(`ir/microinstruction.cpp:156`) so the `mrs` legitimately ends the GE chain, and `SyncOut` reads state
+from `A32JitState` rather than a stale copy (`jit.cpp:403-421`). `RB_JIT_NOOPT=1` was already on record
+as ruling out the optimizer, and it had: same 13 divergences, unchanged.
+
+Fix — one `at` and one `cursor +=` — then **zero divergences on both devices, 751 checks / 0 failures**,
+Tier J agreeing with Tier I and with the oracle on all 16 rows including the four `PROBE[first]` rows
+(`usub8` alone now returns `0x00FFFF7F`/GE 9 on both tiers). Task #43 closes as a probe artifact. The
+lone-`usub8` probe that seemed to show a *second*, independent Tier J defect was the same bug: it inherits
+the poisoned `cursor`, so its first row landed on the cached address too. That one is worth saying out
+loud, because it was the evidence that made the wrong story look over-determined — a second instrument
+agreeing with the first, when both were reading the same stale block.
+
+**The pattern, third instance in this project** (`#35` seeded guest memory once for both tiers; the
+`ctx.state()` print read the caller's registers and produced a published-and-retracted diagnosis; this one
+planted sixteen programs at one address): each time, the instrument was *internally consistent* — the
+numbers cohered, the failures had a clean signature, and a plausible mechanism existed for all of it —
+while one premise about the harness went unread. The signature of this class is that the wrong results are
+**too well-organised**: 13 rows agreeing on "the first instruction's answer" is not what independent
+mis-decoding looks like, it is what one shared cause looks like. When a failure has that shape, the next
+question is what the rows have in common in the harness, not what the emulator has in common with itself.
 
 ## Standing environment facts (so they are not re-derived)
 

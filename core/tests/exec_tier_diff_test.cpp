@@ -1999,9 +1999,23 @@ void packed_media_rows_agree_with_the_arm64_recipes() {
     for (std::uint16_t h : kMediaEpilogue) blob[n++] = h;
     blob[n++] = 0;  // the terminator `plant` stops at, and the length check below counts
     cursor = (cursor + 3u) & ~3u;
+    /**
+     * Every row is planted at its own guest address, and the line that makes that true is
+     * `cursor +=` below. Without it the loop aligned `cursor`, wrote the blob there, and left it — so all
+     * 16 rows landed at one address and Tier J served row 1's compiled block to every one of them. That
+     * produced a confident, deterministic, six-run reproducible and **completely false** report that
+     * dynarmic's Thumb-2 media path was broken on 13 of 16 rows, with a signature that looked exactly
+     * like a translation bug: the three "agreeing" rows were precisely the three whose instruction under
+     * test *is* row 1's `uadd8`, and every divergent row reported row 1's result computed on its own
+     * operands. A code-cache invariant is the only thing that explains that pattern, and it is the same
+     * class of artifact as §Step 30's `#35` — an instrument whose output is internally consistent about
+     * a premise nobody checked.
+     */
+    const exec::GuestAddr at = cursor;
+    cursor += static_cast<exec::GuestAddr>(n * 2);
     bool planted = true;
     for (std::size_t i = 0; i < n; ++i) {
-      if (!rig.mem->Write(cursor + static_cast<exec::GuestAddr>(i * 2), &blob[i], 2)) {
+      if (!rig.mem->Write(at + static_cast<exec::GuestAddr>(i * 2), &blob[i], 2)) {
         planted = false;
         break;
       }
@@ -2022,7 +2036,7 @@ void packed_media_rows_agree_with_the_arm64_recipes() {
       continue;
     }
 
-    exec::MachineState si = EntryState(cursor, 0, 0, /*thumb=*/true);
+    exec::MachineState si = EntryState(at, 0, 0, /*thumb=*/true);
     si.r[0] = data;  ///< the blob's only handle on its operands
     exec::MachineState sj = si;  ///< copied before either tier runs — see the exclusive lane's note
     const exec::RunResult ri = rig.interp->Run(si, kExclBudget);
@@ -2109,17 +2123,88 @@ void packed_media_rows_agree_with_the_arm64_recipes() {
    * the leading `uadd8` had already left in the same register: agreement there is the absence of a
    * second effect, not evidence of a correct one.
    */
-  CHECK_CTX(rows_diverged == 13u,
+  CHECK_CTX(rows_diverged == 0u,
             "Tier J diverged from Tier I on " + std::to_string(rows_diverged) +
-                " media rows, not the 13 recorded in docs/30 §Step 35. If the number went DOWN, dynarmic's"
-                " Thumb-2 media path changed: re-run the on-device oracle for these rows, and if Tier J"
-                " now matches Tier I, delete this bound and assert agreement instead. If it went up, the"
-                " rows are listed by name above — find out which one moved before believing either tier.");
+                " media rows, which is asserted to be none now that every row is planted at its own"
+                " address. Both tiers are also asserted against `tests/guest/mediarows.c`, which runs these"
+                " same bytes natively on the SM7250 and the SM8550, so a divergence here is an emulator"
+                " bug with a hardware answer to check it against — not a disagreement between two guesses."
+                " The 13 that this line used to require are recorded in docs/30 §Step 35 as a code-cache"
+                " artifact of this lane, not as a dynarmic defect.");
+
+  /**
+   * A diagnostic, not a test: the same three media instructions with the *leading* `uadd8` removed, so
+   * each is the only media instruction in its block.
+   *
+   * Every asserted row above has two media instructions — one to put a known value in GE, and the one
+   * under test — and Tier J's answer for all 13 divergent rows is the *first* one's, in the destination
+   * register and in GE alike. That shape has two very different explanations and they need different
+   * fixes: either the second one is lost (an interaction inside one block: allocation, liveness, a
+   * pass that deletes a "redundant" producer), or the mnemonic never translates at all and the three
+   * agreeing rows are agreeing by accident. This probe separates them, because with only one media
+   * instruction there is no second anything to lose — so a Tier J that is right here is a Tier J whose
+   * decoder and translator work, and the bug is in what happens to a *repeat*.
+   *
+   * Nothing is asserted, because there is no hardware column for these yet and an assertion here would
+   * be this file restating its own guess. It prints; `docs/30` §Step 35 and task #43 read the numbers.
+   * Delete it when the mechanism is pinned.
+   */
+  struct FirstRow {
+    const char* name;
+    std::uint16_t op[2];
+    std::uint32_t a, b;
+  };
+  constexpr FirstRow kFirstOpRows[] = {
+      {"usub8 alone", {0xfac2, 0xf443}, 0x0100'0080u, 0x0101'0101u},
+      {"uqsub8 alone", {0xfac2, 0xf453}, 0xFFFF'FFFFu, 0x0101'0101u},
+      {"shadd8 alone", {0xfa82, 0xf423}, 0x7E7E'7E7Eu, 0x0101'0101u},
+      {"sel alone (GE=0)", {0xfaa2, 0xf483}, 0x00FF'7F80u, 0x0101'0101u},
+  };
+  for (const FirstRow& row : kFirstOpRows) {
+    std::uint16_t blob[2 + 2 + 7 + 1] = {};
+    std::size_t n = 0;
+    blob[n++] = 0x6802;  // ldr r2, [r0]
+    blob[n++] = 0x6843;  // ldr r3, [r0, #4]
+    for (std::uint16_t h : row.op) blob[n++] = h;
+    for (std::uint16_t h : kMediaEpilogue) blob[n++] = h;
+    blob[n++] = 0;
+    cursor = (cursor + 3u) & ~3u;
+    exec::GuestAddr at = cursor;
+    bool planted = true;
+    for (std::size_t i = 0; i < n; ++i) {
+      if (!rig.mem->Write(at + static_cast<exec::GuestAddr>(i * 2), &blob[i], 2)) planted = false;
+    }
+    cursor += static_cast<exec::GuestAddr>(n * 2);
+    const exec::GuestAddr data = kExclDataPage + slot * kExclSlot;
+    ++slot;
+    const std::uint64_t seed = (static_cast<std::uint64_t>(row.b) << 32) | row.a;
+    if (!planted || !rig.mem->Write(data, &seed, 8)) {
+      std::printf("  PROBE[first] %s could not be planted\n", row.name);
+      continue;
+    }
+    exec::MachineState si = EntryState(at, 0, 0, /*thumb=*/true);
+    si.r[0] = data;
+    exec::MachineState sj = si;
+    const exec::RunResult ri = rig.interp->Run(si, kExclBudget);
+    std::printf("  PROBE[first] %-18s I r0=0x%s GE=%u (%d) | J about to run\n", row.name,
+                Hex(si.r[0]).c_str(), (si.cpsr >> 16) & 0xFu, static_cast<int>(ri.reason));
+    const exec::RunResult rj = rig.jit->Run(sj, kExclBudget);
+    std::printf("  PROBE[first] %-18s J r0=0x%s GE=%u (%d)\n", row.name, Hex(sj.r[0]).c_str(),
+                (sj.cpsr >> 16) & 0xFu, static_cast<int>(rj.reason));
+  }
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
+  /**
+   * Unbuffered from the first line. `adb shell` pipes stdout, which makes it block-buffered, so a
+   * `SIGSEGV` anywhere in a lane discards everything that lane printed before it — and the surviving
+   * output then stops at whatever the last flush boundary was, which reads as "the crash was in the lane
+   * whose tally line you can see". This file's own standing-facts table has said so since §Step 5g; the
+   * lane that lost a debugging cycle to it is the one this line is for.
+   */
+  setvbuf(stdout, nullptr, _IONBF, 0);
   if (argc > 2 && std::string_view{argv[1]} == "--interpret-probe") return interpret_probe(argv[2]);
 
   both_tiers_agree_and_match_hardware();
