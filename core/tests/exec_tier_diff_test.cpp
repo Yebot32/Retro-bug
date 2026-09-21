@@ -2189,9 +2189,107 @@ void packed_media_rows_agree_with_the_arm64_recipes() {
     std::printf("  PROBE[first] %-18s I r0=0x%s GE=%u (%d) | J about to run\n", row.name,
                 Hex(si.r[0]).c_str(), (si.cpsr >> 16) & 0xFu, static_cast<int>(ri.reason));
     const exec::RunResult rj = rig.jit->Run(sj, kExclBudget);
-    std::printf("  PROBE[first] %-18s J r0=0x%s GE=%u (%d)\n", row.name, Hex(sj.r[0]).c_str(),
-                (sj.cpsr >> 16) & 0xFu, static_cast<int>(rj.reason));
   }
+
+  /**
+   * `pld` specifically, in both ISA states, because it is the one instruction the disassembly of the
+   * selected bionic `memcpy`/`memmove` (`memmove_a15`, ARM state, `pld` x10) uses that the string
+   * routines do not, and Tier I refuses inside that routine while Tier J runs it to completion.
+   *
+   * The encodings are `llvm-objdump`'s output over an assembler-produced file, not recalled: ARM
+   * `pld [r1, #-0x400]` = `f551f400`, ARM `pld [r1, #0x400]` = `f5d1f400`, Thumb
+   * `pld [r0]` = `f890 f000`.
+   *
+   * What a real device does with them is already on record from `docs/30` §Step 34's EL0 probe: it
+   * executes them as no-ops and takes no fault, even for an address nothing is mapped at — which is what
+   * the architecture says (PLD reports no MMU fault of any kind). So the question here is only which of
+   * *RetroBug's* two tiers matches that, and the answer decides whether the remaining `memcpy` refusal is
+   * `pld` at all. Nothing is asserted yet: this run exists to find out, and the row becomes an assertion
+   * once there is something to assert.
+   */
+  struct PreloadRow {
+    const char* name;
+    bool thumb;
+    bool is_pld;           ///< false for the controls, which are the same blocks with the preload removed
+    std::uint32_t words[4];  ///< 32-bit words in ARM state, halfword-pairs packed little-endian in Thumb
+  };
+  constexpr PreloadRow kPreloadRows[] = {
+      {"pld [r1,#-0x400] arm", false, true,
+       {0xf551f400u, 0xe2800001u /*add r0,r0,#1*/, 0xe12fff1eu /*bx lr*/}},
+      {"pld [r1,#0x400] arm", false, true, {0xf5d1f400u, 0xe12fff1eu}},
+      {"pld [r0] thumb", true, true, {0xf000f890u /* f890 f000 */, 0x4770u /*bx lr*/}},
+      // The two controls, and the reason this table has them: without a row that differs from a `pld` row
+      // by exactly one instruction, "Tier I refuses `pld`" is an inference from where the refusal was
+      // *attributed* — and this file has already been wrong once about what an attribution means. These
+      // two are the same blocks with the `pld` removed, so if both tiers walk them the only thing left to
+      // account for the refusal is the preload itself.
+      {"add r0,r0,#1 arm", false, false, {0xe2800001u, 0xe12fff1eu}},
+      {"movs r0,#1 thumb", true, false, {0x2001u, 0x4770u}},
+  };
+  unsigned pld_rows = 0, control_rows = 0;
+  for (const PreloadRow& row : kPreloadRows) {
+    cursor = (cursor + 3u) & ~3u;
+    const exec::GuestAddr at = cursor;
+    unsigned len = 0;
+    for (unsigned i = 0; i < 4 && row.words[i] != 0; ++i) {
+      if (row.thumb) {
+        const std::uint16_t lo = static_cast<std::uint16_t>(row.words[i]),
+                        hi = static_cast<std::uint16_t>(row.words[i] >> 16);
+        if (!rig.mem->Write(at + len, &lo, 2)) break;
+        len += 2;
+        if (hi != 0) {
+          if (!rig.mem->Write(at + len, &hi, 2)) break;
+          len += 2;
+        }
+      } else {
+        const std::uint32_t w = row.words[i];
+        if (!rig.mem->Write(at + len, &w, 4)) break;
+        len += 4;
+      }
+    }
+    cursor += len + 4u;  // again: a distinct address per row, which is the bug §Step 36 was
+    exec::MachineState si = EntryState(at, 0, 0, row.thumb);
+    si.r[1] = kExclDataPage + 0x40u;  // a mapped r1, so a fault here cannot be blamed on the address
+    exec::MachineState sj = si;
+    const exec::RunResult ri = rig.interp->Run(si, 200);
+    const exec::RunResult rj = rig.jit->Run(sj, 200);
+    std::printf("  PROBE[pld] %-20s I r0=0x%s reason=%d | J r0=0x%s reason=%d  %s%s\n", row.name,
+                Hex(si.r[0]).c_str(), static_cast<int>(ri.reason), Hex(sj.r[0]).c_str(),
+                static_cast<int>(rj.reason), ri.reason == rj.reason ? "" : "TIERS DISAGREE  ",
+                ri.reason == rj.reason ? "" : ri.detail.c_str());
+    if (row.is_pld) {
+      ++pld_rows;
+      /**
+       * Both tiers, equal, and both returning. This row was a print-only diagnostic until Tier I learned
+       * to execute a preload as the no-op the architecture says it is (`docs/30` §Step 37): hardware
+       * faults on none of these three encodings on either SoC, Tier J already continued, and Tier I
+       * stopped — which is what made bionic's `memmove_a15` unreachable on the interpreter while the JIT
+       * ran it. Asserting agreement rather than a specific `r0` keeps the row honest about the one thing
+       * that matters here: the two tiers must not disagree, whatever the value is.
+       */
+      CHECK_CTX(ri.reason == exec::StopReason::Returned && rj.reason == exec::StopReason::Returned,
+                std::string{row.name} + ": I reason=" +
+                    std::to_string(static_cast<int>(ri.reason)) + " J reason=" +
+                    std::to_string(static_cast<int>(rj.reason)) + " — a preload has to be a no-op that"
+                    " continues on both tiers; hardware takes no fault from it on either device");
+      CHECK_CTX(si.r[0] == sj.r[0],
+                std::string{row.name} + ": the tiers disagree about the register state after a preload:" +
+                    " I r0=0x" + Hex(si.r[0]) + " J r0=0x" + Hex(sj.r[0]));
+    } else {
+      ++control_rows;
+      CHECK_CTX(ri.reason == exec::StopReason::Returned && rj.reason == exec::StopReason::Returned,
+                std::string{row.name} + " (control): I reason=" +
+                    std::to_string(static_cast<int>(ri.reason)) + " J reason=" +
+                    std::to_string(static_cast<int>(rj.reason)) +
+                    " — a control block that does not run makes the preload rows above meaningless");
+      CHECK_CTX(si.r[0] == 1u && sj.r[0] == 1u,
+                std::string{row.name} + " (control): I r0=0x" + Hex(si.r[0]) + " J r0=0x" +
+                    Hex(sj.r[0]) + ", both expected 1");
+    }
+  }
+  CHECK_CTX(pld_rows == 3u && control_rows == 2u,
+            "the preload table ran " + std::to_string(pld_rows) + " preload and " +
+                std::to_string(control_rows) + " control rows, expected 3 and 2");
 }
 
 }  // namespace

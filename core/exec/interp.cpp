@@ -56,6 +56,7 @@
 #include <limits>
 #include <string>
 #include <type_traits>
+#include "dynarmic/interface/A32/config.h"  // `A32::Exception`, the operand `A32ExceptionRaised` carries
 #include <unordered_map>
 #include <utility>
 
@@ -921,31 +922,50 @@ bool BlockRunner::Step(const Inst* inst) {
 
     case Opcode::A32ExceptionRaised: {
       /**
-       * Named with the guest's own coordinates, because "the front end raised an exception at this
-       * instruction" is not something a reader can act on. Six banked-register and privileged forms, the
-       * unpredictable-operands forms (`d == PC` in the media translators, for instance), `NEONUnimplemented`
-       * and a handful of others all arrive here, and the only way to tell them apart is to disassemble the
-       * halfwords.
-       *
-       * What this is **not** is the address of the instruction that raised. There is no PC between a
-       * block's entry and its terminator in this interpreter — the location descriptor only moves on a
-       * `BranchWritePC`/`BXWritePC` — and not every front-end exception ends the block, so the address
-       * below is the start of the block the raising instruction is in, and the instruction is at or after
-       * it. The first run that used this said so: `memcpy`'s refusal reported `0xe92d4001` at the named
-       * PC, which is `stmdb sp!, {r0, lr}`, an instruction with nothing wrong with it. A precise-looking
-       * wrong address is worse than a range, so the range is what is stated.
+       * The exception op's own operands answer the question this file previously could only gesture at.
+       * Dynarmic emits it as `Inst(A32ExceptionRaised, Imm32(current_location.PC()),
+       * Imm64(exception))` (`a32_ir_emitter.cpp:134`), so argument 0 is the **address of the instruction
+       * that raised** and argument 1 is the exception — which is better than anything reachable from the
+       * block's location descriptor. The first version of this message printed the block entry and
+       * warned that it might not be the raising instruction; for `pld` it was off by exactly one
+       * encoding, and the probe rows in `core/tests/exec_tier_diff_test.cpp` were what showed it.
        */
-      const GuestAddr at = location_.PC();
-      std::uint32_t w = 0;
-      const bool readable = memory_.Read(at, &w, 4);
-      const std::string bytes =
-          readable
-              ? (location_.TFlag()
-                     ? Hex(w & 0xFFFFu) + " " + Hex(static_cast<std::uint32_t>(w >> 16))
-                     : Hex(w))
-              : std::string{"<unreadable>"};
-      return Fault("the front end raised an exception in the block entering at 0x" + Hex(at) +
-                   (location_.TFlag() ? " (Thumb, halfwords " : " (ARM, word ") + bytes + ")");
+      std::uint64_t where = 0, kind = 0;
+      if (!HasArgs(inst, 2) || !ImmediateAsU64(inst->GetArg(0), where) ||
+          !ImmediateAsU64(inst->GetArg(1), kind)) {
+        const GuestAddr at = location_.PC();
+        std::uint32_t w = 0;
+        const bool readable = memory_.Read(at, &w, 4);
+        return Fault("the front end raised an exception in the block entering at 0x" + Hex(at) +
+                     (location_.TFlag() ? " (Thumb, halfwords " : " (ARM, word ") +
+                     (readable ? Hex(w & 0xFFFFu) + " " + Hex(w >> 16) : "<unreadable>") + ")");
+      }
+      using Exception = Dynarmic::A32::Exception;
+      constexpr std::uint64_t kPreload = static_cast<std::uint64_t>(Exception::PreloadData);
+      constexpr std::uint64_t kPreloadWrite =
+          static_cast<std::uint64_t>(Exception::PreloadDataWithIntentToWrite);
+      constexpr std::uint64_t kPreloadInst = static_cast<std::uint64_t>(Exception::PreloadInstruction);
+      if (kind == kPreload || kind == kPreloadWrite || kind == kPreloadInst) {
+        /**
+         * A preload is a hint. ARM's rule is that it never reports a fault of any kind and changes no
+         * architectural state, so executing it as nothing and continuing at the next encoding is the
+         * correct semantics, not a tolerance — and it is what the shipping tier and real hardware both
+         * do with these bytes: `tests/guest/mediarows.c`-style probes on the SM7250 and the SM8550 run
+         * `pld` at EL0 without faulting, and Tier J's own answer for the same three encodings is
+         * "continue", which is what the divergence rows in the differential lane record. Bionic's
+         * selected `memcpy`/`memmove` (`memmove_a15` on both devices) contains ten of them, which is how
+         * this was found: refusing one made Tier I stop inside `memcpy` while Tier J ran it to the end.
+         *
+         * Deliberately not `HaltExecution`-adjacent state: the raise op is *not* the block terminator, so
+         * returning true lets the rest of the block — and then its terminal — run as if the instruction
+         * had never been there, which is precisely the effect the hint has on hardware.
+         */
+        return true;
+      }
+      // The exception *number* rather than a name: `jit.cpp`'s `ExceptionName` owns that table, and a
+      // second copy here would be a second thing allowed to drift. The number indexes that table directly.
+      return Fault("the A32 front end raised exception " + std::to_string(kind) + " at 0x" +
+                   Hex(static_cast<std::uint32_t>(where)));
     }
 
     /**
