@@ -1874,6 +1874,249 @@ void exclusive_access_rows_match_hardware_rule_and_each_other() {
                                counted[static_cast<int>(ExclProof::kStricter)]));
 }
 
+/**
+ * The ARMv5TE/v6 media ("packed") instructions, row by row, on both tiers.
+ *
+ * Why a lane of its own rather than rows appended to `kExclRows`: the exclusive lane asserts a memory
+ * effect (did the store land?) and its provenance tally is itself checked (`expected three divergence
+ * rows`), so rows whose whole subject is a per-lane flag would be asserting a property of that lane
+ * rather than of these instructions.
+ *
+ * **Every row is one template**, assembled by `clang` for `armv7-none-linux-androideabi26 -mthumb` and
+ * read back out of `llvm-objdump` — none of these halfwords is written from memory, which is the same
+ * recipe `docs/30` §Step 9 settled on for `ldaexh`. The template is:
+ *
+ *     ldr   r2, [r0]        ; operand A, seeded by the lane
+ *     ldr   r3, [r0, #4]    ; operand B
+ *     uadd8 r4, r2, r3      ; set GE from the *unsigned* rule, deliberately
+ *     ldr   r2, [r0]        ; reload (the leading op wrote r4 only, but say so in code, not in prose)
+ *     ldr   r3, [r0, #4]
+ *     <op>  r4, r2, r3      ; the instruction under test
+ *     mrs   r3, cpsr        ; CPSR's GE field is the only thing it can be reporting from here
+ *     lsrs  r3, #16
+ *     movs  r2, #15
+ *     ands  r3, r3, r2      ; r3 = the four GE bits, so they can be asserted without a CPSR mask
+ *     mov   r0, r4
+ *     bx    lr
+ *
+ * The leading `uadd8` is what makes the *flag* half of these rows evidence rather than decoration. For
+ * the saturating and halving kinds, ARM says GE is untouched, so the expected value is the one the
+ * leading `uadd8` wrote — and a Tier I that wrote GE from those ops would have to write it *back* to
+ * that value to pass, which is not a thing an implementation does by accident. For the add/subtract
+ * kinds, the leading value is chosen (row by row, in the operand columns) to differ from the expected
+ * one, so a row cannot pass by the flag never having been written at all.
+ *
+ * What the tiers are being asked, per row, is stated in the row's `why` — including the two places where
+ * dynarmic's own back ends disagree and this project has chosen the AArch64 one, because that is the one
+ * that ships here.
+ */
+struct MediaRow {
+  const char* name;
+  const char* asm_text;       ///< the instruction under test, as the assembler printed it
+  std::uint16_t op[2];        ///< its Thumb-2 encoding, big-endian halfword order as objdump prints it
+  std::uint32_t a, b;         ///< operands, planted at the row's data slot
+  std::uint32_t want_r0;      ///< the instruction's result
+  std::uint32_t want_ge;      ///< CPSR[19:16] afterwards
+  const char* why;
+};
+
+constexpr std::uint16_t kMediaPrologue[] = {0x6802, 0x6843, 0xfa82, 0xf443, 0x6802, 0x6843};
+constexpr std::uint16_t kMediaEpilogue[] = {0xf3ef, 0x8300, 0x0c1b, 0x220f, 0x4013, 0x4620, 0x4770};
+
+constexpr MediaRow kMediaRows[] = {
+    {"uadd8 all-carry", "uadd8 r4, r2, r3", {0xfa82, 0xf443}, 0xFFFF'FFFFu, 0x0101'0101u, 0x0000'0000u,
+     0xFu, "the plain add wraps per byte and reports the carry in GE: 0xFF+0x01 in all four lanes"},
+    {"uadd8 no-carry", "uadd8 r4, r2, r3", {0xfa82, 0xf443}, 0x7F7F'7F7Fu, 0x0101'0101u, 0x8080'8080u,
+     0x0u, "the same instruction with no lane carrying: GE has to be *cleared*, not left alone"},
+    {"uadd8 one lane", "uadd8 r4, r2, r3", {0xfa82, 0xf443}, 0x00FF'7F80u, 0x0101'0101u, 0x0100'8081u,
+     0x4u, "GE0 is byte lane 0, so the carry out of byte 2 must land in bit 18 and nowhere else — the"
+           " off-by-a-lane error the magic multiply in emit_arm64_a32.cpp:333-338 exists to avoid"},
+    {"usub8 mixed borrow", "usub8 r4, r2, r3", {0xfaC2, 0xf443}, 0x0100'0080u, 0x0101'0101u, 0x00FF'FF7Fu,
+     0x9u, "GE set where a >= b, which is `>=` and not `>`: lane 3 is 0x01-0x01, exactly equal"},
+    {"sadd8 zero lane", "sadd8 r4, r2, r3", {0xfa82, 0xf403}, 0x01FF'007Fu, 0x0101'0101u, 0x0200'0180u,
+     0xFu, "dynarmic's x64 back end tests the signed sum > 0 and its arm64 one >= 0; byte lane 1 sums to"
+           " exactly 0, so 15 here means Tier I followed arm64 and 11 would mean it followed x64"},
+    {"sadd8 all-negative", "sadd8 r4, r2, r3", {0xfa82, 0xf403}, 0x8080'8080u, 0xFFFF'FFFFu, 0x7F7F'7F7Fu,
+     0x0u, "(-128)+(-1) per lane is below -1, so GE clears — and the leading uadd8 set it to 15 on these"
+           " same operands, so clearing is the only way to get here"},
+    {"ssub8 signed-only", "ssub8 r4, r2, r3", {0xfaC2, 0xf403}, 0x0000'0000u, 0xFFFF'FFFFu, 0x0101'0101u,
+     0xFu, "0-(-1) is a signed borrow that is not an *unsigned* one: the unsigned rule would leave GE 0"
+           " here, so this row is only satisfiable by the signed comparison"},
+    {"uqsub8 no clamp", "uqsub8 r4, r2, r3", {0xfaC2, 0xf453}, 0xFFFF'FFFFu, 0x0101'0101u, 0xFEFE'FEFEu,
+     0xFu, "the saturating form reports nothing: GE stays where the leading uadd8 put it"},
+    {"uqadd8 clamped", "uqadd8 r4, r2, r3", {0xfa82, 0xf453}, 0xFFFF'FFFFu, 0xFFFF'FFFFu, 0xFFFF'FFFFu,
+     0xFu, "0xFF+0xFF clamps to 0xFF per byte where uadd8 would have wrapped to 0xFE — the difference"
+           " between these two is the data result, not only the flag"},
+    {"qsub8 clamped", "qsub8 r4, r2, r3", {0xfaC2, 0xf413}, 0x8080'8080u, 0x0101'0101u, 0x8080'8080u,
+     0x0u, "signed saturating subtract: -128-1 clamps to -128 rather than wrapping to +127"},
+    {"uhadd8 truncating", "uhadd8 r4, r2, r3", {0xfa82, 0xf463}, 0x7E7E'7E7Eu, 0x0101'0101u, 0x3F3F'3F3Fu,
+     0x0u, "(0x7E+0x01)>>1 is 63; the (a+b+1)>>1 form AArch64's URHADD uses would answer 64. dynarmic's"
+           " own x64 route derives the truncating law from pavg at emit_x64_packed.cpp:256-259"},
+    {"uhsub8 through zero", "uhsub8 r4, r2, r3", {0xfaC2, 0xf463}, 0x0000'0000u, 0x0202'0202u,
+     0xFFFF'FFFFu, 0x0u, "ARM forms the difference one bit wider than the lane and takes bits [8:1], so"
+                         " 0-2 halves to 0xFF and not to 0x7F"},
+    {"shadd8 positive", "shadd8 r4, r2, r3", {0xfa82, 0xf423}, 0x7F7F'7F7Fu, 0x7F7F'7F7Fu, 0x7F7F'7F7Fu,
+     0x0u, "signed halving add of two maxima stays at 127; the arithmetic shift is what makes 0x7E+0x7E"
+           " come back as 0x7E rather than 0xFE"},
+    {"uadd16 lane map", "uadd16 r4, r2, r3", {0xfa92, 0xf443}, 0x0000'FFFFu, 0x0001'0001u, 0x0001'0000u,
+     0x3u, "a 16-bit lane sets *both* GE bits of the two bytes it spans, so halfword 0 carries is GE0 and"
+          " GE1 = 0b0011: hardware on the SM7250 and the SM8550 alike (`tests/guest/mediarows.c`), which"
+          " overturned the expectation this row first shipped with (2, read off dynarmic packing a"
+          " 0xFFFF halfword off bit 15 — see the note above the lane)"},
+    {"usub16 lane map", "usub16 r4, r2, r3", {0xfad2, 0xf443}, 0x0001'0000u, 0x0000'0001u,
+     0x0001'FFFFu, 0xCu, "the upper halfword does not borrow and the lower one does, so GE2 and GE3 = 12."
+                         " The lane's first expectation was 8, from the same bit-15 reading the oracle"
+                         " disproved; Tier I produced 12 all along, because it stores 0xFFFF per lane and"
+                         " compresses byte-wise"},
+    {"sel from mixed GE", "sel r4, r2, r3", {0xfaa2, 0xf483}, 0x00FF'7F80u, 0x0101'0101u, 0x01FF'0101u,
+     0x4u, "SEL takes Rn where GE is set and Rm where it is clear, per byte. With GE=4 only byte 2 comes"
+           " from r2; a reversed polarity gives 0x007F0180 and a lane off by one gives something else"
+           " again. This is the instruction bionic's strcmp reaches for"},
+};
+
+void packed_media_rows_agree_with_the_arm64_recipes() {
+  Rig rig = build();
+  if (!rig.ok) return;
+
+  std::string err;
+  const auto map = [&](exec::GuestAddr at, unsigned prot) {
+    if (rig.mem->Map(at, mem::kGuestPage, prot, &err)) return true;
+    ++checks;
+    fail("could not map a page for the media rows", __LINE__, "0x" + Hex(at) + ": " + err);
+    return false;
+  };
+  if (!map(kExclCodePage, kRead | kWrite | kExec) || !map(kExclDataPage, kRead | kWrite)) return;
+
+  exec::GuestAddr cursor = kExclCodePage + 0x800;  // the exclusive lane's own rows start at +0x100
+  unsigned slot = 1;
+  unsigned rows_run = 0;
+  unsigned rows_diverged = 0;
+  for (const MediaRow& row : kMediaRows) {
+    std::uint16_t blob[6 + 2 + 7 + 1] = {};
+    std::size_t n = 0;
+    for (std::uint16_t h : kMediaPrologue) blob[n++] = h;
+    for (std::uint16_t h : row.op) blob[n++] = h;
+    for (std::uint16_t h : kMediaEpilogue) blob[n++] = h;
+    blob[n++] = 0;  // the terminator `plant` stops at, and the length check below counts
+    cursor = (cursor + 3u) & ~3u;
+    bool planted = true;
+    for (std::size_t i = 0; i < n; ++i) {
+      if (!rig.mem->Write(cursor + static_cast<exec::GuestAddr>(i * 2), &blob[i], 2)) {
+        planted = false;
+        break;
+      }
+    }
+    ++checks;
+    if (!planted) {
+      fail("a media row could not be planted", __LINE__, std::string{row.name});
+      continue;
+    }
+
+    const exec::GuestAddr data = kExclDataPage + slot * kExclSlot;
+    ++slot;
+    const std::uint64_t seed =
+        (static_cast<std::uint64_t>(row.b) << 32) | static_cast<std::uint64_t>(row.a);
+    ++checks;
+    if (!rig.mem->Write(data, &seed, 8)) {
+      fail("a media row's operands could not be seeded", __LINE__, std::string{row.name});
+      continue;
+    }
+
+    exec::MachineState si = EntryState(cursor, 0, 0, /*thumb=*/true);
+    si.r[0] = data;  ///< the blob's only handle on its operands
+    exec::MachineState sj = si;  ///< copied before either tier runs — see the exclusive lane's note
+    const exec::RunResult ri = rig.interp->Run(si, kExclBudget);
+    const exec::RunResult rj = rig.jit->Run(sj, kExclBudget);
+    ++rows_run;
+
+    std::uint64_t mem_i = 0, mem_j = 0;
+    rig.mem->Read(data, &mem_i, 8);
+    rig.mem->Read(data, &mem_j, 8);
+
+    unsigned diverged = 0;
+    const std::uint32_t want_r_i = si.r[0];
+    const unsigned ge_i = (si.cpsr >> 16) & 0xFu;
+    const auto verdict = [&](const char* which, const exec::RunResult& res, const exec::MachineState& s,
+                             std::uint64_t mem) {
+      const unsigned ge = (s.cpsr >> 16) & 0xFu;
+      CHECK_CTX(res.reason == exec::StopReason::Returned,
+                std::string{row.name} + " on Tier " + which + ": reason=" +
+                    std::to_string(static_cast<int>(res.reason)) + " " + res.detail);
+      if (res.reason != exec::StopReason::Returned) return;
+      // A packed instruction is not allowed to touch memory, so its operands survive — asserted on both
+      // tiers, where a wrong data result would otherwise be able to hide behind the register it is read
+      // back from.
+      CHECK_CTX(mem == seed, std::string{row.name} + " on Tier " + which +
+                                 " wrote its operand slot: 0x" + Hex(mem) + " is not 0x" + Hex(seed));
+      if (which[0] == 'I') {
+        // Tier I against the value derived from the architecture and cross-checked against dynarmic's own
+        // portable (x64) recipes. This is the half that gates.
+        CHECK_CTX(s.r[0] == row.want_r0, std::string{row.name} + " on Tier I r0=0x" + Hex(s.r[0]) +
+                                             + " want 0x" + Hex(row.want_r0) + " (" + row.why + ")");
+        // `want_ge` is asserted as an absolute value, so a Tier that does not export CPSR's GE bits at
+        // all fails here rather than agreeing with itself at zero — the difference between an
+        // unimplemented flag and two tiers that both implement it.
+        CHECK_CTX(ge == row.want_ge, std::string{row.name} + " on Tier I GE=" + std::to_string(ge) +
+                                         + " want " + std::to_string(row.want_ge) +
+                                         + " (cpsr=0x" + Hex(s.cpsr) + ", " + row.why + ")");
+        return;
+      }
+      /**
+       * Tier J is compared against Tier I and *counted*, not asserted equal.
+       *
+       * This lane first ran 13 of its 16 rows red on Tier J only, identically on both devices, with a
+       * uniform signature: `r0` and GE both holding what the *leading* `uadd8` had produced, as if the
+       * instruction under test had not run. Two implementations disagreeing is a question, not an answer,
+       * so the same bytes were assembled once into `tests/guest/media_rows.s`, linked into a 32-bit
+       * executable, and run natively: **hardware agrees with Tier I on all 16 rows on both the SM7250 and
+       * the SM8550**, and disagrees with Tier J on the same 13. Two of the oracle's rows even corrected
+       * this table — the 16-bit GE values are 3 and 12 (a halfword sets *both* of its byte's GE bits),
+       * where the expectations read off dynarmic's packing said 2 and 8, and Tier I had produced the
+       * architectural answer all along.
+       *
+       * So Tier J is not asserted here because it is known wrong on these rows, and the divergence is
+       * counted rather than hidden: see `docs/30` §Step 35 and task #43. Fixing dynarmic's AArch32 media
+       * path is the change that should turn these 13 to agreement, and when it does this bound has to be
+       * replaced by an assertion of equality with `want_r0`/`want_ge`.
+       */
+      const bool differs = s.r[0] != want_r_i || ge != ge_i;
+      if (differs) {
+        ++diverged;
+        std::printf("  TIER-J-DIVERGES  %-22s I r0=0x%s GE=%u | J r0=0x%s GE=%u | want r0=0x%s GE=%u\n",
+                    row.name, Hex(want_r_i).c_str(), ge_i, Hex(s.r[0]).c_str(), ge,
+                    Hex(row.want_r0).c_str(), row.want_ge);
+      }
+    };
+    verdict("I", ri, si, mem_i);
+    verdict("J", rj, sj, mem_j);
+    rows_diverged += diverged;
+
+    std::printf("[media] %-20s r0 I=0x%s J=0x%s (want 0x%s)  GE I=%u J=%u (want %u)\n", row.name,
+                Hex(si.r[0]).c_str(), Hex(sj.r[0]).c_str(), Hex(row.want_r0).c_str(),
+                (si.cpsr >> 16) & 0xFu, (sj.cpsr >> 16) & 0xFu, row.want_ge);
+  }
+  // A row that never ran is the quiet failure this project has now been caught by twice: every check
+  // above is inside the loop, so a `continue` that fired for all of them would otherwise report a clean
+  // lane with nothing in it.
+  CHECK_CTX(rows_run == static_cast<unsigned>(sizeof kMediaRows / sizeof kMediaRows[0]),
+            "only " + std::to_string(rows_run) + " of " +
+                std::to_string(sizeof kMediaRows / sizeof kMediaRows[0]) + " media rows ran");
+  /**
+   * The known Tier J divergence count, pinned at 13 of 16 — measured identically on the SM7250 and the
+   * SM8550, so it is a property of the back end and not of a device.
+   *
+   * The three rows that agree are the ones where the instruction under test *is* `uadd8`, whose result
+   * the leading `uadd8` had already left in the same register: agreement there is the absence of a
+   * second effect, not evidence of a correct one.
+   */
+  CHECK_CTX(rows_diverged == 13u,
+            "Tier J diverged from Tier I on " + std::to_string(rows_diverged) +
+                " media rows, not the 13 recorded in docs/30 §Step 35. If the number went DOWN, dynarmic's"
+                " Thumb-2 media path changed: re-run the on-device oracle for these rows, and if Tier J"
+                " now matches Tier I, delete this bound and assert agreement instead. If it went up, the"
+                " rows are listed by name above — find out which one moved before believing either tier.");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1883,6 +2126,7 @@ int main(int argc, char** argv) {
   fp_groups_are_accurate_or_explicitly_refused();
   declined_instructions_refuse_by_name();
   exclusive_access_rows_match_hardware_rule_and_each_other();
+  packed_media_rows_agree_with_the_arm64_recipes();
   invalidation_reaches_the_compiled_code();
   both_tiers_stop_at_the_same_svc();
   a_guest_cacheflush_reaches_the_tier_that_owns_the_cache();

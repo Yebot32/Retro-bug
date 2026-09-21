@@ -304,10 +304,11 @@ bool IsPackedSigned(Opcode op) {
  *
  * The `>= 0` versus `> 0` question is real and has no single answer in dynarmic: the x64 back end
  * compares the *saturating* sum strictly greater than zero (`emit_x64_packed.cpp:41-63`), which differs
- * from arm64 on the exactly-zero lane (say `0x01 + 0xFF` as signed bytes). Tier I matches **arm64**,
- * because that is the back end that ships on this host and the tiers' agreement is the invariant the
- * differential lane enforces; where two of dynarmic's own back ends disagree, the one under test wins
- * and the disagreement gets recorded, not averaged.
+ * from arm64 on the exactly-zero lane (say `0x01 + 0xFF` as signed bytes). Tier I matches **arm64** —
+ * which is the back end that ships on this host, and the differential is the invariant — and on
+ * 2026-09-21 a 32-bit oracle run natively on both devices agreed with it (the `sadd8 zero lane` row in
+ * `tests/guest/mediarows.c`, whose byte lane 1 sums to exactly zero), so the choice is no longer only a
+ * matter of matching a sibling backend.
  */
 std::uint32_t GeOfPackedAddSub(Opcode op, std::uint32_t a, std::uint32_t b, unsigned width) {
   const bool is_sub = op == Opcode::PackedSubU8 || op == Opcode::PackedSubU16 ||
@@ -1196,17 +1197,21 @@ bool BlockRunner::Step(const Inst* inst) {
     // (the `UADDASX` family, whose lane-to-GE mapping dynarmic does with a `shl 15; sar 31` recipe I have
     // not read in the AArch64 emitter) and `PackedAbsDiffSumU8` (`USAD8`, whose arm64 path ends in an
     // `AND` with a replicated `0x0F` and a `UADDLV` whose half-lane accumulation I have not derived).
-    // Each still refuses by name, and the refusal is the reason: an op I cannot state precisely is one I
-    // cannot tell apart from a correct one when the guest's answer looks plausible.
+    // Each still refuses by name, and the refusal is the reason: an op whose semantics I cannot state
+    // precisely is one I cannot tell apart from a correct implementation when the guest's answer merely
+    // looks plausible. Neither appears in the disassembly of either device's `libc.so` string routines.
     //
     // `PackedSelect` **is** here, because the device's own `strcmp` asked for it: `rb_guest_libc_tests`
     // refused `PackedSelect: no Tier I semantics yet` on a real `libc.so` (`docs/30` §Step 34). That is
-    // worth recording as a correction, because the plan two revisions ago excluded `SEL` on the grounds
-    // that the media instructions are "not reachable on ARMv7-A hardware" — a claim resting on a probe
-    // whose own provenance is now doubtful (an instruction that SIGILLs in Thumb may be an encoding
-    // artifact rather than an unavailable instruction, since `SEL` is ARM-state only). A refusal text
-    // produced by loading and running the actual library outranks a probe about what the library could
-    // contain, and the library won.
+    // worth recording as a correction, because an earlier revision of this file excluded `SEL` on the
+    // grounds that the ARMv6 media instructions are unreachable on this hardware — a claim resting on a
+    // probe whose result is now disproved: `tests/guest/mediarows.c` executes `uadd8`, `usub8`, `sadd8`,
+    // `ssub8`, `uqadd8`, `uqsub8`, `qsub8`, `uhadd8`, `uhsub8`, `shadd8`, `uadd16`, `usub16` and `sel`
+    // natively at EL0 on both the SM7250 and the SM8550, all without faulting. A `SIGILL` says only that
+    // the encoding which was tried was not executed, which for an instruction reached through the wrong
+    // decoder is the
+    // same observable as an unavailable instruction — and nothing in this repo should treat the earlier
+    // probe as a fact about availability again.
     case Opcode::PackedSelect: {
       if (!HasArgs(inst, 3)) return false;
       std::uint32_t ge = 0, to = 0, from = 0;
@@ -1216,14 +1221,13 @@ bool BlockRunner::Step(const Inst* inst) {
        * ARM's definition, and the law dynarmic's x64 back end implements (`(from & ge) | (to & ~ge)`,
        * `emit_x64_packed.cpp:654-690`).
        *
-       * Stated as a choice, because its AArch64 sibling expresses the same thing as
+       * Stated as a choice at the time, because its AArch64 sibling expresses the same thing as
        * `FMOV(Vresult, Vge); BSL(Vresult, Vb, Va)` (`emit_arm64_packed.cpp:395-407`) and the operand
-       * order in that one line is not something I can read the polarity out of without running it. If
-       * the two dynarmic back ends differ here, **this is the row that will show it**: `strcmp` on a real
-       * `libc.so` is compared against the hardware answer on both tiers, so a reversed `SEL` shows up as
-       * Tier I disagreeing with hardware, or Tier J doing so — not as a quiet pass. Until that lane says
-       * otherwise, this follows the architecture and the portable path, and the differential is the
-       * arbiter.
+       * order in that one line is not something to read the polarity out of without running it. The
+       * `sel from mixed GE` row now settles it against hardware on both devices: with GE = 0b0100 and
+       * operands `0x00FF7F80`/`0x01010101`, the answer is `0x01FF0101`, which is this expression and not
+       * the reversed one (`0x007F0180`). Tier J does not reach that answer — task #43 — so the row is
+       * evidence for this line from the oracle, not from the other tier.
        */
       Put(inst, V{(from & ge) | (to & ~ge), 0});
       return true;

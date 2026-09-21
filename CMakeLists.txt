@@ -20,6 +20,11 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(RB_USE_REAL_BOOST "Use a real Boost installation instead of compat/" OFF)
 
+# The host-side launcher's JNI library. OFF by default, and that is the whole of the guard:
+# `tools/run_engine_tests.sh` configures with `-DRB_BUILD_TESTS=ON` and never mentions this, so the option
+# stays OFF there, the block below is never reached, and no test target gains a dependency on it.
+option(RB_BUILD_LAUNCHER "Build the host-side launcher's JNI library (rbguest) for an installed APK" OFF)
+
 # ---------------------------------------------------------------- engine dependency
 set(DYNARMIC_FRONTENDS "A32" CACHE STRING "" FORCE)   # ARMv7 guest only (AD-1)
 set(DYNARMIC_TESTS OFF)
@@ -41,4 +46,30 @@ add_subdirectory(core)
 
 if(RB_BUILD_TESTS)
   add_subdirectory(core/tests)
+endif()
+
+# The host-side launcher: an installable app's `librbguest.so`, which runs a guest library through the
+# engine and reports the answer (android/jni/launcher.cpp).
+#
+# Declared here rather than under `core/`, because `core/CMakeLists.txt` states the rule that excludes it:
+# "nothing here may include Android/JNI/GL headers", and this target's whole job is the JNI half of an
+# Android app. It is also why it is not a `core/tests` target — it is not a test, it is the thing a phone
+# installs.
+#
+# `EXCLUDE_FROM_ALL` is a second, independent guard rather than decoration: even with the option ON, a
+# plain `ninja` in a shared build dir does not build it, so the suites `tools/run_engine_tests.sh` pushes
+# cannot start depending on this existing. `tools/build_launcher_apk.sh` names the target explicitly,
+# which is the only way it gets built.
+if(RB_BUILD_LAUNCHER)
+  add_library(rbguest SHARED EXCLUDE_FROM_ALL android/jni/launcher.cpp)
+  # The same set `rb_guest_apk_tests` links (`core/tests/CMakeLists.txt`), because this target does the
+  # same sequence: memory, loader, linker, executors, bridge. `rb_mem` is already implied by the others,
+  # and named anyway so that a reader of this line sees which layer every address in the launcher goes
+  # through. `-llog` for the two milestone lines that outlive a native crash. Static-lib link order is
+  # CMake's business here, not ours: these are all CMake targets with PUBLIC dependencies.
+  target_link_libraries(rbguest PRIVATE rb_linker rb_loader rb_exec rb_abi rb_mem -llog)
+  # The APK is `arm64-v8a` — RetroBug is the host — and the guest is `armeabi-v7a` *bytes*, never a
+  # library this process asks the system loader for. Nothing here restricts the ABI, so an
+  # `-DANDROID_ABI=x86_64` configure of this target builds and does not run: the emulator cannot execute
+  # the AArch64 code Tier J emits.
 endif()

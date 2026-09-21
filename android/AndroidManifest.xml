@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
+
+  The host-side launcher's manifest: the smallest thing that installs and launches as a real third-party
+  app, same posture as `tests/appdomain/AndroidManifest.xml`.
+
+  Deliberately absent, and each absence is a decision rather than an omission:
+
+    - No permissions. Every one of them is a reason the process could be in a different SELinux domain or
+      carry a different seccomp state than the app RetroBug eventually ships, and the answers this launcher
+      exists to produce are about that domain.
+    - No `android:extractNativeLibs`. `tools/build_launcher_apk.sh` adds `lib/` with plain `jar`, which
+      deflates it, so the platform has to extract `librbguest.so` before `System.loadLibrary` can find it
+      — the same shape the app-domain probe installs in and is recorded as working on both devices.
+    - No `uses-native-library` or ABI restriction. The APK carries exactly one ABI directory (`arm64-v8a`),
+      so the package manager has no choice to make: RetroBug is the host, and the guest's `armeabi-v7a`
+      bytes are data inside an asset, never a library this process asks the system to load.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.retrobug.launcher"
+    android:versionCode="1"
+    android:versionName="1">
+
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />
+
+    <application android:label="RetroBug Launcher" android:debuggable="false">
+        <activity
+            android:name=".LauncherActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

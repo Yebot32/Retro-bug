@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
+#
+# Build the host-side launcher: an installable `arm64-v8a` APK whose native half is RetroBug's own engine.
+#
+# What it produces is the readout for the question `tools/app_domain_probe.sh` could only ask about
+# individual syscalls: does the engine, running as an installed app, get the hardware's answer? The APK
+# carries `lib/arm64-v8a/librbguest.so` (the engine plus `android/jni/launcher.cpp`) and two assets — the
+# guest's APK and the guest's `libm.so` — which the Activity reads as byte arrays and hands across JNI.
+#
+# It runs **no adb command**. Two phones are attached to this machine most of the time and a verification
+# run is normally in flight on them; an install from here would replace a binary mid-run, which is a worse
+# outcome than a script that stops and prints the commands to run by hand. Those are printed at the end
+# instead.
+#
+# The build is the no-Gradle chain recorded as working in `docs/20` §1 and used by
+# `tools/app_domain_probe.sh`: javac -> d8 -> aapt2 link -> jar to add classes.dex + lib + assets ->
+# zipalign -> apksigner. It is spelled out here rather than delegated so the whole path is auditable and
+# runs on a machine with only the SDK and a JDK on it.
+#
+# Usage: tools/build_launcher_apk.sh          # RB_BUILD_TOOLS=36.1.0 pins build-tools
+#                                             # RB_NDK=<ver> pins the NDK
+#                                             # RB_LAUNCHER_BUILD=<dir> redirects the CMake build dir
+
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SDK="${ANDROID_HOME:-$LOCALAPPDATA/Android/Sdk}"
+NDK_VER="${RB_NDK:-28.2.13676358}"
+CM="$SDK/cmake/3.31.6/bin/cmake.exe"
+NJ="$SDK/cmake/3.31.6/bin/ninja.exe"
+TC="$SDK/ndk/$NDK_VER/toolchains/llvm/prebuilt/windows-x86_64"
+BT="$SDK/build-tools/${RB_BUILD_TOOLS:-36.1.0}"
+AJ="$SDK/platforms/android-36/android.jar"
+SRC="$ROOT/android"
+# A build directory of its own, and that is load-bearing rather than tidiness: `build/tests-arm64-v8a` is
+# the one `tools/run_engine_tests.sh` configures and pushes from, and a launcher target in it would be
+# rebuilt over a verification run's binaries. `RB_LAUNCHER_BUILD=<dir>` points it elsewhere, which is how
+# the packaging half below can be exercised against a build directory that already exists.
+BUILD="${RB_LAUNCHER_BUILD:-$ROOT/build/launcher-arm64}"
+OUT="$ROOT/build/launcher-apk"
+# The keystore lives outside $OUT on purpose: $OUT is deleted at the start of every run, and a key that is
+# regenerated each time makes the *next* install fail with
+# `INSTALL_FAILED_UPDATE_INCOMPATIBLE: signatures do not match newer version` — a rebuild appearing as a
+# device problem.
+KS="$ROOT/build/launcher-apk-key.keystore"
+
+GUEST_APK="$ROOT/build/guest-apk/rb_guestprobe.apk"
+GUEST_LIBM="$ROOT/build/guest-libs/libm.so"
+
+to_host() {
+  if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi
+}
+
+# ---- the two guest images. Neither is downloaded, generated, or stubbed by this script: they are outputs
+# of their own build scripts, and a launcher that quietly manufactured a stand-in would report PASS about
+# bytes that no device ever ran.
+for spec in "$GUEST_APK|tools/build-guest-apk.sh" "$GUEST_LIBM|tools/build-guest-libs.sh libm"; do
+  in="${spec%%|*}"; maker="${spec##*|}"
+  if [ ! -s "$in" ]; then
+    echo "missing $in — this script does not create it. Run '$maker' first." >&2
+    exit 1
+  fi
+done
+
+[ -x "$CM" ] || { echo "no cmake at $CM" >&2; exit 1; }
+[ -x "$NJ" ] || { echo "no ninja at $NJ" >&2; exit 1; }
+[ -x "$TC/bin/clang++.exe" ] || { echo "no NDK r$NDK_VER clang++ at $TC (RB_NDK=<ver>)" >&2; exit 1; }
+[ -d "$BT" ] || { echo "no build-tools at $BT (RB_BUILD_TOOLS=<ver>)" >&2; exit 1; }
+[ -f "$AJ" ] || { echo "no android.jar at $AJ" >&2; exit 1; }
+for t in "$BT/aapt2.exe" "$BT/zipalign.exe" "$BT/d8.bat" "$BT/apksigner.bat"; do
+  [ -e "$t" ] || { echo "missing $t" >&2; exit 1; }
+done
+command -v javac >/dev/null || { echo "no javac on PATH" >&2; exit 1; }
+command -v jar >/dev/null || { echo "no jar on PATH (the JDK's is fine)" >&2; exit 1; }
+command -v keytool >/dev/null || { echo "no keytool on PATH" >&2; exit 1; }
+
+# ---- native: the engine, cross-built for the host ABI only.
+#
+# `arm64-v8a` and nothing else, so the package manager has no ABI choice to make. It is not free to make
+# one wrongly in this shape — `tests/appdomain`'s results show an arm64 device taking `arm64` from a
+# two-directory APK — but that probe had to build two APKs precisely because it *needed* the choice to be
+# explicit, and here the opposite holds: `librbguest.so` runs AArch64 code (Tier J's output), so a second
+# directory inviting a 32-bit process would make the run's outcome depend on a picker nobody is watching.
+#
+# `-DRB_BUILD_TESTS=OFF` keeps the test lanes out of this build dir entirely, and `rbguest` is
+# `EXCLUDE_FROM_ALL` in `CMakeLists.txt`, so the explicit target below is the only thing that builds it.
+mkdir -p "$BUILD"
+"$CM" -S "$ROOT" -B "$BUILD" -G Ninja -DCMAKE_MAKE_PROGRAM="$NJ" \
+  -DCMAKE_TOOLCHAIN_FILE="$SDK/ndk/$NDK_VER/build/cmake/android.toolchain.cmake" \
+  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 -DCMAKE_BUILD_TYPE=Release \
+  -DRB_BUILD_TESTS=OFF -DRB_BUILD_LAUNCHER=ON >/dev/null
+"$NJ" -C "$BUILD" rbguest
+LIB="$BUILD/librbguest.so"
+[ -f "$LIB" ] || { echo "no $LIB: the rbguest target did not produce it" >&2; exit 1; }
+
+# ---- staging. The two guest images travel as assets because that is the form the engine is handed them
+# in: `LoadFromBytes` takes a byte vector, and `android/java/.../LauncherActivity.java` reads the asset into
+# one. It also keeps the comparison with the C++ lane honest — `tools/run_engine_tests.sh` pushes
+# `build/guest-apk/rb_guestprobe.apk` to `/data/local/tmp/` and this copies the same file.
+rm -rf "$OUT"
+mkdir -p "$OUT/classes" "$OUT/dex" "$OUT/stage/lib/arm64-v8a" "$OUT/stage/assets/guest"
+# Strip the staged copy only. This target's unstripped Release `.so` is 50,307,560 bytes and
+# `llvm-strip --strip-unneeded` leaves 4,079,208 (both measured on this build, and the stripped figure
+# repeated exactly across two rebuilds). That is a 12x saving on the installed library for information a
+# phone cannot use, and nothing is lost: the debug copy stays at `$LIB`, which is the file a tombstone
+# gets symbolized against afterwards.
+cp "$LIB" "$OUT/stage/lib/arm64-v8a/librbguest.so"
+"$TC/bin/llvm-strip.exe" --strip-unneeded "$OUT/stage/lib/arm64-v8a/librbguest.so"
+cp "$GUEST_APK" "$OUT/stage/assets/guest/rb_guestprobe.apk"
+cp "$GUEST_LIBM" "$OUT/stage/assets/guest/libm.so"
+
+# ---- java -> dex
+javac -nowarn -source 8 -target 8 -bootclasspath "$(to_host "$AJ")" \
+  -d "$(to_host "$OUT/classes")" "$(to_host "$SRC/java/com/retrobug/launcher/LauncherActivity.java")" 2>&1 \
+  | grep -v "bootstrap class path" || true
+find "$OUT/classes" -name '*.class' -print0 |
+  xargs -0 "$BT/d8.bat" --lib "$(to_host "$AJ")" --min-api 26 --output "$(to_host "$OUT/dex")" >/dev/null
+
+# ---- package
+"$BT/aapt2.exe" link -I "$(to_host "$AJ")" --manifest "$(to_host "$SRC/AndroidManifest.xml")" \
+  --min-sdk-version 26 --target-sdk-version 34 --version-code 1 --version-name 1 \
+  -o "$(to_host "$OUT/base.apk")"
+cp "$OUT/dex/classes.dex" "$OUT/stage/"
+(cd "$OUT/stage" && jar -uf "$(to_host "$OUT/base.apk")" classes.dex lib assets)
+"$BT/zipalign.exe" -f -p 4 "$(to_host "$OUT/base.apk")" "$(to_host "$OUT/aligned.apk")"
+[ -f "$KS" ] || keytool -genkeypair -noprompt -keystore "$(to_host "$KS")" -storepass android \
+  -keypass android -alias launcher -dname "CN=RetroBug Launcher, OU=none, O=none, L=none, S=none, C=US" \
+  -keyalg RSA -keysize 2048 -validity 3650 >/dev/null 2>&1
+"$BT/apksigner.bat" sign --ks "$(to_host "$KS")" --ks-pass pass:android --key-pass pass:android \
+  --out "$(to_host "$OUT/rbguest-launcher.apk")" "$(to_host "$OUT/aligned.apk")" >/dev/null
+"$BT/apksigner.bat" verify "$(to_host "$OUT/rbguest-launcher.apk")" && echo "apksigner verify: clean"
+
+echo
+echo "built:"
+printf '  %-38s %s bytes  (stripped, this is what installs)\n' "lib/arm64-v8a/librbguest.so" \
+  "$(wc -c < "$OUT/stage/lib/arm64-v8a/librbguest.so" | tr -d ' ')"
+printf '  %-38s %s bytes  (unstripped, keep it for tombstones)\n' "$LIB" "$(wc -c < "$LIB" | tr -d ' ')"
+printf '  %-38s %s bytes\n' "rbguest-launcher.apk" "$(wc -c < "$OUT/rbguest-launcher.apk" | tr -d ' ')"
+echo "  packaged entries:"
+unzip -v "$OUT/rbguest-launcher.apk" | awk 'NR>3 && NF>7{printf "    %s  %s (%s)\n", $2, $8, $3}'
+echo
+echo "Not installed: this script runs no adb. To run it,"
+echo "  adb install -r -g $(to_host "$OUT/rbguest-launcher.apk")"
+echo "  adb shell am start -n com.retrobug.launcher/.LauncherActivity"
+echo "  adb logcat -s RBLAUNCH"
+echo "Expected on a PASS: for each of the six seeds, a 'JNI_OnLoad tier=I' / 'tier=J' pair and a"
+echo "'mathProbe seed=N tier=I' / 'tier=J' pair, all PASS, then 'summary: 4 PASS, 0 FAIL over 4 calls'."
+echo "The values are the ones the same bytes produced natively on the SM-X710 via"
+echo "tools/build-guest-apk.sh's oracle_linked."

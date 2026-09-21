@@ -3095,6 +3095,98 @@ reaching low absolute addresses (`read at 2889`, `write at 11077`) with both tie
 rig's fault rather than the engine's. `rb_guest_libc_tests`' other 6 rows are the TLS relocations, which
 #32 still has to apply.
 
+## Step 35 — hardware adjudicates the media instructions (Tier J loses), and an installed app runs a 32-bit library through the engine
+
+### The media lane, and the first Tier-J-vs-hardware finding
+
+§Step 34 left Tier I implementing the packed-media set with **no differential rows** — verified by nothing
+wider than `strcmp`. Adding them (`core/tests/exec_tier_diff_test.cpp`, 16 rows) produced the opposite of
+a quiet pass: Tier I matched every hand-derived expectation, and **Tier J disagreed on 13 of 16, identically
+on both devices**, in one uniform shape — `r0` and the GE nibble both holding what the *leading* `uadd8` in
+the row's own prologue had left there. As if the instruction under test had not run.
+
+A tier-vs-tier disagreement is a question, so the same bytes were assembled once
+(`tests/guest/media_rows.s`), linked into a static 32-bit `EM_ARM` executable
+(`tests/guest/mediarows.c`), pushed and run natively on both SoCs. Result, identical on the SM7250 and the
+SM8550:
+
+| | rows agreeing with the table | rows agreeing with the other tier |
+|---|---|---|
+| Hardware (native, 32-bit) | **14 of 16** | — |
+| Tier I | **16 of 16** (the two it "missed" were the table's own error, below) | — |
+| Tier J | 3 of 16 (the three whose op under test *is* the leading `uadd8`) | 13 |
+
+Two of the oracle's rows corrected **this project's expectation**, not the emulator's: a 16-bit lane sets
+*both* of the GE bits of the bytes it spans, so `uadd16` gives GE=3 and `usub16` gives GE=12 — where the
+values read off dynarmic's halfword-packed `0xFFFF` (bit 15 → GE1) said 2 and 8. Tier I had produced the
+architectural answer without being told to, because it stores `0xFFFF` per set lane and compresses
+byte-wise. `docs/30` had that wrong in §Step 34's summary of the GE layout; the table in the lane now
+carries the hardware numbers with the provenance named.
+
+The oracle also **killed** the claim that made §Step 34 skip `SEL` in the first place: every media
+instruction it executed — `uadd8`, `usub8`, `sadd8`, `ssub8`, `uqadd8`, `uqadd16`-adjacent forms, `uqsub8`,
+`qsub8`, `uhadd8`, `uhsub8`, `shadd8`, `uadd16`, `usub16`, `sel` — runs at EL0 on both devices without
+faulting. The earlier probe's `SIGILL` readings were an artifact of the path it took, and §Step 34's note
+that the claim was "now doubted" was too generous: it is withdrawn. `docs/32` §6.4's "USAT8 never reaches
+the IR" and the fleet-table line about the media set should be read against this row, not that probe.
+
+Recorded as **task #43**: Tier J does not apply Thumb-2 media instructions. It is *latent* against today's
+libc because the device's IFUNC resolvers select the NEON `strcmp`/`strlen`/`memcpy` (which is why
+`strcmp` passes on Tier J while its `sel` row does not), and live for any app library that uses them —
+wrong values on the fast tier, right ones on the fallback, and no crash to notice. The lane pins
+`rows_diverged == 13` with a message telling whoever fixes it to replace the bound with an equality
+assertion, so the finding cannot quietly become a pass.
+
+### M1's launcher: `com.retrobug.launcher`, installed and run on both devices
+
+`android/jni/launcher.cpp` + `android/java/com/retrobug/launcher/LauncherActivity.java` +
+`android/AndroidManifest.xml` + `tools/build_launcher_apk.sh`, behind `-DRB_BUILD_LAUNCHER=ON` so the
+default configure never sees the target. An **arm64-v8a app** reads `lib/armeabi-v7a/libmathprobe.so` out
+of a bundled guest APK with `java.util.zip`, hands the bytes to the engine, and the engine — `rb::mem`,
+`rb::loader`, `rb::linker`, `rb::abi`, both executors — loads and calls it.
+
+```
+launch: libmathprobe.so=3284 bytes libm.so=131776 bytes method=mathProbe seed=100 host_page_shift=12
+mem: 67108864-byte window, guest model kBiased, stack 0xf0000..0x100000, sentinel 0xc00000, guard 0x800000
+linker: libm.so at 0x2000, 315 defined functions, 1 module(s) in load order
+app: libmathprobe.so at 0x25000 extent 0x3000, 9 exports, 0 recorded dynsym imports
+app: imports the guest scope did not answer: [none]
+JNI_OnLoad tier=I reason=Returned steps=10   value=0x0000000000010006 hardware=0x0000000000010006 PASS
+JNI_OnLoad tier=J reason=Returned steps=4    value=0x0000000000010006 hardware=0x0000000000010006 PASS
+mathProbe seed=100 tier=I reason=Returned steps=1057 value=0x4058e45fddd281af hardware=0x4058e45fddd281af PASS
+mathProbe seed=100 tier=J reason=Returned steps=245  value=0x4058e45fddd281af hardware=0x4058e45fddd281af PASS
+summary: 4 PASS, 0 FAIL over 4 calls
+```
+
+**24 PASS / 0 FAIL / 0 FATAL on each device**: six seeds (`0, 1, 4, 7, 100, -3`) × two tiers ×
+(`JNI_OnLoad` + `mathProbe`), each launch rebuilding memory, the linker scope and both executors from
+scratch. The expected values are `oracle_linked`'s, captured from these same bytes run natively
+(§Step 24), not host arithmetic.
+
+**What this establishes, `[1A]`:** an installed app in the `untrusted_app` SELinux domain can reserve a
+64 MiB biased guest window, dynarmic's code cache, map the stack/sentinel/guard pages, place a real
+32-bit shared object *as bytes*, resolve its PLT against a second one through `rb::linker`, and reach the
+hardware answer through `rb::abi` on both tiers. The shell-domain numbers from `tools/app_domain_probe.sh`
+were never evidence about this domain, and now they are not needed for it.
+
+**What this does not establish, and must not be reported as:** that RetroBug runs 32-bit code where the
+platform cannot. Both attached devices execute AArch32 natively, so an on-device PASS is compatible with
+the OS being the authority — except that in this design it structurally cannot be: the host process is
+arm64-only, the guest `.so` is never installed, never `dlopen`ed and never handed to the system linker
+(its bytes travel as a `jbyteArray`), and the `steps=` column is RetroBug's own instruction counter
+(963 IR ops on Tier I against 231 guest encodings on Tier J for the same call). That argument is
+`[INFER]` from the code path, not measured. The measurement is the one this desk cannot make: install the
+*guest* APK on the **OnePlus 12** (SD 8 Gen 3, `abilist32` empty), show the platform refuses it —
+`/data/local/tmp/oracle_libc: not executable: 32-bit ELF file` is already on record as the exec-side
+form — and then show RetroBug's launcher answering the same numbers on the same device. **Ask for that
+phone by name.** Until then the launch claim is `[UNVERIFIED]`, and this section says so in the place
+where someone would otherwise infer otherwise from 24 PASSes.
+
+One code-review catch on the launcher's first cut, recorded because it is the same shape as §Step 34's:
+`emit()` compared a call's value against `want_bits`, which is 0 for a seed with no captured hardware row
+— so a call returning 0 would have PASSed while the comment claimed a guard existed against exactly that.
+The comparison now carries `have_hardware` and a seed without an oracle row cannot pass.
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |
