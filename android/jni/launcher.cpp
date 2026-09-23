@@ -446,7 +446,202 @@ std::string Launch(const std::vector<std::uint8_t>& app_image,
   return out;
 }
 
+/**
+ * Load one guest library the way `Launch` does and report what it *is*, rather than whether it passed.
+ *
+ * Why this is a second function and not a mode of `Launch`: `Launch` answers a question about one library
+ * nobody has to identify — it looks up a fixed probe symbol, compares the result against a table measured
+ * on a phone, and prints PASS/FAIL. A game chosen from the library screen is a library no one has
+ * measured, so the honest report is its shape: is it an ELF32 ARM image, what does it need, which of its
+ * imports did the guest scope answer and which were answered by the trap address that faults when called,
+ * and — if it exports one — what does its `JNI_OnLoad` return through the emulator.
+ *
+ * The memory layout, resolver and linker setup are deliberately duplicated from `Launch` rather than
+ * shared with it. `Launch`'s path is verified on hardware (`docs/30` §Step 37); a helper extracted for both
+ * would put that verification behind a refactor no device has run, to save twenty lines.
+ *
+ * `tiers`: 0 = interpreter then JIT, 1 = interpreter only, 2 = JIT only.
+ */
+std::string Inspect(const std::vector<std::uint8_t>& app_image,
+                    const std::vector<std::uint8_t>& libm_image, const std::string& label,
+                    int tiers) {
+  std::string out;
+  const unsigned page_shift = HostPageShift();
+  Say(&out, "inspect: %s=%zu bytes libm.so=%zu bytes host_page_shift=%u", label.c_str(),
+      app_image.size(), libm_image.size(), page_shift);
+  if (app_image.empty()) {
+    Say(&out, "FATAL: no library bytes arrived — this APK has no lib/armeabi-v7a entry, or it could not"
+              " be read out of the zip");
+    return out;
+  }
+  if (libm_image.empty()) {
+    Say(&out, "FATAL: the guest libm asset is missing, and a guest library is linked against it");
+    return out;
+  }
+  if (!loader::LooksLikeAArch32Elf(app_image.data(), app_image.size())) {
+    Say(&out, "FATAL: %s is not an ELF32 ARM image. This is what RetroBug executes, so an arm64 or a"
+              " dex-only APK has nothing here it can run.", label.c_str());
+    return out;
+  }
+
+  std::string err;
+  AddressModel model;
+  model.kind = AddressModel::kBiased;
+  model.host_page_shift = page_shift;
+  std::unique_ptr<GuestMemory> mem = GuestMemory::Create(kWindowBytes, model, &err);
+  if (!mem) {
+    Say(&out, "FATAL: GuestMemory::Create(%zu) refused: %s", kWindowBytes, err.c_str());
+    return out;
+  }
+  if (!mem->Map(kGuardPage, kGuestPage, kRead | kWrite, &err)) {
+    Say(&out, "FATAL: mapping the stack-guard page failed: %s", err.c_str());
+    return out;
+  }
+  const std::uint32_t guard = 0xdead'beefu;
+  mem->Write(kGuardPage, &guard, 4);
+  if (!mem->Map(kStackTop - kStackBytes, kStackBytes, kRead | kWrite, &err)) {
+    Say(&out, "FATAL: mapping the guest stack failed: %s", err.c_str());
+    return out;
+  }
+
+  const loader::SymbolResolver host = [&](const std::string& name) -> std::optional<std::uint32_t> {
+    if (name == "__stack_chk_guard") return kGuardPage;
+    return kUnresolved;
+  };
+  const linker::ImageProvider provider = [libm_image](const std::string& soname)
+      -> std::optional<std::vector<std::uint8_t>> {
+    if (soname == "libm.so") return libm_image;
+    return std::nullopt;
+  };
+  std::unique_ptr<linker::GuestLinker> linker =
+      std::make_unique<linker::GuestLinker>(*mem, provider, host);
+  auto libm_mod = linker->Link("libm.so", libm_image, &err);
+  if (!libm_mod) {
+    Say(&out, "FATAL: GuestLinker::Link(\"libm.so\") failed: %s", err.c_str());
+    return out;
+  }
+  const loader::GuestModule* libm = *libm_mod;
+  std::size_t libm_functions = 0;
+  for (const auto& sym : libm->exports) {
+    if (sym.defined && sym.is_function) ++libm_functions;
+  }
+  Say(&out, "linker: libm.so at 0x%s, %zu defined functions, %zu module(s) in load order",
+      Hex(libm->base).c_str(), libm_functions, linker->order().size());
+
+  std::vector<std::string> trapped;
+  loader::LoadOptions app_opts;
+  app_opts.resolve = [&](const std::string& name) -> std::optional<std::uint32_t> {
+    if (const auto found = linker->Lookup(name)) return found;
+    trapped.push_back(name);
+    return host(name);
+  };
+  auto app_mod = loader::LoadFromBytes(*mem, app_image, label, app_opts, &err);
+  if (!app_mod) {
+    Say(&out, "FATAL: the loader refused %s: %s", label.c_str(), err.c_str());
+    Say(&out, "  (a refusal names every slot it could not fill; a library built against a libc RetroBug"
+              " does not ship yet is the expected shape of this)");
+    return out;
+  }
+  const loader::GuestModule& app = *app_mod;
+  std::size_t defined_exports = 0;
+  for (const auto& sym : app.exports) {
+    if (sym.defined) ++defined_exports;
+  }
+  Say(&out, "loaded: %s at 0x%s extent 0x%s, %zu defined exports, %zu recorded dynsym imports",
+      app.soname.empty() ? label.c_str() : app.soname.c_str(), Hex(app.base).c_str(),
+      Hex(app.extent).c_str(), defined_exports, app.imports.size());
+  if (!app.needed.empty()) {
+    std::string needs;
+    for (const std::string& one : app.needed) needs += (needs.empty() ? "" : ", ") + one;
+    Say(&out, "needs: %s", needs.c_str());
+  }
+  if (!app.unsupported_relocs.empty()) {
+    std::string relocs;
+    for (const std::string& one : app.unsupported_relocs) relocs += (relocs.empty() ? "" : ", ") + one;
+    Say(&out, "refused relocations: %s", relocs.c_str());
+  }
+  if (app.init_array.empty() && app.init.addr == 0) {
+    Say(&out, "constructors: none recorded (DT_INIT_ARRAY and DT_INIT are both empty)");
+  } else {
+    Say(&out, "constructors: %zu in DT_INIT_ARRAY — recorded, NOT run (docs/30 §Step 33: they run after"
+              " the dependency scope exists)",
+        app.init_array.size());
+  }
+
+  abi::AbiContext ctx{*mem, kStackTop, kReturnAddress};
+  exec::InterpExecutor interp{*mem, kReturnAddress, &ctx};
+  exec::JitExecutor jit{*mem, kReturnAddress, &ctx};
+  if (!jit.ok()) Say(&out, "tier J is unavailable before any guest code ran: %s", jit.error().c_str());
+
+  // One place that writes the trap list, so the two exits below cannot drift apart. `Say` is variadic and
+  // takes a `const char*`, so the note is built as a string first: a ternary mixing `""` with a
+  // concatenation hands the variadic call a `std::string` and clang refuses it.
+  const auto say_trapped = [&]() {
+    if (trapped.empty()) {
+      Say(&out, "imports the guest scope did not answer: none");
+      return;
+    }
+    Say(&out, "imports the guest scope did not answer: %zu (a call into one faults at 0x%s)",
+        trapped.size(), Hex(kUnresolved).c_str());
+    for (std::size_t i = 0; i < trapped.size() && i < 12; ++i) Say(&out, "  %s", trapped[i].c_str());
+    if (trapped.size() > 12) Say(&out, "  ... and %zu more", trapped.size() - 12);
+  };
+
+  const auto onload = app.FindExport("JNI_OnLoad");
+  if (!onload) {
+    Say(&out, "JNI_OnLoad: this library does not export one, so there is no entry point RetroBug can"
+              " call yet. Loading it is where this build stops.");
+    say_trapped();
+    return out;
+  }
+
+  Say(&out, "JNI_OnLoad: exported (0x%s). Calling it with env=0 clazz=0 — a real JavaVM is not something"
+            " this host has, and a library that dereferences the null will fault *inside the emulator*,",
+      Hex(static_cast<std::uint32_t>(onload->addr)).c_str());
+  Say(&out, "  which is reported here as a Fault rather than crashing this process.");
+  const auto call_one = [&](exec::Executor& engine, const char* tier) {
+    const Outcome got = Call(engine, ctx, app, "JNI_OnLoad", "II",
+                             {abi::Value32::Ptr(0), abi::Value32::Ptr(0)});
+    Say(&out, "JNI_OnLoad tier=%s reason=%s steps=%u value=0x%s", tier, ReasonName(got.reason), got.steps,
+        Hex64(got.bits).c_str());
+    if (got.reason != exec::StopReason::Returned && !got.detail.empty()) {
+      Say(&out, "    stopped because: %s", got.detail.c_str());
+    }
+    Say(&out, "    callee's last state: pc=0x%s lr=0x%s r0=0x%s sp=0x%s cpsr=0x%s",
+        Hex(got.exit.pc).c_str(), Hex(got.exit.r[14]).c_str(), Hex(got.exit.r[0]).c_str(),
+        Hex(got.exit.r[13]).c_str(), Hex(got.exit.cpsr).c_str());
+  };
+  if (tiers == 0 || tiers == 1) call_one(interp, "I");
+  if ((tiers == 0 || tiers == 2) && jit.ok()) call_one(jit, "J");
+  say_trapped();
+  return out;
+}
+
 }  // namespace
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_retrobug_launcher_LauncherActivity_nativeInspect(JNIEnv* env, jclass /*clazz*/,
+                                                          jbyteArray guest_so, jbyteArray libm_so,
+                                                          jstring label, jint tiers) {
+  std::string name;
+  if (label != nullptr) {
+    const char* chars = env->GetStringUTFChars(label, nullptr);
+    if (chars != nullptr) {
+      name = chars;
+      env->ReleaseStringUTFChars(label, chars);
+    }
+  }
+  if (name.empty()) name = "guest.so";
+  const std::vector<std::uint8_t> app_image = Bytes(env, guest_so);
+  const std::vector<std::uint8_t> libm_image = Bytes(env, libm_so);
+  std::string report;
+  try {
+    report = Inspect(app_image, libm_image, name, static_cast<int>(tiers));
+  } catch (const std::exception& e) {
+    report = std::string{"FATAL: unhandled exception while inspecting: "} + e.what();
+  }
+  return env->NewStringUTF(report.c_str());
+}
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_retrobug_launcher_LauncherActivity_nativeLaunch(JNIEnv* env, jclass /*clazz*/,

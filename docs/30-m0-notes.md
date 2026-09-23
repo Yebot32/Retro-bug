@@ -3452,6 +3452,52 @@ device and refuses to guess between two), so a green build means the APK was pro
 inside it is correct — that is what §Step 37's device run is for. And the launch claim still needs the
 OnePlus 12: both attached phones execute 32-bit ARM natively, so a PASS on them is agreement, not proof.
 
+## Step 39 — the launcher becomes an app: home, library, settings, diagnostics
+
+The owner's note on the previous build was blunt and correct: a white page full of engine text is not an
+app. `android/java/com/retrobug/launcher/LauncherActivity.java` is now four screens — home, **My games**,
+settings, and the self-test, which moved to a diagnostics screen behind a button. Pure framework views,
+built in code, one Activity, one file: `tools/build_launcher_apk.sh` compiles that single path with `javac`
+and links against a manifest with no resources, so a layout XML or a second source file would mean
+rewriting the script that produced every artifact verified on hardware.
+
+`[1L]` **What "Play" does, and why it is not a lie.** The library lists APKs added through the system file
+picker and copied into the app's own storage. Run streams the APK (never holding it in memory — a game's
+APK is hundreds of MB and only one entry inside `lib/armeabi-v7a/` is executable), then loads that library
+and calls its `JNI_OnLoad` through the emulator. It cannot launch a whole app: there is no guest libc, DEX
+loader or JavaVM in this build, and the screen says so before you tap. That is the honest version of "play"
+at this milestone — and it is a real run, not a mock: the report shows the load address, the `DT_NEEDED`
+list, which imports the guest scope answered, and `JNI_OnLoad`'s result per tier.
+
+`[1L]` **New native entry point:** `java ... nativeInspect(byte[] so, byte[] libm, String label, int tiers)`
+→ `Inspect()` in `android/jni/launcher.cpp`. It duplicates `Launch`'s memory/resolver/linker setup rather
+than sharing it, deliberately: `Launch`'s path is the one verified on hardware, and a helper extracted for
+both would put that verification behind a refactor no device has run.
+
+`[1L]` **Verified on the SM7250** (screens in `tests/guest/output/ui-*.png`): the home screen with the
+phone's own 32-bit answer printed; the library's add flow end to end through the system picker, including
+the copy into app storage; and Run against a real 32-bit APK, which reported
+
+```
+apk: rb_probe.apk (4177 bytes)
+32-bit ARM libraries: 1 (lib/armeabi-v7a/libmathprobe.so)
+loaded: lib/armeabi-v7a/libmathprobe.so at 0x25000 extent 0x3000, 9 defined exports
+needs: libdl.so, libc.so
+JNI_OnLoad tier=I reason=Returned steps=10 value=0x0000000000010006
+JNI_OnLoad tier=J reason=Returned steps=4 value=0x0000000000010006
+```
+
+`[UNVERIFIED]` **One path is written and unexercised:** an APK whose only libraries are 64-bit
+(`arm64-v8a`), which is the common case for anything from a modern store. The screen is meant to answer it
+with "this APK carries no lib/armeabi-v7a library", and that branch has not been driven on a device — the
+file picker is what makes it awkward to automate, and I stopped rather than claim it. It is the first thing
+to tap through by hand.
+
+`[UNVERIFIED]` Settings are real but thin: execution tier (both/interpreter/compiler), full-vs-trimmed
+reports, and whether the self-test auto-runs. Nothing is per-game and nothing leaves the phone. The tier
+setting is honoured by the library's Run; the self-test still runs both tiers because comparing them is its
+whole point.
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |

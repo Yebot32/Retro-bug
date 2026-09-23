@@ -1,34 +1,29 @@
 /*
  * RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
  *
- * The Activity that carries the host-side launcher: RetroBug's engine, running inside an installed app,
- * launching an `armeabi-v7a` library out of an APK and reporting whether it got the hardware's answer.
+ * The launcher app: a home screen, a library you add APKs to, settings, and a diagnostics screen that
+ * keeps the engine self-test the earlier version of this file was entirely made of.
  *
- * Java's whole job here is to move bytes and to put the report somewhere a person can read it — a screen
- * for a run nobody is watching, and logcat for a run watched over `adb` (the C++ lane's own harness reads
- * `adb logcat -s RBLAUNCH`, so the log lines are part of the interface and not a debugging aid). Everything
- * that decides PASS or FAIL is in `android/jni/launcher.cpp`, because the numbers it compares against come
- * from the engine's own state and there is no honest way to hand them to Java and have them judged
- * somewhere else.
+ * The shape of it is a decision about honesty as much as about UI. RetroBug today executes a guest's
+ * 32-bit ARM *native* code: it loads an `armeabi-v7a` library, links it against the guest `libm` it ships,
+ * and can call an entry point through the emulator. It does not run a whole Android app — there is no guest
+ * libc, no DEX, no JavaVM, and a game that needs any of those stops early. So the library screen says what
+ * "run" does and what it found, rather than showing a spinner and a fake progress bar.
  *
- * The one thing the *screen* decides, and it decides it because only the platform can answer it, is the
- * line about 32-bit support. `Build.SUPPORTED_32_BIT_ABIS` is empty exactly when the OS cannot execute
- * `armeabi-v7a` code at all, and that is the difference between "the guest ARMv7 bytes ran" and "the guest
- * ARMv7 bytes ran *in this process*". On a 32-bit-capable phone a PASS is the engine agreeing with the
- * device; on a 64-bit-only phone it is the only way the instructions could have run at all. The banner
- * says which phone is which rather than leaving the reader to know.
+ * Screens are built in code rather than from layouts, and there is exactly one Activity and one file,
+ * because `tools/build_launcher_apk.sh` compiles this single path with `javac` and packages it with
+ * `aapt2 link` against a manifest with no resources. Anything that needed a resource file, an XML layout,
+ * or a second source file would need that script rewritten, and its output is what has been verified on
+ * hardware (`docs/30` §Step 37, §Step 38).
  *
  * Two things this file is careful not to assume:
  *
- *   - That the guest library can be found on disk. An installed app cannot point a loader at its own
- *     APK, so the bytes come out of the asset as a `byte[]` and cross JNI as an array. The asset is a zip
- *     inside a zip, and `ZipInputStream` over `getAssets().open()` reads it whichever way either level
- *     was compressed — which is worth saying out loud, because the C++ lane's own zip reader handles
- *     stored entries only (`core/tests/guest_apk_test.cpp`) and the two readers are not interchangeable.
- *   - That the work fits the main thread. Six launches, two tiers each, through an interpreter, is not a
- *     millisecond-scale job, and an ANR dialog half-way through would kill the process before the report
- *     existed. So the launches run on one worker thread and the screen is updated after each seed, which
- *     means a run that dies part-way still leaves on screen the part that did not.
+ *   - That a whole APK can be held in memory. It cannot, usefully: games are tens or hundreds of MB, and
+ *     the only part RetroBug can execute is one `.so` inside `lib/armeabi-v7a/`. So the file is streamed
+ *     through `ZipInputStream` and only the entry that will be executed is read out.
+ *   - That a chosen APK has anything to run. The common failure on a modern store download is an APK that
+ *     ships only `arm64-v8a`, and "it did not work" is a useless thing to be told. The report names which
+ *     ABIs the APK actually carries.
  */
 package com.retrobug.launcher;
 
@@ -36,8 +31,11 @@ import android.app.Activity;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.Intent;
+import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
@@ -52,24 +50,36 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 public class LauncherActivity extends Activity {
     private static final String TAG = "RBLAUNCH";
-    /// The two guest images, staged by `tools/build_launcher_apk.sh`. The inner APK is the *same file*
+    private static final String PREFS = "rb";
+    private static final String PREF_TIER = "tier";               // 0 = both, 1 = interpreter, 2 = JIT
+    private static final String PREF_FULL_REPORT = "full_report"; // show every report line, or the head+tail
+    private static final String PREF_AUTORUN = "autorun";         // run the self-test when its screen opens
+
+    /// The two guest images the launcher ships. The inner APK is the *same file*
     /// `tools/run_engine_tests.sh` pushes to `/data/local/tmp/rb_guestprobe.apk` for the C++ lane, so a
     /// disagreement between the two lanes cannot be blamed on different inputs.
     private static final String GUEST_APK_ASSET = "guest/rb_guestprobe.apk";
     private static final String GUEST_SO_ENTRY = "lib/armeabi-v7a/libmathprobe.so";
     private static final String LIBM_ASSET = "guest/libm.so";
-    /// The seeds `kHardware` in `android/jni/launcher.cpp` carries answers for. A seed outside that list
-    /// still runs and still prints its value; only the PASS/FAIL column is refused.
     private static final int[] SEEDS = {0, 1, 4, 7, 100, -3};
     private static final String METHOD = "mathProbe";
+    /// An entry this size or larger is refused with a message rather than an OutOfMemoryError: a guest
+    /// library that big is not a phone library, and the failure should name itself.
+    private static final long MAX_SO_BYTES = 64L * 1024 * 1024;
 
     static {
         System.loadLibrary("rbguest");
@@ -77,210 +87,506 @@ public class LauncherActivity extends Activity {
 
     private static native String nativeLaunch(byte[] guestSo, byte[] libmSo, String method, int seed);
 
-    private TextView report_;
-    private TextView verdict_;
-    private TextView facts_;
-    private Button run_;
-    private Button copy_;
-    private final StringBuilder report = new StringBuilder();
-    private volatile boolean running_;
-    private int pass_, fail_;
+    private static native String nativeInspect(byte[] guestSo, byte[] libmSo, String label, int tiers);
+
+    private enum Screen { HOME, LIBRARY, SETTINGS, DIAGNOSTICS, REPORT }
+
+    private Screen screen_ = Screen.HOME;
+    private String reportTitle_ = "";
 
     @Override
     protected void onCreate(Bundle saved) {
         super.onCreate(saved);
-        setContentView(buildUi());
-        facts_.setText(deviceFacts());
-        setVerdict("not run yet", Color.DKGRAY);
-        // Runs on launch as well as from the button: an attended look at the phone and an unattended
-        // `adb shell am start` + logcat read are the same run, and requiring a tap would break the second.
-        startRun();
+        show(Screen.HOME);
     }
 
-    /// A label, the device facts, a verdict banner, a Run button, and the full report underneath. Built in
-    /// code rather than from a layout file so this app keeps the same `aapt` shape the probe app has —
-    /// one manifest, no resources, and nothing between the installed APK and the engine's own output.
-    private View buildUi() {
-        int pad = dp(10);
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(Color.WHITE);
+    @Override
+    public void onBackPressed() {
+        if (screen_ == Screen.HOME) {
+            super.onBackPressed();
+        } else {
+            show(Screen.HOME);
+        }
+    }
 
-        TextView title = new TextView(this);
-        title.setText("RetroBug");
-        title.setTextSize(22f);
-        title.setTypeface(Typeface.DEFAULT_BOLD);
-        title.setPadding(pad, pad, pad, 0);
-        root.addView(title);
+    // ------------------------------------------------------------------ navigation
 
-        TextView subtitle = new TextView(this);
-        subtitle.setText("32-bit ARM (armeabi-v7a) guest code, executed by RetroBug inside this app");
-        subtitle.setTextSize(12f);
-        subtitle.setPadding(pad, 0, pad, dp(6));
-        root.addView(subtitle);
+    private void show(Screen which) {
+        screen_ = which;
+        switch (which) {
+            case HOME: setContentView(homeScreen()); break;
+            case LIBRARY: setContentView(libraryScreen()); break;
+            case SETTINGS: setContentView(settingsScreen()); break;
+            case DIAGNOSTICS: setContentView(diagnosticsScreen()); break;
+            case REPORT: setContentView(reportScreen()); break;
+        }
+    }
 
-        facts_ = new TextView(this);
-        facts_.setTextSize(12f);
-        facts_.setTypeface(Typeface.MONOSPACE);
-        facts_.setPadding(pad, 0, pad, dp(6));
-        root.addView(facts_);
+    // ------------------------------------------------------------------ screens
 
-        verdict_ = new TextView(this);
-        verdict_.setTextSize(18f);
-        verdict_.setTypeface(Typeface.DEFAULT_BOLD);
-        verdict_.setPadding(pad, dp(4), pad, dp(4));
-        root.addView(verdict_);
+    private View homeScreen() {
+        LinearLayout root = column();
+        root.addView(title("RetroBug", 26f, true));
+        root.addView(text("Runs 32-bit ARM (armeabi-v7a) code on a 64-bit phone, by emulating the CPU"
+                + " rather than translating API calls.", 13f, false));
+        root.addView(space(8));
+
+        root.addView(text(buildFacts(), 12f, true));
+        root.addView(space(12));
+
+        root.addView(button("My games" + (games().isEmpty() ? "" : "  (" + games().size() + ")"), new Runnable() {
+            @Override public void run() { show(Screen.LIBRARY); }
+        }));
+        root.addView(button("Settings", new Runnable() {
+            @Override public void run() { show(Screen.SETTINGS); }
+        }));
+        root.addView(button("Engine self-test", new Runnable() {
+            @Override public void run() { show(Screen.DIAGNOSTICS); }
+        }));
+        root.addView(space(12));
+        root.addView(text("The self-test runs the same 32-bit probe library that RetroBug's own test lanes"
+                + " run on this machine, on both execution tiers, and compares the values against what the"
+                + " bytes produce on real hardware.", 11f, false));
+        return scroll(root);
+    }
+
+    private View libraryScreen() {
+        LinearLayout root = column();
+        root.addView(title("My games", 22f, true));
+        root.addView(text("Add an APK. RetroBug reads its lib/armeabi-v7a library, loads it into the"
+                + " emulator, and calls the library's JNI entry point if it exports one.", 12f, false));
+        root.addView(space(8));
+        root.addView(button("Add a game (.apk)", new Runnable() {
+            @Override public void run() { pickApk(); }
+        }));
+        root.addView(space(8));
+
+        List<File> list = games();
+        if (list.isEmpty()) {
+            root.addView(text("Nothing added yet.\n\nWhat happens when you add one: RetroBug opens the APK"
+                    + " as a zip, finds lib/armeabi-v7a/*.so, and runs it. It cannot launch a whole app yet"
+                    + " — there is no guest libc or DEX loader in this build — so most games will stop at a"
+                    + " named reason rather than starting. That reason is what the report shows.", 12f,
+                    false));
+        } else {
+            for (final File f : list) {
+                root.addView(gameRow(f));
+            }
+        }
+        root.addView(space(6));
+        root.addView(button("Home", new Runnable() {
+            @Override public void run() { show(Screen.HOME); }
+        }));
+        return scroll(root);
+    }
+
+    private View gameRow(final File apk) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setPadding(dp(4), dp(10), dp(4), dp(10));
+
+        String name = apk.getName().replaceAll("\\.apk$", "");
+        row.addView(text(name, 16f, true));
+        row.addView(text(String.format("%.1f MB · added %s", apk.length() / 1048576.0,
+                android.text.format.DateFormat.format("yyyy-MM-dd HH:mm", apk.lastModified())), 11f, false));
 
         LinearLayout buttons = new LinearLayout(this);
         buttons.setOrientation(LinearLayout.HORIZONTAL);
-        buttons.setPadding(pad, 0, pad, dp(4));
-        run_ = new Button(this);
-        run_.setText("Run test");
-        run_.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                startRun();
+        buttons.addView(button("Run", new Runnable() {
+            @Override public void run() { runGame(apk); }
+        }), weight(1f));
+        buttons.addView(button("Remove", new Runnable() {
+            @Override public void run() { removeGame(apk); }
+        }), weight(1f));
+        row.addView(buttons);
+
+        View divider = new View(this);
+        divider.setBackgroundColor(0xFFDDDDDD);
+        LinearLayout wrap = column();
+        wrap.addView(row);
+        wrap.addView(divider, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+        return wrap;
+    }
+
+    private View settingsScreen() {
+        final SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
+        LinearLayout root = column();
+        root.addView(title("Settings", 22f, true));
+
+        root.addView(text("Execution tier — which of RetroBug's two engines a run uses. Tier I interprets"
+                + " the engine's internal operations; Tier J compiles them to host code. They are held to"
+                + " the same answers, so this is a speed and trust setting, not a compatibility one.", 12f,
+                false));
+        final int tier = p.getInt(PREF_TIER, 0);
+        String[] names = {"Both tiers (compare them)", "Interpreter only (Tier I)", "Compiler only (Tier J)"};
+        for (int i = 0; i < names.length; ++i) {
+            final int value = i;
+            final boolean on = tier == i;
+            root.addView(button((on ? "●  " : "○  ") + names[i], new Runnable() {
+                @Override public void run() {
+                    p.edit().putInt(PREF_TIER, value).apply();
+                    show(Screen.SETTINGS);
+                }
+            }));
+        }
+        root.addView(space(12));
+
+        final boolean full = p.getBoolean(PREF_FULL_REPORT, false);
+        root.addView(button((full ? "✓  " : "    ") + "Show the full report", new Runnable() {
+            @Override public void run() {
+                p.edit().putBoolean(PREF_FULL_REPORT, !full).apply();
+                show(Screen.SETTINGS);
             }
-        });
-        buttons.addView(run_, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        copy_ = new Button(this);
-        copy_.setText("Copy report");
-        copy_.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
+        }));
+        final boolean autorun = p.getBoolean(PREF_AUTORUN, true);
+        root.addView(button((autorun ? "✓  " : "    ") + "Run the self-test when the screen opens", new Runnable() {
+            @Override public void run() {
+                p.edit().putBoolean(PREF_AUTORUN, !autorun).apply();
+                show(Screen.SETTINGS);
+            }
+        }));
+        root.addView(space(12));
+
+        root.addView(text(buildFacts(), 12f, true));
+        root.addView(space(8));
+        root.addView(text("Where settings are kept: this app's private preferences file, readable by"
+                + " nothing else on the phone. Nothing here is per-game yet, and nothing is sent anywhere.",
+                11f, false));
+        root.addView(space(6));
+        root.addView(button("Home", new Runnable() {
+            @Override public void run() { show(Screen.HOME); }
+        }));
+        return scroll(root);
+    }
+
+    private View diagnosticsScreen() {
+        LinearLayout root = column();
+        root.addView(title("Engine self-test", 22f, true));
+        root.addView(text("Six seeds through the probe library on both tiers, each value compared against"
+                + " what the same bytes produced natively on real hardware. A seed with no captured answer"
+                + " is reported as such instead of being compared against zero.", 12f, false));
+        root.addView(space(8));
+        root.addView(button("Run", new Runnable() {
+            @Override public void run() { saveAndShow("self-test", runSelfTest()); }
+        }));
+        root.addView(space(6));
+        root.addView(button("Home", new Runnable() {
+            @Override public void run() { show(Screen.HOME); }
+        }));
+        if (getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(PREF_AUTORUN, true)) {
+            // Runs once when the screen is opened, on the same worker thread the report screen reads from.
+            runSelfTestAsync();
+        }
+        return scroll(root);
+    }
+
+    private View reportScreen() {
+        LinearLayout root = column();
+        root.addView(title(reportTitle_, 18f, true));
+        final TextView body = text(currentReport(), 11f, true);
+        body.setTextIsSelectable(true);
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(body);
+        root.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        root.addView(button("Copy report", new Runnable() {
+            @Override public void run() {
                 ClipboardManager cb = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-                if (cb != null) cb.setPrimaryClip(ClipData.newPlainText("RetroBug", report.toString()));
+                if (cb != null) cb.setPrimaryClip(ClipData.newPlainText("RetroBug", currentReport()));
                 Toast.makeText(LauncherActivity.this, "Report copied", Toast.LENGTH_SHORT).show();
             }
-        });
-        buttons.addView(copy_, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        root.addView(buttons);
-
-        ScrollView scroll = new ScrollView(this);
-        report_ = new TextView(this);
-        report_.setTextSize(11f);
-        report_.setTypeface(Typeface.MONOSPACE);
-        report_.setTextColor(Color.BLACK);
-        report_.setTextIsSelectable(true);
-        report_.setPadding(pad, 0, pad, pad);
-        scroll.addView(report_);
-        root.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        }));
+        root.addView(button("Home", new Runnable() {
+            @Override public void run() { show(Screen.HOME); }
+        }));
         return root;
     }
 
-    /// The platform's own answer to "can this phone run 32-bit ARM code", which is what makes the verdict
-    /// mean something rather than only look green.
-    private String deviceFacts() {
-        String[] abis32 = Build.SUPPORTED_32_BIT_ABIS;
-        boolean canRunNative32 = abis32 != null && abis32.length > 0;
-        String note = canRunNative32
-                ? "this device CAN run 32-bit ARM natively, so a PASS below shows the engine agrees with"
-                        + " the phone -- it is not proof of emulation. A 64-bit-only phone is."
-                : "this device CANNOT run 32-bit ARM code at all, so every ARMv7 instruction that produced"
-                        + " the values below was executed by RetroBug in this process.";
-        return Build.MANUFACTURER + " " + Build.MODEL + ", Android " + Build.VERSION.RELEASE
-                + " (sdk " + Build.VERSION.SDK_INT + ")\n"
-                + "page size   : " + pageSize() + "\n"
-                + "supported   : " + Arrays.toString(Build.SUPPORTED_ABIS) + "\n"
-                + "32-bit abis : " + (canRunNative32 ? Arrays.toString(abis32) : "none") + "\n"
-                + "=> " + note;
+    // ------------------------------------------------------------------ work
+
+    private String currentReport_ = "";
+
+    private String currentReport() {
+        return currentReport_;
     }
 
-    private int pageSize() {
-        // Not Build.*: the page size is queried from the OS because a wrong one changes every memory
-        // constant the engine seeds, and the C++ lanes print the same number for the same reason.
-        return (int) android.system.Os.sysconf(android.system.OsConstants._SC_PAGESIZE);
-    }
-
-    private void startRun() {
-        if (running_) return;
-        running_ = true;
-        run_.setEnabled(false);
-        report.setLength(0);
-        pass_ = 0;
-        fail_ = 0;
-        report_.setText("");
-        setVerdict("running...", Color.rgb(0xB0, 0x60, 0x00));
-        line("device=" + Build.MANUFACTURER + " " + Build.MODEL + " sdk=" + Build.VERSION.SDK_INT
-                + " abis=" + Arrays.toString(Build.SUPPORTED_ABIS));
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    runLaunches();
-                } finally {
-                    running_ = false;
-                    runOnUiThread(new Runnable() {
-                        @Override
-                        public void run() {
-                            run_.setEnabled(true);
-                        }
-                    });
-                }
+    /// Keeps the report for the report screen and trims it when the setting says so. The trim keeps the
+    /// head and the tail, because the two things a reader needs are what was attempted and what stopped it.
+    private void saveAndShow(String title, String report) {
+        reportTitle_ = title;
+        SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
+        if (p.getBoolean(PREF_FULL_REPORT, false)) {
+            currentReport_ = report;
+        } else {
+            String[] lines = report.split("\n");
+            if (lines.length <= 40) {
+                currentReport_ = report;
+            } else {
+                StringBuilder sb = new StringBuilder();
+                for (int i = 0; i < 24; ++i) sb.append(lines[i]).append('\n');
+                sb.append("... ").append(lines.length - 34).append(" lines hidden — 'Show the full report' in"
+                        + " Settings keeps all of them ...\n");
+                for (int i = lines.length - 10; i < lines.length; ++i) sb.append(lines[i]).append('\n');
+                currentReport_ = sb.toString();
             }
-        }, "rb-launch").start();
+        }
+        show(Screen.REPORT);
     }
 
-    private void runLaunches() {
+    private void runSelfTestAsync() {
+        // One worker thread, as before: six launches, two tiers each, through an interpreter is not a
+        // millisecond job, and an ANR dialog would kill the process before the report existed.
+        new Thread(new Runnable() {
+            @Override public void run() {
+                final String report = runSelfTest();
+                runOnUiThread(new Runnable() {
+                    @Override public void run() { saveAndShow("self-test", report); }
+                });
+            }
+        }, "rb-selftest").start();
+    }
+
+    private String runSelfTest() {
+        final StringBuilder out = new StringBuilder();
+        out.append("device=").append(Build.MANUFACTURER).append(' ').append(Build.MODEL)
+                .append(" sdk=").append(Build.VERSION.SDK_INT)
+                .append(" abis=").append(Arrays.toString(Build.SUPPORTED_ABIS)).append('\n');
         byte[] guestSo;
         byte[] libm;
         try {
-            guestSo = readGuestSo();
+            guestSo = extractAssetEntry(GUEST_APK_ASSET, GUEST_SO_ENTRY);
             libm = readAll(getAssets().open(LIBM_ASSET));
         } catch (IOException | RuntimeException e) {
-            line("FATAL: could not read the guest images: "
-                    + e.getClass().getSimpleName() + ": " + e.getMessage());
-            setVerdict("FAILED to start", Color.rgb(0xC0, 0x20, 0x20));
-            return;
+            return out.append("FATAL: could not read the bundled probe images: ")
+                    .append(e.getClass().getSimpleName()).append(": ").append(e.getMessage()).toString();
         }
-        line("assets: " + GUEST_SO_ENTRY + "=" + guestSo.length
-                + "B " + LIBM_ASSET + "=" + libm.length + "B");
+        out.append("assets: ").append(GUEST_SO_ENTRY).append('=').append(guestSo.length)
+                .append("B ").append(LIBM_ASSET).append('=').append(libm.length).append("B\n");
         for (int seed : SEEDS) {
             String r;
             try {
                 r = nativeLaunch(guestSo, libm, METHOD, seed);
             } catch (Throwable t) {
-                // A native SIGSEGV is not catchable and will take the process; what reaches here is a
-                // Java-side throw such as an allocation failure, and one bad seed should still print the
-                // five that worked.
+                // A native SIGSEGV is not catchable and takes the process; what reaches here is a Java-side
+                // throw such as an allocation failure, and one bad seed should still print the five that did.
                 r = "FATAL: nativeLaunch threw " + t.getClass().getName() + ": " + t.getMessage();
             }
-            for (String one : (r == null ? "FATAL: nativeLaunch returned null" : r).split("\n")) {
-                if (one.endsWith("PASS")) ++pass_;
-                if (one.endsWith("FAIL")) ++fail_;
-            }
-            line(r == null ? "FATAL: nativeLaunch returned null" : r);
+            out.append(r == null ? "FATAL: nativeLaunch returned null" : r).append('\n');
         }
-        line("=== launcher done ===");
-        if (fail_ == 0 && pass_ > 0) {
-            setVerdict(pass_ + " PASS, 0 FAIL", Color.rgb(0x18, 0x80, 0x18));
-        } else {
-            setVerdict(pass_ + " PASS, " + fail_ + " FAIL", Color.rgb(0xC0, 0x20, 0x20));
+        out.append("=== self-test done ===");
+        return out.toString();
+    }
+
+    /// The library screen's Run. Streams the APK, executes the one entry RetroBug can execute, and reports
+    /// what it found — including the common case where there is nothing to run.
+    private void runGame(final File apk) {
+        final SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
+        final int tiers = p.getInt(PREF_TIER, 0);
+        final String label = apk.getName();
+        reportTitle_ = apk.getName().replaceAll("\\.apk$", "");
+        currentReport_ = "reading " + apk.getName() + " ...";
+        show(Screen.REPORT);
+        new Thread(new Runnable() {
+            @Override public void run() {
+                String report;
+                try {
+                    report = inspectApk(apk, tiers);
+                } catch (IOException | RuntimeException e) {
+                    report = "FATAL: could not read " + apk.getName() + ": "
+                            + e.getClass().getSimpleName() + ": " + e.getMessage();
+                }
+                final String text = report;
+                runOnUiThread(new Runnable() {
+                    @Override public void run() { saveAndShow(label.replaceAll("\\.apk$", ""), text); }
+                });
+            }
+        }, "rb-run").start();
+    }
+
+    private String inspectApk(File apk, int tiers) throws IOException {
+        byte[] libmBytes;
+        try {
+            libmBytes = readAll(getAssets().open(LIBM_ASSET));
+        } catch (IOException e) {
+            return "FATAL: the bundled guest libm asset could not be read: " + e.getMessage();
+        }
+
+        StringBuilder facts = new StringBuilder();
+        facts.append("apk: ").append(apk.getName()).append(" (").append(apk.length()).append(" bytes)\n");
+        byte[] so = null;
+        String soName = null;
+        List<String> arm32 = new ArrayList<>();
+        List<String> otherAbis = new ArrayList<>();
+        boolean hasDex = false;
+        try (ZipInputStream zip = new ZipInputStream(new java.io.FileInputStream(apk))) {
+            for (ZipEntry e = zip.getNextEntry(); e != null; e = zip.getNextEntry()) {
+                String n = e.getName();
+                if (n.startsWith("lib/") && n.endsWith(".so")) {
+                    String abi = n.substring(4, n.indexOf('/', 4));
+                    if ("armeabi-v7a".equals(abi) || "armeabi".equals(abi)) {
+                        arm32.add(n);
+                        if (so == null) {
+                            so = readAllCapped(zip, MAX_SO_BYTES, n, facts);
+                            if (so != null) soName = n;
+                        }
+                    } else {
+                        otherAbis.add(abi);
+                    }
+                } else if (n.equals("classes.dex")) {
+                    hasDex = true;
+                }
+            }
+        }
+        facts.append("32-bit ARM libraries: ").append(arm32.isEmpty() ? "none" : String.valueOf(arm32.size()));
+        if (!arm32.isEmpty()) facts.append(" (").append(arm32.get(0));
+        if (arm32.size() > 1) facts.append(", first of ").append(arm32.size());
+        if (!arm32.isEmpty()) facts.append(")");
+        facts.append('\n');
+        if (!otherAbis.isEmpty()) {
+            List<String> uniq = new ArrayList<>(new java.util.LinkedHashSet<>(otherAbis));
+            Collections.sort(uniq);
+            facts.append("other ABIs present: ").append(uniq).append('\n');
+        }
+        facts.append("classes.dex: ").append(hasDex ? "present" : "absent").append('\n');
+        if (so == null) {
+            facts.append("\nNothing for RetroBug to run: this APK carries no lib/armeabi-v7a library.\n");
+            if (hasDex) {
+                facts.append("It has Java code, and running Java/DEX is not something this build does —"
+                        + " it executes 32-bit ARM native code.\n");
+            }
+            return facts.toString();
+        }
+        facts.append("\n");
+        return facts + nativeInspect(so, libmBytes, soName, tiers);
+    }
+
+    // ------------------------------------------------------------------ games on disk
+
+    private File gamesDir() {
+        File dir = new File(getFilesDir(), "games");
+        if (!dir.exists() && !dir.mkdirs()) Log.w(TAG, "could not create " + dir);
+        return dir;
+    }
+
+    private List<File> games() {
+        File[] files = gamesDir().listFiles();
+        if (files == null) return new ArrayList<>();
+        List<File> out = new ArrayList<>(Arrays.asList(files));
+        Collections.sort(out, new java.util.Comparator<File>() {
+            @Override public int compare(File a, File b) { return a.getName().compareToIgnoreCase(b.getName()); }
+        });
+        return out;
+    }
+
+    private static final int PICK_APK = 1;
+
+    private void pickApk() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("application/vnd.android.package-archive");
+        // Some file providers hand back a generic type for an APK; without this the picker greys everything out.
+        intent.putExtra(Intent.EXTRA_MIME_TYPES,
+                new String[]{"application/vnd.android.package-archive", "application/octet-stream",
+                        "application/zip"});
+        try {
+            startActivityForResult(intent, PICK_APK);
+        } catch (android.content.ActivityNotFoundException e) {
+            Toast.makeText(this, "No file picker on this phone", Toast.LENGTH_LONG).show();
         }
     }
 
-    /**
-     * Pulls the guest library out of the APK in the assets.
-     *
-     * Throws rather than returning null on a missing entry: an empty `byte[]` would reach the engine,
-     * which would report "not an ELF32 ARM image", and the real fault — the packaging step never put the
-     * library in the asset — would read as an engine defect.
-     */
-    private byte[] readGuestSo() throws IOException {
-        InputStream in = getAssets().open(GUEST_APK_ASSET);
-        try {
-            ZipInputStream zip = new ZipInputStream(in);
-            try {
-                for (ZipEntry e = zip.getNextEntry(); e != null; e = zip.getNextEntry()) {
-                    if (GUEST_SO_ENTRY.equals(e.getName())) return readAll(zip);
+    @Override
+    protected void onActivityResult(int request, int result, Intent data) {
+        super.onActivityResult(request, result, data);
+        if (request != PICK_APK || result != RESULT_OK || data == null || data.getData() == null) return;
+        final Uri uri = data.getData();
+        String name = queryName(uri);
+        if (name == null) name = "game.apk";
+        if (!name.toLowerCase().endsWith(".apk")) name = name + ".apk";
+        final File dest = new File(gamesDir(), name.replaceAll("[^A-Za-z0-9._-]", "_"));
+        Toast.makeText(this, "Adding " + dest.getName() + " ...", Toast.LENGTH_SHORT).show();
+        // Copied off the main thread: a game's APK is tens or hundreds of megabytes and copying one on the
+        // UI thread is an ANR with a toast attached to it.
+        new Thread(new Runnable() {
+            @Override public void run() {
+                String problem = null;
+                try (InputStream in = getContentResolver().openInputStream(uri);
+                     OutputStream out = new FileOutputStream(dest)) {
+                    if (in == null) throw new IOException("the picker returned a stream this app cannot open");
+                    byte[] buf = new byte[1 << 16];
+                    for (int n = in.read(buf); n > 0; n = in.read(buf)) out.write(buf, 0, n);
+                } catch (IOException | SecurityException e) {
+                    problem = e.getClass().getSimpleName() + ": " + e.getMessage();
                 }
-            } finally {
-                zip.close();
+                final String message = problem == null
+                        ? "Added " + dest.getName() + " (" + (dest.length() >> 20) + " MB)"
+                        : "Could not copy the file — " + problem;
+                runOnUiThread(new Runnable() {
+                    @Override public void run() {
+                        Toast.makeText(LauncherActivity.this, message, Toast.LENGTH_LONG).show();
+                        show(Screen.LIBRARY);
+                    }
+                });
             }
+        }, "rb-add").start();
+    }
+
+    private String queryName(Uri uri) {
+        android.database.Cursor c = null;
+        try {
+            c = getContentResolver().query(uri, null, null, null, null);
+            if (c != null && c.moveToFirst()) {
+                int idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME);
+                if (idx >= 0) return c.getString(idx);
+            }
+        } catch (RuntimeException ignored) {
+            // Fall through to the path's last segment.
         } finally {
-            in.close();
+            if (c != null) c.close();
         }
-        throw new IOException(GUEST_SO_ENTRY + " is not in " + GUEST_APK_ASSET);
+        String path = uri.getPath();
+        return path == null ? null : path.substring(path.lastIndexOf('/') + 1);
+    }
+
+    private void removeGame(File apk) {
+        if (apk.delete()) {
+            Toast.makeText(this, "Removed " + apk.getName(), Toast.LENGTH_SHORT).show();
+        } else {
+            Toast.makeText(this, "Could not remove " + apk.getName(), Toast.LENGTH_LONG).show();
+        }
+        show(Screen.LIBRARY);
+    }
+
+    // ------------------------------------------------------------------ io helpers
+
+    /// Reads one entry out of a zip *inside the APK's assets* — the probe APK is one level down.
+    private byte[] extractAssetEntry(String asset, String entry) throws IOException {
+        try (InputStream in = getAssets().open(asset)) {
+            try (ZipInputStream zip = new ZipInputStream(in)) {
+                for (ZipEntry e = zip.getNextEntry(); e != null; e = zip.getNextEntry()) {
+                    if (entry.equals(e.getName())) return readAll(zip);
+                }
+            }
+        }
+        throw new IOException(entry + " is not in " + asset);
+    }
+
+    /// Reads the current zip entry, refusing rather than allocating when it is larger than `cap`. The cap
+    /// exists because the alternative to a message is an `OutOfMemoryError` on a phone with a game's
+    /// native library in hand.
+    private byte[] readAllCapped(InputStream in, long cap, String what, StringBuilder facts) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buf = new byte[1 << 16];
+        long total = 0;
+        for (int n = in.read(buf); n > 0; n = in.read(buf)) {
+            total += n;
+            if (total > cap) {
+                facts.append("refusing ").append(what).append(": larger than ").append(cap >> 20)
+                        .append(" MB\n");
+                return null;
+            }
+            out.write(buf, 0, n);
+        }
+        return out.toByteArray();
     }
 
     private static byte[] readAll(InputStream in) throws IOException {
@@ -294,31 +600,80 @@ public class LauncherActivity extends Activity {
         return out.toByteArray();
     }
 
-    /// One entry of the report: logged line by line so `adb logcat -s RBLAUNCH` reads like the test
-    /// lane's stdout, and shown whole so a run with no cable attached is still readable.
-    private void line(String text) {
-        String body = text == null ? "null" : text;
-        for (String one : body.split("\n")) {
-            if (!one.isEmpty()) Log.i(TAG, one);
-        }
-        report.append(body).append('\n');
-        final String all = report.toString();
-        runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                report_.setText(all);
-            }
-        });
+    // ------------------------------------------------------------------ view helpers
+
+    private String buildFacts() {
+        String[] abis32 = Build.SUPPORTED_32_BIT_ABIS;
+        boolean native32 = abis32 != null && abis32.length > 0;
+        return Build.MANUFACTURER + " " + Build.MODEL + " · Android " + Build.VERSION.RELEASE
+                + " (sdk " + Build.VERSION.SDK_INT + ") · page " + pageSize() + " B\n"
+                + (native32
+                ? "This phone can also run 32-bit ARM natively, so results here show RetroBug agrees with"
+                        + " the phone. Only a 64-bit-only phone shows emulation."
+                : "This phone cannot run 32-bit ARM at all, so every ARMv7 instruction behind these"
+                        + " results was executed by RetroBug inside this app.");
     }
 
-    private void setVerdict(final String text, final int colour) {
-        runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                verdict_.setText(text);
-                verdict_.setTextColor(colour);
-            }
+    private int pageSize() {
+        return (int) android.system.Os.sysconf(android.system.OsConstants._SC_PAGESIZE);
+    }
+
+    private LinearLayout column() {
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(Color.WHITE);
+        root.setPadding(dp(12), dp(12), dp(12), dp(12));
+        return root;
+    }
+
+    private View scroll(View content) {
+        ScrollView s = new ScrollView(this);
+        s.setBackgroundColor(Color.WHITE);
+        s.addView(content);
+        return s;
+    }
+
+    private TextView title(String text, float size, boolean bold) {
+        TextView v = new TextView(this);
+        v.setText(text);
+        v.setTextSize(size);
+        v.setTextColor(Color.BLACK);
+        if (bold) v.setTypeface(Typeface.DEFAULT_BOLD);
+        v.setPadding(0, 0, 0, dp(6));
+        return v;
+    }
+
+    private TextView text(String body, float size, boolean mono) {
+        TextView v = new TextView(this);
+        v.setText(body);
+        v.setTextSize(size);
+        v.setTextColor(0xFF333333);
+        if (mono) v.setTypeface(Typeface.MONOSPACE);
+        v.setPadding(0, dp(2), 0, dp(6));
+        return v;
+    }
+
+    private Button button(String label, final Runnable action) {
+        Button b = new Button(this);
+        b.setText(label);
+        b.setAllCaps(false);
+        b.setGravity(Gravity.CENTER_VERTICAL);
+        b.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { action.run(); }
         });
+        b.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        return b;
+    }
+
+    private LinearLayout.LayoutParams weight(float w) {
+        return new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, w);
+    }
+
+    private View space(int dp) {
+        View v = new View(this);
+        v.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(dp)));
+        return v;
     }
 
     private int dp(int value) {
