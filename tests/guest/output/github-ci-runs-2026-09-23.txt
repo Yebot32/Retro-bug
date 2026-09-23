@@ -1,0 +1,52 @@
+== GitHub builds the launcher APK: the four runs that got it there ==
+
+Captured 2026-09-23 from `gh run view` / `gh run download` (gh 2.101.0, account Yebot32, keyring auth).
+The workflow is .github/workflows/build-apk.yml; it calls tools/build_launcher_apk.sh unchanged, on
+windows-latest, with the SDK components the local build uses pinned to the same versions.
+
+Run 35890924524  failure  40s  died inside android-actions/setup-android@v3, not in any step of ours:
+                                its default package list is `tools platform-tools` and the legacy `tools`
+                                package no longer exists -- "Failed to find package 'tools'".
+                                Fixed: packages: platform-tools.
+Run 35892061439  failure  33s  "Install SDK components": `sdkmanager: command not found` (127). The
+                                action puts cmdline-tools on PATH via GITHUB_PATH and that does not reach a
+                                `shell: bash` step on this runner; the install itself landed at
+                                C:\Android\android-sdk\cmdline-tools\16.0\bin. Fixed: locate
+                                cmdline-tools/*/bin/sdkmanager.bat by glob.
+Run 35892290751  success        APK built and uploaded. First artifact verified on hardware:
+                                uninstalled, installed, installed sha256 == artifact sha256
+                                (651cf36c8b9c23a9...), 24 PASS / 0 FAIL on the SM7250, app label "RetroBug".
+                                It would NOT install over the local build:
+                                INSTALL_FAILED_UPDATE_INCOMPATIBLE -- the script generated a throwaway
+                                keystore inside build/, which is empty on a fresh runner.
+Run 35893873011  failure        "Build guest images": exit 74, output stopping mid-probe, no message.
+                                NOT ROOT-CAUSED. Two hypotheses were tested locally and BOTH are wrong:
+                                (a) the `file -b` in the summary line -- a failing file(1) does not abort
+                                    that echo (measured: exit 0, prints "no file(1)");
+                                (b) the echo line generally -- same measurement.
+                                The assignment form `sz="$(tool | awk)"` DOES abort under `set -euo pipefail`
+                                (measured, status 127), so the death was in a probe's tool invocation --
+                                but the status was 74 (EX_IOERR literally), which no local reproduction
+                                produced. What is in place now is instrumentation, not a fix: both guest
+                                scripts carry `set -E` + an ERR trap that names file, line and command.
+Run 35894428527  success        The run recorded here. Steps: setup, SDK components, signing key,
+                                guest libm, guest probe APK, launcher APK, upload.
+                                artifact 412bf3108b6180a47db50c1f9ee7c5366e1ca9cae5053fba2db0b54f13596911
+                                signed by certificate SHA-256 b26f7de438eae229d96d765791f4f15fb76af0633d99f1f6e459b3f7a2eeade3
+
+Update path, tested rather than assumed: `adb install -r -g` of run 5's artifact over the already
+installed local build, no uninstall -> "Success"; pulled installed sha256 == artifact sha256
+(412bf310...); app launched, 24 PASS / 0 FAIL. The stable test key is in the repository secrets
+(RB_KEYSTORE_B64 / RB_KEYSTORE_PASS / RB_KEY_ALIAS) and the same key signs local builds, which is what
+makes a local build and a CI build installable over each other.
+
+Reproducibility against a local build (same sources, run 3 artifact):
+  lib/arm64-v8a/librbguest.so   SAME SIZE (4080208), 20 bytes differ -- all 20 inside
+                                .note.gnu.build-id: eed5e42d... (local) vs 14f4ef1a... (CI). Every other
+                                byte of code and data is identical.
+  classes.dex                   differs -- javac 21.0.11 here, 17.0.20 on the runner.
+  assets/guest/rb_guestprobe.apk differs in zip entry mtimes only (1980-01-01 for the aapt2 entries,
+                                2026-09-20 vs 2026-09-23 for lib/armeabi-v7a/libmathprobe.so).
+  assets/guest/libm.so          identical (32d06ce18013f9d8...).
+  AndroidManifest.xml,
+  resources.arsc                identical.

@@ -3401,6 +3401,57 @@ phone with no cable attached. [`UNVERIFIED`] This is still a 32-bit-capable devi
 not the launch proof, and the APK has not yet run on the OnePlus 12, the only host where a PASS would mean
 emulation rather than agreement.
 
+## Step 38 — GitHub builds the APK, and the first artifact is verified on the phone
+
+`.github/workflows/build-apk.yml` builds the launcher APK on `windows-latest` and uploads it, on pushes to
+main that touch the APK's inputs, on `v*` tags (which also publish a release asset, so the file can be
+installed from a phone's browser with no cable and no desktop), and on manual dispatch. It runs
+`tools/build_launcher_apk.sh` **unchanged**: all three build scripts name the NDK's `windows-x86_64` host
+tag and its `.exe` tools, so a Linux job would have meant rewriting them and shipping a second build path
+that nothing has ever run on a phone.
+
+`[1L]` **Four runs to get there, and the first two failures were in the environment, not the build.**
+(1) `setup-android@v3` defaults to installing a `tools` package Google has removed from the SDK repository,
+so the action died with "Failed to find package 'tools'" before any step of ours ran. (2) `sdkmanager` was
+on PATH by the action's plumbing but not inside a `shell: bash` step — `command not found`, exit 127, at the
+first line that used it. Full run-by-run record, with ids and hashes, at
+`tests/guest/output/github-ci-runs-2026-09-23.txt`.
+
+`[1L]` **The first artifact that built was verified on hardware, and the first verification of it was
+wrong.** Installed sha256 `651cf36c…` == artifact sha256, 24 PASS / 0 FAIL on the SM7250, app label
+"RetroBug" — but only after an uninstall. The first attempt had reported 24 PASS as well, against the *old*
+locally built APK: `install -r` had failed with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`, one line of adb
+output, and the run on screen was the one from the previous hour. That is the second time in this project a
+refusal has been mistaken for a pass by reading the wrong artifact.
+
+`[1L]` **The signing key is the reason, and it is fixed.** `build_launcher_apk.sh` generated a keystore
+inside `build/` when one was not there, and `build/` is empty on a fresh runner — so every CI run produced
+an APK signed by a different key, and no build could be installed over the previous one without uninstalling
+it first (which deletes the app's data). For a workflow whose purpose is "install it from GitHub and see",
+that is a defect. The key now comes from `RB_KEYSTORE` / `RB_KEYSTORE_PASS` / `RB_KEY_ALIAS` when set, is
+generated into `build/` only as a local throwaway, and CI materializes it from repository secrets — the same
+key this machine signs with (certificate SHA-256 `b26f7de4…`). Verified by installing run 5's artifact over
+the installed local build with `install -r` and **no uninstall**: Success, installed sha `412bf310…` == the
+artifact, 24 PASS / 0 FAIL. It is a test key for a probe app, and both files say so.
+
+`[1L]` **Reproducibility, measured:** the 4 MB engine in the CI APK differs from a local build by **exactly
+20 bytes, all inside `.note.gnu.build-id`** — every byte of code and data is identical. `libm.so`, the
+manifest and `resources.arsc` are identical; `classes.dex` differs because this machine has javac 21.0.11
+and the runner 17.0.20; the nested guest APK differs only in zip entry mtimes.
+
+`[UNVERIFIED, instrumented]` **One failure has no root cause and is not being called fixed.** Run
+35893873011 died inside `build-guest-libs.sh` with exit 74, its output stopping mid-probe and no message —
+and the two explanations I formed for it were both **disproved by local experiment**: a failing `file(1)`
+does not abort that summary line, and a failing command inside an `echo`'s substitution does not abort it
+either (the assignment form does, measured at 127). What is in place is instrumentation, not a fix: both
+guest scripts now carry `set -E` plus an ERR trap naming file, line and command, and the workflow builds the
+two guest images in separate steps. It did not recur on the next run, which is not the same as explained.
+
+`[UNVERIFIED]` **What this route does not do:** it runs no test lanes (`tools/run_engine_tests.sh` needs a
+device and refuses to guess between two), so a green build means the APK was produced, not that the engine
+inside it is correct — that is what §Step 37's device run is for. And the launch claim still needs the
+OnePlus 12: both attached phones execute 32-bit ARM natively, so a PASS on them is agreement, not proof.
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |
