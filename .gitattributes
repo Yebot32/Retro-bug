@@ -1,0 +1,40 @@
+# RetroBug line endings. SPDX-License-Identifier: Apache-2.0
+#
+# Why this file exists: the same bash scripts run on a developer's Windows checkout and on a Windows CI
+# runner, and both invoke them through Git Bash. Git's default `core.autocrlf` on Windows writes CRLF into
+# the working tree, and a bash script with CRLF endings fails with `$'\r': command not found` — a shell
+# error that reads like a broken script rather than a checkout setting. Pinning `eol=lf` for the file
+# types that are interpreted by a shell, an assembler, or a compiler removes the checkout from the list of
+# things that can differ between the two.
+#
+# It is also correct for the vendored tree: `external/dynarmic` is kept byte-identical to upstream
+# (`docs/30` §Step 3), and upstream stores text with LF.
+* text=auto
+
+*.sh    text eol=lf
+*.bash  text eol=lf
+*.s     text eol=lf
+*.S     text eol=lf
+*.inc   text eol=lf
+*.c     text eol=lf
+*.cc    text eol=lf
+*.h     text eol=lf
+*.hpp   text eol=lf
+*.cpp   text eol=lf
+*.java  text eol=lf
+*.cmake text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+*.xml   text eol=lf
+*.json  text eol=lf
+
+# Windows artifacts, in case one is ever committed: never rewrite these.
+*.png  binary
+*.apk  binary
+*.so   binary
+*.a    binary
+*.o    binary
+*.jar  binary
+*.zip  binary

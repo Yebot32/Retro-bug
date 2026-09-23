@@ -63,6 +63,12 @@ jobs:
           java-version: "17"
 
       - uses: android-actions/setup-android@v3
+        with:
+          # The action's default package list is `tools platform-tools`, and the legacy `tools` package no
+          # longer exists in Google's SDK repository -- so the action fails with "Failed to find package
+          # 'tools'" before any step of this workflow runs. That is exactly how run 35890924524 died, 40
+          # seconds in. Everything the build needs is named explicitly in the next step.
+          packages: platform-tools
 
       # The same four components the local build uses, pinned to the same versions: the NDK the scripts
       # default to, the cmake the scripts look for by path, the build-tools they look for by version, and
