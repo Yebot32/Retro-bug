@@ -125,12 +125,13 @@ jobs:
           printf '%s' "$B64" | base64 -d > "$KS"
           { echo "RB_KEYSTORE=$KS"; echo "RB_KEYSTORE_PASS=$PASS"; echo "RB_KEY_ALIAS=$ALIAS"; } >> "$GITHUB_ENV"
 
-      - name: Build guest images
+      - name: Build the guest libm
         shell: bash
-        run: |
-          set -euo pipefail
-          bash tools/build-guest-libs.sh libm
-          bash tools/build-guest-apk.sh
+        run: bash tools/build-guest-libs.sh libm
+
+      - name: Build the guest probe APK
+        shell: bash
+        run: bash tools/build-guest-apk.sh
 
       - name: Build launcher APK
         shell: bash

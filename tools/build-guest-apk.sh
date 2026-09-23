@@ -33,6 +33,11 @@
 #
 # Usage: tools/build-guest-apk.sh [outdir]     # default build/guest-apk
 set -euo pipefail
+
+# Same ERR trap as `build-guest-libs.sh`: with `set -e` a failure aborts and the log just stops, so the
+# next CI reader gets "exit code N" and no line. This costs one line and names the command.
+set -E
+trap 'rc=$?; echo "  FAILED: ${BASH_SOURCE[0]} line ${LINENO} exited ${rc}: ${BASH_COMMAND}" >&2' ERR
 SDK="${ANDROID_HOME:-$LOCALAPPDATA/Android/Sdk}"
 NDK_VER="${RB_NDK:-28.2.13676358}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

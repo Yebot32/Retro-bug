@@ -29,6 +29,13 @@
 #        tools/build-guest-libs.sh libm       # builds one
 
 set -euo pipefail
+
+# Say which line failed, and with what status. Without this, `set -e` aborts on the first nonzero status
+# and the log simply stops -- which is exactly what happened on the first CI run that got this far: the
+# output ended mid-probe and GitHub reported "exit code 74" with no further clue. A build step that dies
+# silently costs a full CI cycle per guess; one line of trap costs nothing.
+set -E
+trap 'rc=$?; echo "  FAILED: ${BASH_SOURCE[0]} line ${LINENO} exited ${rc}: ${BASH_COMMAND}" >&2' ERR
 SDK="${ANDROID_HOME:-$LOCALAPPDATA/Android/Sdk}"
 NDK_VER="${RB_NDK:-28.2.13676358}"
 API="${RB_GUEST_API:-34}"
@@ -205,7 +212,11 @@ for name in "${targets[@]}"; do
       *) echo "  $probe: $sz bytes in the guest build (the stub's $stub_sz is a name, not code)" ;;
     esac
   done
-  echo "  -> $OUT/$name.so ($(stat -c%s "$OUT/$name.so") bytes stripped, $(file -b "$OUT/$name.so" 2>/dev/null | cut -d, -f1-4))"
+  # `file` is a nicety for a human reading the log, and it is not on every host that runs this -- Git for
+  # Windows ships it, a plain Git-Bash CI image may not, and under `set -o pipefail` a missing command in
+  # that substitution is indistinguishable from a failed one. So it is optional by construction.
+  desc="$(command -v file >/dev/null 2>&1 && file -b "$OUT/$name.so" 2>/dev/null | cut -d, -f1-4 || echo "no file(1) on this host")"
+  echo "  -> $OUT/$name.so ($(stat -c%s "$OUT/$name.so") bytes stripped, $desc)"
 done
 
 exit $status
