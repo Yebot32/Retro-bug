@@ -511,8 +511,52 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
     return out;
   }
 
+  /**
+   * One function that belongs to the *dynamic linker*, answered with a synthesized stub.
+   *
+   * bionic's `__libc_preinit_impl` calls `__loader_shared_globals` and then writes into the struct it
+   * returns (at +0x438 — read off the constructor's disassembly, cross-referenced to the GOT slot at
+   * 0xd6b98 and its `R_ARM_JUMP_SLOT`). It is an import of `libc.so` rather than a definition, because
+   * the real implementation lives in the linker, which no image here provides. So the answer is a page of
+   * zeroed guest memory plus twelve bytes of ARM that returns its address:
+   *
+   *     ldr r0, [pc, #0]    @ the word below, which sits at pc+8
+   *     bx  lr
+   *     .word <globals page>
+   *
+   * That is the function's contract — "return the loader's shared globals" — implemented rather than
+   * deferred, and the report says the loader here is RetroBug's stand-in so nobody reads it as Android's.
+   * The alternative was leaving it trapped, which is what the previous run did: the call executed the
+   * trap page and the constructor stopped with `NoExecuteFault` at an address that names nothing.
+   *
+   * Only this one, on purpose. Every other linker-provided name (`android_dlopen_ext`, `pthread_atfork`,
+   * `dladdr`) stays trapped, so the next one the guest reaches names itself in the report instead of
+   * being guessed at now.
+   */
+  constexpr exec::GuestAddr kLoaderGlobals = 0x0041'0000u;
+  constexpr exec::GuestAddr kLoaderStub = 0x0042'0000u;
+  std::uint32_t loader_shared_globals = kUnresolved;
+  if (mem->Map(kLoaderGlobals, kGuestPage, kRead | kWrite, &err) &&
+      mem->Map(kLoaderStub, kGuestPage, kRead | kWrite | kExec, &err)) {
+    const std::uint32_t code[] = {0xe59f'0000u, 0xe12f'ff1eu, kLoaderGlobals};
+    if (mem->Write(kLoaderStub, code, sizeof code)) {
+      // ARM state on purpose: bit 0 stays clear, so a Thumb `blx` switches state on the way in and the
+      // `bx lr` above returns to the caller's Thumb address — the mechanism `docs/30` §Step 25 records.
+      loader_shared_globals = kLoaderStub;
+      Say(&out, "host: __loader_shared_globals -> ARM stub at 0x%s returning the zeroed page at 0x%s"
+                " (the real one lives in the linker, which no image here provides)",
+          Hex(kLoaderStub).c_str(), Hex(kLoaderGlobals).c_str());
+    }
+  }
+  if (loader_shared_globals == kUnresolved) {
+    Say(&out, "host: __loader_shared_globals could not be stubbed (%s) — the first constructor that calls"
+              " it will fault at 0x%s",
+        err.c_str(), Hex(kUnresolved).c_str());
+  }
+
   const loader::SymbolResolver host = [&](const std::string& name) -> std::optional<std::uint32_t> {
     if (name == "__stack_chk_guard") return kGuardPage;
+    if (name == "__loader_shared_globals") return loader_shared_globals;
     return kUnresolved;
   };
 
