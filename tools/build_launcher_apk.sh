@@ -123,10 +123,31 @@ find "$OUT/classes" -name '*.class' -print0 |
 cp "$OUT/dex/classes.dex" "$OUT/stage/"
 (cd "$OUT/stage" && jar -uf "$(to_host "$OUT/base.apk")" classes.dex lib assets)
 "$BT/zipalign.exe" -f -p 4 "$(to_host "$OUT/base.apk")" "$(to_host "$OUT/aligned.apk")"
-[ -f "$KS" ] || keytool -genkeypair -noprompt -keystore "$(to_host "$KS")" -storepass android \
-  -keypass android -alias launcher -dname "CN=RetroBug Launcher, OU=none, O=none, L=none, S=none, C=US" \
+# ---- signing key
+#
+# A *stable* key matters more than it looks. An install of a newer build over an older one is refused when
+# the two are signed by different keys -- `INSTALL_FAILED_UPDATE_INCOMPATIBLE` -- and the refusal arrives on
+# the phone, as one line of adb output, at the end of a command that otherwise looks like it worked. A build
+# that generates a fresh key every run therefore cannot be installed over the last one: the app has to be
+# uninstalled first, which deletes its data. So the key comes from the environment when it is named there,
+# and is generated into `build/` only as a local throwaway:
+#
+#   RB_KEYSTORE       path to the keystore (CI: materialized from the RB_KEYSTORE_B64 secret)
+#   RB_KEYSTORE_PASS  store and key password; the key is PKCS12, where the two have to match
+#   RB_KEY_ALIAS      entry name, default `launcher`
+KS="${RB_KEYSTORE:-$OUT/rb-test.keystore}"
+KS_PASS="${RB_KEYSTORE_PASS:-android}"
+KEY_ALIAS="${RB_KEY_ALIAS:-launcher}"
+if [ -n "${RB_KEYSTORE:-}" ] && [ ! -f "$KS" ]; then
+  echo "RB_KEYSTORE=$KS does not exist; refusing to generate a throwaway key where a stable one was named" >&2
+  exit 1
+fi
+[ -f "$KS" ] || keytool -genkeypair -noprompt -keystore "$(to_host "$KS")" -storetype PKCS12 \
+  -storepass "$KS_PASS" -keypass "$KS_PASS" -alias "$KEY_ALIAS" \
+  -dname "CN=RetroBug test build, OU=none, O=none, L=none, S=none, C=US" \
   -keyalg RSA -keysize 2048 -validity 3650 >/dev/null 2>&1
-"$BT/apksigner.bat" sign --ks "$(to_host "$KS")" --ks-pass pass:android --key-pass pass:android \
+"$BT/apksigner.bat" sign --ks "$(to_host "$KS")" --ks-pass "pass:$KS_PASS" --key-pass "pass:$KS_PASS" \
+  --ks-key-alias "$KEY_ALIAS" \
   --out "$(to_host "$OUT/rbguest-launcher.apk")" "$(to_host "$OUT/aligned.apk")" >/dev/null
 "$BT/apksigner.bat" verify "$(to_host "$OUT/rbguest-launcher.apk")" && echo "apksigner verify: clean"
 

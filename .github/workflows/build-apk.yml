@@ -97,6 +97,34 @@ jobs:
       # The two guest images the APK carries as assets. They are built, never downloaded: the guest APK is
       # the same file the C++ lane pushes to /data/local/tmp, and libm.so is linked out of the NDK's own
       # arm32 archives (docs/34 §1).
+      # The signing key, from repository secrets rather than generated per run.
+      #
+      # Why: an install of a newer build over an older one is refused when the two are signed by different
+      # keys (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`), so a workflow that generated a key each run would
+      # produce APKs that can only be installed after uninstalling the previous one -- which deletes the
+      # app's data. That is exactly what happened on the first successful CI artifact: it built, uploaded,
+      # downloaded, and then refused to install over the local build with one line of adb output.
+      #
+      # The key is a *test* key: it signs a probe app whose whole job is to run the engine and print numbers.
+      # It is not a release key and nothing here would be published under it. The absence of the secret is
+      # loud rather than fatal -- the build still runs and still uploads, with a warning that this artifact
+      # will not install over the last one.
+      - name: Materialize the signing key
+        shell: bash
+        env:
+          B64: ${{ secrets.RB_KEYSTORE_B64 }}
+          PASS: ${{ secrets.RB_KEYSTORE_PASS }}
+          ALIAS: ${{ secrets.RB_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          if [ -z "${B64:-}" ]; then
+            echo "::warning::no RB_KEYSTORE_B64 secret: this APK is signed with a throwaway key and will not install over a previous build"
+            exit 0
+          fi
+          KS="$RUNNER_TEMP/rb-test.keystore"
+          printf '%s' "$B64" | base64 -d > "$KS"
+          { echo "RB_KEYSTORE=$KS"; echo "RB_KEYSTORE_PASS=$PASS"; echo "RB_KEY_ALIAS=$ALIAS"; } >> "$GITHUB_ENV"
+
       - name: Build guest images
         shell: bash
         run: |
