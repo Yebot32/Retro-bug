@@ -26,10 +26,10 @@
  *
  * Two traps, both inherited from the lane and both still live here:
  *
- *   - The `ImageProvider` has to capture the libm bytes **by value**. `GuestLinker` stores the
+ *   - The `ImageProvider` has to capture the guest images **by value**. `GuestLinker` stores the
  *     `std::function` as a member for its whole lifetime, so a capture by reference would leave it
- *     pointing at this function's parameters. Nothing in this file calls the provider after
- *     `Link("libm.so", …)`, which is exactly why the mistake survives compilation and review.
+ *     pointing at this function's parameters. Nothing in this file calls the provider after the scope is
+ *     linked, which is exactly why the mistake survives compilation and review.
  *   - An import nothing in the guest scope answers is bound to `kUnresolved`, an address deliberately
  *     left unmapped, rather than to 0. The loader refuses the load when a resolver returns nullopt for a
  *     non-weak import, so the alternative to a loud address is a load that never happens; binding the
@@ -456,19 +456,26 @@ std::string Launch(const std::vector<std::uint8_t>& app_image,
  * imports did the guest scope answer and which were answered by the trap address that faults when called,
  * and — if it exports one — what does its `JNI_OnLoad` return through the emulator.
  *
- * The memory layout, resolver and linker setup are deliberately duplicated from `Launch` rather than
- * shared with it. `Launch`'s path is verified on hardware (`docs/30` §Step 37); a helper extracted for both
- * would put that verification behind a refactor no device has run, to save twenty lines.
+ * The memory layout and resolver setup are deliberately duplicated from `Launch` rather than shared with
+ * it. `Launch`'s path is verified on hardware (`docs/30` §Step 37); a helper extracted for both would put
+ * that verification behind a refactor no device has run, to save twenty lines.
  *
  * `tiers`: 0 = interpreter then JIT, 1 = interpreter only, 2 = JIT only.
+ *
+ * `libc_image` and `libz_image` are the other two guest libraries this APK ships — a bionic `libc.so`
+ * pulled off a 32-bit-capable device and a `libz.so` built from the NDK archive. Either may be empty (the
+ * APK then carries no such asset), which is still a run this report has to make and name.
  */
 std::string Inspect(const std::vector<std::uint8_t>& app_image,
-                    const std::vector<std::uint8_t>& libm_image, const std::string& label,
+                    const std::vector<std::uint8_t>& libm_image,
+                    const std::vector<std::uint8_t>& libc_image,
+                    const std::vector<std::uint8_t>& libz_image, const std::string& label,
                     int tiers) {
   std::string out;
   const unsigned page_shift = HostPageShift();
-  Say(&out, "inspect: %s=%zu bytes libm.so=%zu bytes host_page_shift=%u", label.c_str(),
-      app_image.size(), libm_image.size(), page_shift);
+  Say(&out, "inspect: %s=%zu bytes libm.so=%zu libc.so=%zu libz.so=%zu bytes host_page_shift=%u",
+      label.c_str(), app_image.size(), libm_image.size(), libc_image.size(), libz_image.size(),
+      page_shift);
   if (app_image.empty()) {
     Say(&out, "FATAL: no library bytes arrived — this APK has no lib/armeabi-v7a entry, or it could not"
               " be read out of the zip");
@@ -508,31 +515,93 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
     if (name == "__stack_chk_guard") return kGuardPage;
     return kUnresolved;
   };
-  const linker::ImageProvider provider = [libm_image](const std::string& soname)
-      -> std::optional<std::vector<std::uint8_t>> {
-    if (soname == "libm.so") return libm_image;
-    return std::nullopt;
-  };
-  std::unique_ptr<linker::GuestLinker> linker =
-      std::make_unique<linker::GuestLinker>(*mem, provider, host);
-  auto libm_mod = linker->Link("libm.so", libm_image, &err);
-  if (!libm_mod) {
-    Say(&out, "FATAL: GuestLinker::Link(\"libm.so\") failed: %s", err.c_str());
-    return out;
-  }
-  const loader::GuestModule* libm = *libm_mod;
-  std::size_t libm_functions = 0;
-  for (const auto& sym : libm->exports) {
-    if (sym.defined && sym.is_function) ++libm_functions;
-  }
-  Say(&out, "linker: libm.so at 0x%s, %zu defined functions, %zu module(s) in load order",
-      Hex(libm->base).c_str(), libm_functions, linker->order().size());
 
+  /**
+   * The scope, built by hand from the images the APK ships rather than by `GuestLinker::Link`.
+   *
+   * The reason is in the image: the device's `libc.so` declares `DT_NEEDED: ld-android.so, libdl.so`,
+   * and `LinkAt` refuses a needed soname with no provider image (`core/linker/guest_linker.cpp:183-185`).
+   * RetroBug ships no image for either and will not fabricate one — those two sonames say what the app
+   * does not import from us, not what it needs to load — so a `Link`-built scope never contains libc at
+   * all, which is exactly the failure this change exists to remove.
+   *
+   * A module that does not load is a report line, not an exit: the run against a scope with no libc is
+   * the run this launcher had before libc was shipped, and the trapped list below is exactly what the
+   * missing library costs.
+   */
+  std::optional<loader::GuestModule> libc_mod, libm_mod, libz_mod;
+  const auto load_scope = [&](const char* soname, std::optional<loader::GuestModule>& slot,
+                              const std::vector<std::uint8_t>& image) {
+    if (image.empty()) {
+      Say(&out, "scope: %s not loaded — no image arrived for it (this APK has no such asset)", soname);
+      return;
+    }
+    loader::LoadOptions opts;
+    // The opt-in is what lets a real bionic `libc.so` load at all: it has TLS relocation slots this loader
+    // cannot apply, and without the opt-in every one of them fails the load by name. What it tolerates is
+    // not hidden — each module keeps its skipped slots in `unsupported_relocs`, printed below.
+    opts.tolerate_unresolved_relocs = true;
+    // By reference, and that is safe here where the file header's provider has to be by value: this
+    // resolver is consulted only inside `LoadFromBytes`, which this lambda calls synchronously and does
+    // not retain. It answers from what is already in the scope, which is what makes the load order below
+    // dependency-first rather than a preference.
+    opts.resolve = [&](const std::string& name) -> std::optional<std::uint32_t> {
+      for (const std::optional<loader::GuestModule>* placed : {&libc_mod, &libm_mod, &libz_mod}) {
+        if (*placed) {
+          if (const auto fn = (*placed)->FindExport(name)) return fn->tagged();
+        }
+      }
+      return host(name);
+    };
+    std::string load_err;
+    slot = loader::LoadFromBytes(*mem, image, soname, opts, &load_err);
+    if (!slot) {
+      Say(&out, "scope: %s not loaded: %s", soname, load_err.c_str());
+      return;
+    }
+    std::size_t exports = 0;
+    for (const loader::Symbol& sym : slot->exports) {
+      if (sym.defined) ++exports;
+    }
+    Say(&out, "scope: %s at 0x%s extent 0x%s, %zu defined exports", soname, Hex(slot->base).c_str(),
+        Hex(slot->extent).c_str(), exports);
+    if (!slot->unsupported_relocs.empty()) {
+      Say(&out, "scope: %s: %zu relocation(s) tolerated but not applied — those slots still hold file"
+                " data, not addresses",
+          soname, slot->unsupported_relocs.size());
+    }
+  };
+  load_scope("libc.so", libc_mod, libc_image);
+  load_scope("libm.so", libm_mod, libm_image);
+  load_scope("libz.so", libz_mod, libz_image);
+
+  /**
+   * The app's imports, answered from the hand-built scope and nothing else. `FindExport` is the whole
+   * lookup and its tagged address is what a GOT entry wants (`rb/loader/guest_elf.h`) — the same answer
+   * `GuestLinker::Lookup` produced, with the linker no longer in the way. Only a name none of the three
+   * libraries defines falls through to the trap address, and only that falls through.
+   */
+  std::vector<std::string> answered;
   std::vector<std::string> trapped;
+  // One entry per imported name, not per relocation slot: the loader asks once per slot, and an import
+  // can fill more than one, so a plain push would count the same import twice.
+  const auto record = [](std::vector<std::string>& list, const std::string& name) {
+    for (const std::string& seen : list) {
+      if (seen == name) return;
+    }
+    list.push_back(name);
+  };
   loader::LoadOptions app_opts;
   app_opts.resolve = [&](const std::string& name) -> std::optional<std::uint32_t> {
-    if (const auto found = linker->Lookup(name)) return found;
-    trapped.push_back(name);
+    for (const std::optional<loader::GuestModule>* mod : {&libc_mod, &libz_mod, &libm_mod}) {
+      if (*mod) {
+        if (const auto fn = (*mod)->FindExport(name)) {
+          record(answered, name);
+          return fn->tagged();
+        }
+      }
+    }
+    record(trapped, name);
     return host(name);
   };
   auto app_mod = loader::LoadFromBytes(*mem, app_image, label, app_opts, &err);
@@ -560,20 +629,133 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
     for (const std::string& one : app.unsupported_relocs) relocs += (relocs.empty() ? "" : ", ") + one;
     Say(&out, "refused relocations: %s", relocs.c_str());
   }
-  if (app.init_array.empty() && app.init.addr == 0) {
-    Say(&out, "constructors: none recorded (DT_INIT_ARRAY and DT_INIT are both empty)");
-  } else {
-    Say(&out, "constructors: %zu in DT_INIT_ARRAY — recorded, NOT run (docs/30 §Step 33: they run after"
-              " the dependency scope exists)",
-        app.init_array.size());
-  }
-
   abi::AbiContext ctx{*mem, kStackTop, kReturnAddress};
   exec::InterpExecutor interp{*mem, kReturnAddress, &ctx};
   exec::JitExecutor jit{*mem, kReturnAddress, &ctx};
   if (!jit.ok()) Say(&out, "tier J is unavailable before any guest code ran: %s", jit.error().c_str());
 
-  // One place that writes the trap list, so the two exits below cannot drift apart. `Say` is variadic and
+  /**
+   * The thread pointer, before any guest constructor runs.
+   *
+   * `__get_tls()` in bionic is a read of the coprocessor register TPIDRURW — `MachineState::tp`, which
+   * defaults to zero — and every per-thread thing a constructor touches goes through it. With it zero the
+   * first TLS slot read is a read of a near-null address, and that is exactly what the run before this
+   * one did: libc's own `DT_INIT_ARRAY[0]` stopped at `guest memory read at 0x14 refused` on
+   * `ReadMemory32`, which is slot 5 of a null TLS block rather than anything libc did wrong.
+   *
+   * One page, read/write, at an address the layout above leaves free (the stack ends at `kStackTop`, the
+   * guard page is at `kGuardPage`, the sentinel at `kReturnAddress`, and modules are placed upward from
+   * 0x2000). The guest's own TLS layout lives inside it; nothing here interprets it.
+   */
+  constexpr exec::GuestAddr kTlsBase = 0x0040'0000u;
+  if (mem->Map(kTlsBase, kGuestPage, kRead | kWrite, &err)) {
+    ctx.state().tp = kTlsBase;
+    Say(&out, "tls: thread pointer set to 0x%s (one read/write page, %u bytes), because bionic reaches"
+              " its per-thread data through the coprocessor register this seeds",
+        Hex(kTlsBase).c_str(), kGuestPage);
+  } else {
+    Say(&out, "tls: could not map a thread-pointer page at 0x%s: %s — a guest constructor that touches"
+              " per-thread data will fault near address 0",
+        Hex(kTlsBase).c_str(), err.c_str());
+  }
+
+  /**
+   * The constructors, run here for the first time: the scope's in dependency order, then the app's own.
+   *
+   * `GuestLinker::RunInitializers` cannot do this one. It walks the linker's `order()`, and neither the
+   * app nor this scope is in it — the app is placed with `LoadFromBytes` (which is why it never runs
+   * through `Link`; see above) and the scope's modules are not linked at all — so the app's own
+   * `DT_INIT_ARRAY` was recorded and never run. Each module's two tags are walked the way
+   * `guest_linker.cpp:222-238` established: `DT_INIT_ARRAY` first, then `DT_INIT`, a zero entry skipped
+   * rather than called. The app's come last because a constructor may call into the scope.
+   *
+   * One tier only, and that is a correctness rule rather than a speed one: a constructor has side effects
+   * and this is one guest memory, so running the sequence on both tiers would run every constructor
+   * twice. `tiers == 2` asks for the JIT, but a JIT that could not be built is reported above, and the
+   * interpreter is then the only engine left that can run one.
+   */
+  exec::Executor& ctor_engine = (tiers == 2 && jit.ok()) ? static_cast<exec::Executor&>(jit)
+                                                         : static_cast<exec::Executor&>(interp);
+  const char* ctor_tier = ctor_engine.tier() == exec::CodeTier::Interp ? "I" : "J";
+  ctx.set_executor(ctor_engine);
+  // `CallGuest` hands the callee's last state back through its out-parameter, not through `ctx.state()`,
+  // which the bridge restores to the caller's registers on the way out (`rb/abi/abi.h`).
+  Outcome ctor_call;
+  const auto run_one_ctor = [&](loader::CodeAddress fn) {
+    ctor_call = Outcome{};
+    exec::RunResult result{};
+    const abi::Ret32 ret = ctx.CallGuest(fn.tagged(), {}, abi::Shorty::For(""), kCallBudget, &result,
+                                         &ctor_call.exit);
+    ctor_call.reason = result.reason;
+    ctor_call.bits = ret.bits;
+    ctor_call.steps = result.instructions_executed;
+    ctor_call.detail = result.detail;
+    return result.reason == exec::StopReason::Returned;
+  };
+  // One failure, with everything needed to find where it stopped. `what` names the entry — module, tag and
+  // index — because "a constructor failed" without one is a report a reader cannot act on, and `detail` is
+  // where a named fault (an unanswered import called at 0xbad0000, an unimplemented IR op) appears.
+  const auto say_ctor_failure = [&](const std::string& what) {
+    Say(&out, "constructors: %s did not return on tier=%s: %s", what.c_str(), ctor_tier,
+        ReasonName(ctor_call.reason));
+    if (!ctor_call.detail.empty()) Say(&out, "    stopped because: %s", ctor_call.detail.c_str());
+    Say(&out, "    callee's last state: pc=0x%s lr=0x%s r0=0x%s r1=0x%s sp=0x%s cpsr=0x%s",
+        Hex(ctor_call.exit.pc).c_str(), Hex(ctor_call.exit.r[14]).c_str(),
+        Hex(ctor_call.exit.r[0]).c_str(), Hex(ctor_call.exit.r[1]).c_str(),
+        Hex(ctor_call.exit.r[13]).c_str(), Hex(ctor_call.exit.cpsr).c_str());
+  };
+  // Stops the whole sequence at the first constructor that does not return: the rest of the scope's and
+  // the app's constructors are not run after a failure, because a half-initialized module must not look
+  // loaded.
+  const auto run_ctors = [&](const char* soname, const std::optional<loader::GuestModule>& slot,
+                             std::size_t* ran) -> bool {
+    if (!slot) return true;
+    for (std::size_t i = 0; i < slot->init_array.size(); ++i) {
+      const loader::CodeAddress fn = slot->init_array[i];
+      if (fn.addr == 0) continue;  // a gap some linkers leave in the array, not a function to call
+      if (run_one_ctor(fn)) {
+        ++*ran;
+        continue;
+      }
+      say_ctor_failure(std::string{soname} + " DT_INIT_ARRAY[" + std::to_string(i) + "] at 0x" +
+                       Hex(fn.addr));
+      return false;
+    }
+    if (slot->init.addr != 0) {
+      if (run_one_ctor(slot->init)) {
+        ++*ran;
+      } else {
+        say_ctor_failure(std::string{soname} + " DT_INIT at 0x" + Hex(slot->init.addr));
+        return false;
+      }
+    }
+    return true;
+  };
+  std::size_t libc_ctors = 0, libm_ctors = 0, libz_ctors = 0, app_ctors = 0;
+  const bool ctors_ok = run_ctors("libc.so", libc_mod, &libc_ctors) &&
+                        run_ctors("libm.so", libm_mod, &libm_ctors) &&
+                        run_ctors("libz.so", libz_mod, &libz_ctors) &&
+                        run_ctors(label.c_str(), app_mod, &app_ctors);
+  if (ctors_ok) {
+    Say(&out, "constructors: %zu ran in total on tier=%s (libc.so %zu, libm.so %zu, libz.so %zu, %s %zu)",
+        libc_ctors + libm_ctors + libz_ctors + app_ctors, ctor_tier, libc_ctors, libm_ctors, libz_ctors,
+        label.c_str(), app_ctors);
+  }
+  // The app's own tags are the point of running these by hand, so "it had none" is its own line rather
+  // than a zero in the tuple above.
+  if (app_ctors == 0 && app.init_array.empty() && app.init.addr == 0) {
+    Say(&out, "constructors: %s carries no DT_INIT_ARRAY and no DT_INIT — no startup work of its own",
+        label.c_str());
+  }
+
+  // The whole scope's effect in one line: how many of the names the app's relocations asked for were
+  // answered from a guest library, and how many are still bound to the unmapped trap address. The counts
+  // come from the resolver's own log rather than from `app.imports`, which holds only dynsym entries whose
+  // type the loader recognises — this image's three are `NOTYPE`, so it reads 0 beside three real slots.
+  Say(&out, "imports: %zu of %zu answered by the guest scope, %zu still trapped at 0x%s",
+      answered.size(), answered.size() + trapped.size(), trapped.size(), Hex(kUnresolved).c_str());
+
+  // One place that writes the trap list, so the exits below cannot drift apart. `Say` is variadic and
   // takes a `const char*`, so the note is built as a string first: a ternary mixing `""` with a
   // concatenation hands the variadic call a `std::string` and clang refuses it.
   const auto say_trapped = [&]() {
@@ -586,6 +768,16 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
     for (std::size_t i = 0; i < trapped.size() && i < 12; ++i) Say(&out, "  %s", trapped[i].c_str());
     if (trapped.size() > 12) Say(&out, "  ... and %zu more", trapped.size() - 12);
   };
+
+  // A constructor that did not return leaves the module half-initialized, so its entry points are not
+  // called: a real runtime would not be entering this library either. Named rather than silent, because
+  // "why is there no JNI_OnLoad line" is the first question a reader of this report will have.
+  if (!ctors_ok) {
+    Say(&out, "JNI_OnLoad: not called — a constructor above did not return, so the library is not in a"
+              " state a runtime would enter");
+    say_trapped();
+    return out;
+  }
 
   const auto onload = app.FindExport("JNI_OnLoad");
   if (!onload) {
@@ -645,6 +837,7 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_retrobug_launcher_LauncherActivity_nativeInspect(JNIEnv* env, jclass /*clazz*/,
                                                           jbyteArray guest_so, jbyteArray libm_so,
+                                                          jbyteArray libc_so, jbyteArray libz_so,
                                                           jstring label, jint tiers) {
   std::string name;
   if (label != nullptr) {
@@ -657,18 +850,24 @@ Java_com_retrobug_launcher_LauncherActivity_nativeInspect(JNIEnv* env, jclass /*
   if (name.empty()) name = "guest.so";
   const std::vector<std::uint8_t> app_image = Bytes(env, guest_so);
   const std::vector<std::uint8_t> libm_image = Bytes(env, libm_so);
+  const std::vector<std::uint8_t> libc_image = Bytes(env, libc_so);
+  const std::vector<std::uint8_t> libz_image = Bytes(env, libz_so);
   std::string report;
   try {
-    report = Inspect(app_image, libm_image, name, static_cast<int>(tiers));
+    report = Inspect(app_image, libm_image, libc_image, libz_image, name, static_cast<int>(tiers));
   } catch (const std::exception& e) {
     report = std::string{"FATAL: unhandled exception while inspecting: "} + e.what();
   }
   return env->NewStringUTF(report.c_str());
 }
 
+// The self-test lane loads the probe through `Launch`, which links only libm; libc and libz are in this
+// signature so the one APK has one asset set and the Java half hands it over uniformly. Unused on purpose:
+// `Launch`'s PASS/FAIL table was measured against a libm-only scope and is not this change's to move.
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_retrobug_launcher_LauncherActivity_nativeLaunch(JNIEnv* env, jclass /*clazz*/,
                                                          jbyteArray guest_so, jbyteArray libm_so,
+                                                         jbyteArray /*libc_so*/, jbyteArray /*libz_so*/,
                                                          jstring method, jint seed) {
   std::string name;
   if (method != nullptr) {

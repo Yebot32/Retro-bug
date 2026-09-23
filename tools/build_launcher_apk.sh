@@ -5,8 +5,9 @@
 #
 # What it produces is the readout for the question `tools/app_domain_probe.sh` could only ask about
 # individual syscalls: does the engine, running as an installed app, get the hardware's answer? The APK
-# carries `lib/arm64-v8a/librbguest.so` (the engine plus `android/jni/launcher.cpp`) and two assets — the
-# guest's APK and the guest's `libm.so` — which the Activity reads as byte arrays and hands across JNI.
+# carries `lib/arm64-v8a/librbguest.so` (the engine plus `android/jni/launcher.cpp`) and assets — the
+# guest's APK and the guest libraries a chosen app is resolved against, one of them optional — which the
+# Activity reads as byte arrays and hands across JNI.
 #
 # It runs **no adb command**. Two phones are attached to this machine most of the time and a verification
 # run is normally in flight on them; an install from here would replace a binary mid-run, which is a worse
@@ -46,15 +47,21 @@ KS="$ROOT/build/launcher-apk-key.keystore"
 
 GUEST_APK="$ROOT/build/guest-apk/rb_guestprobe.apk"
 GUEST_LIBM="$ROOT/build/guest-libs/libm.so"
+GUEST_LIBZ="$ROOT/build/guest-libs/libz.so"
+# Optional, and deliberately not in the requirement list below: the guest's real libc is the device's own
+# bionic, pulled off a 32-bit-capable phone, and no script in this tree produces one.
+GUEST_LIBC="$ROOT/build/device-libs/libc.so"
 
 to_host() {
   if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi
 }
 
-# ---- the two guest images. Neither is downloaded, generated, or stubbed by this script: they are outputs
-# of their own build scripts, and a launcher that quietly manufactured a stand-in would report PASS about
-# bytes that no device ever ran.
-for spec in "$GUEST_APK|tools/build-guest-apk.sh" "$GUEST_LIBM|tools/build-guest-libs.sh libm"; do
+# ---- the guest images this script insists on. None is downloaded, generated, or stubbed by this script:
+# they are outputs of their own build scripts, and a launcher that quietly manufactured a stand-in would
+# report PASS about bytes that no device ever ran. `libc.so` is absent from this list on purpose — see the
+# staging step, which treats it as required-if-present.
+for spec in "$GUEST_APK|tools/build-guest-apk.sh" "$GUEST_LIBM|tools/build-guest-libs.sh libm" \
+            "$GUEST_LIBZ|tools/build-guest-libs.sh libz"; do
   in="${spec%%|*}"; maker="${spec##*|}"
   if [ ! -s "$in" ]; then
     echo "missing $in — this script does not create it. Run '$maker' first." >&2
@@ -93,7 +100,7 @@ mkdir -p "$BUILD"
 LIB="$BUILD/librbguest.so"
 [ -f "$LIB" ] || { echo "no $LIB: the rbguest target did not produce it" >&2; exit 1; }
 
-# ---- staging. The two guest images travel as assets because that is the form the engine is handed them
+# ---- staging. The guest images travel as assets because that is the form the engine is handed them
 # in: `LoadFromBytes` takes a byte vector, and `android/java/.../LauncherActivity.java` reads the asset into
 # one. It also keeps the comparison with the C++ lane honest — `tools/run_engine_tests.sh` pushes
 # `build/guest-apk/rb_guestprobe.apk` to `/data/local/tmp/` and this copies the same file.
@@ -108,6 +115,19 @@ cp "$LIB" "$OUT/stage/lib/arm64-v8a/librbguest.so"
 "$TC/bin/llvm-strip.exe" --strip-unneeded "$OUT/stage/lib/arm64-v8a/librbguest.so"
 cp "$GUEST_APK" "$OUT/stage/assets/guest/rb_guestprobe.apk"
 cp "$GUEST_LIBM" "$OUT/stage/assets/guest/libm.so"
+cp "$GUEST_LIBZ" "$OUT/stage/assets/guest/libz.so"
+# libc.so is the one guest library this script cannot insist on: it is a file pulled off a 32-bit-capable
+# device, and a relink of the NDK's static `libc.a` is not the dynamic libc a real guest expects. Absent is
+# a warning rather than a build failure — the Activity reads the missing asset as an empty array and the
+# native side reports the scope it could link, which is the run this app had before libc was shipped. It is
+# deliberately not stubbed: a fabricated libc would be reported as a loaded one.
+if [ -s "$GUEST_LIBC" ]; then
+  cp "$GUEST_LIBC" "$OUT/stage/assets/guest/libc.so"
+else
+  echo "warning: $GUEST_LIBC is missing — packaging no guest libc.so;" >&2
+  echo "         the launcher then reports the runs it can still make without it. To include one, pull the" >&2
+  echo "         device's 32-bit /system/lib/libc.so to that path." >&2
+fi
 
 # ---- java -> dex
 javac -nowarn -source 8 -target 8 -bootclasspath "$(to_host "$AJ")" \

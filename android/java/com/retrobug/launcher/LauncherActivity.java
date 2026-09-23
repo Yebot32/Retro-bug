@@ -69,12 +69,16 @@ public class LauncherActivity extends Activity {
     private static final String PREF_FULL_REPORT = "full_report"; // show every report line, or the head+tail
     private static final String PREF_AUTORUN = "autorun";         // run the self-test when its screen opens
 
-    /// The two guest images the launcher ships. The inner APK is the *same file*
+    /// The guest images the launcher ships. The inner APK is the *same file*
     /// `tools/run_engine_tests.sh` pushes to `/data/local/tmp/rb_guestprobe.apk` for the C++ lane, so a
-    /// disagreement between the two lanes cannot be blamed on different inputs.
+    /// disagreement between the two lanes cannot be blamed on different inputs. `libc.so` is the device's
+    /// own bionic and may be absent from a build — the native side then reports the run without it, which
+    /// is why `readAssetOrEmpty` exists rather than a fatal read.
     private static final String GUEST_APK_ASSET = "guest/rb_guestprobe.apk";
     private static final String GUEST_SO_ENTRY = "lib/armeabi-v7a/libmathprobe.so";
     private static final String LIBM_ASSET = "guest/libm.so";
+    private static final String LIBC_ASSET = "guest/libc.so";
+    private static final String LIBZ_ASSET = "guest/libz.so";
     private static final int[] SEEDS = {0, 1, 4, 7, 100, -3};
     private static final String METHOD = "mathProbe";
     /// An entry this size or larger is refused with a message rather than an OutOfMemoryError: a guest
@@ -85,9 +89,11 @@ public class LauncherActivity extends Activity {
         System.loadLibrary("rbguest");
     }
 
-    private static native String nativeLaunch(byte[] guestSo, byte[] libmSo, String method, int seed);
+    private static native String nativeLaunch(byte[] guestSo, byte[] libmSo, byte[] libcSo, byte[] libzSo,
+                                              String method, int seed);
 
-    private static native String nativeInspect(byte[] guestSo, byte[] libmSo, String label, int tiers);
+    private static native String nativeInspect(byte[] guestSo, byte[] libmSo, byte[] libcSo, byte[] libzSo,
+                                               String label, int tiers);
 
     private enum Screen { HOME, LIBRARY, SETTINGS, DIAGNOSTICS, REPORT }
 
@@ -369,12 +375,14 @@ public class LauncherActivity extends Activity {
             return out.append("FATAL: could not read the bundled probe images: ")
                     .append(e.getClass().getSimpleName()).append(": ").append(e.getMessage()).toString();
         }
+        final byte[] libc = readAssetOrEmpty(LIBC_ASSET);
+        final byte[] libz = readAssetOrEmpty(LIBZ_ASSET);
         out.append("assets: ").append(GUEST_SO_ENTRY).append('=').append(guestSo.length)
                 .append("B ").append(LIBM_ASSET).append('=').append(libm.length).append("B\n");
         for (int seed : SEEDS) {
             String r;
             try {
-                r = nativeLaunch(guestSo, libm, METHOD, seed);
+                r = nativeLaunch(guestSo, libm, libc, libz, METHOD, seed);
             } catch (Throwable t) {
                 // A native SIGSEGV is not catchable and takes the process; what reaches here is a Java-side
                 // throw such as an allocation failure, and one bad seed should still print the five that did.
@@ -419,6 +427,8 @@ public class LauncherActivity extends Activity {
         } catch (IOException e) {
             return "FATAL: the bundled guest libm asset could not be read: " + e.getMessage();
         }
+        final byte[] libcBytes = readAssetOrEmpty(LIBC_ASSET);
+        final byte[] libzBytes = readAssetOrEmpty(LIBZ_ASSET);
 
         /*
          * One listing pass and one read, both through `ZipFile` rather than `ZipInputStream`.
@@ -504,7 +514,7 @@ public class LauncherActivity extends Activity {
             }
             if (so == null) return facts.append(refused).toString();
             facts.append('\n');
-            return facts + nativeInspect(so, libmBytes, chosen, tiers);
+            return facts + nativeInspect(so, libmBytes, libcBytes, libzBytes, chosen, tiers);
         }
     }
 
@@ -647,6 +657,18 @@ public class LauncherActivity extends Activity {
             in.close();
         }
         return out.toByteArray();
+    }
+
+    /// An asset's bytes, or an empty array when this APK does not carry that asset. A build can legitimately
+    /// ship without a guest libc (there is no script here that produces one), and the run that results is
+    /// the native half's to report by name — an IOException out of a missing asset would instead replace
+    /// that report with nothing at all.
+    private byte[] readAssetOrEmpty(String asset) {
+        try {
+            return readAll(getAssets().open(asset));
+        } catch (IOException e) {
+            return new byte[0];
+        }
     }
 
     // ------------------------------------------------------------------ view helpers
