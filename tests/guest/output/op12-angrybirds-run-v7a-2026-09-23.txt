@@ -1,0 +1,33 @@
+--------- beginning of main
+09-23 22:17:49.541  4907  4907 I RBLAUNCH: apk: angry-bird-v.1.0-android_port.apk (10675295 bytes)
+09-23 22:17:49.541  4907  4907 I RBLAUNCH: running: lib/armeabi-v7a/libangrybirds.so (1670325 bytes, the largest of 2)
+09-23 22:17:49.541  4907  4907 I RBLAUNCH: 32-bit ARM libraries: 2 (1 armeabi-v7a, 1 armeabi)
+09-23 22:17:49.541  4907  4907 I RBLAUNCH: classes.dex: present
+09-23 22:17:49.541  4907  4907 I RBLAUNCH: inspect: lib/armeabi-v7a/libangrybirds.so=1670325 bytes libm.so=131776 bytes host_page_shift=12
+09-23 22:17:49.541  4907  4907 I RBLAUNCH: linker: libm.so at 0x2000, 315 defined functions, 1 module(s) in load order
+09-23 22:17:49.541  4907  4907 I RBLAUNCH: loaded: libangrybirds.so at 0x100000 extent 0x152000, 4115 defined exports, 182 recorded dynsym imports
+09-23 22:17:49.541  4907  4907 I RBLAUNCH: needs: libc.so, libm.so, libGLESv1_CM.so, libz.so, liblog.so
+09-23 22:17:49.541  4907  4907 I RBLAUNCH: constructors: 12 in DT_INIT_ARRAY — recorded, NOT run (docs/30 §Step 33: they run after the dependency scope exists)
+09-23 22:17:49.542  4907  4907 I RBLAUNCH: JNI_OnLoad: not exported. This library exports 7 Java_* entry points instead, which is how an app of its era is driven — the Java side calls in through JNI.
+09-23 22:17:49.542  4907  4907 I RBLAUNCH:   RetroBug cannot reach them yet: each takes a JNIEnv* and a jobject that only a Java runtime can supply, and this build runs a guest's native code, not its DEX.
+09-23 22:17:49.542  4907  4907 I RBLAUNCH:   Java_com_rovio_ka3d_MyRenderer_nativeDeinit
+09-23 22:17:49.542  4907  4907 I RBLAUNCH:   Java_com_rovio_ka3d_MyRenderer_nativeUpdate
+09-23 22:17:49.542  4907  4907 I RBLAUNCH:   Java_com_rovio_ka3d_AudioOutput_nativeMixData
+09-23 22:17:49.542  4907  4907 I RBLAUNCH:   Java_com_rovio_ka3d_MyRenderer_nativeKeyInput
+09-23 22:17:49.542  4907  4907 I RBLAUNCH:   Java_com_rovio_ka3d_MyRenderer_nativeInit
+09-23 22:17:49.542  4907  4907 I RBLAUNCH:   Java_com_rovio_ka3d_MyRenderer_nativeInput
+09-23 22:17:49.542  4907  4907 I RBLAUNCH:   Java_com_rovio_ka3d_MyRenderer_nativeResize
+09-23 22:17:49.542  4907  4907 I RBLAUNCH: imports the guest scope did not answer: 164 (a call into one faults at 0xbad0000)
+09-23 22:17:49.542  4907  4907 I RBLAUNCH:   __dso_handle
+09-23 22:17:49.542  4907  4907 I RBLAUNCH:   __dso_handle
+09-23 22:17:49.542  4907  4907 I RBLAUNCH:   __sF
+09-23 22:17:49.542  4907  4907 I RBLAUNCH:   __sF
+09-23 22:17:49.542  4907  4907 I RBLAUNCH:   __stack_chk_guard
+09-23 22:17:49.542  4907  4907 I RBLAUNCH:   _toupper_tab_
+09-23 22:17:49.542  4907  4907 I RBLAUNCH:   _tolower_tab_
+09-23 22:17:49.542  4907  4907 I RBLAUNCH:   _ctype_
+09-23 22:17:49.542  4907  4907 I RBLAUNCH:   clock
+09-23 22:17:49.542  4907  4907 I RBLAUNCH:   pthread_mutex_trylock
+09-23 22:17:49.542  4907  4907 I RBLAUNCH:   glGenRenderbuffersOES
+09-23 22:17:49.542  4907  4907 I RBLAUNCH:   glEnable
+09-23 22:17:49.542  4907  4907 I RBLAUNCH:   ... and 152 more

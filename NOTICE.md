@@ -47,6 +47,20 @@ Components planned but not yet vendored — attribution obligations attach when 
   Apache-2.0 respectively.
 
 ================================================================================
+Image assets
+================================================================================
+
+The Android robot — Creative Commons Attribution 3.0
+  Copyright Google LLC. Created and shared by Google, used according to the terms described in the
+  Creative Commons 3.0 Attribution License: https://creativecommons.org/licenses/by/3.0/
+  Located at: file_0000000033448211bbdb620eed523634.png (source), android/res/mipmap-*/ic_launcher.png
+  (the densities `tools/make_launcher_icon.ps1` generates from it, which is what the launcher APK packages)
+
+  The attribution above is a condition of the licence, so it travels with the asset rather than being a
+  courtesy. Note what the mark is *not*: the Android robot is the platform's mascot, not a RetroBug mark,
+  and its use here implies no affiliation with, or endorsement by, Google.
+
+================================================================================
 Excluded deliberately, and why
 ================================================================================
 

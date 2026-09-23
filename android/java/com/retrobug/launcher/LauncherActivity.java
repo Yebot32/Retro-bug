@@ -311,7 +311,17 @@ public class LauncherActivity extends Activity {
 
     /// Keeps the report for the report screen and trims it when the setting says so. The trim keeps the
     /// head and the tail, because the two things a reader needs are what was attempted and what stopped it.
+    ///
+    /// Every line is logged before it is trimmed. The screen is for a person holding the phone; `logcat -s
+    /// RBLAUNCH` is the interface everything else reads — `tools/run_engine_tests.sh` and every unattended
+    /// check in this project — and the first version of this screen dropped the logging while adding the
+    /// trimming, which turned "the self-test passed" into "the log is empty" for anyone not looking at the
+    /// screen. The report goes out untrimmed for the same reason: a reader who can grep is not the reader
+    /// the trim was for.
     private void saveAndShow(String title, String report) {
+        for (String one : report.split("\n")) {
+            if (!one.isEmpty()) Log.i(TAG, one);
+        }
         reportTitle_ = title;
         SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
         if (p.getBoolean(PREF_FULL_REPORT, false)) {
@@ -410,24 +420,40 @@ public class LauncherActivity extends Activity {
             return "FATAL: the bundled guest libm asset could not be read: " + e.getMessage();
         }
 
+        /*
+         * One listing pass and one read, both through `ZipFile` rather than `ZipInputStream`.
+         *
+         * The library to run is chosen by the central directory: prefer an `armeabi-v7a` build over
+         * `armeabi` (the Angry Birds APK on the test phone carries both, and the first version of this ran
+         * the ARMv5 build while the ARMv7A one sat right there — a device would have picked v7a, and what
+         * RetroBug tests should be what the device would have run), and within that ABI the largest `.so`,
+         * because a game's code is never the smallest file in its own APK.
+         *
+         * `ZipInputStream` cannot do this: it is a stream, so `ZipEntry.getSize()` is -1 for anything whose
+         * size is not in the local header, and the comparison silently selected nothing — which the phone
+         * then reported as "this APK carries no library" about an APK with two of them. `ZipFile` reads the
+         * central directory, where the sizes are.
+         */
         StringBuilder facts = new StringBuilder();
         facts.append("apk: ").append(apk.getName()).append(" (").append(apk.length()).append(" bytes)\n");
-        byte[] so = null;
-        String soName = null;
-        List<String> arm32 = new ArrayList<>();
+        List<String> v7a = new ArrayList<>();
+        List<String> armv5 = new ArrayList<>();
         List<String> otherAbis = new ArrayList<>();
         boolean hasDex = false;
-        try (ZipInputStream zip = new ZipInputStream(new java.io.FileInputStream(apk))) {
-            for (ZipEntry e = zip.getNextEntry(); e != null; e = zip.getNextEntry()) {
+        String chosen = null;
+        long chosenSize = 0;
+        try (java.util.zip.ZipFile zf = new java.util.zip.ZipFile(apk)) {
+            for (java.util.Enumeration<? extends ZipEntry> en = zf.entries(); en.hasMoreElements(); ) {
+                ZipEntry e = en.nextElement();
                 String n = e.getName();
                 if (n.startsWith("lib/") && n.endsWith(".so")) {
-                    String abi = n.substring(4, n.indexOf('/', 4));
-                    if ("armeabi-v7a".equals(abi) || "armeabi".equals(abi)) {
-                        arm32.add(n);
-                        if (so == null) {
-                            so = readAllCapped(zip, MAX_SO_BYTES, n, facts);
-                            if (so != null) soName = n;
-                        }
+                    int slash = n.indexOf('/', 4);
+                    if (slash < 0) continue;
+                    String abi = n.substring(4, slash);
+                    if ("armeabi-v7a".equals(abi)) {
+                        v7a.add(n);
+                    } else if ("armeabi".equals(abi)) {
+                        armv5.add(n);
                     } else {
                         otherAbis.add(abi);
                     }
@@ -435,28 +461,51 @@ public class LauncherActivity extends Activity {
                     hasDex = true;
                 }
             }
-        }
-        facts.append("32-bit ARM libraries: ").append(arm32.isEmpty() ? "none" : String.valueOf(arm32.size()));
-        if (!arm32.isEmpty()) facts.append(" (").append(arm32.get(0));
-        if (arm32.size() > 1) facts.append(", first of ").append(arm32.size());
-        if (!arm32.isEmpty()) facts.append(")");
-        facts.append('\n');
-        if (!otherAbis.isEmpty()) {
-            List<String> uniq = new ArrayList<>(new java.util.LinkedHashSet<>(otherAbis));
-            Collections.sort(uniq);
-            facts.append("other ABIs present: ").append(uniq).append('\n');
-        }
-        facts.append("classes.dex: ").append(hasDex ? "present" : "absent").append('\n');
-        if (so == null) {
-            facts.append("\nNothing for RetroBug to run: this APK carries no lib/armeabi-v7a library.\n");
-            if (hasDex) {
-                facts.append("It has Java code, and running Java/DEX is not something this build does —"
-                        + " it executes 32-bit ARM native code.\n");
+            // ARMv7A when present, ARMv5 only when it is not; largest within the chosen ABI.
+            for (String candidate : (v7a.isEmpty() ? armv5 : v7a)) {
+                ZipEntry e = zf.getEntry(candidate);
+                long size = e == null ? 0 : e.getSize();
+                if (chosen == null || size > chosenSize) { chosen = candidate; chosenSize = size; }
             }
-            return facts.toString();
+            if (chosen != null) {
+                facts.append("running: ").append(chosen).append(" (").append(chosenSize).append(" bytes")
+                        .append(v7a.size() + armv5.size() > 1
+                                ? ", the largest of " + (v7a.size() + armv5.size()) : "")
+                        .append(v7a.isEmpty() ? ", no armeabi-v7a build in this APK" : "")
+                        .append(")\n");
+            }
+            int arm32Count = v7a.size() + armv5.size();
+            facts.append("32-bit ARM libraries: ")
+                    .append(arm32Count == 0 ? "none" : String.valueOf(arm32Count));
+            if (arm32Count > 0) {
+                facts.append(" (").append(v7a.size()).append(" armeabi-v7a, ").append(armv5.size())
+                        .append(" armeabi)");
+            }
+            facts.append('\n');
+            if (!otherAbis.isEmpty()) {
+                List<String> uniq = new ArrayList<>(new java.util.LinkedHashSet<>(otherAbis));
+                Collections.sort(uniq);
+                facts.append("other ABIs present: ").append(uniq).append('\n');
+            }
+            facts.append("classes.dex: ").append(hasDex ? "present" : "absent").append('\n');
+            if (chosen == null) {
+                facts.append("\nNothing for RetroBug to run: this APK carries no lib/armeabi-v7a or")
+                        .append(" lib/armeabi library.\n");
+                if (hasDex) {
+                    facts.append("It has Java code, and running Java/DEX is not something this build does —")
+                            .append(" it executes 32-bit ARM native code.\n");
+                }
+                return facts.toString();
+            }
+            byte[] so;
+            StringBuilder refused = new StringBuilder();
+            try (InputStream in = zf.getInputStream(zf.getEntry(chosen))) {
+                so = readAllCapped(in, MAX_SO_BYTES, chosen, refused);
+            }
+            if (so == null) return facts.append(refused).toString();
+            facts.append('\n');
+            return facts + nativeInspect(so, libmBytes, chosen, tiers);
         }
-        facts.append("\n");
-        return facts + nativeInspect(so, libmBytes, soName, tiers);
     }
 
     // ------------------------------------------------------------------ games on disk

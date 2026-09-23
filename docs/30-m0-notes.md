@@ -3498,6 +3498,69 @@ reports, and whether the self-test auto-runs. Nothing is per-game and nothing le
 setting is honoured by the library's Run; the self-test still runs both tiers because comparing them is its
 whole point.
 
+## Step 40 — the first real third-party app: Angry Birds 1.0.0 on a phone with no 32-bit support
+
+The owner put an APK on the OnePlus 12 and asked for it to be run. `angry-bird-v.1.0-android_port.apk`
+(10,675,295 B) is the genuine article: Rovio's KA3D engine, every entry stamped 2009-12-11, package
+`com.rovio.angrybirds`, versionName `1.0.0`, `assets/data/Level1..96.lua`, `lib/armeabi{,‑v7a}/libangrybirds.so`
+and a 33 KB `classes.dex` — re-signed by APK Easy Tool, but the game itself is untouched. Pulled from the
+phone, hashed (`c80ed55b…`), analysed independently before anything was run, then run through the app on the
+device. Evidence: `tests/guest/output/op12-*.png`, `op12-angrybirds-run-2026-09-23.txt`.
+
+`[1L]` **What happened: the game's ARMv7A library loaded and relocated.** On the CPH2573 (Snapdragon 8 Gen 3,
+`abilist32` empty, and the same phone that answers `not executable: 32-bit ELF file` for a native 32-bit
+binary), RetroBug read `lib/armeabi-v7a/libangrybirds.so` out of the APK, loaded it at 0x100000 with extent
+0x152000, relocated it — **4,115 defined exports, 182 dynsym imports, 176 `R_ARM_JUMP_SLOT` and 3,601
+`R_ARM_RELATIVE` relocations applied** — and reported `needs: libc.so, libm.so, libGLESv1_CM.so, libz.so,
+liblog.so`. That is a 2010 commercial game library, in guest memory, on a phone that cannot execute it.
+
+`[1L]` **Two bugs in my own new UI code, and the phone found both.** (1) It picked
+`lib/armeabi/libangrybirds.so` — the ARMv5 build — because that entry came first, while the ARMv7A build the
+device would actually have loaded sat in the same zip. (2) The rewrite that fixed (1) used
+`ZipEntry.getSize()` through a `ZipInputStream`, where it is `-1` for entries whose size is not in the local
+header, so the size comparison selected nothing and the app announced "this APK carries no lib/armeabi-v7a
+or lib/armeabi library" **about an APK with two of them**. Both fixed: the choice comes from `ZipFile`'s
+central directory, prefers ARMv7A, and takes the largest `.so` within it. Neither bug was visible from the
+code alone; both were one screenshot away.
+
+`[1L]` **And one wrong sentence, corrected by looking at what the library exports.** The first report said
+"this library does not export JNI_OnLoad, so there is no entry point RetroBug can call yet". It exports no
+`JNI_OnLoad` — and it exports **seven** `Java_*` entry points:
+`Java_com_rovio_ka3d_MyRenderer_nativeInit/nativeUpdate/nativeResize/nativeInput/nativeKeyInput/nativeDeinit`
+and `AudioOutput_nativeMixData`. That is how an app of that era is built: the Java side calls in through
+JNI, so the library never needs to know it was loaded. "No entry point" was wrong in the one place a reader
+would take as final, and the report now names them and says what they need — a `JNIEnv*` and a `jobject`
+that only a Java runtime can supply.
+
+`[1L]` **Why it stops there, measured rather than assumed.** The independent analysis (NDK `llvm-readelf` /
+`llvm-nm` / `llvm-objdump` over both `.so` files) puts the library's 182 undefined symbols into 22 that the
+bundled guest `libm` can answer and **160 that nothing in this build can** — 53 `gl*` from `libGLESv1_CM`,
+5 zlib, and 102 libc/other (`pthread_*`, `malloc`, `memcpy`, stdio, `str*`, `open/read/write`, `clock`,
+`__errno`, `_ctype_`, `longjmp`, `__cxa_atexit`…). It also puts the first *unanswerable* symbol in the load
+path precisely: the first static constructor tail-calls `__aeabi_atexit` → the PLT slot for `__cxa_atexit`,
+so running the 12 `DT_INIT_ARRAY` entries with today's provider would fault immediately. That is the reason
+they are recorded and not run (§Step 33), and now it has a witness.
+
+`[1L]` **No landmines, which is worth recording:** zero `R_ARM_TLS_*`, zero IFUNC slots, zero
+`R_ARM_REL32`, zero NEON, and the two ABIs' undefined sets are byte-identical. The ARMv7A build uses VFP
+(23,765 instructions, `vldr`/`vstr`/`vmul.f32` in the entry paths of `nativeInput`/`nativeUpdate`) where
+the ARMv5 build uses none — so the ABI choice above decides whether this game exercises Tier I's scalar VFP
+at all.
+
+`[UNVERIFIED]` **What "running Angry Birds" would actually take**, as a list rather than a wish: a guest
+libc and liblog answer (task #29's libc.so built from the NDK archive, plus the 160 symbols above), zlib,
+GLESv1 forwarded to the host, the 12 constructors run once the dependency scope exists, and a Java side to
+call the seven entry points — which is the AD-3 path (host ART runs the guest's DEX) with the JNI bridge
+that `rb::abi` already provides. None of that is in this build; the game stops after loading, and it stops
+for the reasons above rather than for want of ARMv7 emulation.
+
+`[1L]` **An operational fact about the test phone, learned the hard way:** `adb install` and
+`pm install` on the CPH2573 (ColorOS, Android 16) both return **success with no output and install
+nothing** — the package simply is not there afterwards. The session API works:
+`pm install-create -r -g -S <bytes>` → `pm install-write <id> base <path>` → `pm install-commit <id>`. Every
+install on that phone in this step used it. A silent no-op install is worse than the blocking install this
+device was already on record for, because it looks like it worked.
+
 ## Standing environment facts (so they are not re-derived)
 
 | Fact | Value |

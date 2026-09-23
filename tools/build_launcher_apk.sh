@@ -117,8 +117,20 @@ find "$OUT/classes" -name '*.class' -print0 |
   xargs -0 "$BT/d8.bat" --lib "$(to_host "$AJ")" --min-api 26 --output "$(to_host "$OUT/dex")" >/dev/null
 
 # ---- package
+# `aapt2 link` takes *compiled* resources, so the icon tree is compiled first. Until the icon the launcher
+# had none and this step did not exist; without it the app installs with the platform's default icon, which
+# is a thing you only notice on a home screen.
+RES_ARGS=()
+if [ -d "$SRC/res" ]; then
+  RESZIP="$OUT/res.zip"
+  "$BT/aapt2.exe" compile --dir "$(to_host "$SRC/res")" -o "$(to_host "$RESZIP")"
+  RES_ARGS+=("$(to_host "$RESZIP")")
+else
+  echo "note: no $SRC/res, building without an icon" >&2
+fi
 "$BT/aapt2.exe" link -I "$(to_host "$AJ")" --manifest "$(to_host "$SRC/AndroidManifest.xml")" \
   --min-sdk-version 26 --target-sdk-version 34 --version-code 1 --version-name 1 \
+  ${RES_ARGS[@]+"${RES_ARGS[@]}"} \
   -o "$(to_host "$OUT/base.apk")"
 cp "$OUT/dex/classes.dex" "$OUT/stage/"
 (cd "$OUT/stage" && jar -uf "$(to_host "$OUT/base.apk")" classes.dex lib assets)

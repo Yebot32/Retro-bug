@@ -589,8 +589,31 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
 
   const auto onload = app.FindExport("JNI_OnLoad");
   if (!onload) {
-    Say(&out, "JNI_OnLoad: this library does not export one, so there is no entry point RetroBug can"
-              " call yet. Loading it is where this build stops.");
+    /**
+     * No `JNI_OnLoad` is not the same as nothing to call, and the first version of this report said it
+     * was. The Angry Birds library on the test phone exports seven `Java_*` functions and no `JNI_OnLoad`
+     * at all — that is how an app of that era is built: the Java side calls into the library through JNI,
+     * so the library has no reason to notice being loaded. Saying "no entry point" about it was wrong in
+     * the one place a reader would take it as final.
+     */
+    std::vector<std::string> java_entries;
+    for (const std::string& name : app.ExportNames()) {
+      if (name.compare(0, 5, "Java_") == 0) java_entries.push_back(name);
+    }
+    if (java_entries.empty()) {
+      Say(&out, "JNI_OnLoad: not exported, and no Java_* entry point either — there is nothing here for a"
+                " Java runtime to call. Loading it is where this build stops.");
+    } else {
+      Say(&out, "JNI_OnLoad: not exported. This library exports %zu Java_* entry points instead, which is"
+                " how an app of its era is driven — the Java side calls in through JNI.",
+          java_entries.size());
+      Say(&out, "  RetroBug cannot reach them yet: each takes a JNIEnv* and a jobject that only a Java"
+                " runtime can supply, and this build runs a guest's native code, not its DEX.");
+      for (std::size_t i = 0; i < java_entries.size() && i < 8; ++i) {
+        Say(&out, "  %s", java_entries[i].c_str());
+      }
+      if (java_entries.size() > 8) Say(&out, "  ... and %zu more", java_entries.size() - 8);
+    }
     say_trapped();
     return out;
   }
