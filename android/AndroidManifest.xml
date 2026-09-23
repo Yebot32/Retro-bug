@@ -24,7 +24,7 @@
 
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />
 
-    <application android:label="RetroBug Launcher" android:debuggable="false">
+    <application android:label="RetroBug" android:debuggable="false">
         <activity
             android:name=".LauncherActivity"
             android:exported="true">

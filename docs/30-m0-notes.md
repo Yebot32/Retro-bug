@@ -3390,8 +3390,16 @@ from any of these three accounts.
 `rb_codecache_tests` 95/0, `rb_profile_tests` 133/0, Dynarmic's own 47 cases / 200,561 assertions, plus the
 advisory lanes above. `[UNVERIFIED]` Every one of those numbers is **SM7250-only this time**: the Tab S9 was
 not attached, so the two-device differential for §Steps 34-36 is not re-established. `[UNVERIFIED]` The
-launcher APK has not been rebuilt since `interp.cpp`, `jit.cpp` and `front_end.cpp` changed under it, so its
-24 PASS / 0 FAIL is a claim about the previous tree.
+launcher APK has been rebuilt and re-run against the changed engine, because the previous 24 PASS was a
+claim about the old tree. Rebuilt, installed and started on the SM7250: **24 PASS / 0 FAIL** over
+6 seeds x 4 calls, captured at `tests/guest/output/launcher-cph2145-lito-2026-09-21.txt`. The launcher also
+grew a real screen -- device facts including a plain line about whether the phone can run 32-bit ARM
+natively, a verdict banner, a re-run button and a scrollable report
+(`android/java/com/retrobug/launcher/LauncherActivity.java`, screen at
+`tests/guest/output/launcher-ui-cph2145-2026-09-21.png`) -- because "it works" has to be readable on a
+phone with no cable attached. [`UNVERIFIED`] This is still a 32-bit-capable device, so it is an oracle and
+not the launch proof, and the APK has not yet run on the OnePlus 12, the only host where a PASS would mean
+emulation rather than agreement.
 
 ## Standing environment facts (so they are not re-derived)
 

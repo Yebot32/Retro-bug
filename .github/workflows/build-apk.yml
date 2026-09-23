@@ -1,0 +1,133 @@
+# RetroBug — build the launcher APK on GitHub's runners. SPDX-License-Identifier: Apache-2.0
+#
+# Why this exists: the APK has only ever been built on the maintainer's Windows machine, which means the
+# artifact and the recipe live in one place and a phone can only get the file over a cable. This workflow
+# builds the same artifact from a clean checkout and attaches it, so "install this and see" does not need
+# the desktop at all.
+#
+# It runs `tools/build_launcher_apk.sh` **unchanged** -- the script that produced the APK verified on
+# hardware (`docs/30` §Step 37, 24 PASS / 0 FAIL on the SM7250). The runners are Windows for that reason:
+# the three build scripts it chains (`build-guest-apk.sh`, `build-guest-libs.sh`, itself) name the NDK's
+# `prebuilt/windows-x86_64` host tag and its `.exe` tools explicitly, so a Linux job would need those
+# scripts rewritten and would then be a *second* build path that nothing has run on a phone. A second path
+# is how an artifact and its recipe drift apart.
+#
+# What this workflow is not: it does not run the test lanes. Those need a device (`tools/run_engine_tests.sh`
+# pushes to `/data/local/tmp` and refuses to guess between two phones), and a green build here says only
+# that the APK was produced -- not that the engine inside it is correct. `docs/30` §Step 37 has the run that
+# does say that, and which device said it.
+name: build-apk
+
+on:
+  # Manual: Actions -> build-apk -> Run workflow.
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Attach the APK to a release with this tag (e.g. v0.1.0-test). Leave empty for an artifact only."
+        required: false
+        default: ""
+  push:
+    # Every push to main that could change the artifact produces a fresh APK, so "the latest build" is a
+    # thing you can download without anyone clicking. The paths list is what keeps that from running the
+    # Windows job for a docs edit: it names every input the APK is actually made of.
+    branches: [main]
+    paths:
+      - "android/**"
+      - "core/**"
+      - "tools/build_launcher_apk.sh"
+      - "tools/build-guest-apk.sh"
+      - "tools/build-guest-libs.sh"
+      - "CMakeLists.txt"
+      - "external/dynarmic/**"
+      - ".github/workflows/build-apk.yml"
+    # Tags always build, and publish: a release asset is what makes this installable from a phone's
+    # browser with no cable and no desktop.
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # only needed by the release step at the end
+
+jobs:
+  launcher-apk:
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The build scripts need javac/jar/keytool for `classes.dex` and for the throwaway signing key.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      # The same four components the local build uses, pinned to the same versions: the NDK the scripts
+      # default to, the cmake the scripts look for by path, the build-tools they look for by version, and
+      # the platform whose android.jar they compile Java against.
+      - name: Install SDK components
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install \
+            "ndk;28.2.13676358" \
+            "cmake;3.31.6" \
+            "build-tools;36.1.0" \
+            "platforms;android-36"
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          sdkmanager --list_installed
+
+      # The two guest images the APK carries as assets. They are built, never downloaded: the guest APK is
+      # the same file the C++ lane pushes to /data/local/tmp, and libm.so is linked out of the NDK's own
+      # arm32 archives (docs/34 §1).
+      - name: Build guest images
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tools/build-guest-libs.sh libm
+          bash tools/build-guest-apk.sh
+
+      - name: Build launcher APK
+        shell: bash
+        run: bash tools/build_launcher_apk.sh
+
+      # The script prints a table of what it packaged; the same list goes in the run's log so a build can
+      # be judged without downloading anything.
+      - name: Show what was packaged
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -la build/launcher-apk/
+          echo "--- sha256 ---"
+          sha256sum build/launcher-apk/rbguest-launcher.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rbguest-launcher-apk
+          path: build/launcher-apk/rbguest-launcher.apk
+          if-no-files-found: error
+
+      # A tag, or a manual run that named one, publishes the APK as a release asset so it can be downloaded
+      # straight from a phone. Assets are what make this installable without a cable.
+      - name: Publish the APK as a release asset
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag != '' && inputs.release_tag || github.ref_name }}
+          name: ${{ inputs.release_tag != '' && inputs.release_tag || github.ref_name }}
+          body: |
+            RetroBug launcher APK, built from ${{ github.sha }} by the `build-apk` workflow.
+
+            This is a *probe*, not the emulator's release: it installs the engine inside an Android app and
+            runs a 32-bit ARM (`armeabi-v7a`) library on both execution tiers, reporting whether the values
+            match what the same bytes produced natively on hardware.
+
+            What to look for on the phone: open "RetroBug" and read the line about 32-bit support. On a
+            64-bit-only phone it says this device cannot run 32-bit ARM at all, and every ARMv7 instruction
+            behind the results below was executed by RetroBug in that process. On a 32-bit-capable phone it
+            says so, and the PASS only means the engine agrees with the phone.
+          files: build/launcher-apk/rbguest-launcher.apk
+          fail_on_unmatched_files: true
