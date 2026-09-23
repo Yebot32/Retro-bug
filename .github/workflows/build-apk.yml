@@ -73,18 +73,26 @@ jobs:
       # The same four components the local build uses, pinned to the same versions: the NDK the scripts
       # default to, the cmake the scripts look for by path, the build-tools they look for by version, and
       # the platform whose android.jar they compile Java against.
+      #
+      # `sdkmanager` is located by path rather than by name. The action puts it on PATH for later steps,
+      # and under `shell: bash` that does not resolve -- run 35892061439 died at `sdkmanager: command not
+      # found` (exit 127) on the first line that used it. Its install directory is also version-named
+      # (`cmdline-tools/16.0/bin` on this runner), which is why the glob rather than a literal `latest`.
       - name: Install SDK components
         shell: bash
         run: |
           set -euo pipefail
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager --install \
+          SDK_ROOT="$(cygpath -u "$ANDROID_HOME")"
+          SDKMGR="$(ls -d "$SDK_ROOT"/cmdline-tools/*/bin/sdkmanager.bat 2>/dev/null | tail -1)"
+          [ -n "$SDKMGR" ] || { echo "no sdkmanager.bat under $SDK_ROOT/cmdline-tools"; ls -la "$SDK_ROOT"; exit 1; }
+          echo "using $SDKMGR"
+          # Licenses were already accepted by the action above; `--install` would prompt otherwise.
+          "$SDKMGR" --install \
             "ndk;28.2.13676358" \
             "cmake;3.31.6" \
             "build-tools;36.1.0" \
             "platforms;android-36"
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          sdkmanager --list_installed
+          "$SDKMGR" --list_installed
 
       # The two guest images the APK carries as assets. They are built, never downloaded: the guest APK is
       # the same file the C++ lane pushes to /data/local/tmp, and libm.so is linked out of the NDK's own
