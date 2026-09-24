@@ -104,6 +104,24 @@ public class LauncherActivity extends Activity {
     protected void onCreate(Bundle saved) {
         super.onCreate(saved);
         show(Screen.HOME);
+        /*
+         * An unattended run, so that a test does not depend on tapping the right pixel.
+         *
+         * `am start -n com.retrobug.launcher/.LauncherActivity -e run angry` opens the first game whose
+         * file name contains "angry" and runs it, with no UI in the loop. Driving this by taps was how the
+         * previous rounds were tested, and twice the taps landed on the screen the app happened to be
+         * resuming on rather than the one intended — each time costing a round trip and, once, producing a
+         * "nothing happened" reading of a run that never started. A named intent cannot miss.
+         */
+        final String run = getIntent() == null ? null : getIntent().getStringExtra("run");
+        if (run == null || run.isEmpty()) return;
+        for (File f : games()) {
+            if (f.getName().toLowerCase().contains(run.toLowerCase())) {
+                runGame(f);
+                return;
+            }
+        }
+        Toast.makeText(this, "no game matching '" + run + "'", Toast.LENGTH_LONG).show();
     }
 
     @Override

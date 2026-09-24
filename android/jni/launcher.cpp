@@ -35,6 +35,11 @@
  *     non-weak import, so the alternative to a loud address is a load that never happens; binding the
  *     unmapped page lets the image place, lets this report name the symbol that went unanswered, and
  *     still makes the guest fault the moment it actually calls it. A zero would do neither.
+ *
+ * The one set of imports that is *not* left to the trap is `gl*`: `libGLESv1_CM.so` is an API this host
+ * could forward to one day and nothing here implements it today, so those names get counted host slots
+ * instead — see the block in `Inspect`. Trapping them would name nothing and answer nothing; a counted
+ * no-op that says which entry point was called, and how often, is the honest form of "not yet".
  */
 #include <jni.h>
 
@@ -51,9 +56,11 @@
 #include <vector>
 
 #include "rb/abi/abi.h"
+#include "rb/abi/jni_env.h"
 #include "rb/exec/interp.h"
 #include "rb/exec/jit.h"
 #include "rb/linker/guest_linker.h"
+#include "rb/syscall/monitor.h"
 #include "rb/loader/guest_elf.h"
 #include "rb/mem/guest_memory.h"
 
@@ -90,6 +97,46 @@ constexpr std::size_t kWindowBytes = 64u << 20;
 constexpr unsigned kCallBudget = 4'000'000;
 constexpr std::int32_t kJniVersion16 = 0x0001'0006;
 constexpr const char* kAppSoname = "libmathprobe.so";
+
+/// Where the host's answers to a guest's `gl*` calls live: one page, mapped before any module is placed,
+/// in the same run of host pages as the loader stub. Its whole content is the pair of strings
+/// `glGetString` hands back, and that is the reason it exists — a game parses that result, so a defined
+/// string is the difference between "this host has no GL" and a null dereference that reads as a bug in
+/// the game.
+constexpr exec::GuestAddr kGlStrings = 0x0043'0000u;
+/// `"RetroBug (no GL)"` is sixteen bytes and a NUL, so the empty answer starts at the next word. The
+/// assert is why the two are joined by a constant rather than placed by hand: a longer identity string
+/// would silently overwrite the empty one, and the only thing that would ever notice is a guest parsing
+/// the result it was handed.
+constexpr unsigned kGlEmptyOffset = 20u;
+constexpr exec::GuestAddr kGlEmpty = kGlStrings + kGlEmptyOffset;
+static_assert(sizeof("RetroBug (no GL)") <= kGlEmptyOffset,
+              "the identity string would run into the empty one");
+
+/// `GL_VENDOR`, `GL_RENDERER`, `GL_VERSION`, transcribed from the NDK's own `GLES/gl.h`
+/// (`sysroot/usr/include/GLES/gl.h:303-305`, with `GL_EXTENSIONS` at 306) rather than recalled: these are
+/// the enums a game parses to decide what it is running on, so a wrong number here is a wrong answer that
+/// no fault would ever name.
+constexpr std::uint32_t kGlVendor = 0x1f00u;
+constexpr std::uint32_t kGlRenderer = 0x1f01u;
+constexpr std::uint32_t kGlVersion = 0x1f02u;
+
+/// The host-slot ids the GL answers take — above bionic's JNI table, which `abi::JniEnv` fills from 0, so
+/// the two answer tables cannot alias each other, and below `AbiContext::kMaxSlots`, past which no
+/// address `SlotFor` produces maps back to its slot. `kGlSlots` bounds how many names one run may bind;
+/// the set is refused rather than wrapped when it runs out.
+constexpr std::uint32_t kGlSlotBase = 256u;
+constexpr std::size_t kGlSlots = 64;
+static_assert(kGlSlotBase >= abi::jni::kTableEntries &&
+                  kGlSlotBase + kGlSlots <= abi::AbiContext::kMaxSlots,
+              "a GL slot would either alias the JNI table or be unreachable past kMaxSlots");
+
+/// Whether a name is one of the OpenGL ES client entry points the host answers. The set is deliberately
+/// not a list: which entry points a run needs is whatever the app's own relocations ask for, and a list
+/// written here would be a second inventory of `libGLESv1_CM.so` to keep in step with the first.
+bool IsGlName(const std::string& name) {
+  return name.size() > 2 && name.compare(0, 2, "gl") == 0;
+}
 
 /// The host's page granule as a shift, because `AddressModel::host_page_shift` is told the host granule
 /// and must be **no finer** than it (`rb/mem/guest_memory.h`: a finer value is refused by `Create`, a
@@ -554,9 +601,137 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
         err.c_str(), Hex(kUnresolved).c_str());
   }
 
+  // The bridge, built here rather than beside the executors below, because the answer to a `gl*` import
+  // is a host slot and only the bridge can hand one out. It has no executor yet, which is the ordering
+  // `rb/abi/abi.h` describes: the bridge *is* the table the executor consults, so the executor takes it.
+  abi::AbiContext ctx{*mem, kStackTop, kReturnAddress};
+
+  /**
+   * The host-answered OpenGL ES 1.x set.
+   *
+   * Why this exists at all: 53 of the Angry Birds 1.0.0 library's 182 imports are `gl*`, and that list was
+   * the *entire* trapped list of the run before this one — the client library that would define them,
+   * `libGLESv1_CM.so`, is in no image here and is not being fabricated. Left alone they land on
+   * `kUnresolved`, so the first one the game calls faults at an address that names nothing, which is the
+   * worst of both: no answer and no name. This answers them instead, and the answer is *visible*: one host
+   * slot per name the run asks for, a tally per name, and report lines that say exactly what happened.
+   * That is the sanctioned shape of "not implemented" here — counted, named, and explained — rather than
+   * the silent zero the project forbids.
+   *
+   * What a call does: nothing but count, and leave r0 at 0. For a `void` function that is invisible, and
+   * for the rest it is a defined value a caller can store; for `glGetError` a 0 is `GL_NO_ERROR`, the
+   * answer a working driver gives. `glGetString` is the exception that has to be answered with bytes,
+   * because a game parses its result and a null would crash it in a way that looks like a game bug — see
+   * the two strings above.
+   */
+  std::string gl_why;
+  const auto gl_ready = [&]() -> bool {
+    if (!mem->Map(kGlStrings, kGuestPage, kRead | kWrite, &err)) {
+      gl_why = "the page could not be mapped: " + err;
+      return false;
+    }
+    if (!mem->Write(kGlStrings, "RetroBug (no GL)", sizeof("RetroBug (no GL)")) ||
+        !mem->Write(kGlEmpty, "", 1)) {
+      gl_why = "the mapped page refused the writes";
+      return false;
+    }
+    return true;
+  }();
+  if (!gl_ready) {
+    Say(&out, "gl: the strings glGetString must return could not be placed at 0x%s (%s) — the gl* imports"
+              " stay trapped at 0x%s, which faults the moment one is called",
+        Hex(kGlStrings).c_str(), gl_why.c_str(), Hex(kUnresolved).c_str());
+  }
+  struct GlEntry {
+    std::string name;
+    unsigned calls = 0;
+  };
+  std::vector<GlEntry> gl_calls;
+  /// Hands one `gl*` name a host slot, allocating on first sight and reusing it after. `nullopt` is a
+  /// refusal — no strings to point at, or the set is full — and the caller turns that into the trap
+  /// address, so a GL answer is never a slot the executor would not recognise.
+  const auto gl_slot_for = [&](const std::string& name) -> std::optional<std::uint32_t> {
+    if (!gl_ready) return std::nullopt;
+    for (std::size_t i = 0; i < gl_calls.size(); ++i) {
+      if (gl_calls[i].name == name) return ctx.SlotFor(kGlSlotBase + static_cast<std::uint32_t>(i));
+    }
+    if (gl_calls.size() >= kGlSlots) return std::nullopt;
+    const std::uint32_t slot = kGlSlotBase + static_cast<std::uint32_t>(gl_calls.size());
+    const std::size_t index = gl_calls.size();
+    gl_calls.push_back(GlEntry{name, 0});
+    // The name is captured by value and the counter is reached by index, so a later `push_back` moving
+    // the vector cannot leave this closure counting into freed memory.
+    ctx.Bind(slot, [&gl_calls, index, name](exec::MachineState& s, std::string*) {
+      ++gl_calls[index].calls;
+      const bool wants_a_string = name == "glGetString";
+      const bool parsed_by_the_game = s.r[0] == kGlVendor || s.r[0] == kGlRenderer || s.r[0] == kGlVersion;
+      s.r[0] = wants_a_string ? (parsed_by_the_game ? kGlStrings : kGlEmpty) : 0u;
+      return true;
+    });
+    return ctx.SlotFor(slot);
+  };
+
+  /**
+   * The guest-callable `JNIEnv`, from `rb/abi/jni_env.h` — the machinery the JNI seam already has, used
+   * here for its second caller rather than reimplemented.
+   *
+   * It is built before anything is loaded for one reason: it maps guest pages of its own, and the
+   * loader's placement scan takes the first free run it finds, so a region mapped afterwards could be
+   * occupied by an image. Built now, every module is placed around it instead.
+   *
+   * The table is guest *data*, not guest code: `jni_env.h` fills it with `AbiContext` slots, which the
+   * executor recognises before it translates anything, so no page of the guest window has to hold host
+   * instructions. The GL set above reaches the same slot mechanism independently; what both need is a
+   * guest that calls through them, and for the JNIEnv that caller is the entry point below.
+   */
+  constexpr exec::GuestAddr kJniEnvRegion = 0x0050'0000u;
+  constexpr unsigned kJniEnvArena = 4u << 10;
+  std::string jni_err;
+  abi::JniEnv jni{*mem, ctx, kJniEnvRegion, kJniEnvArena, &jni_err};
+  // The value the entry point gets in r0: a real fake environment when the region above was granted, and
+  // a null when it was not, which is the only other honest answer — the report says which one it was.
+  const abi::GuestAddr env_ptr = jni.ok() ? jni.env() : 0;
+  if (jni.ok()) {
+    Say(&out, "env: a fake JNIEnv at 0x%s — %u table entries of host-call slots (0..%u) and a %u-byte"
+              " string arena, all guest memory. It is RetroBug's, not a JavaVM's: a guest that"
+              " dereferences it reads a real table, and an entry with no implementation refuses by name"
+              " instead of branching to address 0.",
+        Hex(env_ptr).c_str(), abi::jni::kTableEntries, abi::jni::kTableEntries - 1u, kJniEnvArena);
+  } else {
+    Say(&out, "env: the fake JNIEnv could not be built (%s) — a guest JNI method is called with env=0, so"
+              " one that reads its table faults near address 0 rather than in a table this run could have"
+              " provided",
+        jni_err.c_str());
+  }
+
+  /**
+   * The syscall monitor — the piece of the OS a guest `svc` instruction reaches.
+   *
+   * Without one, the first `svc` a guest libc makes stops the run with `no syscall monitor attached`,
+   * which is what bionic's own preinit did on this phone the first time it ran far enough to ask the
+   * kernel for anything. With one attached, each call is either *answered* — the monitor knows the call
+   * and has the fact — or *refused by name*, and its tally says how many of each, which is the difference
+   * between "the guest asked for nothing" and "the guest asked and nobody answered".
+   *
+   * Two setters and one deliberate omission. `set_memory` is what lets a pointer-shaped call copy a path
+   * out of guest memory or a `stat64` into it; without it every such call is a refusal rather than a write
+   * to address 0. `set_ids` gives the guest its own pid and tid, because nothing in this path may ask the
+   * host kernel for one and an unset id is refused rather than invented. No file provider is attached on
+   * purpose: a guest `openat` then comes back as a named refusal carrying the path, which is a list of
+   * files to decide about one at a time — handing the guest the host's filesystem wholesale is a decision
+   * that should be made per path, with the path in front of you.
+   */
+  syscall::Monitor monitor;
+  monitor.set_memory(mem.get());
+  monitor.set_ids(4242, 4243);
+  ctx.set_monitor(&monitor);
+
   const loader::SymbolResolver host = [&](const std::string& name) -> std::optional<std::uint32_t> {
     if (name == "__stack_chk_guard") return kGuardPage;
     if (name == "__loader_shared_globals") return loader_shared_globals;
+    if (IsGlName(name)) {
+      if (const auto slot = gl_slot_for(name)) return slot;
+    }
     return kUnresolved;
   };
 
@@ -626,6 +801,10 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
    * libraries defines falls through to the trap address, and only that falls through.
    */
   std::vector<std::string> answered;
+  /// The `gl*` names the app's relocations asked for and the host answered with a slot. Kept apart from
+  /// `answered` on purpose: "the guest scope answered it" and "the host bound it to a counted no-op" are
+  /// different facts, and the imports line below is a claim about the first one.
+  std::vector<std::string> gl_answered;
   std::vector<std::string> trapped;
   // One entry per imported name, not per relocation slot: the loader asks once per slot, and an import
   // can fill more than one, so a plain push would count the same import twice.
@@ -645,8 +824,16 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
         }
       }
     }
-    record(trapped, name);
-    return host(name);
+    const std::optional<std::uint32_t> from_host = host(name);
+    // The bucket has to be the answer the name actually got, not the question that was asked: a `gl*`
+    // name is in the host-answered set only when a slot really came back, so a refused slot set still
+    // reports those names as trapped rather than claiming an answer nobody can call.
+    if (IsGlName(name) && from_host && *from_host != kUnresolved) {
+      record(gl_answered, name);
+    } else {
+      record(trapped, name);
+    }
+    return from_host;
   };
   auto app_mod = loader::LoadFromBytes(*mem, app_image, label, app_opts, &err);
   if (!app_mod) {
@@ -673,7 +860,6 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
     for (const std::string& one : app.unsupported_relocs) relocs += (relocs.empty() ? "" : ", ") + one;
     Say(&out, "refused relocations: %s", relocs.c_str());
   }
-  abi::AbiContext ctx{*mem, kStackTop, kReturnAddress};
   exec::InterpExecutor interp{*mem, kReturnAddress, &ctx};
   exec::JitExecutor jit{*mem, kReturnAddress, &ctx};
   if (!jit.ok()) Say(&out, "tier J is unavailable before any guest code ran: %s", jit.error().c_str());
@@ -793,11 +979,16 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
   }
 
   // The whole scope's effect in one line: how many of the names the app's relocations asked for were
-  // answered from a guest library, and how many are still bound to the unmapped trap address. The counts
-  // come from the resolver's own log rather than from `app.imports`, which holds only dynsym entries whose
-  // type the loader recognises — this image's three are `NOTYPE`, so it reads 0 beside three real slots.
-  Say(&out, "imports: %zu of %zu answered by the guest scope, %zu still trapped at 0x%s",
-      answered.size(), answered.size() + trapped.size(), trapped.size(), Hex(kUnresolved).c_str());
+  // answered from a guest library, how many went to the host's counted GL set, and how many are still
+  // bound to the unmapped trap address. The counts come from the resolver's own log rather than from
+  // `app.imports`, which holds only dynsym entries whose type the loader recognises — this image's three
+  // are `NOTYPE`, so it reads 0 beside three real slots. The three buckets are the app's whole import list
+  // and they are separate on purpose: "the guest scope answered it" and "the host bound it to a counted
+  // no-op" are different facts, and the second one gets its own lines at the exit.
+  Say(&out, "imports: %zu of %zu answered by the guest scope, %zu by the host's GL set (below), %zu still"
+            " trapped at 0x%s",
+      answered.size(), answered.size() + gl_answered.size() + trapped.size(), gl_answered.size(),
+      trapped.size(), Hex(kUnresolved).c_str());
 
   // One place that writes the trap list, so the exits below cannot drift apart. `Say` is variadic and
   // takes a `const char*`, so the note is built as a string first: a ternary mixing `""` with a
@@ -813,12 +1004,81 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
     if (trapped.size() > 12) Say(&out, "  ... and %zu more", trapped.size() - 12);
   };
 
+  /**
+   * One place that writes the GL tally, at every exit, for the same reason `say_trapped` exists.
+   *
+   * The list is of the names this run *bound*, each with its call count, rather than of the names that
+   * were called: for the work ahead — forwarding these entry points to a host driver one day — which
+   * entry points the app asks for is the useful fact, and a count of 0 says "bound and not reached yet"
+   * where an omission would say nothing. The two are distinguishable at a glance and that matters here,
+   * because a run that stops early and one that never bound the set produce the same silence otherwise.
+   */
+  const auto say_gl = [&]() {
+    if (gl_calls.empty()) {
+      Say(&out, "gl: no gl* import was asked of the host in this run, so the host-answered GL set is empty"
+                " (nothing was answered with GL semantics, and nothing needed to be)");
+      return;
+    }
+    unsigned called = 0, calls = 0;
+    bool get_string = false;
+    for (const GlEntry& e : gl_calls) {
+      if (e.calls != 0) ++called;
+      calls += e.calls;
+      if (e.name == "glGetString") get_string = true;
+    }
+    Say(&out, "gl: %zu gl* imports were answered by host slots %u..%u rather than by the trap address — no"
+              " image here implements GLES1. RetroBug implements no GL: every one of these returns a"
+              " defined zero (glGetError's is GL_NO_ERROR) and draws nothing. Counted, named, and reported"
+              " here rather than silently ignored.",
+        gl_calls.size(), kGlSlotBase,
+        kGlSlotBase + static_cast<std::uint32_t>(gl_calls.size()) - 1u);
+    if (called == 0) {
+      Say(&out, "gl: none of them has been called by this run yet — the set is bound, so the first call"
+                " that does arrive is counted and answered instead of faulting at 0x%s. What the app asks"
+                " for, each with the number of calls reached:",
+          Hex(kUnresolved).c_str());
+    } else {
+      Say(&out, "gl: %u of them have been called, %u calls in total. What the app asks for, each with the"
+                " number of calls reached:",
+          called, calls);
+    }
+    std::size_t shown = 0;
+    for (const GlEntry& e : gl_calls) {
+      if (shown == 12) {
+        Say(&out, "  ... and %zu more, whose calls are in the total above", gl_calls.size() - shown);
+        break;
+      }
+      Say(&out, "  %s x%u", e.name.c_str(), e.calls);
+      ++shown;
+    }
+    if (get_string) {
+      Say(&out, "gl: glGetString returns fabrications standing in for a driver — GL_VENDOR, GL_RENDERER and"
+                " GL_VERSION read \"RetroBug (no GL)\" out of guest memory, and GL_EXTENSIONS and every"
+                " other enum read the empty string. A game parses that answer, so it is bytes rather than"
+                " a null; nothing behind them renders.");
+    }
+  };
+
+  /// One place that writes the syscall tally, at every exit, for the reason the other two emitters exist:
+  /// what the guest asked the OS for is the next thing a reader needs, and a run that stopped before any
+  /// guest code ran has to say that rather than print an empty line.
+  const auto say_syscalls = [&]() {
+    const std::string tally = monitor.TallyText();
+    if (tally.empty()) {
+      Say(&out, "syscalls: none were made — the run stopped before guest code asked the OS for anything");
+      return;
+    }
+    Say(&out, "syscalls: %s", tally.c_str());
+  };
+
   // A constructor that did not return leaves the module half-initialized, so its entry points are not
   // called: a real runtime would not be entering this library either. Named rather than silent, because
   // "why is there no JNI_OnLoad line" is the first question a reader of this report will have.
   if (!ctors_ok) {
     Say(&out, "JNI_OnLoad: not called — a constructor above did not return, so the library is not in a"
               " state a runtime would enter");
+    say_gl();
+    say_syscalls();
     say_trapped();
     return out;
   }
@@ -843,13 +1103,48 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
       Say(&out, "JNI_OnLoad: not exported. This library exports %zu Java_* entry points instead, which is"
                 " how an app of its era is driven — the Java side calls in through JNI.",
           java_entries.size());
-      Say(&out, "  RetroBug cannot reach them yet: each takes a JNIEnv* and a jobject that only a Java"
-                " runtime can supply, and this build runs a guest's native code, not its DEX.");
       for (std::size_t i = 0; i < java_entries.size() && i < 8; ++i) {
         Say(&out, "  %s", java_entries[i].c_str());
       }
       if (java_entries.size() > 8) Say(&out, "  ... and %zu more", java_entries.size() - 8);
+
+      /**
+       * Why this one of the seven: it is the only name in the list above that is not a per-frame or
+       * per-input callback — the engine's one-time startup, which is what a runtime's first call into a
+       * game does before a frame exists. The name is checked against the image rather than assumed, so a
+       * library that does not export it is reported as such instead of being skipped quietly.
+       *
+       * Called on the constructor tier, once, and that is a requirement rather than a preference: this
+       * function has side effects in one shared guest memory (the rule the constructor sequence above
+       * already follows), and calling it on both tiers would run the game's startup twice and count every
+       * GL call it made twice.
+       */
+      constexpr const char* kEntryPoint = "Java_com_rovio_ka3d_MyRenderer_nativeInit";
+      const auto entry = app.FindExport(kEntryPoint);
+      if (!entry) {
+        Say(&out, "%s: not exported by this library either, so this run has no JNI method to call — the"
+                  " names above are the list a Java side would drive.",
+            kEntryPoint);
+      } else {
+        Say(&out, "%s: exported (0x%s). Calling it through the bridge the way a JNI method is called:"
+                  " env=0x%s, the fake JNIEnv above, and clazz=0.",
+            kEntryPoint, Hex(static_cast<std::uint32_t>(entry->addr)).c_str(), Hex(env_ptr).c_str());
+        Say(&out, "  called with (env, clazz) only; the library's other parameters were not supplied,"
+                  " because what they are lives in the APK's Java half and not in these bytes. The return"
+                  " type is declared int here for the same reason, so the value below is what the bridge"
+                  " reads out of r0 rather than what the library declared.");
+        const Outcome got = Call(ctor_engine, ctx, app, kEntryPoint, "I",
+                                 {abi::Value32::Ptr(env_ptr), abi::Value32::Ptr(0)});
+        Say(&out, "%s tier=%s reason=%s steps=%u value=0x%s", kEntryPoint, ctor_tier,
+            ReasonName(got.reason), got.steps, Hex(static_cast<std::uint32_t>(got.bits)).c_str());
+        if (!got.detail.empty()) Say(&out, "    stopped because: %s", got.detail.c_str());
+        Say(&out, "    callee's last state: pc=0x%s lr=0x%s r0=0x%s r1=0x%s sp=0x%s cpsr=0x%s",
+            Hex(got.exit.pc).c_str(), Hex(got.exit.r[14]).c_str(), Hex(got.exit.r[0]).c_str(),
+            Hex(got.exit.r[1]).c_str(), Hex(got.exit.r[13]).c_str(), Hex(got.exit.cpsr).c_str());
+      }
     }
+    say_gl();
+    say_syscalls();
     say_trapped();
     return out;
   }
@@ -872,6 +1167,8 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
   };
   if (tiers == 0 || tiers == 1) call_one(interp, "I");
   if ((tiers == 0 || tiers == 2) && jit.ok()) call_one(jit, "J");
+  say_gl();
+  say_syscalls();
   say_trapped();
   return out;
 }

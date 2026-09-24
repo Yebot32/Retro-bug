@@ -3,7 +3,12 @@
  */
 #include "rb/syscall/monitor.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <ctime>
+#include <random>
+
+#include "rb/mem/guest_memory.h"
 
 namespace rb::syscall {
 namespace {
@@ -12,6 +17,112 @@ std::string Hex(std::uint64_t v) {
   char buf[19];
   std::snprintf(buf, sizeof buf, "%llx", static_cast<unsigned long long>(v));
   return buf;
+}
+
+/// The host's own clocks, and the only place in this file that asks the host anything. `CLOCK_REALTIME`
+/// and `CLOCK_MONOTONIC` are facts a process can have; the process-CPU clocks are not answered here
+/// because a guest's "CPU time" measured by the emulator's host would be a different quantity wearing the
+/// right name, and a named refusal is better than a plausible wrong number.
+bool HostClock(std::int32_t clock_id, std::int64_t* nanos) {
+  const clockid_t id = clock_id == static_cast<std::int32_t>(CLOCK_REALTIME)
+                           ? CLOCK_REALTIME
+                           : (clock_id == static_cast<std::int32_t>(CLOCK_MONOTONIC) ? CLOCK_MONOTONIC
+                                                                                    : -1);
+  if (id < 0) return false;
+  timespec ts{};
+  if (::clock_gettime(id, &ts) != 0) return false;
+  *nanos = static_cast<std::int64_t>(ts.tv_sec) * 1'000'000'000 + static_cast<std::int64_t>(ts.tv_nsec);
+  return true;
+}
+
+/// The host's entropy pool, through `<random>` because `getentropy`/`getrandom` are API 28 and this
+/// engine builds at 26. libc++'s `random_device` is `/dev/urandom` on Android; the `try` is here because
+/// it is allowed to throw on a host with no entropy source, and a syscall handler that threw would take
+/// the instance down instead of naming a refusal.
+bool HostEntropy(std::uint8_t* dst, std::size_t len) {
+  try {
+    std::random_device device;
+    for (std::size_t i = 0; i < len;) {
+      const std::uint32_t word = device();
+      for (unsigned b = 0; b < 4 && i < len; ++b, ++i) {
+        dst[i] = static_cast<std::uint8_t>((word >> (8 * b)) & 0xffu);
+      }
+    }
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+/// `AT_FDCWD`, measured: the wall run's `openat` had `r0 = 0xffffff9c`.
+constexpr std::int32_t kAtFdcwd = -100;
+/// The longest pathname this file will copy before answering `ENAMETOOLONG`, which is `PATH_MAX` and the
+/// length a real `openat` of an over-long name was measured to refuse with -36 on the SM-X710.
+constexpr std::size_t kMaxPath = 4096;
+/// Linux fcntl bits this file has to read, from `asm-generic/fcntl.h`: O_ACCMODE (write intent),
+/// O_CREAT, O_TRUNC, O_APPEND, O_DIRECTORY. A provider serves bytes, so a write-intent open is `EROFS`
+/// and a directory open is `ENOTDIR`, both of which are what a real Android gives for those shapes.
+constexpr std::uint32_t kOAccMode = 3u;
+constexpr std::uint32_t kOCreat = 00000100u;
+constexpr std::uint32_t kOTrunc = 00001000u;
+constexpr std::uint32_t kOAppend = 00002000u;
+constexpr std::uint32_t kODirectory = 00200000u;
+
+/// The arm32 `struct stat64`, whose field offsets were *measured* rather than recalled: the NDK's own
+/// `arm-linux-androideabi/asm/stat.h` compiled for `armv7a-linux-androideabi26` puts `st_size` at 48 and
+/// the two inode words at 12 and 96, sizeof == 104 — the four bytes of alignment after `__pad3` are the
+/// part a hand-written layout gets wrong. See the test lane, which asserts the offsets it reads back.
+constexpr std::uint32_t kStatSize = 16;    ///< st_mode
+constexpr std::uint32_t kStatNlink = 20;   ///< st_nlink
+constexpr std::uint32_t kStatSizeOff = 48; ///< st_size, the 8-byte one
+constexpr std::uint32_t kStatBlksize = 56;
+constexpr std::uint32_t kStatBlocks = 64;
+constexpr std::uint32_t kStatIno = 96;
+constexpr std::uint32_t kStatBytes = 104;
+/// S_IFREG | 0444: what the provider's images are, and the reason `write` on one is `EBADF` rather than a
+/// silently discarded buffer.
+constexpr std::uint32_t kModeReadonly = 0100444u;
+
+/// Fills a guest `struct stat64` for a read-only regular file of `size` bytes. Only the fields a caller
+/// can observe from a read-only image are written: everything else is left zero rather than filled with
+/// a host value (`st_dev`, times) that would be a fact about the wrong machine.
+bool WriteStat64(mem::GuestMemory& mem, std::uint32_t at, std::uint64_t size, std::string* why) {
+  std::uint8_t bytes[kStatBytes] = {};
+  const auto put32 = [&](std::uint32_t off, std::uint32_t v) {
+    for (unsigned i = 0; i < 4; ++i) bytes[off + i] = static_cast<std::uint8_t>((v >> (8 * i)) & 0xffu);
+  };
+  const auto put64 = [&](std::uint32_t off, std::uint64_t v) {
+    for (unsigned i = 0; i < 8; ++i) bytes[off + i] = static_cast<std::uint8_t>((v >> (8 * i)) & 0xffu);
+  };
+  put32(kStatSize, kModeReadonly);
+  put32(kStatNlink, 1u);
+  put64(kStatSizeOff, size);
+  put32(kStatBlksize, mem::kGuestPage);
+  put64(kStatBlocks, (size + 511u) / 512u);
+  put32(12, 1u);  ///< the old `__st_ino` word, which bionic's struct still carries
+  put64(kStatIno, 1u);
+  if (!mem.Write(at, bytes, sizeof bytes)) {
+    if (why != nullptr) *why = "the stat buffer at 0x" + Hex(at) + " is not writable guest memory";
+    return false;
+  }
+  return true;
+}
+
+enum class PathStatus { kOk, kUnmapped, kTooLong };
+
+/// Copies a NUL-terminated guest path out, one byte at a time so a path that ends at the last byte of a
+/// mapped page still works. `kTooLong` is a distinct answer from `kUnmapped` because the two have
+/// different errnos — `ENAMETOOLONG` is measured (`-36`, SM-X710), and `EFAULT` is what a real kernel
+/// says for a pointer that is not there.
+PathStatus ReadGuestPath(mem::GuestMemory& mem, std::uint32_t at, std::string* out) {
+  out->clear();
+  for (std::size_t i = 0; i < kMaxPath; ++i) {
+    char c = 0;
+    if (!mem.Read(at + static_cast<std::uint32_t>(i), &c, 1)) return PathStatus::kUnmapped;
+    if (c == '\0') return PathStatus::kOk;
+    out->push_back(c);
+  }
+  return PathStatus::kTooLong;
 }
 
 }  // namespace
@@ -33,15 +144,36 @@ const char* Name(std::uint32_t number) {
     case nr::kWrite: return "write";
     case nr::kClose: return "close";
     case nr::kGetpid: return "getpid";
+    case nr::kBrk: return "brk";
+    case nr::kIoctl: return "ioctl";
+    case nr::kGettimeofday: return "gettimeofday";
     case nr::kMunmap: return "munmap";
+    case nr::kFstat: return "fstat";
     case nr::kMprotect: return "mprotect";
+    case nr::kWritev: return "writev";
     case nr::kPrctl: return "prctl";
+    case nr::kRtSigaction: return "rt_sigaction";
+    case nr::kRtSigprocmask: return "rt_sigprocmask";
     case nr::kMmap2: return "mmap2";
+    case nr::kFstat64: return "fstat64";
+    case nr::kGetdents64: return "getdents64";
+    case nr::kMadvise: return "madvise";
+    case nr::kFcntl64: return "fcntl64";
     case nr::kGettid: return "gettid";
     case nr::kFutex: return "futex";
     case nr::kExitGroup: return "exit_group";
+    case nr::kSetTidAddress: return "set_tid_address";
     case nr::kClockGettime: return "clock_gettime";
+    case nr::kClockNanosleep: return "clock_nanosleep";
+    case nr::kTgkill: return "tgkill";
     case nr::kOpenat: return "openat";
+    case nr::kFstatat64: return "fstatat64";
+    case nr::kReadlinkat: return "readlinkat";
+    case nr::kFaccessat: return "faccessat";
+    case nr::kSetRobustList: return "set_robust_list";
+    case nr::kUtimensat: return "utimensat";
+    case nr::kGetrandom: return "getrandom";
+    case nr::kClockGettime64: return "clock_gettime64";
     case nr::kExecve: return "execve";
     case nr::kCacheFlush: return "arm_cacheflush";
     case nr::kSetTls: return "arm_set_tls";
@@ -82,6 +214,37 @@ unsigned Monitor::Note(std::uint32_t number) {
   }
   tally_.emplace_back(number, 1u);
   return 1;
+}
+
+void Monitor::Observe(const std::string& detail) {
+  for (const std::string& seen : notes_) {
+    if (seen == detail) return;
+  }
+  if (notes_.size() >= kMaxNotes) {
+    ++dropped_notes_;
+    return;
+  }
+  notes_.push_back(detail);
+}
+
+std::int32_t Monitor::NextFd() const {
+  for (std::int32_t candidate = 3;; ++candidate) {
+    bool used = false;
+    for (const ServedFile& open : served_) {
+      if (open.fd == candidate) {
+        used = true;
+        break;
+      }
+    }
+    if (!used) return candidate;
+  }
+}
+
+Monitor::ServedFile* Monitor::FileFor(std::int32_t fd) {
+  for (ServedFile& open : served_) {
+    if (open.fd == fd) return &open;
+  }
+  return nullptr;
 }
 
 std::string Monitor::TallyText() const {
@@ -134,23 +297,373 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
       state.tp = f.arg[0];
       return Outcome::Emulated(0, "MachineState::tp = " + Hex(f.arg[0]));
 
-    case nr::kRead:
-    case nr::kWrite:
-    case nr::kClose:
-    case nr::kOpenat:
-    case nr::kMmap2:
-    case nr::kMunmap:
-    case nr::kMprotect:
-    case nr::kFutex:
+    case nr::kSetTidAddress: {
+      if (!ids_set_) {
+        return Outcome::Refused(err::kEnosys,
+                                "svc #256 (set_tid_address) before the launcher set this instance's ids; "
+                                "refusing rather than returning a tid nobody produced");
+      }
+      clear_child_tid_ = f.arg[0];
+      const std::string why = "set_tid_address(0x" + Hex(clear_child_tid_) + ") -> tid " +
+                              std::to_string(tid_) +
+                              "; the clear-child-tid slot is recorded, and no thread exit walks it "
+                              "because this build models one thread";
+      Observe(why);
+      return Outcome::Emulated(tid_, why);
+    }
+
+    case nr::kSetRobustList: {
+      robust_head_ = f.arg[0];
+      robust_len_ = f.arg[1];
+      const std::string why = "set_robust_list(head=0x" + Hex(robust_head_) + ", len=" +
+                              std::to_string(robust_len_) +
+                              ") recorded -> 0; this build models one thread and no thread exit, so "
+                              "nothing ever walks the list";
+      Observe(why);
+      return Outcome::Emulated(0, why);
+    }
+
     case nr::kClockGettime:
-    case nr::kPrctl:
-      // Known, and refused *as a decision* rather than as an accident: each of these needs a component
-      // that does not exist yet (C10's resolver for the file calls, C07's own thread work for futex, and
-      // so on). ENOSYS is what a kernel with no entry says, and the measured device kernel says exactly
-      // that for a number outside its table, so the guest at least sees a consistent shape.
-      return Outcome::Refused(err::kEnosys, Describe(f.number) +
-                                               " is not forwarded: this build has an empty allowlist and "
-                                               "no handler yet");
+    case nr::kClockGettime64: {
+      const bool wide = f.number == nr::kClockGettime64;
+      const std::string call = wide ? "clock_gettime64" : "clock_gettime";
+      const std::int32_t id = static_cast<std::int32_t>(f.arg[0]);
+      if (memory_ == nullptr) {
+        return Outcome::Refused(err::kEnosys, call + "(" + std::to_string(id) +
+                                                   "): no guest memory is attached to this monitor, so "
+                                                   "there is nowhere to write the timespec");
+      }
+      std::int64_t nanos = 0;
+      const bool have = clock_ ? clock_(id, &nanos) : HostClock(id, &nanos);
+      if (!have) {
+        return Outcome::Refused(err::kEnosys,
+                                call + "(" + std::to_string(id) +
+                                    ") has no fact to answer from: this build answers CLOCK_REALTIME "
+                                    "(0) and CLOCK_MONOTONIC (1) only, and a CPU-time clock measured on "
+                                    "the host would be the emulator's time under the guest's name");
+      }
+      std::int64_t sec = nanos / 1'000'000'000;
+      std::int64_t nsec = nanos % 1'000'000'000;
+      if (nsec < 0) {
+        nsec += 1'000'000'000;
+        --sec;
+      }
+      const std::uint32_t at = f.arg[1];
+      bool wrote = false;
+      if (wide) {
+        // `struct __kernel_timespec` for the 64-bit `time_t` variant: two 8-byte fields, 16 bytes.
+        const std::uint64_t words[2] = {static_cast<std::uint64_t>(sec),
+                                        static_cast<std::uint64_t>(nsec)};
+        wrote = memory_->Write(at, words, sizeof words);
+      } else {
+        // The legacy arm32 `struct timespec`: two 4-byte fields, 8 bytes.
+        const std::uint32_t words[2] = {static_cast<std::uint32_t>(sec),
+                                        static_cast<std::uint32_t>(nsec)};
+        wrote = memory_->Write(at, words, sizeof words);
+      }
+      if (!wrote) {
+        return Outcome::Answered(err::kEfault, call + ": the timespec at 0x" + Hex(at) +
+                                                   " is not writable guest memory");
+      }
+      return Outcome::Emulated(0, call + "(" + std::to_string(id) + ") = " + std::to_string(sec) + "s " +
+                                      std::to_string(nsec) + "ns");
+    }
+
+    case nr::kGetrandom: {
+      const std::uint32_t at = f.arg[0];
+      const std::uint32_t len = f.arg[1];
+      const std::uint32_t flags = f.arg[2];
+      if (memory_ == nullptr) {
+        return Outcome::Refused(err::kEnosys, "getrandom: no guest memory is attached to this monitor");
+      }
+      if (flags != 0) {
+        return Outcome::Answered(err::kEinval, "getrandom(flags=0x" + Hex(flags) +
+                                                   "): the kernel requires flags == 0");
+      }
+      if (len == 0) return Outcome::Emulated(0, "getrandom(0) -> 0");
+      /// Filled in bounded chunks straight into guest memory: the guest picks `len`, so a `std::vector`
+      /// of its choosing is a host allocation a guest controls, and there is no reason to make one.
+      std::uint8_t chunk[256];
+      std::uint32_t done = 0;
+      while (done < len) {
+        const std::uint32_t n = std::min<std::uint32_t>(sizeof chunk, len - done);
+        if (!(random_ ? random_(chunk, n) : HostEntropy(chunk, n))) {
+          return Outcome::Refused(err::kEnosys, "svc #384 (getrandom) is not implemented: no random "
+                                               "source is installed and the host's own pool refused");
+        }
+        if (!memory_->Write(at + done, chunk, n)) {
+          return Outcome::Answered(err::kEfault, "getrandom: the buffer at 0x" + Hex(at) +
+                                                     " is not writable guest memory");
+        }
+        done += n;
+      }
+      return Outcome::Emulated(static_cast<std::int32_t>(len),
+                               "getrandom(" + std::to_string(len) + ") from the host's entropy pool");
+    }
+
+    case nr::kRtSigprocmask: {
+      const std::uint32_t how = f.arg[0];
+      const std::uint32_t set = f.arg[1];
+      const std::uint32_t old = f.arg[2];
+      const std::uint32_t sigsetsize = f.arg[3];
+      if (memory_ == nullptr) {
+        return Outcome::Refused(err::kEnosys, "rt_sigprocmask: no guest memory is attached to this monitor");
+      }
+      // The arm32 kernel's `compat_sigset_t` is 8 bytes and it refuses anything else with EINVAL before
+      // it looks at the mask — so a size of 4 (bionic's *userspace* `sigset_t`) is a real EINVAL, not a
+      // gap, and answering it would hide a caller that is passing the wrong object.
+      if (sigsetsize != 8) {
+        return Outcome::Answered(err::kEinval,
+                                 "rt_sigprocmask(sigsetsize=" + std::to_string(sigsetsize) +
+                                     ") = -EINVAL (-22): the arm32 kernel's compat sigset is 8 bytes");
+      }
+      if (how > 2) {
+        return Outcome::Answered(err::kEinval, "rt_sigprocmask(how=" + std::to_string(how) +
+                                                   ") = -EINVAL: not SIG_BLOCK(0)/SIG_UNBLOCK(1)/"
+                                                   "SIG_SETMASK(2)");
+      }
+      if (old != 0 && !memory_->Write(old, &signal_mask_, sizeof signal_mask_)) {
+        return Outcome::Answered(err::kEfault, "rt_sigprocmask: the old-set out-parameter at 0x" +
+                                                   Hex(old) + " is not writable guest memory");
+      }
+      if (set != 0) {
+        std::uint64_t incoming = 0;
+        if (!memory_->Read(set, &incoming, sizeof incoming)) {
+          return Outcome::Answered(err::kEfault, "rt_sigprocmask: the set at 0x" + Hex(set) +
+                                                     " is not readable guest memory");
+        }
+        if (how == 0) {
+          signal_mask_ |= incoming;
+        } else if (how == 1) {
+          signal_mask_ &= ~incoming;
+        } else {
+          signal_mask_ = incoming;
+        }
+      }
+      return Outcome::Emulated(0, "rt_sigprocmask(how=" + std::to_string(how) + ") -> mask 0x" +
+                                      Hex(signal_mask_) +
+                                      " (modelled in the monitor; this build delivers no signals)");
+    }
+
+    case nr::kPrctl: {
+      const std::uint32_t option = f.arg[0];
+      // PR_SET_NAME (15) / PR_GET_NAME (16): the thread name is guest-visible state that RetroBug can
+      // hold without touching the host thread, so these two are answered and everything else is refused
+      // by name rather than answered with a 0 the way a kernel would answer an option it *does* know.
+      if (option == 15u || option == 16u) {
+        if (memory_ == nullptr) {
+          return Outcome::Refused(err::kEnosys, "prctl(PR_SET_NAME/PR_GET_NAME): no guest memory is "
+                                               "attached to this monitor");
+        }
+        if (option == 15u) {
+          // TASK_COMM_LEN bytes, NUL-terminated: read up to the terminator the way `strncpy_from_user`
+          // does, so a name whose last byte is the last byte of a page still reads.
+          std::array<char, 16> name{};
+          for (std::size_t i = 0; i + 1 < name.size(); ++i) {
+            if (!memory_->Read(f.arg[1] + static_cast<std::uint32_t>(i), &name[i], 1)) {
+              return Outcome::Answered(err::kEfault, "prctl(PR_SET_NAME): the name pointer at 0x" +
+                                                         Hex(f.arg[1]) + " is not readable guest memory");
+            }
+            if (name[i] == '\0') break;
+          }
+          thread_name_ = name;
+          return Outcome::Emulated(0, std::string{"prctl(PR_SET_NAME, \""} + name.data() +
+                                      "\") recorded in the monitor; the host thread is not renamed");
+        }
+        if (!memory_->Write(f.arg[1], thread_name_.data(), thread_name_.size())) {
+          return Outcome::Answered(err::kEfault, "prctl(PR_GET_NAME): the buffer at 0x" + Hex(f.arg[1]) +
+                                                     " is not writable guest memory");
+        }
+        return Outcome::Emulated(0, std::string{"prctl(PR_GET_NAME) -> \""} + thread_name_.data() + "\"");
+      }
+      return Outcome::Refused(err::kEnosys, "svc #172 (prctl) is not implemented for option 0x" +
+                                                Hex(option) +
+                                                "; this build answers PR_SET_NAME (15) and PR_GET_NAME "
+                                                "(16) only");
+    }
+
+    case nr::kOpenat: {
+      if (!files_) {
+        // The existing shape, kept because it is what a launch with no provider must say: nothing here
+        // can serve a file, and the empty allowlist is the other half of why.
+        return Outcome::Refused(err::kEnosys,
+                                "openat: no file provider is installed on this monitor and the "
+                                "forwarding allowlist is empty, so there is nothing that can serve a "
+                                "file; refused with ENOSYS (-38) rather than answered with a 0");
+      }
+      if (memory_ == nullptr) {
+        return Outcome::Refused(err::kEnosys, "openat: no guest memory is attached to this monitor, so "
+                                              "the path cannot be read");
+      }
+      const std::int32_t dirfd = static_cast<std::int32_t>(f.arg[0]);
+      if (dirfd != kAtFdcwd) {
+        return Outcome::Refused(err::kEnosys,
+                                "svc #322 (openat) is not implemented for a dirfd other than AT_FDCWD "
+                                "(-100): this build has no directory descriptors to be relative to");
+      }
+      std::string path;
+      const PathStatus status = ReadGuestPath(*memory_, f.arg[1], &path);
+      if (status == PathStatus::kUnmapped) {
+        return Outcome::Answered(err::kEfault, "openat: the path pointer 0x" + Hex(f.arg[1]) +
+                                                   " is not readable guest memory");
+      }
+      if (status == PathStatus::kTooLong) {
+        return Outcome::Answered(err::kEnametoolong,
+                                 "openat: the name at 0x" + Hex(f.arg[1]) +
+                                     " has no NUL in the first " + std::to_string(kMaxPath) +
+                                     " bytes; a real openat of an over-long name was measured at -36 "
+                                     "(ENAMETOOLONG) on the SM-X710");
+      }
+      const std::uint32_t flags = f.arg[2];
+      if ((flags & kOAccMode) != 0 || (flags & (kOCreat | kOTrunc | kOAppend)) != 0) {
+        return Outcome::Answered(err::kErofs,
+                                 "openat('" + path + "', flags=0x" + Hex(flags) + ") = -EROFS (-30): the "
+                                 "launcher's file provider serves read-only images, so a write-intent "
+                                 "open is refused rather than answered with a descriptor writes would "
+                                 "silently go nowhere through");
+      }
+      if ((flags & kODirectory) != 0) {
+        return Outcome::Answered(err::kEnotdir, "openat('" + path + "', O_DIRECTORY) = -ENOTDIR (-20): "
+                                                    "the provider serves files, and this build has no "
+                                                    "directory descriptors");
+      }
+      std::optional<std::vector<std::uint8_t>> bytes = files_(path);
+      if (!bytes) {
+        return Outcome::Answered(err::kEnoent, "openat('" + path +
+                                                   "') = -ENOENT (-2): the launcher's file provider does "
+                                                   "not serve that path");
+      }
+      if (served_.size() >= kMaxServedFds) {
+        return Outcome::Answered(err::kEmfile, "openat('" + path + "') = -EMFILE (-24): this monitor's "
+                                                          "descriptor table is full (" +
+                                                   std::to_string(kMaxServedFds) + ")");
+      }
+      const std::int32_t fd = NextFd();
+      served_.push_back(ServedFile{path, std::move(*bytes), 0, fd});
+      const std::string why = "openat('" + path + "') -> fd " + std::to_string(fd) + " (" +
+                              std::to_string(served_.back().bytes.size()) +
+                              " bytes from the launcher's provider, read-only)";
+      Observe(why);
+      return Outcome::Emulated(fd, why);
+    }
+
+    case nr::kClose: {
+      const std::int32_t fd = static_cast<std::int32_t>(f.arg[0]);
+      for (auto it = served_.begin(); it != served_.end(); ++it) {
+        if (it->fd == fd) {
+          served_.erase(it);
+          return Outcome::Emulated(0, "close(" + std::to_string(fd) + ") -> 0");
+        }
+      }
+      return Outcome::Answered(err::kEbadf, "close(" + std::to_string(fd) +
+                                                ") = -EBADF (-9): no descriptor with that number is open "
+                                                "in this instance");
+    }
+
+    case nr::kRead: {
+      const std::int32_t fd = static_cast<std::int32_t>(f.arg[0]);
+      ServedFile* file = FileFor(fd);
+      if (file == nullptr) {
+        return Outcome::Answered(err::kEbadf, "read(fd=" + std::to_string(fd) +
+                                                  ") = -EBADF (-9): no descriptor with that number is open "
+                                                  "in this instance");
+      }
+      if (memory_ == nullptr) {
+        return Outcome::Refused(err::kEnosys, "read: no guest memory is attached to this monitor");
+      }
+      const std::uint32_t count = f.arg[2];
+      if (count == 0) return Outcome::Emulated(0, "read(fd=" + std::to_string(fd) + ", 0) -> 0");
+      const std::size_t left = file->bytes.size() - file->offset;
+      const std::size_t n = std::min<std::size_t>(count, left);
+      if (n != 0 && !memory_->Write(f.arg[1], file->bytes.data() + file->offset, n)) {
+        return Outcome::Answered(err::kEfault, "read(fd=" + std::to_string(fd) + "): the buffer at 0x" +
+                                                   Hex(f.arg[1]) + " is not writable guest memory");
+      }
+      file->offset += n;
+      if (n == 0) {
+        return Outcome::Emulated(0, "read(fd=" + std::to_string(fd) + ") -> 0: end of the " +
+                                        std::to_string(file->bytes.size()) + "-byte file");
+      }
+      return Outcome::Emulated(static_cast<std::int32_t>(n),
+                               "read(fd=" + std::to_string(fd) + ", " + std::to_string(count) + ") -> " +
+                                   std::to_string(n) + " (offset " + std::to_string(file->offset) +
+                                   " of " + std::to_string(file->bytes.size()) + ")");
+    }
+
+    case nr::kWrite: {
+      const std::int32_t fd = static_cast<std::int32_t>(f.arg[0]);
+      if (FileFor(fd) != nullptr) {
+        return Outcome::Answered(err::kEbadf, "write(fd=" + std::to_string(fd) +
+                                                  ") = -EBADF (-9): this descriptor was opened read-only "
+                                                  "from the launcher's file provider");
+      }
+      return Outcome::Answered(err::kEbadf, "write(fd=" + std::to_string(fd) +
+                                                ") = -EBADF (-9): no descriptor with that number is open "
+                                                "in this instance (this build has no stdout/stderr "
+                                                "descriptors either)");
+    }
+
+    case nr::kFstat64: {
+      const std::int32_t fd = static_cast<std::int32_t>(f.arg[0]);
+      ServedFile* file = FileFor(fd);
+      if (file == nullptr) {
+        return Outcome::Answered(err::kEbadf, "fstat64(fd=" + std::to_string(fd) +
+                                                  ") = -EBADF (-9): no descriptor with that number is open "
+                                                  "in this instance");
+      }
+      if (memory_ == nullptr) {
+        return Outcome::Refused(err::kEnosys, "fstat64: no guest memory is attached to this monitor");
+      }
+      std::string why;
+      if (!WriteStat64(*memory_, f.arg[1], file->bytes.size(), &why)) {
+        return Outcome::Answered(err::kEfault, "fstat64(fd=" + std::to_string(fd) + "): " + why);
+      }
+      return Outcome::Emulated(0, "fstat64(fd=" + std::to_string(fd) + ") -> a " +
+                                      std::to_string(file->bytes.size()) +
+                                      "-byte read-only regular file in the arm32 struct stat64 layout");
+    }
+
+    case nr::kFstatat64: {
+      if (!files_) {
+        return Outcome::Refused(err::kEnosys,
+                                "fstatat64: no file provider is installed on this monitor and the "
+                                "forwarding allowlist is empty, so there is nothing that can answer for "
+                                "a path; refused with ENOSYS (-38) rather than answered with a 0");
+      }
+      if (memory_ == nullptr) {
+        return Outcome::Refused(err::kEnosys, "fstatat64: no guest memory is attached to this monitor, "
+                                              "so the path cannot be read");
+      }
+      const std::int32_t dirfd = static_cast<std::int32_t>(f.arg[0]);
+      if (dirfd != kAtFdcwd) {
+        return Outcome::Refused(err::kEnosys,
+                                "svc #327 (fstatat64) is not implemented for a dirfd other than "
+                                "AT_FDCWD (-100): this build has no directory descriptors");
+      }
+      std::string path;
+      const PathStatus status = ReadGuestPath(*memory_, f.arg[1], &path);
+      if (status == PathStatus::kUnmapped) {
+        return Outcome::Answered(err::kEfault, "fstatat64: the path pointer 0x" + Hex(f.arg[1]) +
+                                                   " is not readable guest memory");
+      }
+      if (status == PathStatus::kTooLong) {
+        return Outcome::Answered(err::kEnametoolong,
+                                 "fstatat64: the name at 0x" + Hex(f.arg[1]) +
+                                     " has no NUL in the first " + std::to_string(kMaxPath) + " bytes");
+      }
+      std::optional<std::vector<std::uint8_t>> bytes = files_(path);
+      if (!bytes) {
+        return Outcome::Answered(err::kEnoent, "fstatat64('" + path +
+                                                   "') = -ENOENT (-2): the launcher's file provider does "
+                                                   "not serve that path");
+      }
+      std::string why;
+      if (!WriteStat64(*memory_, f.arg[2], bytes->size(), &why)) {
+        return Outcome::Answered(err::kEfault, "fstatat64('" + path + "'): " + why);
+      }
+      return Outcome::Emulated(0, "fstatat64('" + path + "') -> a " + std::to_string(bytes->size()) +
+                                      "-byte read-only regular file");
+    }
 
     case nr::kExecve:
       // The one refusal with a *measured* errno rather than a default. A real 32-bit app process asking
@@ -162,10 +675,17 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
                              "execve: measured EACCES (13) from u:r:untrusted_app on SM-X710, SELinux "
                              "app_data_file execute_no_trans; see 30 §Step 12");
 
-    default:
-      return Outcome::Refused(err::kEnosys, "no handler for " + Describe(f.number) +
-                                                "; measured on SM-X710: an out-of-table r7 answers "
-                                                "-ENOSYS (-38)");
+    default: {
+      // The reason names the call, so a reader on a phone can tell this from "no monitor attached" and
+      // from "answered with ENOENT". The number is decimal because that is what `svc #<n>` means; the
+      // name is the same table `Describe` prints.
+      const char* named = Name(f.number);
+      std::string why = "svc #" + std::to_string(f.number);
+      if (named != nullptr) why += std::string{" ("} + named + ")";
+      why += " is not implemented; refusing with ENOSYS (-38), the value this kernel answers for a number "
+             "outside its table, rather than a 0 nobody produced";
+      return Outcome::Refused(err::kEnosys, why);
+    }
   }
 }
 
@@ -185,6 +705,19 @@ void Monitor::Echo(diag::Recorder& rec, const std::string& stage,
   e.requested = ForwardsAnything() ? std::string{"a non-empty forwarding allowlist"}
                                    : std::string{"no forwarding: nothing reaches the host kernel"};
   e.active = "allowlist empty, so every answer came from RetroBug. Guest asked for: " + TallyText();
+  // The counts say what was asked; only these lines say what was answered. Without them a report that
+  // ends on a refusal cannot distinguish a call the monitor answered with ENOENT from one it had no
+  // handler for — the distinction `docs/20` §C07 asks the reason text to carry.
+  if (!notes_.empty()) {
+    e.active += ". Answered (or refused) in guest terms: ";
+    for (std::size_t i = 0; i < notes_.size(); ++i) {
+      if (i != 0) e.active += " | ";
+      e.active += notes_[i];
+    }
+    if (dropped_notes_ != 0) {
+      e.active += " | +" + std::to_string(dropped_notes_) + " more distinct answer(s), not stored";
+    }
+  }
   // `inert` rather than `active` for the forwarding case, because a declared row that was not honoured is
   // exactly the shape C17 exists to surface. Today nothing is declared, so `active` is the truth.
   e.outcome = ForwardsAnything() ? diag::Outcome::kInert : diag::Outcome::kActive;

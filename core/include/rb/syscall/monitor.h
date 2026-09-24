@@ -11,6 +11,25 @@
  * choice, because the calls that will need forwarding (`read`, `write`, `futex`, `mmap2`) are the ones
  * whose semantics depend on C10's VFS and C07's own thread work, not the other way round.
  *
+ * The calls a real libc makes during its own startup are answered from three sources, none of which is
+ * the host's syscall table:
+ *
+ *   - **facts the host knows** — the process's own id (`set_ids`, from the launcher), the wall and
+ *     monotonic clocks, the thread pointer, entropy. A fact is answered with the fact or refused by
+ *     name; it is never estimated. (`getauxval` is deliberately not here: on a real system it is a read
+ *     of the auxiliary vector the kernel wrote at process entry, not an `SVC`, so the guest's libc
+ *     reaches it through the linker's `__libc_shared_globals`, which is the launcher's stub and not
+ *     this monitor's business.)
+ *   - **a file provider the launcher installs** — a `std::function` from guest path to bytes. Bytes, not
+ *     a host fd, so there is no host file descriptor anywhere for a guest to reach through twice, and
+ *     nothing in this file can open a path the launcher did not answer. A path the provider does not
+ *     serve is `ENOENT`, which is what a real Android answers and is *also* the answer bionic's IFUNC
+ *     resolvers are built to survive (their fallback for `/dev/cpu_variant:arm` is a plain `bmi` on the
+ *     negative return, read out of the device's own `libc.so` at `get_cpu_variant+0x26`).
+ *   - **`ENOSYS` naming the call** — everything else. The string starts `svc #<n> (<name>) is not
+ *     implemented`, so a reader on a phone can tell "no monitor was attached" from "the monitor does not
+ *     know this call" from "the call was answered with ENOENT".
+ *
  * Two numbers here are measured rather than transcribed, from `tests/corpus/syscall-abi-arm.txt`
  * (`tools/syscall_abi_probe.sh`, executed on an SM-X710 as an `armeabi-v7a` process):
  *
@@ -36,14 +55,21 @@
  */
 #pragma once
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "rb/diag/diag.h"
 #include "rb/exec/machine_state.h"
+
+namespace rb::mem {
+class GuestMemory;  ///< the monitor never owns it: the launcher builds one and hands it over
+}  // namespace rb::mem
 
 namespace rb::syscall {
 
@@ -67,15 +93,45 @@ constexpr std::uint32_t kRead = 3;
 constexpr std::uint32_t kWrite = 4;
 constexpr std::uint32_t kClose = 6;
 constexpr std::uint32_t kGetpid = 20;
+/// From here down: the calls a real libc's own startup reaches for. The numbers are from the NDK's
+/// `arm-linux-androideabi/asm/unistd-eabi.h` — the header the guest itself is compiled against — and the
+/// ones the OnePlus 12 run actually used were checked a second way, against the device's `libc.so`: its
+/// `__openat`, `__close`, `__mmap2`, `fstat64`, `__rt_sigprocmask`, `__set_tid_address` and `getrandom`
+/// stubs load r7 with exactly these values (`llvm-objdump -d build/device-libs/libc.so`).
+constexpr std::uint32_t kBrk = 45;
+constexpr std::uint32_t kIoctl = 54;
+constexpr std::uint32_t kGettimeofday = 78;
 constexpr std::uint32_t kMunmap = 91;
+constexpr std::uint32_t kFstat = 108;  ///< the 32-bit-time `stat`; bionic does not use it
 constexpr std::uint32_t kMprotect = 125;
+constexpr std::uint32_t kWritev = 146;
 constexpr std::uint32_t kPrctl = 172;
+constexpr std::uint32_t kRtSigaction = 174;
+constexpr std::uint32_t kRtSigprocmask = 175;
 constexpr std::uint32_t kMmap2 = 192;
+constexpr std::uint32_t kFstat64 = 197;
+constexpr std::uint32_t kGetdents64 = 217;
+constexpr std::uint32_t kMadvise = 220;
+constexpr std::uint32_t kFcntl64 = 221;
 constexpr std::uint32_t kGettid = 224;
 constexpr std::uint32_t kFutex = 240;
 constexpr std::uint32_t kExitGroup = 248;
+constexpr std::uint32_t kSetTidAddress = 256;
 constexpr std::uint32_t kClockGettime = 263;
+constexpr std::uint32_t kClockNanosleep = 265;
+constexpr std::uint32_t kTgkill = 268;
 constexpr std::uint32_t kOpenat = 322;
+/// ARM's name for what the 64-bit ABIs call `newfstatat`: there is no separate `newfstatat` number here,
+/// and the NDK header has only this one (`unistd-eabi.h:291`).
+constexpr std::uint32_t kFstatat64 = 327;
+constexpr std::uint32_t kReadlinkat = 332;
+constexpr std::uint32_t kFaccessat = 334;
+constexpr std::uint32_t kSetRobustList = 338;
+constexpr std::uint32_t kUtimensat = 348;
+constexpr std::uint32_t kGetrandom = 384;
+/// `clock_gettime` for a 64-bit `time_t`, which is what a bionic built for modern API levels reaches for
+/// when the vDSO is not there to answer it (`docs/research/02` §5.3 measured the pair 263/403).
+constexpr std::uint32_t kClockGettime64 = 403;
 /// Measured refusal, not a gap: an `armeabi-v7a` process in `u:r:untrusted_app` on an SM-X710 asked for
 /// `execve` of a file the app itself had just written into its own cache directory and got **EACCES**
 /// (`tests/appdomain/results-SM-X710-armv7.txt`). That is the SELinux `app_data_file:file
@@ -101,7 +157,9 @@ constexpr std::uint32_t kEnomem = 12;
 constexpr std::uint32_t kEacces = 13;
 constexpr std::uint32_t kEfault = 14;
 constexpr std::uint32_t kEexist = 17;
+constexpr std::uint32_t kEnotdir = 20;  ///< what a file-only provider answers an `O_DIRECTORY` open with
 constexpr std::uint32_t kEinval = 22;
+constexpr std::uint32_t kEmfile = 24;  ///< the synthetic fd table is full
 constexpr std::uint32_t kEnospc = 28;
 constexpr std::uint32_t kErofs = 30;
 constexpr std::uint32_t kErrange = 34;
@@ -152,6 +210,14 @@ struct Outcome {
   [[nodiscard]] static Outcome Emulated(std::int32_t value, std::string why = {}) {
     return Outcome{Verdict::kEmulated, value, std::move(why)};
   }
+  /// The call *was* serviced, and the service itself is an errno — a path the provider does not have
+  /// (`ENOENT`), a descriptor number that is not open (`EBADF`), a write-intent open of a read-only
+  /// provider (`EROFS`). `kEmulated` rather than `kUnsupported` because nothing is missing from
+  /// RetroBug here: a report that could not tell this from "no handler" is the distinction the sharper
+  /// reason text exists for.
+  [[nodiscard]] static Outcome Answered(std::uint32_t guest_errno, std::string why) {
+    return Outcome{Verdict::kEmulated, -static_cast<std::int32_t>(guest_errno), std::move(why)};
+  }
   [[nodiscard]] static Outcome Refused(std::uint32_t guest_errno, std::string why) {
     return Outcome{Verdict::kUnsupported, -static_cast<std::int32_t>(guest_errno), std::move(why)};
   }
@@ -178,6 +244,27 @@ struct Frame {
   std::uint32_t ApplyReturn(exec::MachineState& state, const Outcome& outcome) const;
 };
 
+/// The launcher's read-only view of the files this instance may see. `guest_path` is the NUL-terminated
+/// path the guest passed, copied out of guest memory; the answer is the file's bytes, or `nullopt` for
+/// "this path is not served here", which the monitor turns into `ENOENT`.
+///
+/// Bytes rather than a host file descriptor, and that is the isolation property: a guest can never hold
+/// or guess something that *is* a host fd, there is no offset/lock/`mmap` state that outlives the call,
+/// and the only paths that ever resolve are the ones this function was written to answer. It is also why
+/// the provider is the whole of C10's surface for now: the mount trie, the fd capability table and
+/// synthetic `/proc` belong behind this same answer.
+using FileProvider = std::function<std::optional<std::vector<std::uint8_t>>(const std::string& path)>;
+
+/// A clock fact: nanoseconds for `clock_id` (`CLOCK_REALTIME` 0, `CLOCK_MONOTONIC` 1), false when this
+/// source has no fact for that id. Unset, the monitor reads the host's own clocks — the fact the host
+/// has — rather than guessing one.
+using ClockSource = std::function<bool(std::int32_t clock_id, std::int64_t* nanos)>;
+
+/// `getrandom`'s bytes. Unset, the monitor asks the host's entropy pool, because a constant here would
+/// be a fabricated answer handed to whatever is seeding a cookie or a key — the one syscall whose whole
+/// contract is "these bytes are not predictable".
+using RandomSource = std::function<bool(std::uint8_t* dst, std::size_t len)>;
+
 /// The monitor. One per guest instance, like everything else that is per-instance: a refusal tally that
 /// mixes apps would be a diagnostics lie, and no isolation property is shared across apps.
 class Monitor {
@@ -196,6 +283,21 @@ class Monitor {
     ids_set_ = true;
   }
 
+  /// The pointer-shaped calls need guest memory: to copy a path out, to copy a buffer in or out, to
+  /// write a `timespec` or a `stat64`. Without one attached, every such call is a named refusal rather
+  /// than a write to address 0 or a silently skipped copy.
+  void set_memory(mem::GuestMemory* memory) { memory_ = memory; }
+
+  /// Where a guest `openat` is answered from. Unset is a named refusal, not an empty file.
+  void set_file_provider(FileProvider provider) { files_ = std::move(provider); }
+
+  /// Overrides the host-clock default, for a test that needs a value it can assert and for a launcher
+  /// that wants the guest to see its own notion of time.
+  void set_clock(ClockSource clock) { clock_ = std::move(clock); }
+
+  /// Overrides the host-entropy default.
+  void set_random(RandomSource random) { random_ = std::move(random); }
+
   /// Capture, dispatch, write the result back. This is what an executor's `Syscall` stop hands to.
   Outcome Handle(exec::MachineState& state, std::uint32_t svc_imm);
 
@@ -206,6 +308,22 @@ class Monitor {
   /// Distinct numbers seen, and how many times each — the line C17 records.
   [[nodiscard]] std::string TallyText() const;
 
+  /// One line for each distinct call that was *not* answered with a value: refusals (`ENOSYS` and why),
+  /// policy denials, and the serviced-with-an-errno answers (`ENOENT` from the provider, `EBADF` from the
+  /// fd table). First-seen order, deduplicated, capped at `kMaxNotes` so a guest looping on one refusal
+  /// cannot grow a report without bound. This is the half of the story the tally's counts cannot tell: a
+  /// phone report that lists `openat x3` still cannot say whether those three were answered or refused.
+  [[nodiscard]] const std::vector<std::string>& notes() const { return notes_; }
+
+  /// How many distinct notes are kept before the rest are counted rather than stored.
+  static constexpr std::size_t kMaxNotes = 24;
+
+  /// The descriptor table's ceiling. A guest that opens more than this is refused with `EMFILE` naming
+  /// the limit, rather than the table growing until the host's allocator says so. 256 is a number, not a
+  /// fact about Android — but it is stated once, here, and the refusal prints it, so a guest that hits it
+  /// is told which limit it hit.
+  static constexpr std::size_t kMaxServedFds = 256;
+
   /// The requested-vs-active echo of the monitor's own policy (C17's `syscall-policy` field): what the
   /// guest asked for against what this build is allowed to do about it. An empty forwarding allowlist is
   /// recorded as the design it is, not as silence.
@@ -215,6 +333,22 @@ class Monitor {
 
  private:
   unsigned Note(std::uint32_t number);  ///< the count after this one, which callers rarely want
+  /// Records `detail` unless it is already there, and counts what it had to drop.
+  void Observe(const std::string& detail);
+
+  /// One entry per guest-visible fd. The bytes are a copy, so `close` is a real close and nothing host
+  /// side outlives the guest's own table.
+  struct ServedFile {
+    std::string path;
+    std::vector<std::uint8_t> bytes;
+    std::size_t offset = 0;
+    std::int32_t fd = 0;
+  };
+  /// Lowest number at or above 3 that is not open. A real kernel hands out the lowest free descriptor,
+  /// and bionic's `fdsan`/`fdtrack` are built around that shape; starting at 1000 would be a value no
+  /// real Android process ever sees.
+  [[nodiscard]] std::int32_t NextFd() const;
+  [[nodiscard]] ServedFile* FileFor(std::int32_t fd);
 
   Invalidator invalidator_;
   std::int32_t pid_ = 0;
@@ -222,6 +356,23 @@ class Monitor {
   bool ids_set_ = false;
   std::vector<std::pair<std::uint32_t, unsigned>> tally_;  ///< first-seen order, not sorted: a launch's
                                                            ///< story is the order the guest asked in
+
+  mem::GuestMemory* memory_ = nullptr;
+  FileProvider files_;
+  ClockSource clock_;
+  RandomSource random_;
+  std::vector<ServedFile> served_;
+  /// `rt_sigprocmask`'s model: the kernel's arm32 sigset is 8 bytes, so this is the whole of it. Stored
+  /// because a guest may read back what it blocked, and no signal is ever delivered by this build.
+  std::uint64_t signal_mask_ = 0;
+  /// `set_tid_address`'s clear-child-tid pointer, and `set_robust_list`'s head: recorded so the guest
+  /// gets the identity and the acceptance a real kernel gives, and named in the notes as un-walked.
+  std::uint32_t clear_child_tid_ = 0;
+  std::uint32_t robust_head_ = 0;
+  std::uint32_t robust_len_ = 0;
+  std::array<char, 16> thread_name_{};  ///< `prctl(PR_SET_NAME)`, TASK_COMM_LEN bytes
+  std::vector<std::string> notes_;
+  std::size_t dropped_notes_ = 0;
 };
 
 }  // namespace rb::syscall
