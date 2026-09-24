@@ -115,9 +115,25 @@ public class LauncherActivity extends Activity {
          */
         final String run = getIntent() == null ? null : getIntent().getStringExtra("run");
         if (run == null || run.isEmpty()) return;
+        /*
+         * `-e tier <0|1|2>` overrides the Settings choice for this run only (0 both, 1 interpreter, 2 JIT).
+         * It exists because the tier is the one variable whose *cost* differs by orders of magnitude and
+         * the report's step budget is spent very differently by the two: a constructor that looks stuck on
+         * the interpreter can be a few milliseconds of work on the JIT, and telling "slow" from "looping"
+         * needs the second measurement rather than a bigger budget on the first.
+         */
+        final String tier = getIntent().getStringExtra("tier");
+        int chosen = getSharedPreferences(PREFS, MODE_PRIVATE).getInt(PREF_TIER, 0);
+        if (tier != null) {
+            try {
+                chosen = Integer.parseInt(tier.trim());
+            } catch (NumberFormatException ignored) {
+                // A malformed extra falls back to the stored preference rather than failing the run.
+            }
+        }
         for (File f : games()) {
             if (f.getName().toLowerCase().contains(run.toLowerCase())) {
-                runGame(f);
+                runGame(f, chosen);
                 return;
             }
         }
@@ -217,7 +233,9 @@ public class LauncherActivity extends Activity {
         LinearLayout buttons = new LinearLayout(this);
         buttons.setOrientation(LinearLayout.HORIZONTAL);
         buttons.addView(button("Run", new Runnable() {
-            @Override public void run() { runGame(apk); }
+            @Override public void run() {
+                runGame(apk, getSharedPreferences(PREFS, MODE_PRIVATE).getInt(PREF_TIER, 0));
+            }
         }), weight(1f));
         buttons.addView(button("Remove", new Runnable() {
             @Override public void run() { removeGame(apk); }
@@ -414,9 +432,7 @@ public class LauncherActivity extends Activity {
 
     /// The library screen's Run. Streams the APK, executes the one entry RetroBug can execute, and reports
     /// what it found — including the common case where there is nothing to run.
-    private void runGame(final File apk) {
-        final SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
-        final int tiers = p.getInt(PREF_TIER, 0);
+    private void runGame(final File apk, final int tiers) {
         final String label = apk.getName();
         reportTitle_ = apk.getName().replaceAll("\\.apk$", "");
         currentReport_ = "reading " + apk.getName() + " ...";

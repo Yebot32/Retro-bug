@@ -83,10 +83,20 @@ using namespace rb::mem;
 /// The guest's address layout, identical to `core/tests/guest_apk_test.cpp`'s rig so that the two lanes'
 /// stack frames, sentinel and guard page have the same shape and a difference between them cannot be
 /// blamed on where the code landed.
+///
+/// The stack is the one figure here that the probe rig did not need to get right and a real library does:
+/// **8 MiB just below the window's top (55–63 MiB)**, where Android gives a main thread 8 MiB, instead of
+/// the 64 KiB this was. 64 KiB was obviously enough for the probe's handful of frames and is nothing like
+/// enough for bionic: its `__libc_preinit` walked 65,640 bytes down it and the next store landed 104 bytes
+/// past the bottom, which reads as `guest memory write at 0xeff90 refused` with `sp = 0xeff98` — an address
+/// that sends a reader hunting a bug in libc when the bug is this constant. It sits at the top of the
+/// window because the crowded part is the *bottom*: `kGuardPage` at 8 MiB, the sentinel at 12 MiB, TLS at
+/// 4 MiB, the loader stub and JNI environment above that, the GL strings at 5 MiB, and images placed
+/// upward from 0x2000.
 constexpr exec::GuestAddr kReturnAddress = 0x00c0'0000u;
-constexpr exec::GuestAddr kStackTop = 0x0010'0000u;
+constexpr exec::GuestAddr kStackTop = 0x03f0'0000u;
 constexpr exec::GuestAddr kGuardPage = 0x0080'0000u;
-constexpr exec::GuestAddr kStackBytes = 64u << 10;
+constexpr exec::GuestAddr kStackBytes = 32u << 20;
 /// Nothing is mapped here. An unresolved import that is *called* faults and names this address instead
 /// of returning a plausible zero; see the file header.
 constexpr std::uint32_t kUnresolved = 0x0bad'0000u;
@@ -194,6 +204,18 @@ void Say(std::string* out, const char* fmt, ...) {
   if (n < 0) buf[0] = '\0';
   *out += buf;
   *out += '\n';
+  /**
+   * Live, as well as accumulated.
+   *
+   * The report is returned to Java as one string and logged when the run finishes, which is fine until a
+   * run does not finish: a constructor sequence through the interpreter, or a guest that loops, produces
+   * *nothing* in logcat until it is over — and the reader is left deciding whether the app is thinking or
+   * dead, with a screenshot that shows the previous screen. Every line is therefore also written to logcat
+   * the moment it is produced. The Java half logs the finished report again; the duplication is the price
+   * of being able to watch a slow run, and it is the difference between "still running, here is how far it
+   * got" and silence.
+   */
+  RB_LOG("%s", buf);
 }
 
 /// The answers, as raw bit patterns, from the same bytes executed natively on the SM-X710. Transcribed
@@ -878,15 +900,43 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
    * 0x2000). The guest's own TLS layout lives inside it; nothing here interprets it.
    */
   constexpr exec::GuestAddr kTlsBase = 0x0040'0000u;
-  if (mem->Map(kTlsBase, kGuestPage, kRead | kWrite, &err)) {
+  constexpr exec::GuestAddr kThreadStruct = 0x0043'0000u;
+  if (mem->Map(kTlsBase, kGuestPage, kRead | kWrite, &err) &&
+      mem->Map(kThreadStruct, kGuestPage, kRead | kWrite, &err)) {
     ctx.state().tp = kTlsBase;
-    Say(&out, "tls: thread pointer set to 0x%s (one read/write page, %u bytes), because bionic reaches"
-              " its per-thread data through the coprocessor register this seeds",
-        Hex(kTlsBase).c_str(), kGuestPage);
+    /*
+     * The thread struct, which is what the blank page above was missing.
+     *
+     * bionic's `__errno()` is `tls = TPIDRURW; return *(void**)(tls + 4) + 0x29c` — slot 1 of the TLS
+     * block is `TLS_SLOT_THREAD_ID`, a pointer to the thread's `pthread_internal_t`, and errno lives
+     * inside *that*, not inside the TLS block. With slot 1 left blank the arithmetic lands on 0x29c and
+     * the first write faults, which is exactly what this run did before the fix: libc's own constructor
+     * stopped at `guest memory write at 0x29c refused`, three frames below `mprotect`'s error path, in
+     * `__set_errno_internal`.
+     *
+     * On a real device the *dynamic linker* allocates this and installs it during main-thread setup. This
+     * image has no such initialiser — `llvm-objdump` over the whole `.text` finds no write to TPIDRURW,
+     * and the one function that could do it (`__set_tls`) has no callers in the image — so the launcher
+     * plays the linker's part with two stores. Slot 0 is set to the block's own address, the convention
+     * bionic's ARM `__get_tls` assumes; `tid` matches the identity the syscall monitor hands the guest, so
+     * `gettid()`'s cached copy reads the same number the syscalls do.
+     */
+    const std::uint32_t thread_self = kTlsBase;
+    const std::uint32_t thread_struct = kThreadStruct;
+    const std::uint32_t tid = 4243;
+    if (!mem->Write(kTlsBase, &thread_self, 4) || !mem->Write(kTlsBase + 4, &thread_struct, 4) ||
+        !mem->Write(kThreadStruct + 8, &tid, 4)) {
+      Say(&out, "tls: the thread block could not be written — bionic's __errno() will compute a null"
+                " thread struct and fault near 0x29c");
+    }
+    Say(&out, "tls: thread pointer set to 0x%s; TLS_SLOT_THREAD_ID (TP+4) -> 0x%s, a zeroed writable page"
+              " whose +0x29c is the errno __errno() computes and whose +8 is tid %u. The linker would"
+              " allocate these; this image has no initialiser, so the launcher does",
+        Hex(kTlsBase).c_str(), Hex(kThreadStruct).c_str(), tid);
   } else {
-    Say(&out, "tls: could not map a thread-pointer page at 0x%s: %s — a guest constructor that touches"
-              " per-thread data will fault near address 0",
-        Hex(kTlsBase).c_str(), err.c_str());
+    Say(&out, "tls: could not map the thread-pointer block (0x%s/0x%s): %s — a guest constructor that"
+              " touches per-thread data will fault near address 0",
+        Hex(kTlsBase).c_str(), Hex(kThreadStruct).c_str(), err.c_str());
   }
 
   /**

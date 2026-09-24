@@ -1699,6 +1699,28 @@ bool BlockRunner::Step(const Inst* inst) {
     // leaves N and Z from the result and clears C and V — exactly what the `TST v, v` fallback
     // `FlagsFromOp` already computes. A shifted *operand* carries a shifter C, but the translator
     // takes that from a separate `GetCarryFromOp` on the shift and recombines it with `SetCpsrNZC`.
+    /**
+     * `Not32`/`Not64`, which the front end emits as the scalar complement — the same operation the 128-bit
+     * `VectorNot` below performs lane-wise, so a NEON routine and a scalar one land in different cases for
+     * one concept. Tier I had `VectorNot` and not these, which is why bionic's own constructor stopped at
+     * `Not32: no Tier I semantics yet` on the phone: a real libc reaches the scalar form in its startup
+     * code, and the interpreter refused it there.
+     *
+     * No flag record, for the reason the neighbours state: their flag-form on AArch64 is `ANDS`/`ORS`/
+     * `EORS`-shaped, which the `TST v, v` fallback in `FlagsFromOp` already computes.
+     */
+    case Opcode::Not32: {
+      std::uint32_t a = 0;
+      if (!W32(inst, 0, a)) return false;
+      Put(inst, V{~a, 0});
+      return true;
+    }
+    case Opcode::Not64: {
+      std::uint64_t a = 0;
+      if (!W64(inst, 0, a)) return false;
+      Put(inst, V{~a, 0});
+      return true;
+    }
     case Opcode::And32:
     case Opcode::Or32:
     case Opcode::Eor32: {

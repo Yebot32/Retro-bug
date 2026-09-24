@@ -55,9 +55,10 @@ case "$INSTALLED" in
   *) echo "the commit reported success and $PKG is not installed — this is the ColorOS silent-drop case" >&2; exit 1 ;;
 esac
 
+adb shell "logcat -G 16M" >/dev/null 2>&1 || true
 adb shell "logcat -c" >/dev/null
 if [ -n "$GAME" ]; then
-  adb shell "am force-stop $PKG; am start -n $PKG/.LauncherActivity -e run '$GAME'" >/dev/null
+  adb shell "am force-stop $PKG; am start -n $PKG/.LauncherActivity -e run '$GAME' -e tier '${RB_TIER:-0}'" >/dev/null
 else
   adb shell "am force-stop $PKG; am start -n $PKG/.LauncherActivity" >/dev/null
 fi
@@ -71,5 +72,10 @@ sleep "$WAIT"
 adb shell "screencap -p /sdcard/rb-run.png" >/dev/null 2>&1
 adb pull /sdcard/rb-run.png "$(to_host "/tmp/rb-run-$SERIAL.png")" >/dev/null 2>&1
 echo "screenshot: /tmp/rb-run-$SERIAL.png" >&2
-echo "--- RBLAUNCH ---"
-adb logcat -d -s RBLAUNCH | tr -d '\r'
+# The whole log to a file, because the report is long and the interesting line is rarely the last one;
+# and the buffer is raised above, because this phone logs every second and rotated the run away once.
+LOG="/tmp/rb-logcat-$SERIAL.txt"
+adb logcat -d -s RBLAUNCH | tr -d '\r' > "$LOG"
+echo "logcat: $LOG ($(wc -l < "$LOG" | tr -d ' ') lines)" >&2
+echo "--- RBLAUNCH (tail) ---"
+tail -25 "$LOG"
