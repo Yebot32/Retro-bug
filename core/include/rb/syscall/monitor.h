@@ -11,7 +11,7 @@
  * choice, because the calls that will need forwarding (`read`, `write`, `futex`, `mmap2`) are the ones
  * whose semantics depend on C10's VFS and C07's own thread work, not the other way round.
  *
- * The calls a real libc makes during its own startup are answered from three sources, none of which is
+ * The calls a real libc makes during its own startup are answered from four sources, none of which is
  * the host's syscall table:
  *
  *   - **facts the host knows** — the process's own id (`set_ids`, from the launcher), the wall and
@@ -29,6 +29,11 @@
  *   - **`ENOSYS` naming the call** — everything else. The string starts `svc #<n> (<name>) is not
  *     implemented`, so a reader on a phone can tell "no monitor was attached" from "the monitor does not
  *     know this call" from "the call was answered with ENOENT".
+ *   - **a grant recorded and not enforced** — `mprotect`, and it is the one deliberate deviation from a
+ *     device here. A real libc's startup strips write from its own globals page and turns a refusal into a
+ *     fatal report, so the call answers the 0 a device answers, and its note says in the words a report
+ *     carries that this monitor does not apply the request to the guest's pages: a guest that later writes
+ *     what a device's `PROT_READ` page would refuse is the difference, stated rather than hidden.
  *
  * Two numbers here are measured rather than transcribed, from `tests/corpus/syscall-abi-arm.txt`
  * (`tools/syscall_abi_probe.sh`, executed on an SM-X710 as an `armeabi-v7a` process):

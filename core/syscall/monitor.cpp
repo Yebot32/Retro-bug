@@ -19,6 +19,17 @@ std::string Hex(std::uint64_t v) {
   return buf;
 }
 
+/// A protection mask the way `/proc/self/maps` spells it, always printed *next to* the raw value rather
+/// than instead of it: this build names three bits, and a guest may pass a fourth (arm32's `PROT_SEM`,
+/// the `PROT_GROWSDOWN`/`UP` pair), which a decoded-only report would quietly drop.
+std::string ProtText(std::uint32_t prot) {
+  std::string out{"---"};
+  if ((prot & mem::kRead) != 0) out[0] = 'r';
+  if ((prot & mem::kWrite) != 0) out[1] = 'w';
+  if ((prot & mem::kExec) != 0) out[2] = 'x';
+  return out;
+}
+
 /// The host's own clocks, and the only place in this file that asks the host anything. `CLOCK_REALTIME`
 /// and `CLOCK_MONOTONIC` are facts a process can have; the process-CPU clocks are not answered here
 /// because a guest's "CPU time" measured by the emulator's host would be a different quantity wearing the
@@ -276,6 +287,54 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
     case nr::kExitGroup:
       return Outcome{Verdict::kExit, static_cast<std::int32_t>(f.arg[0]),
                      "exit_group(" + Hex(f.arg[0]) + ")"};
+
+    case nr::kMprotect: {
+      // The call a real libc's own startup cannot get past: bionic's
+      // `WriteProtected<libc_globals>::initialize` strips write from its globals page before it has a
+      // channel to report a failure through, so a refusal here becomes `async_safe_fatal` and a spin.
+      // Granting is the answer this build can give, and what the grant is *not* is part of the answer.
+      const std::uint32_t at = f.arg[0];
+      const std::uint32_t len = f.arg[1];
+      const std::uint32_t prot = f.arg[2];
+      const std::string asked = "prot=0x" + Hex(prot) + " (" + ProtText(prot) + ")";
+      if (memory_ == nullptr) {
+        return Outcome::Refused(err::kEnosys,
+                                "mprotect(0x" + Hex(at) + ", " + std::to_string(len) + ", " + asked +
+                                    "): no guest memory is attached to this monitor, so there is no "
+                                    "window to check the range against");
+      }
+      const std::uint64_t end = static_cast<std::uint64_t>(at) + len;
+      const std::string range = "[0x" + Hex(at) + ", 0x" + Hex(end) + ")";
+      // ENOMEM rather than the EFAULT the copying calls above answer: a kernel's mprotect never reads or
+      // writes the range, it walks the VMAs covering it, and an address no VMA covers comes back ENOMEM
+      // — which is also the errno a guest expects from a range with a hole in it.
+      if (end > memory_->window_bytes()) {
+        return Outcome::Answered(err::kEnomem,
+                                 "mprotect(" + range + ", " + asked + ") = -ENOMEM (-12): the range is "
+                                 "not inside this instance's guest window of 0x" +
+                                 Hex(memory_->window_bytes()) + " bytes");
+      }
+      // Guest pages, because that is the granule a guest asked about; the model is the only thing that
+      // knows which of them have a mapping, and `IsMapped` refuses an address outside the window too.
+      for (std::uint64_t page = at & ~static_cast<std::uint64_t>(mem::kGuestPage - 1); page < end;
+           page += mem::kGuestPage) {
+        if (!memory_->IsMapped(static_cast<std::uint32_t>(page))) {
+          return Outcome::Answered(err::kEnomem,
+                                   "mprotect(" + range + ", " + asked + ") = -ENOMEM (-12): 0x" +
+                                       Hex(page) + " in the range has no mapping");
+        }
+      }
+      // The deliberate deviation, and it is worded as one: granting the value a device grants is what
+      // lets a guest proceed, but nothing here applied the request to anything, so a report that read
+      // this as "the range is read-only now" would be describing an emulator that does not exist.
+      const std::string why = "mprotect(" + range + ", " + asked +
+                              ") = 0: recorded as granted and not enforced — this monitor does not apply "
+                              "the requested protection to the guest's pages, so the range keeps the "
+                              "access it already had instead of becoming read-only the way a device "
+                              "would make it";
+      Observe(why);
+      return Outcome::Emulated(0, why);
+    }
 
     case nr::kCacheFlush: {
       if (!invalidator_) {

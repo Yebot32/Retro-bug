@@ -6,12 +6,18 @@
  * recollection: which number the guest puts in r7, what a real kernel answers for an unknown number, and
  * what the carry flag is doing — the last of which turned out to be nothing, and is a test rather than a
  * comment because a future edit "fixing" it back to the textbook rule would be a silent behaviour change.
+ * The `mprotect` cases are the exception to that provenance: a grant this build deliberately does not
+ * enforce has no device value to assert, so what they pin down is the monitor's own record of it.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+#include "rb/mem/guest_memory.h"
 #include "rb/syscall/monitor.h"
 
+#include <unistd.h>
+
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -22,6 +28,7 @@ namespace sc = rb::syscall;
 namespace exec = rb::exec;
 namespace diag = rb::diag;
 namespace isa = rb::isa;
+namespace mem = rb::mem;
 
 int failures = 0;
 int checks = 0;
@@ -46,6 +53,22 @@ exec::MachineState State(std::uint32_t nr) {
   s.r[13] = 0x8000;
   s.r[15] = s.pc;
   return s;
+}
+
+/// A guest window for the one call in this lane whose answer depends on what the model has mapped. Its
+/// granule comes from the host rather than from the guest page constant, because `GuestMemory::Create`
+/// refuses a window finer than the kernel's own pages: a lane that hard-coded 4 KiB would pass on a
+/// 4 KiB-page emulator and fail to build a window at all on the 16 KiB-page phone these cases exist for.
+std::unique_ptr<mem::GuestMemory> Window() {
+  mem::AddressModel model;
+  model.kind = mem::AddressModel::kBiased;  // never assume where the OS landed the window
+  const long host_page = sysconf(_SC_PAGESIZE);
+  model.host_page_shift = mem::kGuestPageShift;
+  while (host_page > 0 && (1L << model.host_page_shift) < host_page) ++model.host_page_shift;
+  std::string err;
+  auto window = mem::GuestMemory::Create(16u * mem::kGuestPage, model, &err);
+  if (!window) fail("guest window creation failed", __LINE__, err);
+  return window;
 }
 
 // ------------------------------------------------------- the frame
@@ -137,6 +160,12 @@ void exit_group_is_a_verdict_not_a_value() {
   CHECK_CTX(o.verdict == sc::Verdict::kExit, sc::Name(o.verdict));
   CHECK_CTX(o.r0 == 3, std::to_string(o.r0));
   CHECK_CTX(!sc::LooksLikeError(3), "an exit code of 3 is not an errno");
+  // The verdict is what *ends* the run rather than resuming it: `abi::CallGuest` turns `kExit` into
+  // `StopReason::Exited` and takes its status from the same r0 asserted above (`abi/call.cpp`), so a
+  // guest that asked to die is not handed a value and stepped past. The detail becomes that stop's
+  // reason, so it has to name the call that caused it.
+  CHECK_CTX(o.detail.find("exit_group") != std::string::npos, o.detail);
+  CHECK_CTX(o.detail.find("3") != std::string::npos, o.detail);
 }
 
 void tls_travels_on_the_state_field() {
@@ -179,6 +208,81 @@ void cacheflush_reaches_the_tier_that_owns_the_cache() {
   CHECK_CTX(o.verdict == sc::Verdict::kUnsupported, sc::Name(o.verdict));
   CHECK_CTX(o.detail.find("invalidator") != std::string::npos, o.detail);
   CHECK_CTX(seen.size() == 1u, "the refused flush must not have reached the invalidator");
+}
+
+// ------------------------------------------------------- mprotect
+
+/// The grant this build deliberately gives without enforcing it. The assertion that matters most here is
+/// the last one: a monitor that answered 0 *and* made the page read-only would pass every check about the
+/// value and the note while doing something no other part of this emulator asked it to do.
+void mprotect_inside_the_window_is_granted_and_recorded_as_not_enforced() {
+  auto window = Window();
+  if (!window) return;
+  std::string err;
+  CHECK_CTX(window->Map(0x2000, mem::kGuestPage, mem::kRead | mem::kWrite, &err), err);
+
+  sc::Monitor m;
+  m.set_memory(window.get());
+  exec::MachineState s = State(sc::nr::kMprotect);
+  s.r[0] = 0x2000;             // addr
+  s.r[1] = mem::kGuestPage;    // len
+  s.r[2] = mem::kRead;         // prot
+  const sc::Outcome o = m.Handle(s, 0);
+  CHECK_CTX(o.verdict == sc::Verdict::kEmulated, sc::Name(o.verdict));
+  CHECK_CTX(o.r0 == 0, std::to_string(o.r0));
+  CHECK_CTX(s.r[0] == 0u, "the grant never reached the guest");
+  CHECK_CTX(o.detail.find("mprotect") != std::string::npos, o.detail);
+  CHECK_CTX(o.detail.find("[0x2000, 0x3000)") != std::string::npos, o.detail);
+  CHECK_CTX(o.detail.find("prot=0x1") != std::string::npos, o.detail);
+  CHECK_CTX(o.detail.find("not enforced") != std::string::npos, o.detail);
+  CHECK_CTX(m.notes().size() == 1u && m.notes()[0].find("not enforced") != std::string::npos,
+            m.notes().empty() ? std::string{"no note was recorded"} : m.notes()[0]);
+  CHECK_CTX(m.TallyText() == "mprotect x1", m.TallyText());
+  // `Write` asks the model, so this is the model's answer and not a second opinion: the page is exactly
+  // as writable as it was mapped. On a device the call above is what stops this write.
+  const std::uint32_t probe = 0x5a5a5a5au;
+  CHECK_CTX(window->Write(0x2000, &probe, sizeof probe),
+            "a grant that had really applied PROT_READ would refuse this write");
+}
+
+void mprotect_outside_the_window_is_refused_with_the_range_and_enomem() {
+  auto window = Window();
+  if (!window) return;
+  sc::Monitor m;
+  m.set_memory(window.get());
+  exec::MachineState s = State(sc::nr::kMprotect);
+  s.r[0] = 0x7f000000;  // far above a window this case made sixteen guest pages wide
+  s.r[1] = mem::kGuestPage;
+  s.r[2] = mem::kRead | mem::kWrite;
+  const sc::Outcome o = m.Handle(s, 0);
+  // Serviced, and the service *is* the errno: a kernel walks the range's VMAs and answers ENOMEM for an
+  // address no VMA covers, so this is not one of RetroBug's gaps and must not be reported as ENOSYS.
+  CHECK_CTX(o.verdict == sc::Verdict::kEmulated, sc::Name(o.verdict));
+  CHECK_CTX(o.r0 == -12, std::to_string(o.r0) + " want -12 (ENOMEM)");
+  CHECK_CTX(s.r[0] == static_cast<std::uint32_t>(-12), "the refusal never reached the guest");
+  CHECK_CTX(o.detail.find("mprotect") != std::string::npos, o.detail);
+  CHECK_CTX(o.detail.find("[0x7f000000, 0x7f001000)") != std::string::npos, o.detail);
+  CHECK_CTX(o.detail.find("ENOMEM") != std::string::npos, o.detail);
+}
+
+/// The case that separates "the range is inside the window" from "the range is mapped": page 0x2000 is
+/// mapped and 0x3000/0x4000 are not, so a handler that looked at the first page only would grant here.
+void mprotect_over_a_hole_in_the_window_names_the_unmapped_page() {
+  auto window = Window();
+  if (!window) return;
+  std::string err;
+  CHECK_CTX(window->Map(0x2000, mem::kGuestPage, mem::kRead | mem::kWrite, &err), err);
+  sc::Monitor m;
+  m.set_memory(window.get());
+  exec::MachineState s = State(sc::nr::kMprotect);
+  s.r[0] = 0x2000;
+  s.r[1] = 3u * mem::kGuestPage;
+  s.r[2] = mem::kRead;
+  const sc::Outcome o = m.Handle(s, 0);
+  CHECK_CTX(o.r0 == -12, std::to_string(o.r0) + " want -12 (ENOMEM)");
+  CHECK_CTX(o.detail.find("mprotect") != std::string::npos, o.detail);
+  CHECK_CTX(o.detail.find("0x3000") != std::string::npos, o.detail);
+  CHECK_CTX(o.detail.find("no mapping") != std::string::npos, o.detail);
 }
 
 // ------------------------------------------------------- the numbers themselves
@@ -299,6 +403,9 @@ int main() {
   exit_group_is_a_verdict_not_a_value();
   tls_travels_on_the_state_field();
   cacheflush_reaches_the_tier_that_owns_the_cache();
+  mprotect_inside_the_window_is_granted_and_recorded_as_not_enforced();
+  mprotect_outside_the_window_is_refused_with_the_range_and_enomem();
+  mprotect_over_a_hole_in_the_window_names_the_unmapped_page();
   guest_numbers_are_not_host_numbers();
   the_error_range_is_the_discriminator();
   the_names_are_what_the_headers_call_them();

@@ -44,12 +44,15 @@
 #include <jni.h>
 
 #include <android/log.h>
+#include <fcntl.h>
 
 #include <unistd.h>
 
+#include <cerrno>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <optional>
 #include <string>
@@ -286,6 +289,42 @@ std::vector<std::uint8_t> Bytes(JNIEnv* env, jbyteArray array) {
   // back into the Java array on the way out.
   env->ReleaseByteArrayElements(array, raw, JNI_ABORT);
   return out;
+}
+
+/**
+ * One host file, whole — the bytes the guest's `openat` of the game's own APK is answered with.
+ *
+ * A read loop with `errno` rather than `std::ifstream`, because the failure has to be nameable. The
+ * monitor answers a path its provider does not serve with `ENOENT`, and an `ENOENT` about a file that is
+ * sitting right there sends a reader hunting a wrong path; here the reason comes back as text
+ * (`open(...): Permission denied`) and the caller puts it in the report beside the path it tried. The
+ * APK this is pointed at is one the launcher copied into its own storage, so the failure this can
+ * actually meet is not a missing file — which is exactly why the reason has to survive.
+ *
+ * Path handling deliberately stops at the caller: this function opens whichever single string it is
+ * given, and every "which paths may a guest see" decision is made by the provider that captures its
+ * result — see the one call site in `Inspect`.
+ */
+std::optional<std::vector<std::uint8_t>> ReadHostFile(const std::string& path, std::string* err) {
+  const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd < 0) {
+    if (err != nullptr) *err = "open(" + path + "): " + std::strerror(errno);
+    return std::nullopt;
+  }
+  std::vector<std::uint8_t> bytes;
+  std::uint8_t buf[1 << 16];
+  for (;;) {
+    const ssize_t n = ::read(fd, buf, sizeof(buf));
+    if (n < 0) {
+      if (err != nullptr) *err = "read(" + path + "): " + std::strerror(errno);
+      ::close(fd);
+      return std::nullopt;
+    }
+    if (n == 0) break;
+    bytes.insert(bytes.end(), buf, buf + n);
+  }
+  ::close(fd);
+  return bytes;
 }
 
 struct Outcome {
@@ -534,12 +573,20 @@ std::string Launch(const std::vector<std::uint8_t>& app_image,
  * `libc_image` and `libz_image` are the other two guest libraries this APK ships — a bionic `libc.so`
  * pulled off a 32-bit-capable device and a `libz.so` built from the NDK archive. Either may be empty (the
  * APK then carries no such asset), which is still a run this report has to make and name.
+ *
+ * `apk_path` is the chosen APK as the host filesystem names it (`File.getAbsolutePath()` on the Java
+ * side), and it has two jobs: it becomes the NUL-terminated guest string the entry point is handed,
+ * because the game opens that file to read the `assets/` it ships, and it is the one path this run's
+ * syscall monitor will serve bytes for. `surface_width`/`surface_height` are the Activity's display in
+ * pixels — the numbers a `GLSurfaceView.Renderer` would have reported to the game — supplied here on the
+ * Java side's behalf; the report says they were given rather than measured by the game.
  */
 std::string Inspect(const std::vector<std::uint8_t>& app_image,
                     const std::vector<std::uint8_t>& libm_image,
                     const std::vector<std::uint8_t>& libc_image,
                     const std::vector<std::uint8_t>& libz_image, const std::string& label,
-                    int tiers) {
+                    int tiers, const std::string& apk_path, int surface_width,
+                    int surface_height) {
   std::string out;
   const unsigned page_shift = HostPageShift();
   Say(&out, "inspect: %s=%zu bytes libm.so=%zu libc.so=%zu libz.so=%zu bytes host_page_shift=%u",
@@ -578,6 +625,47 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
   if (!mem->Map(kStackTop - kStackBytes, kStackBytes, kRead | kWrite, &err)) {
     Say(&out, "FATAL: mapping the guest stack failed: %s", err.c_str());
     return out;
+  }
+
+  /**
+   * The two guest pages the entry point's arguments live in, mapped here rather than at that call.
+   *
+   * Why here: the loader places every module in the first free run of the window it can find, so a page
+   * mapped after the loads could be a page a module already sits on — `Map` replaces, and what would
+   * disappear is the module's own text. Two pages, before anything is placed, cost nothing and take the
+   * ordering question away; the JNIEnv below is built early for the same reason.
+   *
+   * What: a zeroed page to stand in for the `MyRenderer` object the entry point receives twice — as
+   * `this` and as its first declared parameter — and the APK's absolute path as the NUL-terminated guest
+   * string the Java side would have passed. Neither is a Java object: there is no JavaVM here, and the
+   * call's own lines say what the addresses are.
+   */
+  constexpr exec::GuestAddr kStandInObject = 0x0044'0000u;
+  constexpr exec::GuestAddr kApkPathAt = 0x0045'0000u;
+  exec::GuestAddr stand_in = 0;
+  exec::GuestAddr apk_path_guest = 0;
+  if (mem->Map(kStandInObject, kGuestPage, kRead | kWrite, &err)) {
+    stand_in = kStandInObject;
+  } else {
+    Say(&out, "entry: the stand-in object page at 0x%s could not be mapped (%s) — the entry point is"
+              " still called, with 0 where that object should be",
+        Hex(kStandInObject).c_str(), err.c_str());
+  }
+  if (apk_path.empty()) {
+    Say(&out, "entry: the Java half passed no APK path, so the library's path argument is 0 and it has no"
+              " way to reach the assets inside its own APK");
+  } else if (apk_path.size() + 1 > kGuestPage) {
+    Say(&out, "entry: the APK path is %zu bytes and does not fit this launcher's %u-byte path page — the"
+              " path argument is 0",
+        apk_path.size(), kGuestPage);
+  } else if (!mem->Map(kApkPathAt, kGuestPage, kRead | kWrite, &err)) {
+    Say(&out, "entry: the APK path page at 0x%s could not be mapped (%s) — the path argument is 0",
+        Hex(kApkPathAt).c_str(), err.c_str());
+  } else if (!mem->Write(kApkPathAt, apk_path.c_str(), apk_path.size() + 1)) {
+    Say(&out, "entry: guest memory at 0x%s refused the APK path — the path argument is 0",
+        Hex(kApkPathAt).c_str());
+  } else {
+    apk_path_guest = kApkPathAt;
   }
 
   /**
@@ -735,17 +823,55 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
    * and has the fact — or *refused by name*, and its tally says how many of each, which is the difference
    * between "the guest asked for nothing" and "the guest asked and nobody answered".
    *
-   * Two setters and one deliberate omission. `set_memory` is what lets a pointer-shaped call copy a path
-   * out of guest memory or a `stat64` into it; without it every such call is a refusal rather than a write
-   * to address 0. `set_ids` gives the guest its own pid and tid, because nothing in this path may ask the
-   * host kernel for one and an unset id is refused rather than invented. No file provider is attached on
-   * purpose: a guest `openat` then comes back as a named refusal carrying the path, which is a list of
-   * files to decide about one at a time — handing the guest the host's filesystem wholesale is a decision
-   * that should be made per path, with the path in front of you.
+   * Two setters and one path. `set_memory` is what lets a pointer-shaped call copy a path out of guest
+   * memory or a `stat64` into it; without it every such call is a refusal rather than a write to address 0.
+   * `set_ids` gives the guest its own pid and tid, because nothing in this path may ask the host kernel
+   * for one and an unset id is refused rather than invented.
+   *
+   * The file provider is why this run is not the one before it. The entry point below is handed the APK's
+   * path because the game opens that file to read its `assets/` — levels, textures, whatever the APK
+   * carries — and a monitor with no provider answers that open with `no file provider is installed`,
+   * which is where the game's first asset read stops. The provider answers that one path and nothing else:
+   * every other path still comes back to the guest as a named `ENOENT`, and it cannot do otherwise,
+   * because it compares against the single string captured here. "Serve this one file" therefore stays
+   * distinguishable from "serve the host's filesystem", which is the decision this monitor's design asks
+   * to be made per path.
    */
   syscall::Monitor monitor;
   monitor.set_memory(mem.get());
   monitor.set_ids(4242, 4243);
+  // Read once, here, rather than inside the provider: the provider's contract returns the bytes by value
+  // and the monitor keeps its own copy per open, so a read on each call would be the same bytes read
+  // twice — and a failure has to become a line in *this* report rather than an ENOENT about a file that
+  // is sitting right there.
+  std::optional<std::vector<std::uint8_t>> apk_file;
+  if (apk_path.empty()) {
+    Say(&out, "file: no APK path arrived from the Java half, so the provider below has nothing to serve"
+              " and every openat is still answered by name — ENOENT from the provider, carrying the"
+              " path — rather than served from the host");
+  } else {
+    std::string read_err;
+    apk_file = ReadHostFile(apk_path, &read_err);
+    if (apk_file) {
+      Say(&out, "file: %s (%zu bytes on the host) is the one path this run serves — the path the entry"
+                " point is handed and the guest's openat of it are the same file",
+          apk_path.c_str(), apk_file->size());
+    } else {
+      Say(&out, "file: %s could not be read (%s) — the provider is still attached but has nothing to"
+                " answer with, so the guest's openat of it comes back ENOENT and this line says why",
+          apk_path.c_str(), read_err.c_str());
+    }
+  }
+  // Captured by reference, and here that is safe: the provider is consulted only from inside a guest call
+  // this function is making — the monitor never invokes it on its own lifetime — and `apk_file` is alive
+  // for every one of those calls. The by-value capture the file header insists on is for `GuestLinker`'s
+  // provider, which is stored beyond the call that made it; this one is not. The path is captured by value
+  // so the comparison does not depend on the caller's string outliving the monitor.
+  monitor.set_file_provider([&apk_file, apk_path](const std::string& path)
+                                -> std::optional<std::vector<std::uint8_t>> {
+    if (path != apk_path || !apk_file) return std::nullopt;
+    return apk_file;
+  });
   ctx.set_monitor(&monitor);
 
   const loader::SymbolResolver host = [&](const std::string& name) -> std::optional<std::uint32_t> {
@@ -1164,29 +1290,58 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
        * game does before a frame exists. The name is checked against the image rather than assumed, so a
        * library that does not export it is reported as such instead of being skipped quietly.
        *
+       * Its argument list is no longer a guess. The APK's own `classes.dex` declares it as
+       * `Lcom/rovio/ka3d/MyRenderer;->nativeInit(Lcom/rovio/ka3d/MyRenderer;IILjava/lang/String;)Z`,
+       * shorty `ZLIIL` — a *non-static* method, so the symbol's r0/r1 are the `JNIEnv*` and `this`, and
+       * the declared parameters follow: r2 the `MyRenderer` instance, r3 the width, then the height and
+       * the APK path on the stack in that order. That is the shape a real ART would call it with, and it
+       * is exactly the shape `rb::abi`'s `PlaceArgs` builds from a six-slot list — which is why the call
+       * below has six arguments and the shorty `"ZLIIL"` instead of the placeholder `"I"` this file used
+       * while the parameter list still lived in the APK's Java half and not in these bytes.
+       *
        * Called on the constructor tier, once, and that is a requirement rather than a preference: this
        * function has side effects in one shared guest memory (the rule the constructor sequence above
        * already follows), and calling it on both tiers would run the game's startup twice and count every
        * GL call it made twice.
        */
       constexpr const char* kEntryPoint = "Java_com_rovio_ka3d_MyRenderer_nativeInit";
+      constexpr const char* kEntryPrototype = "(Lcom/rovio/ka3d/MyRenderer;IILjava/lang/String;)Z";
       const auto entry = app.FindExport(kEntryPoint);
       if (!entry) {
         Say(&out, "%s: not exported by this library either, so this run has no JNI method to call — the"
                   " names above are the list a Java side would drive.",
             kEntryPoint);
       } else {
-        Say(&out, "%s: exported (0x%s). Calling it through the bridge the way a JNI method is called:"
-                  " env=0x%s, the fake JNIEnv above, and clazz=0.",
-            kEntryPoint, Hex(static_cast<std::uint32_t>(entry->addr)).c_str(), Hex(env_ptr).c_str());
-        Say(&out, "  called with (env, clazz) only; the library's other parameters were not supplied,"
-                  " because what they are lives in the APK's Java half and not in these bytes. The return"
-                  " type is declared int here for the same reason, so the value below is what the bridge"
-                  " reads out of r0 rather than what the library declared.");
-        const Outcome got = Call(ctor_engine, ctx, app, kEntryPoint, "I",
-                                 {abi::Value32::Ptr(env_ptr), abi::Value32::Ptr(0)});
-        Say(&out, "%s tier=%s reason=%s steps=%u value=0x%s", kEntryPoint, ctor_tier,
-            ReasonName(got.reason), got.steps, Hex(static_cast<std::uint32_t>(got.bits)).c_str());
+        Say(&out, "%s: exported (0x%s). Calling it as its own DEX declares it: %s.", kEntryPoint,
+            Hex(static_cast<std::uint32_t>(entry->addr)).c_str(), kEntryPrototype);
+        Say(&out, "  r0=env 0x%s (the fake JNIEnv above), r1=this 0x%s, r2=MyRenderer 0x%s, r3=width %d;"
+                  " the stack carries height %d, then apkPath 0x%s, in that order.",
+            Hex(env_ptr).c_str(), Hex(stand_in).c_str(), Hex(stand_in).c_str(), surface_width,
+            surface_height, Hex(apk_path_guest).c_str());
+        if (stand_in != 0) {
+          Say(&out, "  the two object arguments are one zeroed guest page: not Java objects — there is no"
+                    " JavaVM here — so a callee that dereferences them reads zeroes, and one that calls a"
+                    " JNIEnv entry on them gets that entry's refusal by name.");
+        } else {
+          Say(&out, "  the two object arguments are 0 because the stand-in page could not be mapped — a"
+                    " callee that dereferences them faults near address 0 (see the entry line above).");
+        }
+        Say(&out, "  width and height are the Activity's display pixels, measured on the Java side and"
+                  " passed in on the game's behalf — the surface a GLSurfaceView.Renderer would have been"
+                  " handed, not numbers this run computed.");
+        if (apk_path_guest != 0) {
+          Say(&out, "  apkPath is a NUL-terminated guest string, not a jstring handle: the fake environment"
+                    " mints a handle only while the guest is inside NewStringUTF, so a callee that hands"
+                    " this pointer to GetStringUTFChars gets that entry's named refusal, not the text.");
+        }
+        const Outcome got = Call(ctor_engine, ctx, app, kEntryPoint, "ZLIIL",
+                                 {abi::Value32::Ptr(env_ptr), abi::Value32::Ptr(stand_in),
+                                  abi::Value32::Ptr(stand_in), abi::Value32::S32(surface_width),
+                                  abi::Value32::S32(surface_height), abi::Value32::Ptr(apk_path_guest)});
+        Say(&out, "%s tier=%s reason=%s steps=%u value=0x%s (Z: the DEX's return type, so this is r0's"
+                  " low byte as the bridge reads a jboolean)",
+            kEntryPoint, ctor_tier, ReasonName(got.reason), got.steps,
+            Hex(static_cast<std::uint32_t>(got.bits)).c_str());
         if (!got.detail.empty()) Say(&out, "    stopped because: %s", got.detail.c_str());
         Say(&out, "    callee's last state: pc=0x%s lr=0x%s r0=0x%s r1=0x%s sp=0x%s cpsr=0x%s",
             Hex(got.exit.pc).c_str(), Hex(got.exit.r[14]).c_str(), Hex(got.exit.r[0]).c_str(),
@@ -1229,7 +1384,9 @@ extern "C" JNIEXPORT jstring JNICALL
 Java_com_retrobug_launcher_LauncherActivity_nativeInspect(JNIEnv* env, jclass /*clazz*/,
                                                           jbyteArray guest_so, jbyteArray libm_so,
                                                           jbyteArray libc_so, jbyteArray libz_so,
-                                                          jstring label, jint tiers) {
+                                                          jstring label, jint tiers,
+                                                          jstring apk_path, jint surface_width,
+                                                          jint surface_height) {
   std::string name;
   if (label != nullptr) {
     const char* chars = env->GetStringUTFChars(label, nullptr);
@@ -1239,13 +1396,25 @@ Java_com_retrobug_launcher_LauncherActivity_nativeInspect(JNIEnv* env, jclass /*
     }
   }
   if (name.empty()) name = "guest.so";
+  // The APK's absolute path as the Java half knows it: the string the guest is told and the one path the
+  // monitor's provider will serve bytes for. Absent is not a failure here — the native side reports a run
+  // without it — so it is copied like any other string and its presence is decided in `Inspect`.
+  std::string apk;
+  if (apk_path != nullptr) {
+    const char* chars = env->GetStringUTFChars(apk_path, nullptr);
+    if (chars != nullptr) {
+      apk = chars;
+      env->ReleaseStringUTFChars(apk_path, chars);
+    }
+  }
   const std::vector<std::uint8_t> app_image = Bytes(env, guest_so);
   const std::vector<std::uint8_t> libm_image = Bytes(env, libm_so);
   const std::vector<std::uint8_t> libc_image = Bytes(env, libc_so);
   const std::vector<std::uint8_t> libz_image = Bytes(env, libz_so);
   std::string report;
   try {
-    report = Inspect(app_image, libm_image, libc_image, libz_image, name, static_cast<int>(tiers));
+    report = Inspect(app_image, libm_image, libc_image, libz_image, name, static_cast<int>(tiers), apk,
+                     static_cast<int>(surface_width), static_cast<int>(surface_height));
   } catch (const std::exception& e) {
     report = std::string{"FATAL: unhandled exception while inspecting: "} + e.what();
   }

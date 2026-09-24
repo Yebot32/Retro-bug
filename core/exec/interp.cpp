@@ -2065,6 +2065,31 @@ bool BlockRunner::Step(const Inst* inst) {
       return true;
     }
 
+    case Opcode::FPMulSub32: case Opcode::FPMulSub64: {
+      // Fused `a - b*c`, the sibling of the row above and for the same reason: the back end emits a single
+      // `FMSUB` (`emit_arm64_floating_point.cpp`, `FPMulSub32`), and this is where `vnmls.f32`/`.f64` land —
+      // a pattern the coverage audit measured 45 times in this repo's own bionic/libm corpus.
+      //
+      // `std::fma(-b, c, a)` rather than `a - b*c` written out: negating a float is exact under IEEE-754,
+      // so the fused call still rounds once and returns the correctly-rounded `a - b*c`. The two-step form
+      // would round the product first and disagree in the last bit on exactly the inputs a physical engine
+      // feeds it.
+      const bool dbl = inst->GetOpcode() == Opcode::FPMulSub64;
+      FpOps flags{state_.fpscr};
+      if (dbl) {
+        std::uint64_t a = 0, b = 0, c = 0;
+        if (!W64(inst, 0, a) || !W64(inst, 1, b) || !W64(inst, 2, c)) return false;
+        const double r = std::fma(-BitsAs<double>(b), BitsAs<double>(c), BitsAs<double>(a));
+        Put(inst, V{AsBits<std::uint64_t>(r), 0});
+      } else {
+        std::uint32_t a = 0, b = 0, c = 0;
+        if (!W32(inst, 0, a) || !W32(inst, 1, b) || !W32(inst, 2, c)) return false;
+        const float r = std::fma(-BitsAs<float>(b), BitsAs<float>(c), BitsAs<float>(a));
+        Put(inst, V{AsBits<std::uint32_t>(r), 0});
+      }
+      return true;
+    }
+
     case Opcode::FPMulAdd32: case Opcode::FPMulAdd64: {
       // Fused: `a + b*c` with one rounding, because the back end emits a single `FMADD`. Two host
       // operations would be a different number, and this op is how `vmla.f64` lowers — which the

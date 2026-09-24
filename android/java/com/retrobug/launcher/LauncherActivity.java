@@ -93,7 +93,8 @@ public class LauncherActivity extends Activity {
                                               String method, int seed);
 
     private static native String nativeInspect(byte[] guestSo, byte[] libmSo, byte[] libcSo, byte[] libzSo,
-                                               String label, int tiers);
+                                               String label, int tiers, String apkPath, int surfaceWidth,
+                                               int surfaceHeight);
 
     private enum Screen { HOME, LIBRARY, SETTINGS, DIAGNOSTICS, REPORT }
 
@@ -437,11 +438,22 @@ public class LauncherActivity extends Activity {
         reportTitle_ = apk.getName().replaceAll("\\.apk$", "");
         currentReport_ = "reading " + apk.getName() + " ...";
         show(Screen.REPORT);
+        /*
+         * The two ints the game's JNI entry point is given, taken where a real Java side would have taken
+         * them: the Activity's own display, in pixels, which is exactly what GLSurfaceView.Renderer's
+         * onSurfaceChanged hands a game. This app has no GLSurfaceView and no renderer — the game runs
+         * headless inside the engine — so the honest number is the display RetroBug itself occupies, and
+         * it is read here, on the UI thread, rather than guessed at in native code. The native report
+         * says these were supplied on the game's behalf.
+         */
+        final android.util.DisplayMetrics metrics = getResources().getDisplayMetrics();
+        final int surfaceWidth = metrics.widthPixels;
+        final int surfaceHeight = metrics.heightPixels;
         new Thread(new Runnable() {
             @Override public void run() {
                 String report;
                 try {
-                    report = inspectApk(apk, tiers);
+                    report = inspectApk(apk, tiers, surfaceWidth, surfaceHeight);
                 } catch (IOException | RuntimeException e) {
                     report = "FATAL: could not read " + apk.getName() + ": "
                             + e.getClass().getSimpleName() + ": " + e.getMessage();
@@ -454,7 +466,7 @@ public class LauncherActivity extends Activity {
         }, "rb-run").start();
     }
 
-    private String inspectApk(File apk, int tiers) throws IOException {
+    private String inspectApk(File apk, int tiers, int surfaceWidth, int surfaceHeight) throws IOException {
         byte[] libmBytes;
         try {
             libmBytes = readAll(getAssets().open(LIBM_ASSET));
@@ -548,7 +560,15 @@ public class LauncherActivity extends Activity {
             }
             if (so == null) return facts.append(refused).toString();
             facts.append('\n');
-            return facts + nativeInspect(so, libmBytes, libcBytes, libzBytes, chosen, tiers);
+            /*
+             * `apk.getAbsolutePath()` is the guest's whole view of the filesystem. It travels as the entry
+             * point's path argument, and it is the only path the native side's file provider answers, so
+             * `nativeInit` can open the APK it arrived in and read the `assets/` inside it. Nothing else
+             * becomes reachable: every other path is still a named refusal — see the provider in
+             * `android/jni/launcher.cpp`.
+             */
+            return facts + nativeInspect(so, libmBytes, libcBytes, libzBytes, chosen, tiers,
+                    apk.getAbsolutePath(), surfaceWidth, surfaceHeight);
         }
     }
 
