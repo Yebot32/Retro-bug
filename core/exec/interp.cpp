@@ -1709,6 +1709,40 @@ bool BlockRunner::Step(const Inst* inst) {
      * No flag record, for the reason the neighbours state: their flag-form on AArch64 is `ANDS`/`ORS`/
      * `EORS`-shaped, which the `TST v, v` fallback in `FlagsFromOp` already computes.
      */
+    /**
+     * The barriers, executed as instructions that do nothing — which for this guest is what they are.
+     *
+     * `dmb`, `dsb` and `isb` order accesses *between* observers. A RetroBug guest is one thread on one host
+     * thread: program order already provides every ordering these can ask for, there is no second observer
+     * to publish to, and no guest store buffer to drain. Nothing is silently skipped — the instruction is
+     * decoded, counted and continued, and Tier J emits a real fence for the same word (see its
+     * `emit_arm64_a32.cpp`), so the two tiers differ in mechanism and not in what the guest observes.
+     *
+     * The *frequency* is why these are worth a comment at all: `dmb` appears 1067 times in the
+     * 325,541-instruction bionic/libm/libc corpus this repo measures against — more than any other
+     * unimplemented opcode — so refusing it is the difference between Tier I running a real system library
+     * and stopping in the first hundred instructions of one.
+     *
+     * What would change this: a guest with more than one thread. Then these become real fences, and the
+     * place to implement them is wherever the second thread's view of memory is introduced.
+     */
+    case Opcode::A32DataMemoryBarrier:
+    case Opcode::A32DataSynchronizationBarrier:
+    case Opcode::A32InstructionSynchronizationBarrier:
+      return true;
+
+    /**
+     * `ByteReverseHalf` is U16→U16: the byte swap *within* each half, which the front end feeds to
+     * `SignExtendHalfToWord` for `revsh` and to the register write for `rev16`. Tier I had `ByteReverseWord`
+     * and not this, so every `rev16`/`revsh` in a guest refused while `rev` worked.
+     */
+    case Opcode::ByteReverseHalf: {
+      std::uint32_t a = 0;
+      if (!W32(inst, 0, a)) return false;
+      Put(inst, V{((a & 0x00ffu) << 8) | ((a & 0xff00u) >> 8), 0});
+      return true;
+    }
+
     case Opcode::Not32: {
       std::uint32_t a = 0;
       if (!W32(inst, 0, a)) return false;
