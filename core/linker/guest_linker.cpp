@@ -66,7 +66,10 @@ std::vector<std::string> PeekNeeded(const std::vector<std::uint8_t>& image, std:
     if (p->p_type == elf::PT_LOAD) loads.push_back(*p);
   }
   if (!dyn_ph) return {};  // a static or executable image has no dependencies to name
-  if (dyn_ph->p_offset + dyn_ph->p_filesz > image.size()) {
+  // Widened before the sum: two 32-bit values added in 32 bits wrap mod 2^32, and a crafted
+  // `p_offset = 0xFFFFFFF0, p_filesz = 0x100` passed this check and then handed the parser a
+  // `Dyn32*` pointing megabytes past the image.
+  if (static_cast<std::uint64_t>(dyn_ph->p_offset) + dyn_ph->p_filesz > image.size()) {
     return fail("PT_DYNAMIC runs past the image");
   }
 
@@ -220,9 +223,22 @@ bool GuestLinker::RunInitializers(const ExecFn& exec, std::string* err) {
   if (!exec) return fail("no executor supplied to run initializers");
 
   for (auto* m : order_) {
-    // `DT_INIT_ARRAY` first, then `DT_INIT` — the order glibc and bionic both use, so an image that has
-    // both behaves the same whichever way it was built. A zero entry is a gap some linkers leave in the
-    // array, not a function to call.
+    // `DT_INIT` first, then `DT_INIT_ARRAY` — the order bionic states verbatim in
+    // `soinfo::call_constructors` ("DT_INIT should be called before DT_INIT_ARRAY if both are
+    // present") and glibc's `call_init` matches. The first draft ran them the other way round with
+    // a comment claiming it was bionic's order; the classic image with a `DT_INIT` that sets up
+    // state its array entries consume got that setup *after* its consumers. A zero array entry is a
+    // gap some linkers leave in the array, not a function to call.
+    //
+    // Skipped when the module's constructors already ran: a shared dependency is loaded once but is
+    // in every dependent's `order_`, and a retry after a mid-way failure would re-run the allocator
+    // init and static constructors of everything before the failure. bionic guards per-soinfo with
+    // `constructors_called`; `GuestModule` carries the same flag.
+    if (m->constructors_called) continue;
+    if (m->init && !exec(m->init)) {
+      return fail("DT_INIT of '" + m->soname + "' at " + std::to_string(m->init.addr) +
+                  " did not return");
+    }
     for (std::size_t i = 0; i < m->init_array.size(); ++i) {
       const auto fn = m->init_array[i];
       if (fn.addr == 0) continue;
@@ -231,10 +247,7 @@ bool GuestLinker::RunInitializers(const ExecFn& exec, std::string* err) {
                     std::to_string(fn.addr) + " did not return");
       }
     }
-    if (m->init && !exec(m->init)) {
-      return fail("DT_INIT of '" + m->soname + "' at " + std::to_string(m->init.addr) +
-                  " did not return");
-    }
+    m->constructors_called = true;
   }
   return true;
 }

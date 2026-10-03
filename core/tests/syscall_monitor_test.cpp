@@ -85,17 +85,26 @@ void frame_takes_the_number_from_r7_not_the_encoding() {
   CHECK(f.number != f.imm);
 }
 
-void r7_is_masked_the_way_the_kernel_masks_it() {
+void r7_is_the_number_not_a_masked_remainder() {
+  // r7 is taken as the syscall number, full stop. The kernel bounds-checks it; the first draft
+  // masked it with __NR_SYSCALL_MASK, which is a bounds-check constant rather than a mask, and a
+  // hand-written stub with a garbage high bit then *executed* the aliased low syscall where the
+  // kernel would have answered -ENOSYS.
   exec::MachineState s = State(0x0010'0000u | sc::nr::kGetpid);
   const sc::Frame f = sc::Frame::Capture(s, 0);
-  CHECK_CTX(f.number == sc::nr::kGetpid, "0x" + std::to_string(f.number));
-  // Above the table even after masking: refused, not wrapped into something that exists.
-  exec::MachineState hi = State(0x00ff'fff0u);
+  CHECK_CTX(f.number == (0x0010'0000u | sc::nr::kGetpid),
+            "0x" + std::to_string(f.number) + ": the high bit survives capture");
   sc::Monitor m;
-  const sc::Outcome o = m.Classify(sc::Frame::Capture(hi, 0), hi);
+  const sc::Outcome o = m.Classify(sc::Frame::Capture(s, 0), s);
   CHECK_CTX(o.verdict == sc::Verdict::kUnsupported, sc::Name(o.verdict));
   CHECK_CTX(o.r0 == -static_cast<std::int32_t>(sc::err::kEnosys),
             std::to_string(o.r0) + " want -38, the value measured from hardware for this exact case");
+
+  // Above the table outright: refused, not wrapped into something that exists.
+  exec::MachineState hi = State(0x00ff'fff0u);
+  const sc::Outcome o2 = m.Classify(sc::Frame::Capture(hi, 0), hi);
+  CHECK_CTX(o2.verdict == sc::Verdict::kUnsupported, sc::Name(o2.verdict));
+  CHECK_CTX(o2.r0 == -static_cast<std::int32_t>(sc::err::kEnosys), std::to_string(o2.r0));
 }
 
 /// The measured return convention. `-36` for ENAMETOOLONG is the number that settles the
@@ -397,7 +406,7 @@ void the_tally_is_per_monitor_and_in_first_seen_order() {
 
 int main() {
   frame_takes_the_number_from_r7_not_the_encoding();
-  r7_is_masked_the_way_the_kernel_masks_it();
+  r7_is_the_number_not_a_masked_remainder();
   return_value_and_the_carry_bit();
   known_numbers_are_answered_or_refused_not_guessed();
   exit_group_is_a_verdict_not_a_value();

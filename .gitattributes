@@ -29,6 +29,9 @@
 *.txt   text eol=lf
 *.xml   text eol=lf
 *.json  text eol=lf
+# `patches/` is the provenance record: the files there have to survive a checkout byte-for-byte, or
+# `git apply` stops matching its context on a Windows clone and the record quietly stops being usable.
+*.patch text eol=lf
 
 # Windows artifacts, in case one is ever committed: never rewrite these.
 *.png  binary

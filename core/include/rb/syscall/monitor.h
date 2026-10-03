@@ -83,9 +83,13 @@ namespace rb::syscall {
 /// — which is why dispatch looks at the range as well as the value.
 constexpr std::uint32_t kArmNrBase = 0x000f0000u;
 
-/// `__NR_SYSCALL_MASK` from the same header: the kernel masks r7 with this before indexing the table, and
-/// a monitor that did not would let a guest reach an entry with a number that has no meaning.
-constexpr std::uint32_t kSyscallMask = 0x000fffffu;
+/// There is deliberately **no mask constant here**. `__NR_SYSCALL_MASK` in the kernel's own header is a
+/// bounds-check constant, not a mask applied to `r7`: the kernel takes `r7` as the syscall number and
+/// answers `-ENOSYS` past its table. An earlier revision of this file defined `kSyscallMask` and masked
+/// `r7` with `0x000fffff`, which aliased `0x00100003` onto `read` and *executed* it where the kernel
+/// would have refused — and the same revision returned `ENOSYS` for numbers the kernel serves. The
+/// number goes to dispatch untouched, and a constant kept "for the ARM private range check" was removed
+/// with this comment because no such check exists; `kArmNrBase` above is what the range test uses.
 
 /// The ARM Linux error range: `r0` in [-4095, -1] is `-errno`. See the measurement above — this, not the
 /// carry flag, is what a guest's own glue tests.
@@ -235,13 +239,13 @@ struct Outcome {
 /// a literal frame, and so the fields that matter for dispatch cannot be confused with the ones that
 /// matter for the result.
 struct Frame {
-  std::uint32_t number = 0;  ///< r7, masked by the kernel's rule
+  std::uint32_t number = 0;  ///< r7, taken as the syscall number — see the note above `kArmNrBase`
   std::uint32_t imm = 0;     ///< the SVC immediate — a channel, not the number
   std::uint32_t arg[6] = {};  ///< r0..r5
   exec::GuestAddr pc = 0;    ///< already past the SVC, in both tiers (see `StopReason::Syscall`)
 
-  /// r7 is what the kernel dispatches on; the masking is the kernel's own rule and is applied here so a
-  /// guest cannot reach past the table by setting a high bit.
+  /// `r7` *is* the number. It is captured whole and dispatched on whole, because that is what the kernel
+  /// does: a monitor that masked it turned a garbage number into a valid one and then served it.
   [[nodiscard]] static Frame Capture(const exec::MachineState& state, std::uint32_t svc_imm);
 
   /// Puts the result back the way the kernel does: r0 only, CPSR untouched — see the measurement in the
@@ -313,12 +317,17 @@ class Monitor {
   /// Distinct numbers seen, and how many times each — the line C17 records.
   [[nodiscard]] std::string TallyText() const;
 
-  /// One line for each distinct call that was *not* answered with a value: refusals (`ENOSYS` and why),
-  /// policy denials, and the serviced-with-an-errno answers (`ENOENT` from the provider, `EBADF` from the
-  /// fd table). First-seen order, deduplicated, capped at `kMaxNotes` so a guest looping on one refusal
+  /// One line for each distinct call that did not simply succeed: refusals (`ENOSYS` and why), policy
+  /// denials, and the serviced-with-an-errno answers (`ENOENT` from the provider, `EBADF` from the fd
+  /// table). First-seen order, deduplicated, capped at `kMaxNotes` so a guest looping on one refusal
   /// cannot grow a report without bound. This is the half of the story the tally's counts cannot tell: a
   /// phone report that lists `openat x3` still cannot say whether those three were answered or refused.
+  /// `Handle` records any outcome with a negative `r0`, not only the four original success-path sites.
   [[nodiscard]] const std::vector<std::string>& notes() const { return notes_; }
+
+  /// How many distinct notes the cap had to drop, so a report can say the list is not the whole story
+  /// rather than presenting a truncated list as complete.
+  [[nodiscard]] std::size_t dropped_notes() const { return dropped_notes_; }
 
   /// How many distinct notes are kept before the rest are counted rather than stored.
   static constexpr std::size_t kMaxNotes = 24;

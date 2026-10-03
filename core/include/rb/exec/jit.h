@@ -68,7 +68,7 @@ class JitExecutor : public Executor, public Dynarmic::A32::UserCallbacks {
 
   CodeTier tier() const override { return CodeTier::Translate; }
 
-  [[nodiscard]] bool ok() const { return err_.empty(); }
+  [[nodiscard]] bool ok() const override { return err_.empty(); }
   [[nodiscard]] const std::string& error() const { return err_; }
 
   // ---------------------------------------------------------- Dynarmic::A32::UserCallbacks

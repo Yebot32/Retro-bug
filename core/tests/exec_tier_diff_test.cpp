@@ -367,6 +367,84 @@ void fp_groups_are_accurate_or_explicitly_refused() {
       {"Java_com_retrobug_fixture_MainActivity_fp_nan", -7, 0, 8, "NaN comparison semantics"},
       {"Java_com_retrobug_fixture_MainActivity_fp_nan", 98, 0, 8, "NaN comparison semantics"},
       {"Java_com_retrobug_fixture_MainActivity_fp_nan", -2, 0, 8, "NaN comparison semantics"},
+      // fp_vecmax / fp_vecmin: the Advanced SIMD FP max/min group — and the *only* FP max/min an ARMv7
+      // guest can encode, since the scalar VFP forms need FPARMv8. The operands are float bit patterns,
+      // not small integers: 0x80000000 IS -0.0, which is the whole subject of the first four rows. Every
+      // `want` here comes from the oracle's fp_vecmax/fp_vecmin line, captured on the SM-X710 by running
+      // the same instruction the guest runs. These rows exist because Tier I implemented no FP vector op
+      // at all, so a real guest's `vmax.f32` stopped the run — and because the signed-zero rule is the
+      // one a hand-written max gets wrong in both directions at once: max(-0,-0) is -0 (not +0) and
+      // min(+0,+0) is +0 (not -0), while max(+0,-0) is +0 and min(+0,-0) is -0.
+      {"Java_com_retrobug_fixture_MainActivity_fp_vecmax", static_cast<std::int32_t>(0x80000000u),
+       static_cast<std::int32_t>(0x80000000u), static_cast<std::int32_t>(0x80000000u),
+       "ASIMD vmax.f32 signed zeros"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_vecmin", static_cast<std::int32_t>(0x80000000u),
+       static_cast<std::int32_t>(0x80000000u), static_cast<std::int32_t>(0x80000000u),
+       "ASIMD vmin.f32 signed zeros"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_vecmax", 0, static_cast<std::int32_t>(0x80000000u), 0,
+       "ASIMD vmax.f32 signed zeros"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_vecmin", 0, static_cast<std::int32_t>(0x80000000u),
+       static_cast<std::int32_t>(0x80000000u), "ASIMD vmin.f32 signed zeros"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_vecmax", static_cast<std::int32_t>(0x80000000u), 0, 0,
+       "ASIMD vmax.f32 signed zeros"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_vecmin", static_cast<std::int32_t>(0x80000000u), 0,
+       static_cast<std::int32_t>(0x80000000u), "ASIMD vmin.f32 signed zeros"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_vecmax", 0, 0, 0, "ASIMD vmax.f32 signed zeros"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_vecmin", 0, 0, 0, "ASIMD vmin.f32 signed zeros"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_vecmax", 0x3f800000, static_cast<std::int32_t>(0xbf800000u),
+       0x3f800000, "ASIMD vmax.f32 ordered"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_vecmin", 0x3f800000, static_cast<std::int32_t>(0xbf800000u),
+       static_cast<std::int32_t>(0xbf800000u), "ASIMD vmin.f32 ordered"},
+      // The NaN half of the rule: the *default* NaN, not either input's payload, and the same answer for
+      // a quiet and a signalling operand. A tier that propagated the payload would answer 0x7fc00000 for
+      // the quiet row by luck and 0x7f800001 for the signalling one, which is what makes the pair useful.
+      {"Java_com_retrobug_fixture_MainActivity_fp_vecmax", 0x7fc00000, 0x3f800000, 0x7fc00000,
+       "ASIMD vmax.f32 default NaN"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_vecmin", 0x7fc00000, 0x3f800000, 0x7fc00000,
+       "ASIMD vmin.f32 default NaN"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_vecmax", 0x7f800001, 0x3f800000, 0x7fc00000,
+       "ASIMD vmax.f32 default NaN"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_vecmin", 0x7f800001, 0x3f800000, 0x7fc00000,
+       "ASIMD vmin.f32 default NaN"},
+      // fp_rmode: `a` is FPSCR.RMode (0 nearest, 1 +inf, 2 -inf, 3 zero) and `b` seeds the operand, so
+      // these are (mode, seed) pairs rather than arithmetic operands. The probe divides in double and
+      // narrows that to float, folding both results into the returned int, so one row covers the
+      // arithmetic path (mode taken from FPSCR) and the conversion path (mode carried as an IR immediate)
+      // together. Values from the oracle's fp_rmode line, captured on the SM-X710.
+      //
+      // Both seeds are needed, and the reason is worth keeping: for seed 1 the nearest, -inf and zero
+      // results coincide (the +inf row is what separates them), and for seed 5 nearest and +inf coincide.
+      // A Tier I that ignored the mode would answer the *nearest* value in all eight rows — 1374455510
+      // four times for seed 1 and -375277457 four times for seed 5 — so six of the eight fail. Across the
+      // two seeds the four modes do give four distinct numbers, which is what makes the set a measurement
+      // of the mode rather than of the arithmetic.
+      {"Java_com_retrobug_fixture_MainActivity_fp_rmode", 0, 1, 1374455510, "FPSCR.RMode rounding"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_rmode", 1, 1, 1374455506, "FPSCR.RMode rounding"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_rmode", 2, 1, 1374455510, "FPSCR.RMode rounding"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_rmode", 3, 1, 1374455510, "FPSCR.RMode rounding"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_rmode", 0, 5, -375277457, "FPSCR.RMode rounding"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_rmode", 1, 5, -375277457, "FPSCR.RMode rounding"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_rmode", 2, 5, -375277458, "FPSCR.RMode rounding"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_rmode", 3, 5, -375277458, "FPSCR.RMode rounding"},
+      // fp_fz: `a` bit 0 is FPSCR.FZ and `b` picks the case (0 scalar mul input, 1 scalar mul result,
+      // 2 scalar sqrt input, 3 widening input, 4 NEON max input). Values from the oracle's fp_fz line,
+      // captured on the SM-X710.
+      //
+      // The fifth case is the reason this row set exists rather than a single FZ row: Advanced SIMD
+      // flushes denormal operands *regardless of FZ*, so `vmax.f32(0x00000001, +0)` answers +0 at FZ=0 as
+      // well. Both FZ values are in the table for it precisely because the answer must not move — a
+      // probe that only ever set FZ would have shown nothing, and a Tier I that applied the scalar rule to
+      // the vector path would answer the denormal on the `fz=0` row and fail.
+      {"Java_com_retrobug_fixture_MainActivity_fp_fz", 0, 0, 1, "FPSCR.FZ flush-to-zero"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_fz", 1, 0, 0, "FPSCR.FZ flush-to-zero"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_fz", 0, 1, 4194304, "FPSCR.FZ flush-to-zero"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_fz", 1, 1, 0, "FPSCR.FZ flush-to-zero"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_fz", 0, 2, 439682291, "FPSCR.FZ flush-to-zero"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_fz", 1, 2, 0, "FPSCR.FZ flush-to-zero"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_fz", 0, 3, 916455424, "FPSCR.FZ flush-to-zero"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_fz", 1, 3, 0, "FPSCR.FZ flush-to-zero"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_fz", 0, 4, 0, "FPSCR.FZ flush-to-zero (NEON, always)"},
+      {"Java_com_retrobug_fixture_MainActivity_fp_fz", 1, 4, 0, "FPSCR.FZ flush-to-zero (NEON, always)"},
       // simd_int: vmul.i32/vadd.i32 on q registers plus two lane extracts.
       {"Java_com_retrobug_fixture_MainActivity_simd_int", 3, 7, -25, "ASIMD i32 lanes"},
       {"Java_com_retrobug_fixture_MainActivity_simd_int", 7, 3, 67, "ASIMD i32 lanes"},
@@ -834,6 +912,122 @@ void unmapped_code_faults_in_both_tiers() {
             "Tier J: reason " + std::to_string(static_cast<int>(rj.reason)) + " " + rj.detail);
   std::fprintf(stderr, "[diff] unmapped fetch: I said \"%s\", J said \"%s\"\n", ri.detail.c_str(),
                rj.detail.c_str());
+}
+
+/**
+ * A data access that faults *mid-block*, with instructions after it that would corrupt state.
+ *
+ * The block is three Thumb instructions on a mapped, executable page: a load through r1 = 0 (mapped by
+ * nothing), then a marker write to r0, then a return. The fault has to stop both tiers at the faulting
+ * instruction with the marker unwritten — a tier that keeps executing after a faulting data access
+ * hands the guest zero-filled loads plus whatever the rest of the block does to the register file,
+ * which is the failure mode `check_halt_on_memory_access` exists to prevent. Tier J is the tier this
+ * guarded: its fault callbacks raised a halt reason the callback-only emit path never tested.
+ *
+ * The first version of this test proved nothing, and the way it failed is worth keeping written down.
+ * It planted `ldr r0, [r1]; movs r0, #0x5a; bx lr` and asserted that r0 was still 0 after the fault. The
+ * marker wrote to *the register the load wrote to*, so the load's result had no uses — and dynarmic's
+ * dead-code-elimination pass removes an instruction with no uses that `Inst::MayHaveSideEffects()` does
+ * not list (`ir/opt/dead_code_elimination_pass.cpp:17`). That predicate covers memory *writes*
+ * (`IsMemoryWrite()`), coprocessor accesses and CPU exceptions, but **not memory reads**
+ * (`ir/microinstruction.cpp:544-560`). So Tier J never executed the load at all: no fault was raised,
+ * the marker ran, the block returned to the sentinel, and the lane reported `reason=Returned, r0=0x5a,
+ * pc=0xc00000` — a tier divergence manufactured by the blob rather than found in the emulator. It also
+ * means the pre-fix "expected" behaviour recorded in this comment (reason=Returned) could not have
+ * distinguished the two tiers, because `SetPending` is first-write-wins: the reason would still have
+ * been Fault.
+ *
+ * The blob below keeps the load live by consuming it (`adds r0, r0, r2`), so Tier J must execute it, and
+ * keeps the marker in a *different* register (r2) so both halves stay observable: r0 = 0x11 with
+ * r2 = 0 means the block stopped at the faulting load; r0 = 0x5a means the rest of the block ran.
+ */
+void a_fauling_data_access_stops_both_tiers_at_the_instruction() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  constexpr exec::GuestAddr kBlob = 0x0070'0000u;
+  // ldr r0, [r1]; movs r2, #0x5a; adds r0, r0, r2; bx lr — assembled rather than recalled, this file's
+  // rule since docs/30:
+  //   $TC/bin/clang.exe --target=armv7-none-linux-androideabi26 -mthumb -c fault.s
+  //   $TC/bin/llvm-objdump.exe -d fault.o   →   6808 / 225a / 1880 / 4770
+  // The trailing `adds` is not decoration: it is what keeps the load on the dead-code-elimination side
+  // of the line (see the header comment).
+  constexpr std::uint16_t kCode[] = {0x6808, 0x225A, 0x1880, 0x4770};
+  std::string err;
+  if (!rig.mem->Map(kBlob, mem::kGuestPage, kRead | kWrite | kExec, &err)) {
+    fail("could not map the fault-probe page", __LINE__, err);
+    return;
+  }
+  CHECK_CTX(rig.mem->Write(kBlob, kCode, sizeof(kCode)), "could not plant the fault-probe blob");
+
+  exec::MachineState si = EntryState(kBlob, 0, 0, true);
+  si.r[0] = 0x11;  // what the faulting load must leave alone; 0x5a means the block ran on
+  si.r[1] = 0;  // the load's base: address 0, mapped by nothing in this window
+  exec::MachineState sj = si;
+  const exec::RunResult ri = rig.interp->Run(si, 1000);
+  const exec::RunResult rj = rig.jit->Run(sj, 1000);
+
+  CHECK_CTX(ri.reason == exec::StopReason::Fault,
+            "Tier I: reason " + std::to_string(static_cast<int>(ri.reason)) + " " + ri.detail);
+  CHECK_CTX(rj.reason == exec::StopReason::Fault,
+            "Tier J: reason " + std::to_string(static_cast<int>(rj.reason)) + " " + rj.detail);
+  CHECK_CTX(si.pc == kBlob, "Tier I stopped at 0x" + Hex(si.pc) +
+                                ", not at the faulting instruction 0x" + Hex(kBlob));
+  CHECK_CTX(sj.pc == kBlob, "Tier J stopped at 0x" + Hex(sj.pc) +
+                                ", not at the faulting instruction 0x" + Hex(kBlob));
+  CHECK_CTX(si.r[0] == 0x11, "Tier I's r0 = 0x" + Hex(si.r[0]) + " after a faulting load");
+  CHECK_CTX(sj.r[0] == 0x11, "Tier J's r0 = 0x" + Hex(sj.r[0]) +
+                                 " after a faulting load — 0x5a means the rest of the block ran and 0x0"
+                                 " means the faulting load committed a zero");
+  CHECK_CTX(si.r[2] == 0, "Tier I's r2 = 0x" + Hex(si.r[2]) + " — the marker after the fault executed");
+  CHECK_CTX(sj.r[2] == 0, "Tier J's r2 = 0x" + Hex(sj.r[2]) + " — the marker after the fault executed");
+  std::fprintf(stderr, "[diff] data fault mid-block: I pc=%08x r0=%08x \"%s\" / J pc=%08x r0=%08x \"%s\"\n",
+               si.pc, si.r[0], ri.detail.c_str(), sj.pc, sj.r[0], rj.detail.c_str());
+}
+
+/**
+ * An *unmodelled* coprocessor access stops both tiers at the instruction, leaving the destination
+ * register untouched.
+ *
+ * This is the last of the "plausible zero" paths. `Arm15Coprocessor::Refuse` records the refusal and
+ * raises `UserDefined1`, but the emitted coprocessor callback had no halt re-test, so the callback's zero
+ * landed in r0 and the `movs r0, #0x5a` after it still ran — where Tier I stops at the `mrc`. The entry
+ * value 0x11 is what makes the assertion sharp: 0x11 is "untouched", 0x00 would also be the callback's
+ * zero, and 0x5a means the rest of the block ran.
+ *
+ * The encoding was assembled and read back rather than recalled, which is this file's rule:
+ *
+ *   mrc p15, #0, r0, c0, c0, #0 ; movs r0, #0x5a ; bx lr
+ *   $TC/bin/clang.exe --target=armv7-none-linux-androideabi26 -mthumb -c coproc.s
+ *   $TC/bin/llvm-objdump.exe -d coproc.o   →   ee10 0f10 / 205a / 4770
+ */
+void an_unmodelled_coprocessor_access_stops_both_tiers() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  constexpr exec::GuestAddr kBlob = 0x0070'1000u;
+  constexpr std::uint16_t kCode[] = {0xee10, 0x0f10, 0x205a, 0x4770};
+  std::string err;
+  if (!rig.mem->Map(kBlob, mem::kGuestPage, kRead | kWrite | kExec, &err)) {
+    fail("could not map the coprocessor-probe page", __LINE__, err);
+    return;
+  }
+  CHECK_CTX(rig.mem->Write(kBlob, kCode, sizeof(kCode)), "could not plant the coprocessor blob");
+
+  exec::MachineState si = EntryState(kBlob, 0, 0, true);
+  si.r[0] = 0x11;  // the value a halted access must leave alone
+  exec::MachineState sj = si;
+  const exec::RunResult ri = rig.interp->Run(si, 1000);
+  const exec::RunResult rj = rig.jit->Run(sj, 1000);
+
+  CHECK_CTX(ri.reason == exec::StopReason::Unimplemented,
+            "Tier I: reason " + std::to_string(static_cast<int>(ri.reason)) + " " + ri.detail);
+  CHECK_CTX(rj.reason == exec::StopReason::Unimplemented,
+            "Tier J: reason " + std::to_string(static_cast<int>(rj.reason)) + " " + rj.detail);
+  CHECK_CTX(si.r[0] == 0x11, "Tier I's r0 = 0x" + Hex(si.r[0]) + " after an unmodelled mrc");
+  CHECK_CTX(sj.r[0] == 0x11, "Tier J's r0 = 0x" + Hex(sj.r[0]) +
+                                 " after an unmodelled mrc — 0x5a would mean the rest of the block ran"
+                                 " and 0x0 would mean the callback's zero was read as a result");
+  std::fprintf(stderr, "[diff] unmodelled coprocessor: I r0=%08x \"%s\" / J r0=%08x \"%s\"\n", si.r[0],
+               ri.detail.c_str(), sj.r[0], rj.detail.c_str());
 }
 
 /**
@@ -1939,6 +2133,12 @@ constexpr MediaRow kMediaRows[] = {
     {"sadd8 all-negative", "sadd8 r4, r2, r3", {0xfa82, 0xf403}, 0x8080'8080u, 0xFFFF'FFFFu, 0x7F7F'7F7Fu,
      0x0u, "(-128)+(-1) per lane is below -1, so GE clears — and the leading uadd8 set it to 15 on these"
            " same operands, so clearing is the only way to get here"},
+    {"sadd8 minus-one lane", "sadd8 r4, r2, r3", {0xfa82, 0xf403}, 0x0000'0000u, 0xFFFF'FFFFu,
+     0xFFFF'FFFFu, 0x0u, "0+(-1) per lane sums to exactly -1, the one value that separates the two"
+           " readings of the arm64 recipe: SHADD halves the true sum, floor(-1/2) is -1, and CMGE"
+           " clears — so the rule is sum >= 0 and GE stays 0. The (a+b+1)>>1 form is SRHADD's algebra"
+           " and sets GE to 15 here; every lane of this row is exactly -1, so there is no lane that"
+           " agrees by accident"},
     {"ssub8 signed-only", "ssub8 r4, r2, r3", {0xfaC2, 0xf403}, 0x0000'0000u, 0xFFFF'FFFFu, 0x0101'0101u,
      0xFu, "0-(-1) is a signed borrow that is not an *unsigned* one: the unsigned rule would leave GE 0"
            " here, so this row is only satisfiable by the signed comparison"},
@@ -2417,6 +2617,8 @@ int main(int argc, char** argv) {
   both_tiers_stop_at_the_same_svc();
   a_guest_cacheflush_reaches_the_tier_that_owns_the_cache();
   unmapped_code_faults_in_both_tiers();
+  a_fauling_data_access_stops_both_tiers_at_the_instruction();
+  an_unmodelled_coprocessor_access_stops_both_tiers();
 
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;

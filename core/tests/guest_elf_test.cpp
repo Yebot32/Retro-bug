@@ -530,6 +530,15 @@ void truncated_image_is_refused() {
   std::string err;
   CHECK(!loader::LoadFromBytes(*gm, cut, "cut.so", opts, &err));
   CHECK(!err.empty());
+
+  // Truncated *past the header table*: the phdrs still parse, so the refusal has to come from the
+  // file-range check rather than a short read. This is the shape a partial APK extraction produces,
+  // and without the check the segment mapped anyway and the first access — the tail-zero write or a
+  // relocation — raised SIGBUS in the host instead of naming a stage.
+  const std::size_t half = f.bytes.size() / 2;
+  std::vector<std::uint8_t> mid(f.bytes.begin(), f.bytes.begin() + half);
+  CHECK(!loader::LoadFromBytes(*gm, mid, "cut-mid.so", opts, &err));
+  CHECK_CTX(!err.empty(), "a half-truncated image loaded: " + err);
 }
 
 /// A stripped or hand-built image with no section header table has no way to say how long .dynsym
@@ -554,6 +563,46 @@ void symbol_table_without_a_bound_is_refused() {
   CHECK(gm->mapped_page_count() == 0);
 }
 
+/// A string table declared past the end of the image is refused by name.
+///
+/// This is the half of the earlier bound fix that was only *applied* rather than enforced: a `DT_STRSZ`
+/// larger than the file left the table unresolved, every name came back empty, and the load reported "no
+/// exports / no soname" about an image whose string table was simply damaged. Nothing crashed and nothing
+/// was named, which is why it needed a test rather than a careful reader.
+void a_string_table_past_the_end_of_the_image_is_refused() {
+  Fixture f = parse_fixture();
+  auto gm = make_mem();
+  if (!f.ok || !gm) return;
+  auto bytes = f.bytes;
+  const auto* h = reinterpret_cast<const elf::Ehdr32*>(bytes.data());
+  bool patched = false;
+  for (std::uint16_t i = 0; i < h->e_phnum && !patched; ++i) {
+    const std::size_t ph = h->e_phoff + std::size_t{i} * h->e_phentsize;
+    if (ph + sizeof(elf::Phdr32) > bytes.size()) break;
+    elf::Phdr32 p;
+    std::memcpy(&p, bytes.data() + ph, sizeof(p));
+    if (p.p_type != elf::PT_DYNAMIC || p.p_offset + p.p_filesz > bytes.size()) continue;
+    for (std::size_t o = 0; o * sizeof(elf::Dyn32) + sizeof(elf::Dyn32) <= p.p_filesz; ++o) {
+      auto* d = reinterpret_cast<elf::Dyn32*>(bytes.data() + p.p_offset + o * sizeof(elf::Dyn32));
+      if (d->d_tag == elf::DT_NULL) break;
+      if (d->d_tag != elf::DT_STRSZ) continue;
+      // Past the end of the image, and small enough that the sum cannot wrap on any host.
+      d->d_val = static_cast<std::uint32_t>(bytes.size()) * 4u;
+      patched = true;
+      break;
+    }
+  }
+  CHECK_CTX(patched, "the fixture has no DT_STRSZ entry to damage");
+
+  std::map<std::string, std::uint32_t> given;
+  loader::LoadOptions opts;
+  opts.resolve = make_resolver(f, given);
+  std::string err;
+  CHECK(!loader::LoadFromBytes(*gm, bytes, "badstrsz.so", opts, &err));
+  CHECK_CTX(err.find("DT_STRSZ") != std::string::npos,
+            "a string table past the end of the image was not refused by name: " + err);
+}
+
 }  // namespace
 
 int main() {
@@ -563,6 +612,7 @@ int main() {
   two_loads_are_independent_copies();
   truncated_image_is_refused();
   symbol_table_without_a_bound_is_refused();
+  a_string_table_past_the_end_of_the_image_is_refused();
 
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;

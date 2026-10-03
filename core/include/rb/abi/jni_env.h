@@ -37,6 +37,8 @@
 #include "rb/abi/abi.h"
 #include "rb/mem/guest_memory.h"
 
+#include <vector>
+
 namespace rb::abi {
 
 /// JNI function-table indices. See this file's header for how they were measured; `kNewStringUTF` is
@@ -53,6 +55,7 @@ inline constexpr std::uint32_t kNewStringUTF = 167;
 inline constexpr std::uint32_t kGetStringUTFLength = 168;
 inline constexpr std::uint32_t kGetStringUTFChars = 169;
 inline constexpr std::uint32_t kReleaseStringUTFChars = 170;
+inline constexpr std::uint32_t kExceptionCheck = 228;
 inline constexpr std::uint32_t kGetObjectRefType = 232;
 
 /// The table length: the highest index defined, plus one. Entries the guest can reach but this
@@ -97,6 +100,18 @@ class JniEnv {
   [[nodiscard]] const std::string& last_string() const { return last_string_; }
   [[nodiscard]] unsigned new_string_utf_calls() const { return utf_calls_; }
   [[nodiscard]] unsigned strings_made() const { return strings_made_; }
+  [[nodiscard]] unsigned strings_freed() const { return strings_freed_; }
+  /// Bytes of the arena the bump pointer has claimed. A guest that releases keeps this flat however many
+  /// strings it makes; a guest that does not grows it until the refusal below fires. It is the difference
+  /// `a_released_string_does_not_grow_the_arena` measures, and the reason it exists as an accessor rather
+  /// than an inference from `strings_made()`.
+  [[nodiscard]] unsigned arena_used() const { return arena_next_ - arena_at_; }
+  /// Bytes returned by releases and not yet handed out again.
+  [[nodiscard]] unsigned free_bytes() const {
+    unsigned n = 0;
+    for (const FreeBlock& b : free_) n += b.bytes;
+    return n;
+  }
   /// The handle of the most recent string this environment made. A `jstring` is opaque to the guest,
   /// so a test that wants to hand one back has to get the same value the guest got — and reconstructing
   /// it from the arena base would be assuming the allocation order rather than observing it.
@@ -105,6 +120,19 @@ class JniEnv {
  private:
   /// The `NewStringUTF` implementation: copies the guest's NUL-terminated bytes and returns a handle.
   GuestAddr MakeString(GuestAddr chars_at);
+
+  /// One block a release handed back, in arena coordinates. Kept sorted by address and coalesced, because
+  /// a list of adjacent slivers can refuse an allocation the space as a whole would hold.
+  struct FreeBlock {
+    GuestAddr at = 0;
+    unsigned bytes = 0;
+  };
+
+  /// Returns `handle`'s block to the free list — the local-reference lifecycle's other half. False, with a
+  /// named reason, when the handle is not a *live* string of this instance's: a stale handle, a foreign
+  /// pointer, or a double release. `handle == 0` is legal and means nothing to do, which is what JNI says
+  /// about `DeleteLocalRef(NULL)`.
+  bool Free(GuestAddr handle, std::string* err);
 
   /// Validates a handle the guest handed back: inside this instance's arena, and carrying the magic
   /// this environment writes. A `jstring` is opaque to the guest, so anything arriving here is either
@@ -119,11 +147,15 @@ class JniEnv {
   GuestAddr arena_at_ = 0;
   GuestAddr arena_next_ = 0;
   GuestAddr arena_end_ = 0;
+  /// Sorted, coalesced blocks freed by `ReleaseStringUTFChars`/`DeleteLocalRef` and available to the next
+  /// `MakeString`. Empty for a guest that never releases, which is exactly the behaviour this replaced.
+  std::vector<FreeBlock> free_;
   bool ok_ = false;
   std::string err_;
   std::string last_string_;
   unsigned utf_calls_ = 0;
   unsigned strings_made_ = 0;
+  unsigned strings_freed_ = 0;
   GuestAddr last_handle_ = 0;
 };
 

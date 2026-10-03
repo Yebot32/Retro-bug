@@ -300,7 +300,10 @@ bool IsPackedSigned(Opcode op) {
  *   - `USUB8`   `UHSUB` then `CMGE #0` → the halving difference is negative exactly when a borrow
  *              occurred, so this is `a >= b` — not `a > b`, which is the off-by-one this row exists
  *              to keep out.
- *   - `SADD8`   `SHADD` then `CMGE #0` → `(a+b+1)>>1 >= 0` as a signed lane, i.e. `a+b >= -1`.
+ *   - `SADD8`   `SHADD` then `CMGE #0` → `floor((a+b)/2) >= 0`, which for the true signed sum is
+ *              exactly `a+b >= 0`. The first draft read the recipe as `(a+b+1)>>1 >= 0` — the algebra
+ *              of the *rounding* halving add, `SRHADD` — and so set GE for a lane summing to -1, where
+ *              the arm64 back end, the x64 back end and real silicon all leave it clear.
  *   - `SSUB8`   `SHSUB` then `CMGE #0` → `(a-b)>>1 >= 0`, i.e. `a >= b` signed.
  *
  * The `>= 0` versus `> 0` question is real and has no single answer in dynarmic: the x64 back end
@@ -323,13 +326,63 @@ std::uint32_t GeOfPackedAddSub(Opcode op, std::uint32_t a, std::uint32_t b, unsi
     bool set = false;
     if (is_signed) {
       const std::int64_t sx = LaneOf(a, shift, width, true), sy = LaneOf(b, shift, width, true);
-      set = is_sub ? (sx - sy >= 0) : (sx + sy >= -1);
+      set = is_sub ? (sx - sy >= 0) : (sx + sy >= 0);
     } else {
       set = is_sub ? (x >= y) : ((x + y) & ~mask) != 0;  // carry out of the lane
     }
     if (set) out |= mask << shift;
   }
   return out;
+}
+
+/// The max/min tie rule, as ARM defines it for VMAX/VMIN and their Numeric forms: max(+0,-0) is +0
+/// and min(+0,-0) is -0, either order. A bare `a > b ? a : b` returns the *second* operand on a tie,
+/// so it handed back -0 where silicon returns +0. NaN handling stays at the call sites: the plain
+/// forms answer the default NaN, the Numeric forms take the other operand, and both-NaN is the
+/// default NaN there too rather than either payload.
+///
+/// **Measured, not recalled.** A standalone ARMv7 probe run natively on the SM-X710 Tab S9 measured the
+/// ARM float-max/min zero rule, with `llvm-objdump` confirming the Advanced SIMD forms were really
+/// emitted (`vmax.f32 d16,d16,d17` / `vmin.f32 d16,d16,d17`) rather than scalarised:
+///
+///   (-0,-0)  vmax=0x80000000 vmin=0x80000000      (+0,-0)  vmax=0x00000000 vmin=0x80000000
+///   (-0,+0)  vmax=0x00000000 vmin=0x80000000      (+0,+0)  vmax=0x00000000 vmin=0x00000000
+///
+/// The result is `-0` only when *every* operand is `-0` for max, and when *any* operand is `-0` for min.
+/// That is what the sign tests below encode, and it is the pair of cases an earlier form got wrong in
+/// opposite directions.
+///
+/// **Reachability, which a reader should not have to rediscover.** These helpers are reached from
+/// `FPMax32`/`FPMin32` and their Numeric forms, and dynarmic's A32 front end emits those only for the
+/// *VFP scalar* encodings — which require FPARMv8. `vmaxnm.f32 s0, s1, s2` is rejected for this target
+/// ("instruction requires: FPARMv8"), and a plain scalar `vmax.f32 s0, s1, s2` is not an ARMv7
+/// instruction at all: the only ARMv7 encoding is the Advanced SIMD `vmax.f32 d0, d1, d2`, which the
+/// front end lowers to `FPVectorMax32`/`FPVectorMin32` — and Tier I does not implement those, so it
+/// refuses them by name. An ARMv7 guest therefore never reaches this code (the same shape as `ToFixed`'s
+/// 64-bit branch), it is kept correct for an A32-on-ARMv8 guest, and the *reachable* v7 form is a named
+/// refusal rather than a wrong answer. The measurement above is the value that implementation needs when
+/// it arrives: the rule is ARM's, shared by both encodings.
+template <typename F>
+F FpMax(F a, F b) {
+  if (a == 0 && b == 0) {
+    // The sign of a zero result is `-0` only when *both* operands are `-0`: max(+0,-0) is +0, but
+    // max(-0,-0) is -0, and the previous form forced +0 for every zero pair. It had replaced a
+    // `a > b ? a : b` that returned the second operand and so answered -0 for (+0,-0) — fixing the
+    // mixed-sign case by breaking the same-sign one, which is the pair hardware and Tier J (native
+    // FMAX) both get right.
+    return std::copysign(F(0), (std::signbit(a) && std::signbit(b)) ? F(-1) : F(1));
+  }
+  return a > b ? a : b;
+}
+
+template <typename F>
+F FpMin(F a, F b) {
+  if (a == 0 && b == 0) {
+    // Mirror of FpMax: min(+0,+0) is +0 and min(-0,-0) is -0, and one `-0` operand is enough to make
+    // the result `-0` in every other combination.
+    return std::copysign(F(0), (std::signbit(a) || std::signbit(b)) ? F(-1) : F(1));
+  }
+  return a < b ? a : b;
 }
 
 /**
@@ -376,6 +429,11 @@ enum FpSticky : std::uint32_t {
   kOfc = 1u << 2,
   kUfc = 1u << 3,
   kIxc = 1u << 4,
+  /// IDC, the *input*-denormal cumulative flag. The comment above names it at bit 7 and the mask below
+  /// has always included it; it needed a name once flush-to-zero was modelled, because a flushed input is
+  /// otherwise silent: measured on the SM-X710, `0x00000001 * 1.0` under FZ answers +0 with FPSCR 0x080
+  /// and nothing else.
+  kIdc = 1u << 7,
 };
 constexpr std::uint32_t kFpStickyMask = 0x0000'009fu;
 
@@ -413,6 +471,109 @@ class FpOps {
 
  private:
   std::uint32_t& fpscr_;
+};
+
+/// The guest's `FPSCR.RMode`, as one of ARM's four two-bit values — the same field the translator reads
+/// (`dynarmic/frontend/A32/FPSCR.h:76`, bits 23:22) and the same one the back end copies into the host
+/// FPCR. The translator's 4 and 5 are not reachable from ARMv7's two-bit field and never appear here.
+std::uint8_t RModeOf(std::uint32_t fpscr) {
+  return static_cast<std::uint8_t>((fpscr >> 22) & 0x3u);
+}
+
+/**
+ * Installs a guest rounding mode on the host for the duration of one operation.
+ *
+ * Why it exists: on the JIT path the mode travels in the block's location descriptor and is installed in
+ * the host FPCR, so the host's own `FADD`/`FMUL`/`FDIV`/`FSQRT` round the guest's way. Tier I computes
+ * with host arithmetic too and has to install the same mode, or the two tiers differ in the last bit of
+ * every directed-rounding result — a difference no *value* in the corpus showed until `fp_rmode` compared
+ * the bits. The conversions carry their mode as an immediate rather than taking it from FPSCR; both forms
+ * construct this.
+ *
+ * `fesetround` is process-global, so the previous mode is saved and restored rather than assumed: these
+ * scopes nest (a helper inside a handler), and round-to-nearest is not "the" default on every host.
+ */
+class HostRounding {
+ public:
+  explicit HostRounding(std::uint8_t rmode) : saved_(std::fegetround()) {
+    // ARM's two-bit field in order: nearest-even, +inf, -inf, zero.
+    static const int kHost[4] = {FE_TONEAREST, FE_UPWARD, FE_DOWNWARD, FE_TOWARDZERO};
+    if (rmode < 4) std::fesetround(kHost[rmode]);
+  }
+  ~HostRounding() { std::fesetround(saved_); }
+  HostRounding(const HostRounding&) = delete;
+  HostRounding& operator=(const HostRounding&) = delete;
+
+ private:
+  int saved_;
+};
+
+/// `FPSCR.FZ`, bit 24 — the same field the back end copies into the host FPCR, which is how Tier J has
+/// always honoured it.
+constexpr std::uint32_t kFz = 1u << 24;
+[[nodiscard]] inline bool FlushToZero(std::uint32_t fpscr) { return (fpscr & kFz) != 0; }
+
+/// FZ's *input* rule: a denormal operand becomes a zero of its own sign and raises IDC (bit 7) — measured
+/// on the SM-X710 through the VFP scalar forms, with FPSCR cleared first:
+///
+///   `vmul.f32(0x00000001, 1.0)`   FZ=0 → 0x00000001 (the denormal), FPSCR 0x000
+///                                 FZ=1 → 0x00000000,                FPSCR 0x080 (IDC)
+///   `vsqrt.f32(0x00000001)`       FZ=0 → 0x1a3504f3,                FPSCR 0x010 (IXC)
+///                                 FZ=1 → 0x00000000,                FPSCR 0x080 (IDC)
+///   `vcvt.f64.f32(0x00000001)`    FZ=0 → the exact double,          FPSCR 0x000
+///                                 FZ=1 → 0.0,                       FPSCR 0x080 (IDC)
+///
+/// Note what is *not* there: no UFC, no IXC. Flushing an input is reported by IDC alone, which is why the
+/// flag needed a name (see `kIdc`).
+template <typename F>
+F FlushDenormalInput(F v, std::uint32_t& fpscr) {
+  if (std::fpclassify(v) == FP_SUBNORMAL) {
+    fpscr |= kIdc;
+    return std::copysign(F(0), v);
+  }
+  return v;
+}
+
+/// FZ's *output* rule: a denormal result becomes a zero of its own sign and raises UFC (bit 3). Measured:
+/// `vmul.f32(0x00800000, 0.5)` — an *exact* denormal result — answers +0 with FPSCR 0x008 and **no IXC**,
+/// because the operation itself was exact. So the flush states UFC itself and leaves IXC to the host-flag
+/// merge, which is exactly what makes an inexact flushed result report both flags.
+template <typename F>
+F FlushDenormalResult(F v, std::uint32_t& fpscr) {
+  if (std::fpclassify(v) == FP_SUBNORMAL) {
+    fpscr |= kUfc;
+    return std::copysign(F(0), v);
+  }
+  return v;
+}
+
+/**
+ * One VFP scalar operation's host environment: the guest's rounding mode installed on the host, and the
+ * guest's flush-to-zero rule applied to the operands and the result.
+ *
+ * Both halves were absent from Tier I and both are measured, not recalled: the rounding mode came from a
+ * note that called the work nextafter-sized, and FZ was not modelled at all while the JIT honoured it
+ * through the host FPCR. `In`/`Out` are no-ops when the guest asked for full denormals, so a handler reads
+ * as one expression per operand instead of a branch.
+ */
+class FpOpScope {
+ public:
+  explicit FpOpScope(std::uint32_t& fpscr)
+      : fpscr_(fpscr), rounding_(RModeOf(fpscr)), flush_(FlushToZero(fpscr)) {}
+
+  template <typename F>
+  F In(F v) const {
+    return flush_ ? FlushDenormalInput(v, fpscr_) : v;
+  }
+  template <typename F>
+  F Out(F v) const {
+    return flush_ ? FlushDenormalResult(v, fpscr_) : v;
+  }
+
+ private:
+  std::uint32_t& fpscr_;
+  HostRounding rounding_;
+  bool flush_;
 };
 
 /// `FP::RoundingMode`, as the translator's `U8` immediates. 4 and 5 (ties-away, ToOdd) are not
@@ -463,19 +624,52 @@ std::uint64_t ToFixed(double rounded, bool is_signed, unsigned dst_bits, std::ui
     *flags |= kIoc;
     return is_signed ? (1ull << (dst_bits - 1)) : 0ull;
   }
+  // `rounded` is already integer-valued (the caller applied RoundToInt), so a boundary comparison is
+  // exact wherever the bound itself is a representable double. The 64-bit bounds are not: 2^63-1 and
+  // 2^64-1 have no double form, and `ldexp(1.0, 63) - 1.0` quietly rounds *up* to 2^63 — which made
+  // the in-range clamp below cast a double that was out of range for the destination. That cast is
+  // undefined behaviour (the exact heisenbug this function's own comment exists to prevent), and on
+  // x86-64 it came back as the sign-preferring extreme rather than the saturation the comment
+  // promises. The 64-bit forms therefore compare against the first out-of-range power of two — exactly
+  // representable — and return the saturation constants outright.
+  if (dst_bits == 64) {
+    if (is_signed) {
+      if (rounded >= 9223372036854775808.0) {  // 2^63: out of range for int64
+        *flags |= kIoc;
+        return 0x7fff'ffff'ffff'ffffull;
+      }
+      if (rounded <= -9223372036854775808.0) {
+        if (rounded != -9223372036854775808.0) *flags |= kIoc;  // exactly -2^63 is in range: INT64_MIN
+        return 0x8000'0000'0000'0000ull;
+      }
+      return static_cast<std::uint64_t>(static_cast<std::int64_t>(rounded));
+    }
+    if (rounded >= 18446744073709551616.0) {  // 2^64: out of range for uint64
+      *flags |= kIoc;
+      return 0xffff'ffff'ffff'ffffull;
+    }
+    if (rounded < 0.0) {
+      *flags |= kIoc;
+      return 0ull;
+    }
+    return static_cast<std::uint64_t>(rounded);
+  }
   const double lo = is_signed ? -std::ldexp(1.0, static_cast<int>(dst_bits) - 1) : 0.0;
   const double hi = is_signed ? std::ldexp(1.0, static_cast<int>(dst_bits) - 1) - 1.0
                               : std::ldexp(1.0, static_cast<int>(dst_bits)) - 1.0;
-  if (!(rounded < hi)) {
+  // Strictly greater, not `!(rounded < hi)`: `rounded == hi` is in range and exact, and raising IOC
+  // there — as the old form did for exactly 2147483647.0 — diverges from ARM, whose FPToFixed is
+  // exact-and-quiet on an in-range boundary. The low side already had this right.
+  if (rounded > hi) {
     *flags |= kIoc;
     return is_signed ? static_cast<std::uint64_t>(static_cast<std::int64_t>(hi))
                      : static_cast<std::uint64_t>(hi);
   }
-  if (!(rounded > lo)) {
+  if (rounded < lo) {
     // Below range raises IOC and clamps; *equal* to the bound is exact and raises nothing, which is
     // the distinction the unsigned case turns on (a negative value clamps to 0 and is invalid, while
     // the already-zero value is simply zero).
-    if (rounded != lo) *flags |= kIoc;
+    *flags |= kIoc;
     return static_cast<std::uint64_t>(static_cast<std::int64_t>(lo));
   }
   return is_signed ? static_cast<std::uint64_t>(static_cast<std::int64_t>(rounded))
@@ -492,17 +686,19 @@ unsigned LaneBits(Dynarmic::IR::Opcode op) {
   switch (op) {
     case Opcode::VectorAdd8: case Opcode::VectorSub8: case Opcode::VectorMultiply8:
     case Opcode::VectorAbs8: case Opcode::VectorGetElement8: case Opcode::VectorSetElement8:
+    case Opcode::VectorBroadcastElement8:
       return 8;
     case Opcode::VectorAdd16: case Opcode::VectorSub16: case Opcode::VectorMultiply16:
     case Opcode::VectorAbs16: case Opcode::VectorGetElement16: case Opcode::VectorSetElement16:
+    case Opcode::VectorBroadcastElement16:
       return 16;
     case Opcode::VectorAdd32: case Opcode::VectorSub32: case Opcode::VectorMultiply32:
     case Opcode::VectorAbs32: case Opcode::VectorGetElement32: case Opcode::VectorSetElement32:
-    case Opcode::VectorBroadcast32:
+    case Opcode::VectorBroadcast32: case Opcode::VectorBroadcastElement32:
       return 32;
     case Opcode::VectorAdd64: case Opcode::VectorSub64: case Opcode::VectorMultiply64:
     case Opcode::VectorAbs64: case Opcode::VectorGetElement64: case Opcode::VectorSetElement64:
-    case Opcode::VectorBroadcast64:
+    case Opcode::VectorBroadcast64: case Opcode::VectorBroadcastElement64:
       return 64;
     case Opcode::VectorBroadcast8: return 8;
     case Opcode::VectorBroadcast16: return 16;
@@ -615,6 +811,14 @@ class BlockRunner {
   /// Returns false when execution must stop, with `stop` filled in. On true, `successor` is where to
   /// go next — already reflected in the location reference handed to the constructor.
   bool Run(const isa::TranslatedBlock& block, LocationDescriptor& successor) {
+    // The IT state this block leaves behind. The translator advances IT per instruction, so the end
+    // location carries the architecturally-correct value for "every instruction of this block ran" —
+    // which is what anything following the block must resume with, including a target a `bx` inside
+    // the block chose. `location_` after a `WritePC` still carries the block's *entry* IT, because
+    // `WritePC` rewrites only PC and mode; taking it raw reported a finished IT block as still live,
+    // and the two-tier differential caught exactly that as a one-byte disagreement at the return
+    // sentinel.
+    end_it_ = Dynarmic::A32::LocationDescriptor{block.ir.EndLocation()}.IT().Value();
     for (const auto& inst : block.ir) {
       if (!Step(&inst)) return false;
       ++steps;
@@ -626,6 +830,11 @@ class BlockRunner {
   unsigned steps = 0;
 
  private:
+  /// The block's end-location IT state, captured by `Run` before the first step. `Take` needs it for
+  /// the PC-write terminals, whose successor comes from `location_` and so carries the block's entry
+  /// IT instead of the value the guest is left holding.
+  std::uint8_t end_it_ = 0;
+
   [[nodiscard]] bool HasArgs(const Inst* inst, std::size_t n) {
     if (inst->NumArgs() < n) {
       stop.reason = StopReason::Unimplemented;
@@ -1546,6 +1755,14 @@ bool BlockRunner::Step(const Inst* inst) {
       // back together), so a `vmsr` of a garbage word retains exactly that union and nothing else.
       // Tier I holds one architectural word, so it applies the same union once.
       state_.fpscr = v & 0xFFF7'009Fu;
+      // The mode bits also live in the location descriptor (they are part of block identity, because
+      // the translator bakes RMode into every conversion it emits). The back end writes them into its
+      // upper location descriptor at this same op; without the mirror here, Tier I's *successor*
+      // descriptors carried the entry FPSCR for the rest of the Run and every later conversion in it
+      // rounded with the old mode — the state read back correctly either way, so only the results
+      // diverged. Linked-block successors still take the translator's end location, which is the one
+      // staleness Tier J shares; a `Run` boundary picks the new mode up in both tiers.
+      location_ = location_.SetFPSCR(state_.fpscr);
       return true;
     }
     case Opcode::A32GetFpscrNZCV:
@@ -2011,8 +2228,14 @@ bool BlockRunner::Step(const Inst* inst) {
     case Opcode::FPMinNumeric32: {
       std::uint32_t raw_a = 0, raw_b = 0;
       if (!W32(inst, 0, raw_a) || !W32(inst, 1, raw_b)) return false;
+      // The guest's rounding mode, installed for the arithmetic in this block. The back end puts the mode
+      // in the block's location descriptor and the JIT installs it in the host FPCR, so `FADD`/`FMUL`/
+      // `FDIV` round the guest's way there; Tier I computes with the *host's* arithmetic and rounded
+      // every one of them to nearest until this line existed. The differential lane could not see it
+      // because no probe set RMode and then did arithmetic — `fp_rmode` in the corpus is that probe.
+      FpOpScope op{state_.fpscr};
       FpOps flags{state_.fpscr};
-      const float a = BitsAs<float>(raw_a), b = BitsAs<float>(raw_b);
+      const float a = op.In(BitsAs<float>(raw_a)), b = op.In(BitsAs<float>(raw_b));
       float r{};
       switch (inst->GetOpcode()) {
         case Opcode::FPAdd32: r = a + b; break;
@@ -2022,18 +2245,21 @@ bool BlockRunner::Step(const Inst* inst) {
         case Opcode::FPMaxNumeric32: case Opcode::FPMinNumeric32:
           // The "Numeric" forms are the ones that treat a NaN operand as the *other* one, which is
           // VMAXNM/VMINNM; the plain forms propagate it. Getting these two the same way round is a
-          // wrong answer that only shows up on inputs nobody thinks to test.
-          r = (std::isnan(a) && !std::isnan(b)) ? b
-              : (std::isnan(b) && !std::isnan(a)) ? a
-              : (inst->GetOpcode() == Opcode::FPMaxNumeric32 ? a > b ? a : b : a < b ? a : b);
+          // wrong answer that only shows up on inputs nobody thinks to test. Both-NaN is the default
+          // NaN rather than either operand's payload, and the ±0 tie follows ARM (FpMax/FpMin).
+          r = (std::isnan(a) && std::isnan(b))
+                  ? std::numeric_limits<float>::quiet_NaN()
+              : std::isnan(a) ? b
+              : std::isnan(b) ? a
+              : (inst->GetOpcode() == Opcode::FPMaxNumeric32 ? FpMax(a, b) : FpMin(a, b));
           break;
-        default:  // VMAX/VMIN: NaN in, NaN out
+        default:  // VMAX/VMIN: NaN in, default NaN out
           r = (std::isnan(a) || std::isnan(b))
                   ? std::numeric_limits<float>::quiet_NaN()
-                  : (inst->GetOpcode() == Opcode::FPMax32 ? (a > b ? a : b) : (a < b ? a : b));
+                  : (inst->GetOpcode() == Opcode::FPMax32 ? FpMax(a, b) : FpMin(a, b));
           break;
       }
-      Put(inst, V{AsBits<std::uint32_t>(r), 0});
+      Put(inst, V{AsBits<std::uint32_t>(op.Out(r)), 0});
       return true;
     }
 
@@ -2042,8 +2268,9 @@ bool BlockRunner::Step(const Inst* inst) {
     case Opcode::FPMinNumeric64: {
       std::uint64_t raw_a = 0, raw_b = 0;
       if (!W64(inst, 0, raw_a) || !W64(inst, 1, raw_b)) return false;
+      FpOpScope op{state_.fpscr};
       FpOps flags{state_.fpscr};
-      const double a = BitsAs<double>(raw_a), b = BitsAs<double>(raw_b);
+      const double a = op.In(BitsAs<double>(raw_a)), b = op.In(BitsAs<double>(raw_b));
       double r{};
       switch (inst->GetOpcode()) {
         case Opcode::FPAdd64: r = a + b; break;
@@ -2051,17 +2278,19 @@ bool BlockRunner::Step(const Inst* inst) {
         case Opcode::FPMul64: r = a * b; break;
         case Opcode::FPDiv64: r = a / b; break;
         case Opcode::FPMaxNumeric64: case Opcode::FPMinNumeric64:
-          r = (std::isnan(a) && !std::isnan(b)) ? b
-              : (std::isnan(b) && !std::isnan(a)) ? a
-              : (inst->GetOpcode() == Opcode::FPMaxNumeric64 ? a > b ? a : b : a < b ? a : b);
+          r = (std::isnan(a) && std::isnan(b))
+                  ? std::numeric_limits<double>::quiet_NaN()
+              : std::isnan(a) ? b
+              : std::isnan(b) ? a
+              : (inst->GetOpcode() == Opcode::FPMaxNumeric64 ? FpMax(a, b) : FpMin(a, b));
           break;
         default:
           r = (std::isnan(a) || std::isnan(b))
                   ? std::numeric_limits<double>::quiet_NaN()
-                  : (inst->GetOpcode() == Opcode::FPMax64 ? (a > b ? a : b) : (a < b ? a : b));
+                  : (inst->GetOpcode() == Opcode::FPMax64 ? FpMax(a, b) : FpMin(a, b));
           break;
       }
-      Put(inst, V{AsBits<std::uint64_t>(r), 0});
+      Put(inst, V{AsBits<std::uint64_t>(op.Out(r)), 0});
       return true;
     }
 
@@ -2075,17 +2304,20 @@ bool BlockRunner::Step(const Inst* inst) {
       // would round the product first and disagree in the last bit on exactly the inputs a physical engine
       // feeds it.
       const bool dbl = inst->GetOpcode() == Opcode::FPMulSub64;
+      FpOpScope op{state_.fpscr};
       FpOps flags{state_.fpscr};
       if (dbl) {
         std::uint64_t a = 0, b = 0, c = 0;
         if (!W64(inst, 0, a) || !W64(inst, 1, b) || !W64(inst, 2, c)) return false;
-        const double r = std::fma(-BitsAs<double>(b), BitsAs<double>(c), BitsAs<double>(a));
-        Put(inst, V{AsBits<std::uint64_t>(r), 0});
+        const double r = std::fma(-op.In(BitsAs<double>(b)), op.In(BitsAs<double>(c)),
+                                  op.In(BitsAs<double>(a)));
+        Put(inst, V{AsBits<std::uint64_t>(op.Out(r)), 0});
       } else {
         std::uint32_t a = 0, b = 0, c = 0;
         if (!W32(inst, 0, a) || !W32(inst, 1, b) || !W32(inst, 2, c)) return false;
-        const float r = std::fma(-BitsAs<float>(b), BitsAs<float>(c), BitsAs<float>(a));
-        Put(inst, V{AsBits<std::uint32_t>(r), 0});
+        const float r =
+            std::fma(-op.In(BitsAs<float>(b)), op.In(BitsAs<float>(c)), op.In(BitsAs<float>(a)));
+        Put(inst, V{AsBits<std::uint32_t>(op.Out(r)), 0});
       }
       return true;
     }
@@ -2095,17 +2327,20 @@ bool BlockRunner::Step(const Inst* inst) {
       // operations would be a different number, and this op is how `vmla.f64` lowers — which the
       // fixture's `fp_arith` reaches through `x*x`.
       const bool dbl = inst->GetOpcode() == Opcode::FPMulAdd64;
+      FpOpScope op{state_.fpscr};
       FpOps flags{state_.fpscr};
       if (dbl) {
         std::uint64_t a = 0, b = 0, c = 0;
         if (!W64(inst, 0, a) || !W64(inst, 1, b) || !W64(inst, 2, c)) return false;
-        const double r = std::fma(BitsAs<double>(b), BitsAs<double>(c), BitsAs<double>(a));
-        Put(inst, V{AsBits<std::uint64_t>(r), 0});
+        const double r =
+            std::fma(op.In(BitsAs<double>(b)), op.In(BitsAs<double>(c)), op.In(BitsAs<double>(a)));
+        Put(inst, V{AsBits<std::uint64_t>(op.Out(r)), 0});
       } else {
         std::uint32_t a = 0, b = 0, c = 0;
         if (!W32(inst, 0, a) || !W32(inst, 1, b) || !W32(inst, 2, c)) return false;
-        const float r = std::fma(BitsAs<float>(b), BitsAs<float>(c), BitsAs<float>(a));
-        Put(inst, V{AsBits<std::uint32_t>(r), 0});
+        const float r =
+            std::fma(op.In(BitsAs<float>(b)), op.In(BitsAs<float>(c)), op.In(BitsAs<float>(a)));
+        Put(inst, V{AsBits<std::uint32_t>(op.Out(r)), 0});
       }
       return true;
     }
@@ -2118,12 +2353,14 @@ bool BlockRunner::Step(const Inst* inst) {
       // Only the sqrt can raise anything — `FPNEG`/`FPABS` are sign edits on the bit pattern. The
       // scope is still opened for them, because clearing-then-merging nothing is the same observable
       // as not touching the sticky bits, and a branch per opcode here would only invite a mistake.
+      // The rounding scope is the same shape: only the sqrt reads it, and the sign edits cannot care.
+      FpOpScope op{state_.fpscr};
       FpOps flags{state_.fpscr};
       if (wide) {
         std::uint64_t raw = 0;
         if (!W64(inst, 0, raw)) return false;
         if (inst->GetOpcode() == Opcode::FPSqrt64) {
-          Put(inst, V{AsBits<std::uint64_t>(std::sqrt(BitsAs<double>(raw))), 0});
+          Put(inst, V{AsBits<std::uint64_t>(op.Out(std::sqrt(op.In(BitsAs<double>(raw))))), 0});
         } else if (inst->GetOpcode() == Opcode::FPNeg64) {
           Put(inst, V{raw ^ (1ull << 63), 0});
         } else {
@@ -2133,7 +2370,7 @@ bool BlockRunner::Step(const Inst* inst) {
         std::uint32_t raw = 0;
         if (!W32(inst, 0, raw)) return false;
         if (inst->GetOpcode() == Opcode::FPSqrt32) {
-          Put(inst, V{AsBits<std::uint32_t>(std::sqrt(BitsAs<float>(raw))), 0});
+          Put(inst, V{AsBits<std::uint32_t>(op.Out(std::sqrt(op.In(BitsAs<float>(raw))))), 0});
         } else if (inst->GetOpcode() == Opcode::FPNeg32) {
           Put(inst, V{raw ^ (1u << 31), 0});
         } else {
@@ -2285,23 +2522,32 @@ bool BlockRunner::Step(const Inst* inst) {
     case Opcode::FPSingleToDouble: case Opcode::FPDoubleToSingle: {
       std::uint8_t rm = 0;
       if (!ByteArg(inst, 1, rm)) return false;
-      // Only round-to-nearest is honoured on the narrowing side: the host conversion does that one,
-      // and picking a *neighbour* in a requested direction is a nextafter-sized piece of work nothing
-      // in the corpus reaches (ARM's `vcvt.f32.f64` is emitted with the FPSCR at its reset RM by every
-      // compiler measured here). Named rather than left implicit, because a silent single-direction
-      // difference is exactly the class of bug this file has already been bitten by once.
-      (void)rm;
+      // Every mode is honoured now, and the "nextafter-sized piece of work" the previous note feared is
+      // not needed: `static_cast<float>` on a double is correctly rounded under whatever mode the host is
+      // in, so installing the guest's mode around it is the whole fix. What *was* true is that nothing in
+      // the corpus reached it — no probe set RMode and then narrowed — which is why this stayed a
+      // one-direction difference for as long as it did. `fp_rmode` reaches it now.
+      HostRounding rounding{rm};
       FpOps flags{state_.fpscr};
+      // Flush-to-zero applies to conversions from both sides: a denormal *input* becomes a zero of its own
+      // sign (IDC) and a denormal `f32` *result* becomes a zero too (UFC). Measured for the widening
+      // direction on the SM-X710 — `vcvt.f64.f32(0x00000001)` answers 0.0 with FPSCR 0x080 under FZ, and
+      // the exact double with FZ clear — and the narrowing direction follows the same two rules, which the
+      // corpus's `fp_fz` rows now cover rather than assume.
+      const bool fz = FlushToZero(state_.fpscr);
+      const auto fin = [&](auto v) { return fz ? FlushDenormalInput(v, state_.fpscr) : v; };
+      const auto fout = [&](auto v) { return fz ? FlushDenormalResult(v, state_.fpscr) : v; };
       if (inst->GetOpcode() == Opcode::FPSingleToDouble) {
         std::uint32_t raw = 0;
         if (!W32(inst, 0, raw)) return false;
         // Widening a float to a double is exact in IEEE-754, so the rounding mode cannot apply — which
-        // is why this branch reads the immediate and does not use it.
-        Put(inst, V{AsBits<std::uint64_t>(static_cast<double>(BitsAs<float>(raw))), 0});
+        // is why this branch reads the immediate and does not use it. Flush-to-zero still applies: it is a
+        // statement about the *operand*, not about the rounding.
+        Put(inst, V{AsBits<std::uint64_t>(static_cast<double>(fin(BitsAs<float>(raw)))), 0});
       } else {
         std::uint64_t raw = 0;
         if (!W64(inst, 0, raw)) return false;
-        const double src = BitsAs<double>(raw);
+        const double src = fin(BitsAs<double>(raw));
         if (std::isnan(src)) {
           // Narrowing a NaN keeps a NaN: the sign, the all-ones exponent, and the *leading* bits of the
           // payload — and the quiet bit forced, because ARM's VCVT never emits a signalling NaN from a
@@ -2312,7 +2558,7 @@ bool BlockRunner::Step(const Inst* inst) {
           Put(inst, V{sign | 0x7f80'0000u | 0x0040'0000u | payload, 0});
           return true;
         }
-        Put(inst, V{AsBits<std::uint32_t>(static_cast<float>(src)), 0});
+        Put(inst, V{AsBits<std::uint32_t>(fout(static_cast<float>(src))), 0});
       }
       return true;
     }
@@ -2401,9 +2647,12 @@ bool BlockRunner::Step(const Inst* inst) {
         std::uint64_t r = 0;
         if (abs_only) {
           // Signed lanes only, and the most-negative lane stays negative through `abs` — ARM's
-          // documented behaviour for integer VABS, not an oversight here.
+          // documented behaviour for integer VABS, not an oversight here. The negation is done in
+          // unsigned arithmetic: `-sv` on the int64 is UB for exactly the INT64_MIN lane the comment
+          // says must wrap.
           const std::int64_t sv = SignedAt(x, bits);
-          r = static_cast<std::uint64_t>(sv < 0 ? -sv : sv);
+          const std::uint64_t uv = static_cast<std::uint64_t>(sv);
+          r = sv < 0 ? 0ull - uv : uv;
         } else if (sub) {
           r = x - y;
         } else if (inst->GetOpcode() == Opcode::VectorMultiply8 ||
@@ -2424,6 +2673,118 @@ bool BlockRunner::Step(const Inst* inst) {
       Put(inst, out);
       return true;
     }
+
+    // The VDUP-from-a-lane group: one lane of the source replicated across the whole register. Tier I
+    // implemented `VectorBroadcast*` (a broadcast of a *scalar*) but not this one, so the instruction
+    // every compiler emits to build a NEON constant — `vdup.32 d16, d16[0]`, which is the first thing in
+    // this repo's own vmax probe — stopped the run before anything downstream of it was reached. Found
+    // that way: the FP max/min rows below reported `refused (VectorBroadcastElement32: no Tier I
+    // semantics yet)` while Tier J and hardware already agreed, so the gap was Tier I's and one
+    // instruction earlier than the instruction the rows were written for.
+    //
+    // Only the full-width forms are reachable here. The A32 front end emits `VectorBroadcastElement` and
+    // never an `...ElementLower*` variant (`frontend/A32/translate/impl/asimd_misc.cpp:87`,
+    // `asimd_two_regs_scalar.cpp:51,128,173`), so the three Lower forms get a named refusal below rather
+    // than a semantics no ARMv7 guest can ask for.
+    case Opcode::VectorBroadcastElement8: case Opcode::VectorBroadcastElement16:
+    case Opcode::VectorBroadcastElement32: case Opcode::VectorBroadcastElement64: {
+      const unsigned bits = LaneBits(inst->GetOpcode());
+      if (bits == 0) return Fail(inst, "unrecognised lane width in the broadcast-element group");
+      const unsigned bytes = bits / 8;
+      V src{}, out{};
+      std::uint8_t index = 0;
+      if (!W128(inst, 0, src) || !ByteArg(inst, 1, index)) return false;
+      if (index >= LaneCount(bits)) {
+        return Fail(inst, "vector lane index " + std::to_string(index) + " is out of range for a " +
+                              std::to_string(bits) + "-bit lane in a 128-bit register");
+      }
+      const auto* ps = reinterpret_cast<const std::uint8_t*>(&src);
+      auto* pd = reinterpret_cast<std::uint8_t*>(&out);
+      for (unsigned i = 0; i < 16; i += bytes) {
+        for (unsigned k = 0; k < bytes; ++k) pd[i + k] = ps[index * bytes + k];
+      }
+      Put(inst, out);
+      return true;
+    }
+    case Opcode::VectorBroadcastElementLower8: case Opcode::VectorBroadcastElementLower16:
+    case Opcode::VectorBroadcastElementLower32:
+      return Fail(inst, "the ...ElementLower broadcast forms are emitted by no A32 path, so the "
+                        "upper-half convention they carry has no ARMv7 guest to satisfy; the full-width "
+                        "VectorBroadcastElement forms are implemented and are what this guest emits");
+
+    // The Advanced SIMD FP max/min group. Tier I implemented none of it, so every `vmax.f32`/`vmin.f32`
+    // in a real ARMv7 guest stopped the run — and that is the *only* encoding of FP max/min this ISA
+    // has, because the scalar VFP forms need FPARMv8 (see the note on `FpMax`/`FpMin` above). The two
+    // 32-bit plain forms are implemented here; the Numeric and 64-bit forms are refused **by name**,
+    // because an ARMv7 guest cannot encode them either (VMAXNM is FPARMv8, and NEON has no
+    // double-precision lanes before ARMv8), and naming that is more use than the generic "no Tier I
+    // semantics yet" it would otherwise get.
+    //
+    // The rule is measured on the SM-X710 Tab S9 through the same bytes this executes
+    // (`vmax.f32 d16,d17,d16` / `vmin.f32 d16,d17,d16` in the corpus probe, disassembly checked),
+    // because no lane in this repo had a VMIN/VMAX row:
+    //
+    //   (-0,-0) max=-0 min=-0      (+0,-0) max=+0 min=-0
+    //   (-0,+0) max=+0 min=-0      (+0,+0) max=+0 min=+0
+    //   any NaN operand, either position, quiet or signalling → max = min = 0x7fc00000, the default NaN
+    //
+    // which is also what dynarmic's own x64 emitter does for the non-Numeric forms
+    // (`emit_x64_vector_floating_point.cpp:949-1010`): an unordered pair takes the default NaN, and the
+    // equal case is `a & b` for max and `a | b` for min — the signed-zero rule `FpMax`/`FpMin` already
+    // encode, so the equal case needs no separate branch here.
+    case Opcode::FPVectorMax32: case Opcode::FPVectorMin32: {
+      FpOps flags{state_.fpscr};
+      V a{}, b{}, out{};
+      if (!W128(inst, 0, a) || !W128(inst, 1, b)) return false;
+      const bool is_max = inst->GetOpcode() == Opcode::FPVectorMax32;
+      // f32 signalling NaN: exponent all ones, a non-zero mantissa, and the mantissa's quiet bit clear.
+      const auto is_snan = [](std::uint32_t b) {
+        return (b & 0x7f80'0000u) == 0x7f80'0000u && (b & 0x007f'ffffu) != 0 &&
+               (b & 0x0040'0000u) == 0;
+      };
+      const auto* pa = reinterpret_cast<const std::uint8_t*>(&a);
+      const auto* pb = reinterpret_cast<const std::uint8_t*>(&b);
+      auto* pd = reinterpret_cast<std::uint8_t*>(&out);
+      for (unsigned i = 0; i < 16; i += 4) {
+        std::uint32_t xb = 0, yb = 0;
+        for (unsigned k = 0; k < 4; ++k) {
+          xb |= static_cast<std::uint32_t>(pa[i + k]) << (8 * k);
+          yb |= static_cast<std::uint32_t>(pb[i + k]) << (8 * k);
+        }
+        // A *signalling* NaN raises the invalid-operation flag and a quiet one does not — measured on the
+        // SM-X710 through these same instructions, with FPSCR cleared first: IOC set for an SNaN operand
+        // in either position, clear for a QNaN, clear for the ordered and zero rows. Leaving this out is
+        // what the differential lane caught, and it caught it on `fpscr` rather than on a value: Tier J's
+        // native FMAX raises the flag and Tier I did not, so the two tiers disagreed about guest state
+        // while agreeing about the number — the failure mode this repo's state diff exists to expose.
+        // Advanced SIMD flushes denormal operands and results *unconditionally* — FPSCR.FZ is not
+        // consulted for the NEON forms, which is the opposite of the VFP scalar rule above and was
+        // measured rather than assumed: `vmax.f32(0x00000001, +0)` answers +0 with IDC set at **FZ=0 as
+        // well**, where `vmul.f32(0x00000001, 1.0)` answers the denormal. So these two handlers flush
+        // whatever the guest asked for, and flush the result for the mirror-image reason.
+        const float x = FlushDenormalInput(BitsAs<float>(xb), state_.fpscr);
+        const float y = FlushDenormalInput(BitsAs<float>(yb), state_.fpscr);
+        if (is_snan(xb) || is_snan(yb)) flags.Raise(kIoc);
+        // The NaN answer is the *default* NaN and not either input's payload, measured for a quiet and a
+        // signalling operand in both positions. Folding this into `FpMax` would be wrong: those two
+        // helpers are the scalar VFP rule, where the plain form answers the default NaN too but the
+        // Numeric form takes the other operand, and the call sites there do that splitting.
+        const float computed = (std::isnan(x) || std::isnan(y))
+                                   ? BitsAs<float>(0x7fc0'0000u)
+                                   : (is_max ? FpMax(x, y) : FpMin(x, y));
+        const float r = FlushDenormalResult(computed, state_.fpscr);
+        const std::uint32_t rb = AsBits<std::uint32_t>(r);
+        for (unsigned k = 0; k < 4; ++k) pd[i + k] = static_cast<std::uint8_t>(rb >> (8 * k));
+      }
+      Put(inst, out);
+      return true;
+    }
+    case Opcode::FPVectorMaxNumeric32: case Opcode::FPVectorMinNumeric32:
+    case Opcode::FPVectorMax64: case Opcode::FPVectorMin64:
+    case Opcode::FPVectorMaxNumeric64: case Opcode::FPVectorMinNumeric64:
+      return Fail(inst, "the Numeric and 64-bit FP max/min forms need FPARMv8 or ARMv8's "
+                        "double-precision NEON lanes, and an ARMv7 guest can encode neither; the 32-bit "
+                        "plain vmax/vmin is the form that exists there and it is implemented");
 
     case Opcode::VectorGetElement8: case Opcode::VectorGetElement16:
     case Opcode::VectorGetElement32: case Opcode::VectorGetElement64: {
@@ -2512,7 +2873,11 @@ bool BlockRunner::Take(const Term::Terminal& terminal, LocationDescriptor& succe
       return false;
     } else if constexpr (std::is_same_v<T, Term::PopRSBHint> ||
                          std::is_same_v<T, Term::FastDispatchHint>) {
-      successor = location_;  // whatever BXWritePC put here is the next location
+      // Whatever BXWritePC put here is the next location — but its IT field is the block *entry*'s,
+      // because `WritePC` rewrites only PC and mode. Every instruction of the block ran, the last of
+      // them advanced IT past the sequence, and `end_it_` is that value: the state the guest is
+      // architecturally holding at the branch target.
+      successor = location_.SetIT(Dynarmic::A32::ITState{end_it_});
       return true;
     } else if constexpr (std::is_same_v<T, Term::If>) {
       // Predicated on the architectural flags: a conditional branch tests CPSR's NZCV, which the
@@ -2580,6 +2945,10 @@ RunResult InterpExecutor::Run(MachineState& state, unsigned max_instructions) {
   const char* tenv = std::getenv("RB_T1_TRACE");
   const bool trace = tenv != nullptr && static_cast<unsigned>(std::atoi(tenv)) == run_index;
   unsigned shown = 0;
+  // The IT state CPSR leaves this Run with: the entry descriptor's until a block runs, then the
+  // successor's at each block boundary and the stopping block's end IT for a mid-block halt. The
+  // tail folds it into CPSR — see the fold's comment below for why the fold exists at all.
+  std::uint8_t it_fold = location.IT().Value();
   while (steps < max_instructions) {
     if (location.PC() == return_address_) {
       result.reason = StopReason::Returned;
@@ -2629,6 +2998,11 @@ RunResult InterpExecutor::Run(MachineState& state, unsigned max_instructions) {
         state.mode = location.TFlag() ? isa::Mode::Thumb : isa::Mode::Arm;
         state.pc = location.PC();
         state.r[15] = location.PC();
+        // The skipped leg advanced IT — the condition-failed location carries the post-leg value —
+        // and a budget edge that exits straight from here must fold *that*, not the stale value the
+        // previous block boundary left. Missing this line made every `Run` that ended on a skipped
+        // leg resume with the leg's own IT state, re-skipping the next leg under the wrong condition.
+        it_fold = location.IT().Value();
         ++steps;
         result.reason = StopReason::Budget;
         continue;
@@ -2652,17 +3026,34 @@ RunResult InterpExecutor::Run(MachineState& state, unsigned max_instructions) {
     steps += runner.steps;
     if (!continued) {
       result = runner.stop;
+      // A stop *inside* the block. Everything up to the halt ran — for an `svc` that includes the
+      // `BranchWritePC` the translator emits ahead of it — so the IT state at the stop's pc is the
+      // block's end IT, not the entry IT `location` still carries. (For a stop that refuses an
+      // instruction mid-block, `bkpt` or an unimplemented op, the end IT over-advances by the legs
+      // that never ran; those stops end the run, so nothing resumes against the approximation.)
+      it_fold = Dynarmic::A32::LocationDescriptor{block->ir.EndLocation()}.IT().Value();
       break;
     }
     location = successor;
     state.mode = location.TFlag() ? isa::Mode::Thumb : isa::Mode::Arm;
     state.pc = location.PC();
     state.r[15] = location.PC();
+    it_fold = location.IT().Value();
     result.reason = StopReason::Budget;
   }
   // The IT mirror is derived from CPSR here rather than from each block's location descriptor, in both
   // tiers, so that the two-tier comparison measures guest behaviour instead of two representations of
   // the same field. Translation still takes IT from the descriptor, which is where Dynarmic keeps it.
+  //
+  // The fold below is what keeps that derivation honest: the descriptor is the only place Tier I holds
+  // live IT state, and until it was folded back the CPSR a Run handed out still carried the IT bits of
+  // whatever ran *before* it. A stop between the legs of an IT sequence — a budget edge, a `bkpt`, a
+  // predicated `svc` — then reported IT=0 while Tier J's `SyncOut` reported the live bits, and the next
+  // `Run` rebuilt its descriptor from that CPSR and executed the remaining legs unconditionally. CPSR
+  // now carries the stop's IT out of this Run, and the next Run's `PSR{state.cpsr}` reads it back
+  // through `ItStateFromCpsr`, whose non-contiguous byte mapping is bit-identical to dynarmic's own
+  // `PSR::IT()` composition (machine_state.h has the story of what getting that mapping wrong cost).
+  state.cpsr = CpsrWithIt(state.cpsr, it_fold);
   state.cpsr = CpsrWithMode(state.cpsr, state.mode);
   state.itstate = ItStateFromCpsr(state.cpsr);
   result.instructions_executed = steps;

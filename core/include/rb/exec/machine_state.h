@@ -49,25 +49,33 @@ struct MachineState {
 static_assert(sizeof(GuestAddr) == 4, "guest addresses are 32-bit by definition");
 
 /**
- * The CPSR IT field, as the low 8 bits ARMv7 splits across bits 15:10 and 26:25.
+ * The CPSR IT field. The 8-bit ITSTATE value (`firstcond:mask`) is **not contiguous** in CPSR:
+ * ITSTATE<7:2> live at CPSR bits 15:10 and ITSTATE<1:0> at CPSR bits 26:25 — the low two bits of the
+ * byte move up to sit under the Jazelle J bit. Bit-for-bit identical to dynarmic's own
+ * `PSR::IT()`/`PSR::IT(ITState)` composition (`frontend/A32/PSR.h`), which is the mapping
+ * `LocationDescriptor` round-trips through, and what `A32JitState::Cpsr()`/`SetCpsr()` compose.
+ *
+ * The first draft of these helpers treated the byte as if IT[1:0] were its bits 7:6 — reading
+ * CPSR bits 25:24 (J and IT[0]) and writing the same back. Every resume into the middle of an IT
+ * sequence then reconstructed a scrambled byte (ITE-GT's 0xCC came back as 0x33: firstcond CC, mask
+ * 0011), the translator predicated the remaining legs on the wrong condition, and execution walked
+ * into neighbouring functions. A differential could not see the original form because both tiers
+ * shared the same wrong derivation; the fold below is what made it visible, and this mapping is what
+ * makes the fold correct.
  *
  * Both tiers derive `MachineState::itstate` through these two functions rather than each computing it
- * their own way. That is not tidiness: Tier I had the mirror come from the block's location descriptor
- * and Tier J from CPSR, and the two differ at the moment execution stops — dynarmic's IT encoding is not
- * CPSR's bit layout — so a differential test reported an `itstate` disagreement while `cpsr`, which is
- * the architectural register, agreed exactly. A redundant field with two definitions is a field that
- * produces false findings and hides real ones.
+ * their own way. That is not tidiness: an earlier form had Tier I's mirror come from the block's
+ * location descriptor and Tier J's from CPSR, and the two differ at the moment execution stops — a
+ * redundant field with two definitions is a field that produces false findings and hides real ones.
  */
 [[nodiscard]] inline std::uint8_t ItStateFromCpsr(std::uint32_t cpsr) {
-  const std::uint32_t lo = (cpsr >> 10) & 0x3fu;  ///< IT[7:2]
-  const std::uint32_t hi = (cpsr >> 24) & 0x3u;   ///< IT[1:0]
-  return static_cast<std::uint8_t>((hi << 6) | lo);
+  return static_cast<std::uint8_t>(((cpsr >> 8) & 0xFCu) | ((cpsr >> 25) & 0x03u));
 }
 
 [[nodiscard]] inline std::uint32_t CpsrWithIt(std::uint32_t cpsr, std::uint8_t itstate) {
-  const std::uint32_t cleared = cpsr & ~(0x3f00'0000u | 0x0000'fc00u);
-  return cleared | (static_cast<std::uint32_t>(itstate & 0x3fu) << 10) |
-         (static_cast<std::uint32_t>(itstate >> 6) << 24);
+  const std::uint32_t cleared = cpsr & ~(0x0600'0000u | 0x0000'fc00u);
+  return cleared | (static_cast<std::uint32_t>(itstate & 0xFCu) << 8) |
+         (static_cast<std::uint32_t>(itstate & 0x03u) << 25);
 }
 
 /// CPSR bit 5 *is* the execution mode: `MachineState::mode` and that bit are one fact kept in two
@@ -190,6 +198,13 @@ class Executor {
   /// Self-modifying code (AD-7): drop anything compiled for guest addresses in [from, to).
   virtual void Invalidate(GuestAddr from, GuestAddr to) = 0;
   virtual CodeTier tier() const = 0;
+  /// False when this tier could not be constructed, so `Run` answers `Internal` for every call rather than
+  /// executing anything. Tier I is always available; the JIT tier is not (no execmem, or a back end that
+  /// would not build), and a caller that is about to print one row per tier wants to ask before it runs —
+  /// `android/jni/launcher.cpp`'s "run both tiers" table does exactly that. The query lives here because
+  /// it is a property of the seam: the launcher holds `Executor*`s, and `ok()` used to exist on
+  /// `JitExecutor` alone, which is a compile error in a lane no test under `core/tests` builds.
+  [[nodiscard]] virtual bool ok() const { return true; }
 };
 
 }  // namespace rb::exec

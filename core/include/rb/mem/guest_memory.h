@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace rb::mem {
@@ -64,10 +65,18 @@ class GuestMemory {
   GuestMemory(const GuestMemory&) = delete;
   GuestMemory& operator=(const GuestMemory&) = delete;
 
-  /// Anonymous, zero-filled. Replaces any existing mapping over the range, like MAP_FIXED: `at` and
-  /// `len` are rounded to the guest page and the previous contents of the overlap are dropped.
+  /// Anonymous, zero-filled — or, with `kNone`, a **guard reservation**: a mapped page with no
+  /// permissions and no backing, which the loader's placement scan counts as occupied and every
+  /// access refuses. Replaces any existing mapping over the range, like MAP_FIXED: `at` and `len`
+  /// are rounded to the guest page and the previous contents of the overlap are dropped.
   bool Map(std::uint32_t at, std::size_t len, unsigned prot, std::string* err);
   /// File-backed mapping used by the guest ELF loader. `fd` is owned by the caller.
+  ///
+  /// `shared` is honoured only where a shared mapping can be *served*: the granule must stay in place, and
+  /// its first file offset must be aligned to the host's real page size. A shared mapping that would have
+  /// to leave the window is refused by name rather than silently turned into a private copy whose writes
+  /// never reach the file — so on a 16 KiB-page device a shared mapping at a 4 KiB file offset is a
+  /// refusal, not a mapping that reads zeros. Nothing in the loader takes this path today (`shared=false`).
   bool MapFile(std::uint32_t at, std::size_t len, unsigned prot, int fd, std::uint64_t offset,
                bool shared, std::string* err);
   bool Protect(std::uint32_t at, std::size_t len, unsigned prot, std::string* err);
@@ -102,6 +111,11 @@ class GuestMemory {
   struct Page {
     void* backing = nullptr;  ///< == window_base_ + guest when in place; else out-of-line block.
     unsigned prot = kNone;
+    /// Mapped, whether or not it has permissions or backing: a guard page is `mapped` with
+    /// `kNone` and a null backing, and that state has to be representable or a guard page can
+    /// never be re-protected (the one-way trap the first draft had) and the loader's placement
+    /// scan cannot see it.
+    bool mapped = false;
     int fd = -1;              ///< File-backed mappings retain their fd for re-granulation.
     std::uint64_t file_off = 0;
     bool shared = false;
@@ -136,6 +150,12 @@ class GuestMemory {
                  const std::vector<std::size_t>& fresh);
   bool RebalanceGranule(std::size_t granule, std::string* err,
                         const std::vector<std::size_t>& fresh);
+  /// The out-of-line form, factored out because the in-place attempt falls through to it when its
+  /// mmap fails — carrying the snapshot the attempt took, so the fallback cannot silently zero the
+  /// granule it just withdrew.
+  bool RebalanceGranuleOutOfLine(
+      std::size_t granule, std::string* err,
+      std::vector<std::pair<std::size_t, std::vector<unsigned char>>>&& carries);
   void DropPage(std::size_t page_idx);
 
   void* window_base_ = nullptr;   ///< Host address of guest address 0.
@@ -146,6 +166,11 @@ class GuestMemory {
   void* raw_base_ = nullptr;
   std::size_t raw_bytes_ = 0;
   unsigned host_page_shift_ = 12;
+  /// The kernel's real page size, as a shift. An mmap offset must be aligned to *this*, whatever the
+  /// model's granule is — a 4 KiB ELF segment offset on a 16 KiB host cannot serve its granule in
+  /// place, and knowing the real value here is what routes it out of line before the kernel says
+  /// EINVAL.
+  unsigned real_page_shift_ = kGuestPageShift;
   AddressModel::Kind kind_ = AddressModel::kFlatIdentity;
   std::vector<Page> pages_;
   std::vector<OutOfLine> out_of_line_;

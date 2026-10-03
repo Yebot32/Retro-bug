@@ -1,0 +1,99 @@
+diff --git a/src/dynarmic/frontend/A32/decoder/thumb32.inc b/src/dynarmic/frontend/A32/decoder/thumb32.inc
+index ecc7a65..18853e6 100644
+--- a/src/dynarmic/frontend/A32/decoder/thumb32.inc
++++ b/src/dynarmic/frontend/A32/decoder/thumb32.inc
+@@ -29,6 +29,13 @@ INST(thumb32_TBH,            "TBH",                      "111010001101nnnn111100
+ INST(thumb32_LDREXB,         "LDREXB",                   "111010001101nnnntttt111101001111")
+ INST(thumb32_LDREXH,         "LDREXH",                   "111010001101nnnntttt111101011111")
+ INST(thumb32_LDREXD,         "LDREXD",                   "111010001101nnnnttttuuuu01111111")
++// RetroBug: the acquire-exclusive half of this group was missing, while the ARM-state table had all four
++// (arm.inc:115-131). bionic's `pthread_mutex_lock`/`trylock` are Thumb, so every mutex in a real guest
++// libc reached these encodings and the decoder declined them.
++INST(thumb32_LDAEXB,         "LDAEXB",                   "111010001101nnnntttt111111001111") // v8
++INST(thumb32_LDAEXH,         "LDAEXH",                   "111010001101nnnntttt111111011111") // v8
++INST(thumb32_LDAEX,          "LDAEX",                    "111010001101nnnntttt111111101111") // v8
++INST(thumb32_LDAEXD,         "LDAEXD",                   "111010001101nnnnttttuuuu11111111") // v8
+ 
+ // Data Processing (Shifted Register)
+ INST(thumb32_TST_reg,        "TST (reg)",                "111010100001nnnn0vvv1111vvttmmmm")
+diff --git a/src/dynarmic/frontend/A32/translate/impl/a32_translate_impl.h b/src/dynarmic/frontend/A32/translate/impl/a32_translate_impl.h
+index 44ac245..d61f618 100644
+--- a/src/dynarmic/frontend/A32/translate/impl/a32_translate_impl.h
++++ b/src/dynarmic/frontend/A32/translate/impl/a32_translate_impl.h
+@@ -511,6 +511,11 @@ struct TranslatorVisitor final {
+     bool thumb32_STREXB(Reg n, Reg t, Reg d);
+     bool thumb32_STREXD(Reg n, Reg t, Reg t2, Reg d);
+     bool thumb32_STREXH(Reg n, Reg t, Reg d);
++    // RetroBug: Thumb-state acquire-exclusive loads, the counterpart of the ARM-state declarations above.
++    bool thumb32_LDAEX(Reg n, Reg t);
++    bool thumb32_LDAEXB(Reg n, Reg t);
++    bool thumb32_LDAEXD(Reg n, Reg t, Reg t2);
++    bool thumb32_LDAEXH(Reg n, Reg t);
+     bool thumb32_TBB(Reg n, Reg m);
+     bool thumb32_TBH(Reg n, Reg m);
+ 
+diff --git a/src/dynarmic/frontend/A32/translate/impl/thumb32_load_store_dual.cpp b/src/dynarmic/frontend/A32/translate/impl/thumb32_load_store_dual.cpp
+index 17d4285..063d9f7 100644
+--- a/src/dynarmic/frontend/A32/translate/impl/thumb32_load_store_dual.cpp
++++ b/src/dynarmic/frontend/A32/translate/impl/thumb32_load_store_dual.cpp
+@@ -210,6 +210,60 @@ bool TranslatorVisitor::thumb32_LDREXH(Reg n, Reg t) {
+     return true;
+ }
+ 
++// RetroBug: the Thumb-state acquire-exclusive group. The decoder rows were missing as well; see
++// decoder/thumb32.inc. Bodies mirror the ARM-state ones in synchronization.cpp, whose `ORDERED`
++// access type is the whole point of the LDAEX form -- an acquire-exclusive load is what makes bionic's
++// pthread mutex acquire readable as such, so `ATOMIC` here would silently be a different instruction.
++bool TranslatorVisitor::thumb32_LDAEX(Reg n, Reg t) {
++    if (t == Reg::PC || n == Reg::PC) {
++        return UnpredictableInstruction();
++    }
++
++    const auto address = ir.GetRegister(n);
++    const auto value = ir.ExclusiveReadMemory32(address, IR::AccType::ORDERED);
++
++    ir.SetRegister(t, value);
++    return true;
++}
++
++bool TranslatorVisitor::thumb32_LDAEXB(Reg n, Reg t) {
++    if (t == Reg::PC || n == Reg::PC) {
++        return UnpredictableInstruction();
++    }
++
++    const auto address = ir.GetRegister(n);
++    const auto value = ir.ZeroExtendToWord(ir.ExclusiveReadMemory8(address, IR::AccType::ORDERED));
++
++    ir.SetRegister(t, value);
++    return true;
++}
++
++bool TranslatorVisitor::thumb32_LDAEXD(Reg n, Reg t, Reg t2) {
++    if (t == Reg::PC || t2 == Reg::PC || t == t2 || n == Reg::PC) {
++        return UnpredictableInstruction();
++    }
++
++    const auto address = ir.GetRegister(n);
++    const auto [lo, hi] = ir.ExclusiveReadMemory64(address, IR::AccType::ORDERED);
++
++    // DO NOT SWAP hi AND lo IN BIG ENDIAN MODE, THIS IS CORRECT BEHAVIOUR
++    ir.SetRegister(t, lo);
++    ir.SetRegister(t2, hi);
++    return true;
++}
++
++bool TranslatorVisitor::thumb32_LDAEXH(Reg n, Reg t) {
++    if (t == Reg::PC || n == Reg::PC) {
++        return UnpredictableInstruction();
++    }
++
++    const auto address = ir.GetRegister(n);
++    const auto value = ir.ZeroExtendToWord(ir.ExclusiveReadMemory16(address, IR::AccType::ORDERED));
++
++    ir.SetRegister(t, value);
++    return true;
++}
++
+ bool TranslatorVisitor::thumb32_STL(Reg n, Reg t) {
+     if (t == Reg::PC || n == Reg::PC) {
+         return UnpredictableInstruction();

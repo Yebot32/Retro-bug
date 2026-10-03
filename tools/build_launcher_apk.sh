@@ -130,9 +130,23 @@ else
 fi
 
 # ---- java -> dex
-javac -nowarn -source 8 -target 8 -bootclasspath "$(to_host "$AJ")" \
-  -d "$(to_host "$OUT/classes")" "$(to_host "$SRC/java/com/retrobug/launcher/LauncherActivity.java")" 2>&1 \
-  | grep -v "bootstrap class path" || true
+#
+# The `|| true` that used to end the javac line applied to the whole pipeline, so a compile error exited 0
+# and the *next* command failed instead: `d8` was handed an empty `$OUT/classes` and reported a dex error
+# naming no source line, which reads as a toolchain problem rather than as the Java file not compiling.
+# The filter that drops javac's harmless "bootstrap class path" note still runs, but javac's own status is
+# captured before it and checked here. `set +e`/`set -e` around the capture because the pipeline below
+# legitimately exits non-zero when the filter matches nothing.
+set +e
+javac_out="$(javac -nowarn -source 8 -target 8 -bootclasspath "$(to_host "$AJ")" \
+  -d "$(to_host "$OUT/classes")" "$(to_host "$SRC/java/com/retrobug/launcher/LauncherActivity.java")" 2>&1)"
+javac_status=$?
+set -e
+printf '%s\n' "$javac_out" | grep -v "bootstrap class path" || true
+if [ "$javac_status" -ne 0 ]; then
+  echo "javac failed (exit $javac_status); stopping here rather than letting d8 report it as a dex error" >&2
+  exit 1
+fi
 find "$OUT/classes" -name '*.class' -print0 |
   xargs -0 "$BT/d8.bat" --lib "$(to_host "$AJ")" --min-api 26 --output "$(to_host "$OUT/dex")" >/dev/null
 
@@ -167,13 +181,30 @@ cp "$OUT/dex/classes.dex" "$OUT/stage/"
 #   RB_KEYSTORE       path to the keystore (CI: materialized from the RB_KEYSTORE_B64 secret)
 #   RB_KEYSTORE_PASS  store and key password; the key is PKCS12, where the two have to match
 #   RB_KEY_ALIAS      entry name, default `launcher`
-KS="${RB_KEYSTORE:-$OUT/rb-test.keystore}"
+# `$KS` is already set above, outside `$OUT`, and that is the default on purpose. An earlier revision
+# wrote `KS="${RB_KEYSTORE:-$OUT/rb-test.keystore}"` here, which put the key back inside the directory
+# line 107 deletes every run: the assignment at the top of the script looked authoritative and was dead,
+# and the failure it produced (`INSTALL_FAILED_UPDATE_INCOMPATIBLE` on the *next* install) is the exact
+# one the comment above says the outside-$OUT location exists to prevent. Only a named `RB_KEYSTORE`
+# may move the key now.
+KS="${RB_KEYSTORE:-$KS}"
 KS_PASS="${RB_KEYSTORE_PASS:-android}"
 KEY_ALIAS="${RB_KEY_ALIAS:-launcher}"
 if [ -n "${RB_KEYSTORE:-}" ] && [ ! -f "$KS" ]; then
   echo "RB_KEYSTORE=$KS does not exist; refusing to generate a throwaway key where a stable one was named" >&2
   exit 1
 fi
+# The invariant the whole block rests on, checked rather than assumed: a key inside `$OUT` cannot
+# survive the next run, and a build that quietly minted a new one would report success and then fail
+# on the phone. This is the "refuse loudly" rule applied to the one path that was silently wrong.
+case "$KS" in
+  "$OUT"/*)
+    echo "keystore $KS is inside \$OUT ($OUT), which this script deletes on every run;" >&2
+    echo "that yields a fresh key each build and the next 'adb install -r' fails with" >&2
+    echo "INSTALL_FAILED_UPDATE_INCOMPATIBLE. Set RB_KEYSTORE to a path outside \$OUT." >&2
+    exit 1
+    ;;
+esac
 [ -f "$KS" ] || keytool -genkeypair -noprompt -keystore "$(to_host "$KS")" -storetype PKCS12 \
   -storepass "$KS_PASS" -keypass "$KS_PASS" -alias "$KEY_ALIAS" \
   -dname "CN=RetroBug test build, OU=none, O=none, L=none, S=none, C=US" \

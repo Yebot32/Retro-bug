@@ -2,7 +2,10 @@
 
 RetroBug-side changes to vendored dependencies, per architecture decision AD-14: the trees under
 `external/` stay byte-identical to their pinned upstream commits, and every modification lives here as a
-patch file applied at configure time.
+patch file. Nothing applies them automatically at configure time (an earlier revision of this sentence
+said it did; no `git apply`, `patch -p` or `PATCH_COMMAND` exists anywhere in the build), so the patch
+files are the *record* of edits that are also present in the tree — see `dynarmic/README.md` for the
+invocation, and rule 3 below for what keeps the two in agreement.
 
 Layout:
 

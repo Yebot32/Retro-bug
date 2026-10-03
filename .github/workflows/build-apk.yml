@@ -30,10 +30,19 @@ on:
     # Every push to main that could change the artifact produces a fresh APK, so "the latest build" is a
     # thing you can download without anyone clicking. The paths list is what keeps that from running the
     # Windows job for a docs edit: it names every input the APK is actually made of.
+    #
+    # `compat/**`, `cmake/**` and `tests/guest/**` were missing from the list while `CMakeLists.txt`
+    # itself was on it, which is the shape that produces a stale artifact rather than a red build: the
+    # compat headers are on the include path ahead of everything, the cmake module answers dynarmic's
+    # `find_package(Boost)`, and `tools/build-guest-apk.sh` compiles the guest asset out of
+    # `tests/guest`. A push touching only those files changed the APK and triggered no build.
     branches: [main]
     paths:
       - "android/**"
       - "core/**"
+      - "compat/**"
+      - "cmake/**"
+      - "tests/guest/**"
       - "tools/build_launcher_apk.sh"
       - "tools/build-guest-apk.sh"
       - "tools/build-guest-libs.sh"

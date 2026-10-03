@@ -314,6 +314,88 @@ void unmapped_code_faults_rather_than_returning() {
   CHECK(!r.detail.empty());
 }
 
+/// A budget stop that lands *between the legs of an IT block* is the one place IT state has to cross
+/// a Run boundary, and losing it there executes the remaining legs unconditionally — `addgt` and
+/// `addle` would both run and the last would win. The sweep below stops `it_probe` at every budget
+/// from 1 and resumes it in chunks of the same size until it returns; every chunking must produce the
+/// hardware answer. `saw_live_it` proves the sweep actually crossed a leg boundary with IT state live
+/// — without it, a sweep that always stopped between blocks would pass with or without the fold.
+void a_budget_stop_between_it_legs_resumes_predicated() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  const auto probe = rig.mod->FindExport("Java_com_retrobug_fixture_MainActivity_it_probe");
+  if (!probe) return;
+
+  struct Case {
+    std::int32_t a, b, want;  // oracle-armv7.txt's it_probe row
+  };
+  const Case cases[] = {{7, 3, 42}, {3, 7, 1008}, {5, 5, 42}, {101, 1, 104}, {0, 0, 1005}, {-5, 3, 1000}};
+  bool saw_live_it = false;
+  for (const auto& c : cases) {
+    // The unchunked answer, for the comparison. Built inline rather than through `call`, because
+    // `call` places one argument and `it_probe` takes two — a baseline that ran (a, 0) against a
+    // chunked run of (a, b) would fail its own comparison for every b that mattered.
+    exec::MachineState whole;
+    whole.pc = probe->addr;
+    whole.mode = probe->thumb ? isa::Mode::Thumb : isa::Mode::Arm;
+    whole.r[0] = kFakeJNIEnv;
+    whole.r[1] = kFakeClass;
+    whole.r[2] = static_cast<std::uint32_t>(c.a);
+    whole.r[3] = static_cast<std::uint32_t>(c.b);
+    for (int r : {4, 5, 7}) whole.r[r] = kCalleeSaved[r];
+    whole.r[13] = kStackTop;
+    whole.r[14] = kReturnAddress;
+    whole.r[15] = probe->addr;
+    const auto whole_call = rig.exec->Run(whole, 4'000'000);
+    CHECK_CTX(whole_call.reason == exec::StopReason::Returned, "unchunked it_probe stopped early");
+    CHECK_CTX(static_cast<std::int32_t>(whole.r[0]) == c.want, "unchunked it_probe is wrong");
+
+    for (unsigned budget = 1; budget <= 64; ++budget) {
+      exec::MachineState state;
+      state.pc = probe->addr;
+      state.mode = probe->thumb ? isa::Mode::Thumb : isa::Mode::Arm;
+      state.r[0] = kFakeJNIEnv;
+      state.r[1] = kFakeClass;
+      state.r[2] = static_cast<std::uint32_t>(c.a);
+      state.r[3] = static_cast<std::uint32_t>(c.b);
+      for (int r : {4, 5, 7}) state.r[r] = kCalleeSaved[r];
+      state.r[13] = kStackTop;
+      state.r[14] = kReturnAddress;
+      state.r[15] = probe->addr;
+
+      exec::RunResult chunk = rig.exec->Run(state, budget);
+      unsigned guard = 0;
+      while (chunk.reason == exec::StopReason::Budget && guard++ < 100'000) {
+        // The mirror and CPSR must describe the same IT state at every stop; a stop inside an IT
+        // sequence has to carry it forward rather than report the zero from before the block.
+        //
+        // Spelled out here rather than compared against `exec::ItStateFromCpsr`: Tier I assigns that
+        // expression to `state.itstate` itself, so `state.itstate == ItStateFromCpsr(state.cpsr)` could
+        // not fail whatever the helper did. This form pins the layout the fold depends on — ITSTATE<7:2>
+        // at CPSR bits 15:10 and ITSTATE<1:0> at bits 26:25 — so a change to the helper's bit positions
+        // breaks this check instead of travelling with it.
+        const std::uint8_t expect_it =
+            static_cast<std::uint8_t>(((state.cpsr >> 8) & 0xFCu) | ((state.cpsr >> 25) & 0x03u));
+        CHECK_CTX(state.itstate == expect_it,
+                  "itstate " + std::to_string(state.itstate) + " disagrees with cpsr " +
+                      Hex(state.cpsr) + " at a budget stop");
+        if (state.itstate != 0) saw_live_it = true;
+        chunk = rig.exec->Run(state, budget);
+      }
+      const std::string what = "it_probe(" + std::to_string(c.a) + "," + std::to_string(c.b) +
+                               ") chunked at " + std::to_string(budget);
+      CHECK_CTX(chunk.reason == exec::StopReason::Returned,
+                what + " ended in reason " + std::to_string(static_cast<int>(chunk.reason)) + " " +
+                    chunk.detail);
+      CHECK_CTX(static_cast<std::int32_t>(state.r[0]) == c.want,
+                what + " = " + std::to_string(static_cast<std::int32_t>(state.r[0])) +
+                    ", hardware said " + std::to_string(c.want));
+    }
+  }
+  CHECK_CTX(saw_live_it,
+            "no budget in the sweep stopped with IT state live, so this test proved nothing");
+}
+
 }  // namespace
 
 int main() {
@@ -323,6 +405,7 @@ int main() {
   invalidation_changes_nothing_it_should_not();
   the_instruction_budget_stops_cleanly();
   unmapped_code_faults_rather_than_returning();
+  a_budget_stop_between_it_legs_resumes_predicated();
 
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;

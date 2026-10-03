@@ -88,7 +88,7 @@ using namespace rb::mem;
 /// blamed on where the code landed.
 ///
 /// The stack is the one figure here that the probe rig did not need to get right and a real library does:
-/// **8 MiB just below the window's top (55–63 MiB)**, where Android gives a main thread 8 MiB, instead of
+/// **32 MiB below the window's top (31–63 MiB)**, where Android gives a main thread 8 MiB, instead of
 /// the 64 KiB this was. 64 KiB was obviously enough for the probe's handful of frames and is nothing like
 /// enough for bionic: its `__libc_preinit` walked 65,640 bytes down it and the next store landed 104 bytes
 /// past the bottom, which reads as `guest memory write at 0xeff90 refused` with `sp = 0xeff98` — an address
@@ -104,6 +104,20 @@ constexpr exec::GuestAddr kStackBytes = 32u << 20;
 /// of returning a plausible zero; see the file header.
 constexpr std::uint32_t kUnresolved = 0x0bad'0000u;
 constexpr std::size_t kWindowBytes = 64u << 20;
+/// The host-entry window: the return sentinel at `kReturnAddress` plus the `AbiContext` slot table,
+/// which lives at `kReturnAddress + 0x1000` for `kMaxSlots * 4` bytes. Nothing here is mapped by the
+/// bridge — the executor recognises these addresses before translation — and the memory model is told
+/// that with a guard reservation, because an *unreserved* window is a loaded library that ends past
+/// 12 MiB: the loader's free-space scan would place a module over the sentinel and the slots, and a
+/// guest branch to a 4-aligned address inside the range would then report a bogus host call.
+constexpr std::size_t kHostWindowBytes = 0x2000u;
+/// TLS: the thread pointer page and bionic's own thread struct. The first draft put the thread struct
+/// at 0x430000 — the same page as the GL strings below — and `Map`'s replace-on-overlap silently wiped
+/// the identity strings on every game run, so `glGetString` answered an empty string while the report
+/// claimed the strings were placed. The asserts below keep every reserved page pairwise distinct,
+/// because "two constants happened to agree" is exactly the failure no test caught.
+constexpr exec::GuestAddr kTlsBase = 0x0040'0000u;
+constexpr exec::GuestAddr kThreadStruct = 0x0046'0000u;
 /// One guest call's instruction budget, the same figure the APK lane uses. Tier I counts IR ops and Tier
 /// J guest encodings, so this bounds the two differently — it exists to stop a runaway guest, not to
 /// measure it.
@@ -125,6 +139,50 @@ constexpr unsigned kGlEmptyOffset = 20u;
 constexpr exec::GuestAddr kGlEmpty = kGlStrings + kGlEmptyOffset;
 static_assert(sizeof("RetroBug (no GL)") <= kGlEmptyOffset,
               "the identity string would run into the empty one");
+
+/// The rest of the reserved guest pages, hoisted out of `Inspect` and `Launch` so the check below can see
+/// them. Each was a function-local `constexpr`, which kept it outside the one assertion this file has
+/// against two reserved constants agreeing — the failure class that wiped the GL identity strings at
+/// 0x430000 on every game run. Values unchanged; only their scope moved.
+constexpr exec::GuestAddr kLoaderGlobals = 0x0041'0000u;
+constexpr exec::GuestAddr kLoaderStub = 0x0042'0000u;
+constexpr exec::GuestAddr kStandInObject = 0x0044'0000u;
+constexpr exec::GuestAddr kApkPathAt = 0x0045'0000u;
+constexpr exec::GuestAddr kJniEnvRegion = 0x0050'0000u;
+
+/// Every reserved guest address, so the check is over the whole set rather than over the pairs someone
+/// remembered to write down. The hand-written pairwise list this replaces covered seven of twelve
+/// constants, and the five it missed were exactly the ones still declared inside a function.
+constexpr exec::GuestAddr kReservedPages[] = {
+    kReturnAddress, kGuardPage, kTlsBase,       kLoaderGlobals, kLoaderStub,   kGlStrings,
+    kStandInObject, kApkPathAt,  kThreadStruct, kJniEnvRegion,  kUnresolved,   kStackTop};
+
+constexpr bool ReservedPagesAreDistinctAndAligned() {
+  constexpr std::size_t n = sizeof(kReservedPages) / sizeof(kReservedPages[0]);
+  for (std::size_t i = 0; i < n; ++i) {
+    // A reserved page that is not page-aligned is a typo, and `Map` would round it up onto its neighbour.
+    if ((kReservedPages[i] & (kGuestPage - 1u)) != 0) return false;
+    for (std::size_t j = i + 1; j < n; ++j) {
+      if (kReservedPages[i] == kReservedPages[j]) return false;
+    }
+  }
+  return true;
+}
+static_assert(ReservedPagesAreDistinctAndAligned(),
+              "two reserved guest pages share an address, or one is not page-aligned");
+
+/// The host-entry window is sized for what the bridge actually puts in it: the return sentinel at
+/// `kReturnAddress` plus the slot table at `kReturnAddress + 0x1000` for `kMaxSlots` four-byte entries.
+/// That arithmetic lived in prose, which is the one place a reader cannot check by counting.
+static_assert(kHostWindowBytes >= 0x1000u + static_cast<std::size_t>(abi::AbiContext::kMaxSlots) * 4u,
+              "the host-entry window is smaller than the sentinel page plus the slot table");
+
+/// Every reserved guest page, pairwise distinct at compile time — see `ReservedPagesAreDistinctAndAligned`
+/// above the layout. The layout grew by hand, and the one collision it ever had (the GL strings and
+/// bionic's thread struct both at 0x430000) wiped the GL identity strings on every game run without a
+/// single test noticing.
+static_assert(kStackTop - kStackBytes > kReturnAddress + kHostWindowBytes,
+              "the guest stack would run into the host-entry window");
 
 /// `GL_VENDOR`, `GL_RENDERER`, `GL_VERSION`, transcribed from the NDK's own `GLES/gl.h`
 /// (`sysroot/usr/include/GLES/gl.h:303-305`, with `GL_EXTENSIONS` at 306) rather than recalled: these are
@@ -195,6 +253,23 @@ const char* ReasonName(exec::StopReason r) {
 
 /// One report line. `printf`-checked on purpose: on a phone this string is the only instrument, and a
 /// `%x` handed a 64-bit value is a report that reads as a wrong answer rather than as a bug here.
+/// One report line, sanitized on the way in. Guest-supplied strings (a soname, a `DT_NEEDED` name, a
+/// refused import's name) reach the report through `%s`, and a crafted image controls those bytes: an
+/// embedded NUL truncated everything after it at `NewStringUTF`, and a newline forged report lines.
+/// Control bytes are escaped; bytes >= 0x80 pass through untouched (release ART's `NewStringUTF` is
+/// lenient about them), which is a stated residual rather than a silent one.
+void AppendSanitized(std::string* out, const char* buf) {
+  for (const unsigned char* p = reinterpret_cast<const unsigned char*>(buf); *p != 0; ++p) {
+    if (*p < 0x20 || *p == 0x7f) {
+      char esc[8];
+      std::snprintf(esc, sizeof esc, "\\x%02x", *p);
+      *out += esc;
+    } else {
+      out->push_back(static_cast<char>(*p));
+    }
+  }
+}
+
 #if defined(__GNUC__)
 __attribute__((format(printf, 2, 3)))
 #endif
@@ -205,7 +280,7 @@ void Say(std::string* out, const char* fmt, ...) {
   const int n = std::vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
   if (n < 0) buf[0] = '\0';
-  *out += buf;
+  AppendSanitized(out, buf);
   *out += '\n';
   /**
    * Live, as well as accumulated.
@@ -271,18 +346,50 @@ const GuestMethod* MethodFor(const std::string& name) {
   return nullptr;
 }
 
+/// True when a Java exception was pending and has been cleared. The allocating JNI calls here
+/// (`GetByteArrayElements`, `GetStringUTFChars`, `NewStringUTF`) can throw `OutOfMemoryError`; a
+/// pending exception left set supersedes this function's return value at the Java call site — the
+/// finished report was discarded, and `runGame` catches only `IOException | RuntimeException`, so an
+/// `Error` reached the default uncaught handler and the app died holding a report it never saw.
+///
+/// `note` is what keeps the *other* half from being lost: clearing an exception makes the failing call
+/// look like an ordinary empty result, so the caller has to be told that one was pending. Passing
+/// `nullptr` here is what made a run out of host memory report itself as a guest image that was not an
+/// ELF.
+bool ClearPendingException(JNIEnv* env, std::string* note) {
+  if (env == nullptr || env->ExceptionCheck() != JNI_TRUE) return false;
+  jthrowable pending = env->ExceptionOccurred();
+  env->ExceptionClear();
+  // `note != nullptr`, not `!note->empty() == false`: the latter parses as "append only when the note is
+  // empty", which is the opposite of what the sentence needs and made the line dead code for every caller
+  // that had already written something. The clause is written to follow existing text, so it reads as an
+  // append whenever a caller asked for one.
+  if (note != nullptr) *note += "; a pending Java exception was cleared";
+  if (pending != nullptr) env->DeleteLocalRef(pending);
+  return true;
+}
+
 /// A `jbyteArray` copied into a vector the engine can be handed. The images arrive as bytes rather than
 /// as paths because that is the half of the job each side is good at: `rb::loader` takes bytes or an fd,
 /// the guest library is one entry inside a zip, and `core/tests/guest_apk_test.cpp` carries a
 /// stored-entry-only zip reader of its own to get at it. The Java side already has
 /// `java.util.zip.ZipInputStream`, which handles either compression, so the extraction happens there and
 /// this file sees only ELF images.
-std::vector<std::uint8_t> Bytes(JNIEnv* env, jbyteArray array) {
+///
+/// A null `GetByteArrayElements` returns an *empty* vector, which is indistinguishable from a zero-length
+/// image. `note` carries the difference: it names the call that failed and whether a Java exception was
+/// pending, so the caller can say "the host ran out of memory" instead of letting the loader report
+/// "not an ELF image" about bytes the Java half never handed over.
+std::vector<std::uint8_t> Bytes(JNIEnv* env, jbyteArray array, std::string* note) {
   if (env == nullptr || array == nullptr) return {};
   const jsize len = env->GetArrayLength(array);
   if (len <= 0) return {};
   jbyte* raw = env->GetByteArrayElements(array, nullptr);
-  if (raw == nullptr) return {};
+  if (raw == nullptr) {
+    if (note != nullptr) *note += "GetByteArrayElements returned null";
+    ClearPendingException(env, note);
+    return {};
+  }
   const auto* first = reinterpret_cast<std::uint8_t*>(raw);
   std::vector<std::uint8_t> out(first, first + len);
   // `JNI_ABORT`: nothing here writes through the pointer, and mode 0 would copy the (unchanged) bytes
@@ -308,7 +415,8 @@ std::vector<std::uint8_t> Bytes(JNIEnv* env, jbyteArray array) {
 std::optional<std::vector<std::uint8_t>> ReadHostFile(const std::string& path, std::string* err) {
   const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
   if (fd < 0) {
-    if (err != nullptr) *err = "open(" + path + "): " + std::strerror(errno);
+    const int saved = errno;  // captured before anything (an allocation, a stream write) can move it
+    if (err != nullptr) *err = "open(" + path + "): " + std::strerror(saved);
     return std::nullopt;
   }
   std::vector<std::uint8_t> bytes;
@@ -316,7 +424,8 @@ std::optional<std::vector<std::uint8_t>> ReadHostFile(const std::string& path, s
   for (;;) {
     const ssize_t n = ::read(fd, buf, sizeof(buf));
     if (n < 0) {
-      if (err != nullptr) *err = "read(" + path + "): " + std::strerror(errno);
+      const int saved = errno;
+      if (err != nullptr) *err = "read(" + path + "): " + std::strerror(saved);
       ::close(fd);
       return std::nullopt;
     }
@@ -360,6 +469,102 @@ Outcome Call(exec::Executor& engine, abi::AbiContext& ctx, const loader::GuestMo
   out.detail = result.detail;
   return out;
 }
+
+/**
+ * The IFUNC half of one image's load: the hook `LoadOptions::resolve_ifunc` is asked for each slot, the
+ * guest call behind it, and the tally the report is made of.
+ *
+ * Why the call happens *inside* the load rather than in a pass over `GuestModule::ifunc_slots`
+ * afterwards: the slot is only writable until the load ends, because `LoadFromBytes` runs its RELRO pass
+ * on the way out — `docs/30` §Step 27 measured all eight of a real `libc.so`'s slots refusing the write
+ * once it returns. The hook is that window (`core/loader/guest_elf.cpp`, the loop between relocation and
+ * `enforce_relro`), and returning an address from it is what makes the loader write one.
+ *
+ * Why a tally rather than report lines written from the hook: the `GuestModule` that names these slots is
+ * built by the same call that consults the hook, so at hook time nothing can say which image a slot
+ * belongs to. `Report` says it once the module exists. A slot that did not resolve is a line of its own
+ * with the reason it did not — "0 resolved" with nothing beside it is the shape this report may not have.
+ */
+struct IfuncResolution {
+  abi::AbiContext* ctx = nullptr;
+  exec::Executor* engine = nullptr;  ///< The tier this run chose for guest code.
+  const char* tier = "I";
+  exec::Executor* spare = nullptr;   ///< The other tier, asked only when the first does not return.
+  const char* spare_tier = "J";
+  bool armed = false;                ///< False when the hook was never handed to a loader.
+  std::size_t slots = 0;
+  std::size_t resolved = 0;
+  /// One line per slot, resolved or not, in the order the loader recorded them — so a name that appears
+  /// in one place and not the other reads as a failure rather than as an omission.
+  std::vector<std::string> lines;
+
+  /**
+   * The loader's hook. `slot_value` goes in r0, which is the AArch32 convention rather than a guess: for
+   * an `R_ARM_IRELATIVE` slot that word *is* the addend the resolver is called with, and the device's own
+   * ARM resolvers ignore it either way (`memset_resolver` and `strlen_resolver` both begin by calling
+   * `get_cpu_variant` and take the answer from there). Only the return value is load-bearing.
+   */
+  std::optional<std::uint32_t> operator()(const loader::IfuncSlot& slot) {
+    ++slots;
+    const std::string name = slot.name.empty() ? "<R_ARM_IRELATIVE>" : slot.name;
+    const std::string where = Hex(slot.where);
+    std::string why;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+      exec::Executor* on = attempt == 0 ? engine : spare;
+      const char* on_tier = attempt == 0 ? tier : spare_tier;
+      if (on == nullptr) continue;
+      ctx->set_executor(*on);
+      exec::RunResult result{};
+      exec::MachineState exit{};
+      const abi::Ret32 ret =
+          ctx->CallGuest(slot.resolver.tagged(), {abi::Value32::U32(slot.slot_value)},
+                         abi::Shorty::For("I"), kCallBudget, &result, &exit);
+      if (result.reason == exec::StopReason::Returned && ret.w() != 0) {
+        ++resolved;
+        lines.push_back("  " + name + " slot 0x" + where + " -> implementation 0x" + Hex(ret.w()) +
+                        " (resolver 0x" + Hex(slot.resolver.addr) + ", tier " + on_tier + ", " +
+                        std::to_string(result.instructions_executed) + " steps)");
+        return ret.w();
+      }
+      if (!why.empty()) why += "; ";
+      why += "tier ";
+      why += on_tier;
+      if (result.reason == exec::StopReason::Returned) {
+        // A resolver that returns zero is not an answer any caller can use, and writing it would trade
+        // "executes resolver code" for "branches to the null page". Named, and the slot is left alone.
+        why += " returned 0, which is not an implementation";
+      } else {
+        why += std::string{" stopped with "} + ReasonName(result.reason) + " after " +
+               std::to_string(result.instructions_executed) + " steps" +
+               (result.detail.empty() ? "" : " (" + result.detail + ")");
+      }
+    }
+    lines.push_back("  " + name + " slot 0x" + where + " NOT resolved: " + why +
+                    " — the slot still holds the resolver at 0x" + Hex(slot.resolver.addr) +
+                    ", so a caller of this name executes resolver code as if it were the function");
+    return std::nullopt;
+  }
+
+  /// The image's outcome, once its module exists. `armed` is the difference between "this image has no
+  /// resolver to run" and "nothing was asked of it", and the two deserve different lines.
+  void Report(std::string* out, const std::string& soname) const {
+    if (!armed) {
+      Say(out, "ifunc: %s: resolution did not run for this image, so any IFUNC slot it has still holds"
+               " the resolver the loader wrote",
+          soname.c_str());
+      return;
+    }
+    if (slots == 0) {
+      Say(out, "ifunc: %s has no slot to resolve — the loader found no relocation in it naming a"
+               " resolver",
+          soname.c_str());
+      return;
+    }
+    Say(out, "ifunc: %s — %zu of %zu slot(s) resolved through the guest, %zu still holding a resolver",
+        soname.c_str(), resolved, slots, slots - resolved);
+    for (const std::string& line : lines) Say(out, "%s", line.c_str());
+  }
+};
 
 /// The whole launch, as the report the Java half prints. Every failure path returns a report rather than
 /// an error code, because the caller is an Activity with no console and "it returned null" is the least
@@ -417,6 +622,25 @@ std::string Launch(const std::vector<std::uint8_t>& app_image,
   mem->Write(kGuardPage, &guard, 4);
   if (!mem->Map(kStackTop - kStackBytes, kStackBytes, kRead | kWrite, &err)) {
     Say(&out, "FATAL: mapping the guest stack failed: %s", err.c_str());
+    return out;
+  }
+  // The host-entry window is reserved, not merely avoided: nothing maps it, but the loader's
+  // free-space scan must see it as taken, or a library ending past 12 MiB is placed over the return
+  // sentinel and the `AbiContext` slot table. `kNone` makes it a guard reservation — occupied for
+  // placement, refused for any access.
+  if (!mem->Map(kReturnAddress, kHostWindowBytes, kNone, &err)) {
+    Say(&out, "FATAL: reserving the host-entry window failed: %s", err.c_str());
+    return out;
+  }
+  // `kUnresolved` is the address an unanswered import is handed, and "nothing is mapped here" is the
+  // whole mechanism: the call faults and the report names the symbol that went unanswered. That holds
+  // only while no *module* is placed there, and this page was nobody's reservation — the loader's scan
+  // takes the first free run it finds, so an image large enough to span 12 MiB would have been placed
+  // over the trap and the guest's call would have landed in the image's own bytes. One guard page makes
+  // the mechanism true by construction rather than by luck about image sizes.
+  if (!mem->Map(kUnresolved, kGuestPage, kNone, &err)) {
+    Say(&out, "FATAL: reserving the unresolved-import trap page at 0x%s failed: %s",
+        Hex(kUnresolved).c_str(), err.c_str());
     return out;
   }
 
@@ -531,10 +755,17 @@ std::string Launch(const std::vector<std::uint8_t>& app_image,
   };
 
   // `JNI_OnLoad` first: it is the first thing a real Android runtime calls, and its answer is a constant
-  // the engine either reaches or does not, with no math in the way.
+  // the engine either reaches or does not, with no math in the way. A tier that reported itself
+  // unavailable is skipped with a line rather than run — `JitExecutor::Run` answers `Internal` for a
+  // dead tier, so the alternative is two rows of FAIL noise for the exact condition the line at the
+  // top of this function already reported.
   const std::string want_onload = "0x" + Hex64(static_cast<std::uint64_t>(kJniVersion16));
   for (auto* engine : {static_cast<exec::Executor*>(&interp), static_cast<exec::Executor*>(&jit)}) {
     const char* tier = engine->tier() == exec::CodeTier::Interp ? "I" : "J";
+    if (!engine->ok()) {
+      Say(&out, "JNI_OnLoad tier=%s skipped: that tier reported itself unavailable", tier);
+      continue;
+    }
     RB_LOG("JNI_OnLoad on tier %s", tier);
     const Outcome got = Call(*engine, ctx, *app, "JNI_OnLoad", "II",
                              {abi::Value32::Ptr(0), abi::Value32::Ptr(0)});
@@ -544,6 +775,10 @@ std::string Launch(const std::vector<std::uint8_t>& app_image,
   // Then the method, both tiers, against `kHardware`.
   for (auto* engine : {static_cast<exec::Executor*>(&interp), static_cast<exec::Executor*>(&jit)}) {
     const char* tier = engine->tier() == exec::CodeTier::Interp ? "I" : "J";
+    if (!engine->ok()) {
+      Say(&out, "%s tier=%s skipped: that tier reported itself unavailable", what.c_str(), tier);
+      continue;
+    }
     RB_LOG("%s on tier %s", what.c_str(), tier);
     const Outcome got = Call(*engine, ctx, *app, m->symbol, m->shorty,
                              {abi::Value32::Ptr(0), abi::Value32::Ptr(0), abi::Value32::S32(seed)});
@@ -567,6 +802,12 @@ std::string Launch(const std::vector<std::uint8_t>& app_image,
  * The memory layout and resolver setup are deliberately duplicated from `Launch` rather than shared with
  * it. `Launch`'s path is verified on hardware (`docs/30` §Step 37); a helper extracted for both would put
  * that verification behind a refactor no device has run, to save twenty lines.
+ *
+ * What this has that `Launch` does not is IFUNC: every image loaded here — the three in the scope and the
+ * app — has its `STT_GNU_IFUNC` slots resolved by running their resolvers through the bridge while the
+ * image is still writable, and the report names each slot's implementation. A library loaded without that
+ * hands the guest a *resolver* where it expects a routine, which is the shape of this launcher's last
+ * hang rather than a subtlety of the ELF format.
  *
  * `tiers`: 0 = interpreter then JIT, 1 = interpreter only, 2 = JIT only.
  *
@@ -626,6 +867,21 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
     Say(&out, "FATAL: mapping the guest stack failed: %s", err.c_str());
     return out;
   }
+  // The host-entry window is reserved, not merely avoided: nothing maps it, but the loader's
+  // free-space scan must see it as taken, or a library ending past 12 MiB is placed over the return
+  // sentinel and the `AbiContext` slot table. `kNone` makes it a guard reservation — occupied for
+  // placement, refused for any access.
+  if (!mem->Map(kReturnAddress, kHostWindowBytes, kNone, &err)) {
+    Say(&out, "FATAL: reserving the host-entry window failed: %s", err.c_str());
+    return out;
+  }
+  // Same reservation as `Launch`, for the same reason: an unanswered import's address is only a trap
+  // while no module is placed over it.
+  if (!mem->Map(kUnresolved, kGuestPage, kNone, &err)) {
+    Say(&out, "FATAL: reserving the unresolved-import trap page at 0x%s failed: %s",
+        Hex(kUnresolved).c_str(), err.c_str());
+    return out;
+  }
 
   /**
    * The two guest pages the entry point's arguments live in, mapped here rather than at that call.
@@ -640,8 +896,6 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
    * string the Java side would have passed. Neither is a Java object: there is no JavaVM here, and the
    * call's own lines say what the addresses are.
    */
-  constexpr exec::GuestAddr kStandInObject = 0x0044'0000u;
-  constexpr exec::GuestAddr kApkPathAt = 0x0045'0000u;
   exec::GuestAddr stand_in = 0;
   exec::GuestAddr apk_path_guest = 0;
   if (mem->Map(kStandInObject, kGuestPage, kRead | kWrite, &err)) {
@@ -690,8 +944,6 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
    * `dladdr`) stays trapped, so the next one the guest reaches names itself in the report instead of
    * being guessed at now.
    */
-  constexpr exec::GuestAddr kLoaderGlobals = 0x0041'0000u;
-  constexpr exec::GuestAddr kLoaderStub = 0x0042'0000u;
   std::uint32_t loader_shared_globals = kUnresolved;
   if (mem->Map(kLoaderGlobals, kGuestPage, kRead | kWrite, &err) &&
       mem->Map(kLoaderStub, kGuestPage, kRead | kWrite | kExec, &err)) {
@@ -794,7 +1046,6 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
    * instructions. The GL set above reaches the same slot mechanism independently; what both need is a
    * guest that calls through them, and for the JNIEnv that caller is the entry point below.
    */
-  constexpr exec::GuestAddr kJniEnvRegion = 0x0050'0000u;
   constexpr unsigned kJniEnvArena = 4u << 10;
   std::string jni_err;
   abi::JniEnv jni{*mem, ctx, kJniEnvRegion, kJniEnvArena, &jni_err};
@@ -874,6 +1125,64 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
   });
   ctx.set_monitor(&monitor);
 
+  /**
+   * The two tiers, built here rather than beside the constructors below, because IFUNC resolution runs
+   * *inside* each load: a resolver is guest code, so an executor has to exist before the first
+   * `LoadFromBytes` — `LoadOptions::resolve_ifunc` is called between relocation and RELRO, and that call
+   * has to be able to run something. Constructing an executor maps no guest page and runs no guest code,
+   * so nothing the loads below place is affected by the order.
+   */
+  exec::InterpExecutor interp{*mem, kReturnAddress, &ctx};
+  exec::JitExecutor jit{*mem, kReturnAddress, &ctx};
+  if (!jit.ok()) Say(&out, "tier J is unavailable before any guest code ran: %s", jit.error().c_str());
+  // The tier this run was asked for, by the same rule the constructor sequence below uses, and the other
+  // tier as the fallback a resolver this one cannot execute falls through to. One `set_executor` call,
+  // here, is what arms the bridge for everything that follows.
+  exec::Executor& ctor_engine = (tiers == 2 && jit.ok()) ? static_cast<exec::Executor&>(jit)
+                                                         : static_cast<exec::Executor&>(interp);
+  const char* ctor_tier = ctor_engine.tier() == exec::CodeTier::Interp ? "I" : "J";
+  ctx.set_executor(ctor_engine);
+
+  /**
+   * IFUNC resolution, armed with the guest call it needs and handed to every load below.
+   *
+   * Without it the loader leaves the **resolver's address** in each IFUNC slot, and the guest then calls
+   * resolver *code* as if it were the function. That is not hypothetical: it is what this build was
+   * doing, and a disassembly trace on the phone caught `strlen`'s slot holding `strlen_resolver`, so
+   * `__strlen_chk` received a pointer where it expects a length, failed its fortify check, and recursed
+   * through `async_safe_fatal_va_list` until the step budget and the stack were gone. One unresolved
+   * IFUNC, one infinite recursion, and every symptom pointed at the wrong layer.
+   *
+   * A resolver that probes `/dev/cpu_variant:arm` is answered by the monitor attached above; its `ENOENT`
+   * is the answer that makes bionic choose the generic implementation, which is the one that is right
+   * without knowing which SoC this is. With no monitor there is no such answer, so the hook is not handed
+   * over at all and each image's line below says its slots were left as they were.
+   */
+  IfuncResolution ifunc;
+  ifunc.ctx = &ctx;
+  ifunc.engine = &ctor_engine;
+  ifunc.tier = ctor_tier;
+  // A fallback tier is offered only when this run asked for both (`tiers` 0): 1 and 2 are requests to see
+  // one engine alone, so a resolver that engine cannot execute is that tier's gap to name, not something
+  // to cover with the engine the caller excluded. A JIT that could not be built is not a retry either.
+  if (tiers == 0) {
+    if (&ctor_engine == &interp) {
+      if (jit.ok()) ifunc.spare = &jit;
+    } else {
+      ifunc.spare = &interp;
+    }
+  }
+  ifunc.spare_tier = (&ctor_engine == &interp) ? "J" : "I";
+  // Both halves of the requirement are checked rather than assumed: a resolver is guest code (an engine)
+  // that probes for the CPU variant with a syscall (a monitor). With either missing, the hook is not
+  // handed over at all and every image's line below says its slots were left as they were.
+  ifunc.armed = ifunc.engine != nullptr && ctx.monitor() != nullptr;
+  if (!ifunc.armed) {
+    Say(&out, "ifunc: no engine and monitor pair is available to run a resolver — a resolver is guest"
+              " code whose openat(\"/dev/cpu_variant:arm\") probe a monitor has to answer — so no image"
+              " has its IFUNC slots resolved, and each one's line below says so as it is loaded");
+  }
+
   const loader::SymbolResolver host = [&](const std::string& name) -> std::optional<std::uint32_t> {
     if (name == "__stack_chk_guard") return kGuardPage;
     if (name == "__loader_shared_globals") return loader_shared_globals;
@@ -908,6 +1217,15 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
     // cannot apply, and without the opt-in every one of them fails the load by name. What it tolerates is
     // not hidden — each module keeps its skipped slots in `unsupported_relocs`, printed below.
     opts.tolerate_unresolved_relocs = true;
+    // This image's own tally, with the bridge and the tiers armed above: the hook is per image because the
+    // lines below name the module, and a failure is named per slot rather than counted. Captured by
+    // reference like `opts.resolve` below — and that is not a style choice: assigning the object itself
+    // would copy it into the `std::function`, and the loader would fill the *copy's* tally while this one
+    // reported zero slots for every image.
+    IfuncResolution image_ifunc = ifunc;
+    if (ifunc.armed) {
+      opts.resolve_ifunc = [&image_ifunc](const loader::IfuncSlot& s) { return image_ifunc(s); };
+    }
     // By reference, and that is safe here where the file header's provider has to be by value: this
     // resolver is consulted only inside `LoadFromBytes`, which this lambda calls synchronously and does
     // not retain. It answers from what is already in the scope, which is what makes the load order below
@@ -924,6 +1242,9 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
     slot = loader::LoadFromBytes(*mem, image, soname, opts, &load_err);
     if (!slot) {
       Say(&out, "scope: %s not loaded: %s", soname, load_err.c_str());
+      // A refusal can be a resolved slot the loader could not write, which names itself in `load_err`
+      // above; anything resolved before that is still a fact, so the tally is printed rather than lost.
+      if (image_ifunc.slots != 0) image_ifunc.Report(&out, soname);
       return;
     }
     std::size_t exports = 0;
@@ -937,6 +1258,9 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
                 " data, not addresses",
           soname, slot->unsupported_relocs.size());
     }
+    // Per image, now that the module that names the slots exists. Every slot gets a line, resolved or
+    // not: a name missing from this list would be exactly the silent zero the launcher forbids.
+    image_ifunc.Report(&out, soname);
   };
   load_scope("libc.so", libc_mod, libc_image);
   load_scope("libm.so", libm_mod, libm_image);
@@ -963,6 +1287,13 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
     list.push_back(name);
   };
   loader::LoadOptions app_opts;
+  // The app's own IFUNC slots (if any) get what the scope's got: resolved during this load, by the same
+  // hook, before RELRO makes the slots unwritable. Its `strlen` and friends come from the scope and are
+  // already implementations by the time `FindExport` answers them.
+  IfuncResolution app_ifunc = ifunc;
+  if (ifunc.armed) {
+    app_opts.resolve_ifunc = [&app_ifunc](const loader::IfuncSlot& s) { return app_ifunc(s); };
+  }
   app_opts.resolve = [&](const std::string& name) -> std::optional<std::uint32_t> {
     for (const std::optional<loader::GuestModule>* mod : {&libc_mod, &libz_mod, &libm_mod}) {
       if (*mod) {
@@ -988,6 +1319,7 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
     Say(&out, "FATAL: the loader refused %s: %s", label.c_str(), err.c_str());
     Say(&out, "  (a refusal names every slot it could not fill; a library built against a libc RetroBug"
               " does not ship yet is the expected shape of this)");
+    if (app_ifunc.slots != 0) app_ifunc.Report(&out, label);
     return out;
   }
   const loader::GuestModule& app = *app_mod;
@@ -1008,9 +1340,7 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
     for (const std::string& one : app.unsupported_relocs) relocs += (relocs.empty() ? "" : ", ") + one;
     Say(&out, "refused relocations: %s", relocs.c_str());
   }
-  exec::InterpExecutor interp{*mem, kReturnAddress, &ctx};
-  exec::JitExecutor jit{*mem, kReturnAddress, &ctx};
-  if (!jit.ok()) Say(&out, "tier J is unavailable before any guest code ran: %s", jit.error().c_str());
+  app_ifunc.Report(&out, app.soname.empty() ? label : app.soname);
 
   /**
    * The thread pointer, before any guest constructor runs.
@@ -1021,12 +1351,11 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
    * one did: libc's own `DT_INIT_ARRAY[0]` stopped at `guest memory read at 0x14 refused` on
    * `ReadMemory32`, which is slot 5 of a null TLS block rather than anything libc did wrong.
    *
-   * One page, read/write, at an address the layout above leaves free (the stack ends at `kStackTop`, the
-   * guard page is at `kGuardPage`, the sentinel at `kReturnAddress`, and modules are placed upward from
-   * 0x2000). The guest's own TLS layout lives inside it; nothing here interprets it.
+   * One page, read/write, at an address the file-scope layout constants leave free (they are declared
+   * beside the other reserved pages, and the static_asserts there keep the two distinct — the first
+   * draft of this block declared its own `kThreadStruct` at 0x430000, which was also `kGlStrings`, and
+   * the map below silently replaced the identity strings with a zero page).
    */
-  constexpr exec::GuestAddr kTlsBase = 0x0040'0000u;
-  constexpr exec::GuestAddr kThreadStruct = 0x0043'0000u;
   if (mem->Map(kTlsBase, kGuestPage, kRead | kWrite, &err) &&
       mem->Map(kThreadStruct, kGuestPage, kRead | kWrite, &err)) {
     ctx.state().tp = kTlsBase;
@@ -1077,13 +1406,9 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
    *
    * One tier only, and that is a correctness rule rather than a speed one: a constructor has side effects
    * and this is one guest memory, so running the sequence on both tiers would run every constructor
-   * twice. `tiers == 2` asks for the JIT, but a JIT that could not be built is reported above, and the
-   * interpreter is then the only engine left that can run one.
+   * twice. The engine and tier are the pair chosen above, before the loads, for the same reason the
+   * IFUNC hook needed one.
    */
-  exec::Executor& ctor_engine = (tiers == 2 && jit.ok()) ? static_cast<exec::Executor&>(jit)
-                                                         : static_cast<exec::Executor&>(interp);
-  const char* ctor_tier = ctor_engine.tier() == exec::CodeTier::Interp ? "I" : "J";
-  ctx.set_executor(ctor_engine);
   // `CallGuest` hands the callee's last state back through its out-parameter, not through `ctx.state()`,
   // which the bridge restores to the caller's registers on the way out (`rb/abi/abi.h`).
   Outcome ctor_call;
@@ -1245,6 +1570,19 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
       return;
     }
     Say(&out, "syscalls: %s", tally.c_str());
+    // The tally counts; it cannot say whether a call was served or refused, and a report that lists
+    // `openat x3` without that is the half-story the monitor's own notes exist to complete. They were
+    // recorded on every refusal and read by nobody in production — only by the monitor's unit test — so
+    // until this loop existed, a device report could not explain a single refusal.
+    const std::vector<std::string>& notes = monitor.notes();
+    for (const std::string& note : notes) {
+      Say(&out, "syscall note: %s", note.c_str());
+    }
+    if (monitor.dropped_notes() != 0) {
+      Say(&out, "syscall note: %zu further distinct refusals were recorded past the %zu-note cap and are"
+                " counted, not listed",
+          monitor.dropped_notes(), syscall::Monitor::kMaxNotes);
+    }
   };
 
   // A constructor that did not return leaves the module half-initialized, so its entry points are not
@@ -1370,8 +1708,18 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
         Hex(got.exit.pc).c_str(), Hex(got.exit.r[14]).c_str(), Hex(got.exit.r[0]).c_str(),
         Hex(got.exit.r[13]).c_str(), Hex(got.exit.cpsr).c_str());
   };
-  if (tiers == 0 || tiers == 1) call_one(interp, "I");
-  if ((tiers == 0 || tiers == 2) && jit.ok()) call_one(jit, "J");
+  // The constructor tier, once — the same rule the constructor sequence above states: this is one
+  // shared guest memory, and a real library's `JNI_OnLoad` has side effects (subsystem init,
+  // reference tables, GL calls it makes are counted in this run's tally). Running it on both tiers
+  // applied every one of them twice; the probe lane can run both because the probe's `JNI_OnLoad`
+  // returns a constant and touches nothing.
+  call_one(ctor_engine, ctor_tier);
+  if (tiers == 0) {
+    Say(&out, "JNI_OnLoad: not called on the other tier — a real library's startup has side effects in"
+              " one guest memory, so it runs once, on the constructor tier (%s), like the constructors"
+              " did.",
+        ctor_tier);
+  }
   say_gl();
   say_syscalls();
   say_trapped();
@@ -1407,16 +1755,31 @@ Java_com_retrobug_launcher_LauncherActivity_nativeInspect(JNIEnv* env, jclass /*
       env->ReleaseStringUTFChars(apk_path, chars);
     }
   }
-  const std::vector<std::uint8_t> app_image = Bytes(env, guest_so);
-  const std::vector<std::uint8_t> libm_image = Bytes(env, libm_so);
-  const std::vector<std::uint8_t> libc_image = Bytes(env, libc_so);
-  const std::vector<std::uint8_t> libz_image = Bytes(env, libz_so);
+  // One note per image, joined, so a read that cleared a pending exception names the image it belonged to
+  // rather than arriving as an empty vector the loader then reports as "not an ELF image".
+  std::string image_note;
+  const auto image = [&](jbyteArray a, const char* what) {
+    std::string note;
+    std::vector<std::uint8_t> bytes = Bytes(env, a, &note);
+    if (!note.empty()) image_note += std::string{"\n  "} + what + ": " + note;
+    return bytes;
+  };
+  const std::vector<std::uint8_t> app_image = image(guest_so, "the app's library");
+  const std::vector<std::uint8_t> libm_image = image(libm_so, "libm");
+  const std::vector<std::uint8_t> libc_image = image(libc_so, "libc");
+  const std::vector<std::uint8_t> libz_image = image(libz_so, "libz");
   std::string report;
   try {
     report = Inspect(app_image, libm_image, libc_image, libz_image, name, static_cast<int>(tiers), apk,
                      static_cast<int>(surface_width), static_cast<int>(surface_height));
   } catch (const std::exception& e) {
     report = std::string{"FATAL: unhandled exception while inspecting: "} + e.what();
+  }
+  if (!image_note.empty()) {
+    // Prepended, not appended: every line below this one is about bytes the run never received, so the
+    // reason has to come first or the report reads as a statement about the guest's own image.
+    report = "FATAL: the Java half could not hand over every guest image — a pending exception was cleared"
+             " and the read returned nothing:" + image_note + "\n" + report;
   }
   return env->NewStringUTF(report.c_str());
 }
@@ -1437,8 +1800,17 @@ Java_com_retrobug_launcher_LauncherActivity_nativeLaunch(JNIEnv* env, jclass /*c
       env->ReleaseStringUTFChars(method, chars);
     }
   }
-  const std::vector<std::uint8_t> app_image = Bytes(env, guest_so);
-  const std::vector<std::uint8_t> libm_image = Bytes(env, libm_so);
+  // Same reason as `Inspect` above: an empty image with a cleared pending exception is a host failure and
+  // has to say so rather than be reported as a guest library that would not load.
+  std::string image_note;
+  const auto image = [&](jbyteArray a, const char* what) {
+    std::string note;
+    std::vector<std::uint8_t> bytes = Bytes(env, a, &note);
+    if (!note.empty()) image_note += std::string{"\n  "} + what + ": " + note;
+    return bytes;
+  };
+  const std::vector<std::uint8_t> app_image = image(guest_so, "the app's library");
+  const std::vector<std::uint8_t> libm_image = image(libm_so, "libm");
 
   std::string report;
   try {
@@ -1450,6 +1822,10 @@ Java_com_retrobug_launcher_LauncherActivity_nativeLaunch(JNIEnv* env, jclass /*c
     // because an unhandled one crossing JNI kills the process and this launcher exists to produce a
     // report; a run that stops saying things is the failure mode it cannot afford.
     report = std::string{"FATAL: unhandled exception in the launcher: "} + e.what();
+  }
+  if (!image_note.empty()) {
+    report = "FATAL: the Java half could not hand over every guest image — a pending exception was cleared"
+             " and the read returned nothing:" + image_note + "\n" + report;
   }
   return env->NewStringUTF(report.c_str());
 }

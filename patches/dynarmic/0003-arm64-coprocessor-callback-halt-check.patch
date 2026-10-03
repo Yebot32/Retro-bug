@@ -1,0 +1,72 @@
+diff --git a/src/dynarmic/backend/arm64/emit_arm64.h b/src/dynarmic/backend/arm64/emit_arm64.h
+index 58ccb0e..e0f8afc 100644
+--- a/src/dynarmic/backend/arm64/emit_arm64.h
++++ b/src/dynarmic/backend/arm64/emit_arm64.h
+@@ -177,5 +177,6 @@ void EmitA32ConditionFailedTerminal(oaknut::CodeGenerator& code, EmitContext& ct
+ void EmitA64ConditionFailedTerminal(oaknut::CodeGenerator& code, EmitContext& ctx);
+ void EmitA32CheckMemoryAbort(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, oaknut::Label& end);
+ void EmitA64CheckMemoryAbort(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, oaknut::Label& end);
++void EmitA32CheckCallbackHalt(oaknut::CodeGenerator& code, EmitContext& ctx, oaknut::Label& end);
+ 
+ }  // namespace Dynarmic::Backend::Arm64
+diff --git a/src/dynarmic/backend/arm64/emit_arm64_a32.cpp b/src/dynarmic/backend/arm64/emit_arm64_a32.cpp
+index 909dde7..0acb1aa 100644
+--- a/src/dynarmic/backend/arm64/emit_arm64_a32.cpp
++++ b/src/dynarmic/backend/arm64/emit_arm64_a32.cpp
+@@ -179,6 +179,36 @@ void EmitA32CheckMemoryAbort(oaknut::CodeGenerator& code, EmitContext& ctx, IR::
+     EmitRelocation(code, ctx, LinkTarget::ReturnFromRunCode);
+ }
+ 
++void EmitA32CheckCallbackHalt(oaknut::CodeGenerator& code, EmitContext& ctx, oaknut::Label& end) {
++    // RetroBug patch: the coprocessor callback path needs the same re-test the memory callbacks got.
++    // `CallCoprocCallback` calls into RetroBug's `Arm15Coprocessor`, which raises
++    // `HaltReason::UserDefined1` for an access it does not model — but the emitted code never read
++    // `Xhalt`, so the callback's zero landed in the guest register and the rest of the block ran on.
++    // An unimplemented `mrc` therefore handed the guest a plausible value where Tier I stops at the
++    // instruction: a silent-corruption path *and* a tier divergence.
++    //
++    // The gate is `check_halt_on_memory_access` because that flag is the back end's only "re-test the
++    // halt flag after a host callback" switch, and RetroBug sets it precisely so a callback that
++    // refused cannot be followed by more of the block.
++    if (!ctx.conf.check_halt_on_memory_access) {
++        return;
++    }
++
++    // `ctx.block.Location()`, not an instruction argument: a coprocessor IR instruction carries its
++    // coproc info in arg 0, not a location descriptor, so there is nothing per-instruction to read. The
++    // PC written back is the containing block's, which is also what the callback sees in
++    // `jit_->Regs()[15]` mid-block — so the host's report names the block and never a fabricated address.
++    const A32::LocationDescriptor current_location{ctx.block.Location()};
++
++    code.LDAR(Xscratch0, Xhalt);
++    code.TST(Xscratch0, static_cast<u32>(HaltReason::UserDefined1));
++    code.B(EQ, end);
++    EmitSetUpperLocationDescriptor(code, ctx, current_location, ctx.block.Location());
++    code.MOV(Wscratch0, current_location.PC());
++    code.STR(Wscratch0, Xstate, offsetof(A32JitState, regs) + sizeof(u32) * 15);
++    EmitRelocation(code, ctx, LinkTarget::ReturnFromRunCode);
++}
++
+ template<>
+ void EmitIR<IR::Opcode::A32SetCheckBit>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
+diff --git a/src/dynarmic/backend/arm64/emit_arm64_a32_coprocessor.cpp b/src/dynarmic/backend/arm64/emit_arm64_a32_coprocessor.cpp
+index 5115fbb..ccda345 100644
+--- a/src/dynarmic/backend/arm64/emit_arm64_a32_coprocessor.cpp
++++ b/src/dynarmic/backend/arm64/emit_arm64_a32_coprocessor.cpp
+@@ -33,6 +33,15 @@ static void CallCoprocCallback(oaknut::CodeGenerator& code, EmitContext& ctx, A3
+     code.MOV(Xscratch0, reinterpret_cast<u64>(callback.function));
+     code.BLR(Xscratch0);
+ 
++    if (ctx.conf.check_halt_on_memory_access) {
++        // RetroBug patch: a callback may have refused (raised `HaltReason::UserDefined1`) and there was
++        // no re-test here, so the refusal was recorded and then ignored while the block kept running on
++        // the callback's zero. Same shape as the memory callbacks' abort check.
++        oaknut::Label end;
++        EmitA32CheckCallbackHalt(code, ctx, end);
++        code.l(end);
++    }
++
+     if (inst) {
+         ctx.reg_alloc.DefineAsRegister(inst, X0);
+     }

@@ -141,6 +141,12 @@ struct GuestModule {
   /// content hash as the fallback key; that lands with tier-3 patching, which is deliberately held.
   std::vector<std::uint8_t> build_id;
 
+  /// Set once this module's `DT_INIT`/`DT_INIT_ARRAY` have run, and never cleared. bionic guards
+  /// constructors per-soinfo the same way: a shared dependency loaded by two dependents (or a retry
+  /// after a mid-way failure) must not run its allocator init, static constructors and refcounted
+  /// globals a second time in one address space.
+  bool constructors_called = false;
+
   /// An address to branch to, with the Thumb tag split out of it. nullopt when the name is not
   /// defined by this module.
   std::optional<CodeAddress> FindExport(const std::string& name) const;

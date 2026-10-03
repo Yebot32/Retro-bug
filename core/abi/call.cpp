@@ -195,8 +195,13 @@ Ret32 ReturnValue(const MachineState& state, const Shorty& shorty) {
       break;
     case 'B':
     case 'S':
+      // `jbyte`/`jshort` are *signed*: AAPCS guarantees only the low 8/16 bits of r0, so mask first
+      // and then sign-extend. A bare mask left a callee's `(byte) -1` arriving as 255 — the kinds
+      // above mask-then-normalise because their types are unsigned, and these two are not.
       out.kind = Value32::Kind::S32;
-      out.bits = shorty.returns() == 'B' ? (state.r[0] & 0xffu) : (state.r[0] & 0xffffu);
+      out.bits = shorty.returns() == 'B'
+                     ? static_cast<std::uint32_t>(static_cast<std::int8_t>(state.r[0] & 0xffu))
+                     : static_cast<std::uint32_t>(static_cast<std::int16_t>(state.r[0] & 0xffffu));
       break;
     case 'C':  // char, unsigned
       out.kind = Value32::Kind::U32;

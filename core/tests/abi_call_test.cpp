@@ -407,6 +407,26 @@ void return_values_come_from_where_the_type_says() {
   CHECK(abi::ReturnValue(z, abi::Shorty::For("ZL")).w() == 0u);
   z.r[0] = 0x0000'0001u;
   CHECK(abi::ReturnValue(z, abi::Shorty::For("ZL")).w() == 1u);
+
+  // 'B' and 'S' are *signed*: AAPCS guarantees only the low 8/16 bits, so the value must be masked
+  // and then sign-extended. The bare mask a first draft used turned `(byte) -1` into 255 and
+  // `(short) -2` into 65534 — plausible numbers, which is what made them dangerous. Both shapes of
+  // callee garbage are covered: the sign-extended form a callee leaves, and a zeroed upper half.
+  exec::MachineState b = Fresh();
+  b.r[0] = 0xffff'ffffu;
+  CHECK(abi::ReturnValue(b, abi::Shorty::For("BL")).i() == -1);
+  CHECK(abi::ReturnValue(b, abi::Shorty::For("BL")).w() == 0xffff'ffffu);
+  b.r[0] = 0x0000'00ffu;
+  CHECK(abi::ReturnValue(b, abi::Shorty::For("BL")).i() == -1);
+  b.r[0] = 0x0000'007fu;
+  CHECK(abi::ReturnValue(b, abi::Shorty::For("BL")).i() == 127);
+  exec::MachineState sh = Fresh();
+  sh.r[0] = 0xffff'fffeu;
+  CHECK(abi::ReturnValue(sh, abi::Shorty::For("SL")).i() == -2);
+  sh.r[0] = 0x0000'fffeu;
+  CHECK(abi::ReturnValue(sh, abi::Shorty::For("SL")).i() == -2);
+  sh.r[0] = 0x0000'7fffu;
+  CHECK(abi::ReturnValue(sh, abi::Shorty::For("SL")).i() == 0x7fff);
 }
 
 // --------------------------------------------------------------------- host-call dispatch

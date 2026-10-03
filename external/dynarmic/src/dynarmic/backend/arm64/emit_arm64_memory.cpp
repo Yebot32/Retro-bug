@@ -141,6 +141,19 @@ void CallbackOnlyEmitReadMemory(oaknut::CodeGenerator& code, EmitContext& ctx, I
 
     if constexpr (bitsize == 128) {
         code.MOV(Q8.B16(), Q0.B16());
+    }
+    if (ctx.conf.check_halt_on_memory_access) {
+        // RetroBug patch: honour check_halt_on_memory_access on the callback-only path. The fastmem
+        // and inline-page-table paths end with an abort check for exactly this flag, but this path
+        // emitted the callback call and nothing after it — so a faulting access recorded the failure
+        // and raised MemoryAbort, and the rest of the block still ran on with the zero-filled result.
+        // The check branches to `end` when the flag is clear and otherwise restores PC to the
+        // faulting instruction and returns from run code, which is the same shape the other paths use.
+        oaknut::Label end;
+        ctx.conf.emit_check_memory_abort(code, ctx, inst, end);
+        code.l(end);
+    }
+    if constexpr (bitsize == 128) {
         ctx.reg_alloc.DefineAsRegister(inst, Q8);
     } else {
         ctx.reg_alloc.DefineAsRegister(inst, X0);
@@ -162,6 +175,14 @@ void CallbackOnlyEmitExclusiveReadMemory(oaknut::CodeGenerator& code, EmitContex
 
     if constexpr (bitsize == 128) {
         code.MOV(Q8.B16(), Q0.B16());
+    }
+    if (ctx.conf.check_halt_on_memory_access) {
+        // RetroBug patch: same abort check as the non-exclusive read above.
+        oaknut::Label end;
+        ctx.conf.emit_check_memory_abort(code, ctx, inst, end);
+        code.l(end);
+    }
+    if constexpr (bitsize == 128) {
         ctx.reg_alloc.DefineAsRegister(inst, Q8);
     } else {
         ctx.reg_alloc.DefineAsRegister(inst, X0);
@@ -180,6 +201,12 @@ void CallbackOnlyEmitWriteMemory(oaknut::CodeGenerator& code, EmitContext& ctx, 
     EmitRelocation(code, ctx, WriteMemoryLinkTarget(bitsize));
     if (ordered) {
         code.DMB(oaknut::BarrierOp::ISH);
+    }
+    if (ctx.conf.check_halt_on_memory_access) {
+        // RetroBug patch: same abort check as the read path above.
+        oaknut::Label end;
+        ctx.conf.emit_check_memory_abort(code, ctx, inst, end);
+        code.l(end);
     }
 }
 
@@ -203,6 +230,13 @@ void CallbackOnlyEmitExclusiveWriteMemory(oaknut::CodeGenerator& code, EmitConte
         code.DMB(oaknut::BarrierOp::ISH);
     }
     code.l(end);
+    if (ctx.conf.check_halt_on_memory_access) {
+        // RetroBug patch: a faulted exclusive store raises MemoryAbort and stops here too; the
+        // exclusive-failure path above reaches this check with the flag clear and falls through.
+        oaknut::Label ok;
+        ctx.conf.emit_check_memory_abort(code, ctx, inst, ok);
+        code.l(ok);
+    }
     ctx.reg_alloc.DefineAsRegister(inst, X0);
 }
 

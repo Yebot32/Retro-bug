@@ -372,10 +372,33 @@ void bad_requests_are_refused_not_corrupted() {
   if (!gm) return;
   std::string err;
   CHECK(!gm->Map(0x1000, 0, kRead | kWrite, &err));
-  CHECK(!gm->Map(0x1000, 0x1000, kNone, &err));
+  // `Map(..., kNone)` is a *guard reservation* now, not a rejection: this line asserted the old contract
+  // while `guard_pages_are_representable_and_re_armable` below asserted the new one, so the two halves of
+  // this file disagreed and the binary could not go green. What is still refused is a *file* mapping with
+  // no permissions — it would map nothing and report success, which is the shape the guard reservation
+  // replaced. See the `prot == kNone` case in `MapFile`.
+  CHECK(!gm->MapFile(0x1000, 0x1000, kNone, -1, 0, false, &err));
   CHECK(!gm->Protect(0x8000, 0x1000, kRead, &err));          // nothing mapped there
   CHECK(!gm->Map(0xFFFFFF00, 0x40000, kRead | kWrite, &err));  // runs off the end of the window
   CHECK(!gm->Read(0xFFFFF800, nullptr, 0x10000));             // would wrap past the window end
+}
+
+/// `err` is an output, not an input. A string left dirty by an earlier refusal used to make the next
+/// *successful* map roll itself back and return false, because success was inferred from "`err` stayed
+/// empty" and nothing cleared it on entry. The launcher reuses one `err` across its whole map sequence,
+/// so this is the shape that reaches a device — and the rollback it caused then made the report blame the
+/// guest image for a page the memory model had just refused to keep.
+void a_dirty_error_string_does_not_poison_a_later_map() {
+  auto gm = make(12);
+  if (!gm) return;
+  std::string err = "text left here by an earlier refusal";
+  CHECK(gm->Map(0x1000, 0x1000, kRead | kWrite, &err));
+  CHECK(err.empty());  // the successful call owns the string and leaves it empty
+  CHECK(gm->IsMapped(0x1000));
+  CHECK(gm->Host(0x1000) != nullptr);
+  // The refusal path still reports: clearing on entry must not turn a rejection into silence.
+  CHECK(!gm->Map(0x1000, 0, kRead | kWrite, &err));
+  CHECK(!err.empty());
 }
 
 void host_page_shifts_below_the_guest_page_are_refused() {
@@ -424,6 +447,135 @@ void native_host_granule_matches_injection() {
   CHECK(gm->IsFastmem(0x2000));
 }
 
+// ------------------------------------------------------- guard pages
+
+/// A `kNone` map is a guard reservation: mapped (so the loader's placement scan skips it), with no
+/// permissions (so every access refuses), and *re-armable* — the first draft's Protect skipped
+/// `kNone` pages, which made a guard page a one-way trap.
+void guard_pages_are_representable_and_re_armable() {
+  auto gm = make(12);
+  if (!gm) return;
+  std::string err;
+  CHECK(gm->Map(0x1000, 0x1000, kNone, &err));
+  CHECK(gm->IsMapped(0x1000));  // claimed, so placement scans and Protect see it
+  CHECK(gm->mapped_page_count() == 1);
+  CHECK(gm->ProtAt(0x1000) == kNone);
+  unsigned char b[4] = {};
+  CHECK(!gm->Read(0x1000, b, sizeof b));
+  CHECK(!gm->Write(0x1000, b, sizeof b));
+  CHECK(gm->Host(0x1000) == nullptr);
+  CHECK(!gm->IsFastmem(0x1000));
+
+  // Re-arm: a guard page can become live.
+  CHECK(gm->Protect(0x1000, 0x1000, kRead | kWrite, &err));
+  const std::uint32_t marker = 0x0BADF00Du;
+  CHECK(gm->Write(0x1000, &marker, sizeof marker));
+  std::uint32_t got = 0;
+  CHECK(gm->Read(0x1000, &got, sizeof got));
+  CHECK(got == marker);
+
+  // And back: re-protect to kNone re-traps it.
+  CHECK(gm->Protect(0x1000, 0x1000, kNone, &err));
+  CHECK(!gm->Read(0x1000, &got, sizeof got));
+  CHECK(!gm->Write(0x1000, &marker, sizeof marker));
+}
+
+/// The in-place file form needs every page in the granule to be the same file at consecutive
+/// offsets. The first draft took the first live page's fd and offset for the whole granule, so two
+/// files sharing a host granule both read back the first one's bytes. With the contiguity rule the
+/// granule goes out of line and each page reads its own file.
+void two_files_in_one_granule_read_their_own_bytes() {
+  auto gm = make(14);  // one granule holds four guest pages on the injected shift
+  if (!gm) return;
+  std::string err;
+  int fds[2] = {-1, -1};
+#if defined(SYS_memfd_create)
+  fds[0] = static_cast<int>(syscall(SYS_memfd_create, "rb-file-a", 0u));
+  fds[1] = static_cast<int>(syscall(SYS_memfd_create, "rb-file-b", 0u));
+#endif
+  if (fds[0] < 0 || fds[1] < 0) {
+    ++skipped;
+    std::printf("SKIP   two-files-in-one-granule (no memfd: %s)\n", std::strerror(errno));
+    return;
+  }
+  std::vector<unsigned char> a(kGuestPage, 0xAA), b(kGuestPage, 0xBB);
+  CHECK(::pwrite(fds[0], a.data(), a.size(), 0) == static_cast<ssize_t>(a.size()));
+  CHECK(::pwrite(fds[1], b.data(), b.size(), 0) == static_cast<ssize_t>(b.size()));
+
+  CHECK(gm->MapFile(0x0000, kGuestPage, kRead | kWrite, fds[0], 0, false, &err));
+  CHECK(gm->MapFile(0x1000, kGuestPage, kRead | kWrite, fds[1], 0, false, &err));
+  unsigned char back[kGuestPage] = {};
+  CHECK(gm->Read(0x0000, back, sizeof back));
+  CHECK_CTX(std::memcmp(back, a.data(), kGuestPage) == 0,
+            "page 0 read file B's bytes, not file A's");
+  CHECK(gm->Read(0x1000, back, sizeof back));
+  CHECK_CTX(std::memcmp(back, b.data(), kGuestPage) == 0,
+            "page 1 read file A's bytes, not file B's");
+  ::close(fds[0]);
+  ::close(fds[1]);
+}
+
+/// A shared file mapping has to be creatable at all: the first draft set MAP_PRIVATE and MAP_SHARED
+/// together, which is EINVAL on Linux, so every uniform shared granule failed outright. With the
+/// flag fixed, a write through the file (from the caller's own fd) is visible through the mapping —
+/// which is the property "shared" promises.
+void shared_file_mapping_succeeds_and_stays_shared() {
+  auto gm = make(12);
+  if (!gm) return;
+  std::string err;
+  int fd = -1;
+#if defined(SYS_memfd_create)
+  fd = static_cast<int>(syscall(SYS_memfd_create, "rb-shared", 0u));
+#endif
+  if (fd < 0) {
+    ++skipped;
+    std::printf("SKIP   shared file mapping (no memfd: %s)\n", std::strerror(errno));
+    return;
+  }
+  const std::vector<unsigned char> first(kGuestPage, 0x11);
+  CHECK(::pwrite(fd, first.data(), first.size(), 0) == static_cast<ssize_t>(first.size()));
+  CHECK(gm->MapFile(0x1000, kGuestPage, kRead | kWrite, fd, 0, /*shared=*/true, &err));
+  unsigned char back[4] = {};
+  CHECK(gm->Read(0x1000, back, sizeof back));
+  CHECK(back[0] == 0x11);
+
+  // The sharing, not just the creation: the file moves, the mapping follows.
+  const std::vector<unsigned char> second(kGuestPage, 0x22);
+  CHECK(::pwrite(fd, second.data(), second.size(), 0) == static_cast<ssize_t>(second.size()));
+  CHECK(gm->Read(0x1000, back, sizeof back));
+  CHECK_CTX(back[0] == 0x22, "a write to the shared file did not reach the mapping");
+  ::close(fd);
+}
+
+// ------------------------------------------------------- refusals
+
+void zero_length_and_permissionless_requests_are_refused() {
+  auto gm = make(12);
+  if (!gm) return;
+  std::string err;
+  CHECK(gm->Map(0x1000, 0x1000, kRead | kWrite, &err));
+  // A zero-length mprotect or munmap is a kernel no-op; the first draft rounded an unaligned
+  // address up through `RoundUpPages` and re-protected (or destroyed) a whole page the caller never
+  // named.
+  CHECK(!gm->Protect(0x1801, 0, kRead, &err));
+  CHECK(!gm->Unmap(0x1801, 0, &err));
+  CHECK(gm->IsMapped(0x1000));
+  CHECK(gm->IsMapped(0x2000) == false);
+  std::uint32_t v = 0;
+  CHECK(gm->Read(0x1000, &v, sizeof v));  // the page the zero-length calls must not have touched
+
+  // A permissionless *file* mapping maps nothing and used to report success.
+  int fd = -1;
+#if defined(SYS_memfd_create)
+  fd = static_cast<int>(syscall(SYS_memfd_create, "rb-none", 0u));
+#endif
+  if (fd >= 0) {
+    CHECK(!gm->MapFile(0x3000, 0x1000, kNone, fd, 0, false, &err));
+    CHECK(!gm->IsMapped(0x3000));
+    ::close(fd);
+  }
+}
+
 }  // namespace
 
 /// Prints before each case so a crash names its own test. On Android the child's stdout can be lost
@@ -452,9 +604,15 @@ int main() {
   RUN(translate_round_trips_in_both_forms);
   RUN(writes_through_a_host_pointer_are_visible_to_reads);
   RUN(bad_requests_are_refused_not_corrupted);
+  RUN(a_dirty_error_string_does_not_poison_a_later_map);
   RUN(host_page_shifts_below_the_guest_page_are_refused);
   RUN(window_size_must_be_page_multiples);
   RUN(native_host_granule_matches_injection);
+
+  RUN(guard_pages_are_representable_and_re_armable);
+  RUN(two_files_in_one_granule_read_their_own_bytes);
+  RUN(shared_file_mapping_succeeds_and_stays_shared);
+  RUN(zero_length_and_permissionless_requests_are_refused);
 
   std::printf("%d checks, %d failures, %d skipped (host page shift %u)\n", checks, failures, skipped,
               NativeShift());

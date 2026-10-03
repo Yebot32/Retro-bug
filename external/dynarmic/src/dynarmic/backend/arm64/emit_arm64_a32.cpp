@@ -179,6 +179,36 @@ void EmitA32CheckMemoryAbort(oaknut::CodeGenerator& code, EmitContext& ctx, IR::
     EmitRelocation(code, ctx, LinkTarget::ReturnFromRunCode);
 }
 
+void EmitA32CheckCallbackHalt(oaknut::CodeGenerator& code, EmitContext& ctx, oaknut::Label& end) {
+    // RetroBug patch: the coprocessor callback path needs the same re-test the memory callbacks got.
+    // `CallCoprocCallback` calls into RetroBug's `Arm15Coprocessor`, which raises
+    // `HaltReason::UserDefined1` for an access it does not model — but the emitted code never read
+    // `Xhalt`, so the callback's zero landed in the guest register and the rest of the block ran on.
+    // An unimplemented `mrc` therefore handed the guest a plausible value where Tier I stops at the
+    // instruction: a silent-corruption path *and* a tier divergence.
+    //
+    // The gate is `check_halt_on_memory_access` because that flag is the back end's only "re-test the
+    // halt flag after a host callback" switch, and RetroBug sets it precisely so a callback that
+    // refused cannot be followed by more of the block.
+    if (!ctx.conf.check_halt_on_memory_access) {
+        return;
+    }
+
+    // `ctx.block.Location()`, not an instruction argument: a coprocessor IR instruction carries its
+    // coproc info in arg 0, not a location descriptor, so there is nothing per-instruction to read. The
+    // PC written back is the containing block's, which is also what the callback sees in
+    // `jit_->Regs()[15]` mid-block — so the host's report names the block and never a fabricated address.
+    const A32::LocationDescriptor current_location{ctx.block.Location()};
+
+    code.LDAR(Xscratch0, Xhalt);
+    code.TST(Xscratch0, static_cast<u32>(HaltReason::UserDefined1));
+    code.B(EQ, end);
+    EmitSetUpperLocationDescriptor(code, ctx, current_location, ctx.block.Location());
+    code.MOV(Wscratch0, current_location.PC());
+    code.STR(Wscratch0, Xstate, offsetof(A32JitState, regs) + sizeof(u32) * 15);
+    EmitRelocation(code, ctx, LinkTarget::ReturnFromRunCode);
+}
+
 template<>
 void EmitIR<IR::Opcode::A32SetCheckBit>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
@@ -680,6 +710,19 @@ void EmitIR<IR::Opcode::A32SetFpscr>(oaknut::CodeGenerator& code, EmitContext& c
     code.AND(Wscratch0, Wscratch0, 0x0000'ffff);
     code.ORR(Wscratch0, Wscratch0, Wscratch1);
     code.STR(Wscratch0, Xstate, offsetof(A32JitState, upper_location_descriptor));
+
+    // RetroBug patch 0004: install the new mode in the host FPCR *now*, not at the next Run.
+    //
+    // The prelude installs FPCR once per Run from this descriptor (`a32_address_space.cpp:252-256`,
+    // `:290-294`), and the block emitters that compare `rounding_mode == ctx.FPCR().RMode()` rely on that
+    // invariant to skip their own `MSR` (`emit_arm64_floating_point.cpp:170-182`). A guest `vmsr fpscr`
+    // breaks it: the descriptor above is updated at runtime, the host register is not, and so every
+    // arithmetic op and every conversion after it kept rounding the *Run-entry* way until the embedder
+    // called `SetFpscr` again. The upper half of the descriptor is the FPCR image — the prelude writes it
+    // with exactly this `AND` — so the register can be brought back into step here. FPSCR is written by
+    // the embedder between Runs and by nothing else, which is why upstream never needed this.
+    code.AND(Wscratch0, Wscratch0, 0xffff'0000);
+    code.MSR(oaknut::SystemReg::FPCR, Xscratch0);
 
     code.MOV(Wscratch0, 0x0800'009f);
     code.AND(Wscratch0, Wfpscr, Wscratch0);

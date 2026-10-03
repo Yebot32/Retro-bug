@@ -450,6 +450,51 @@ JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_simd_int(JNIEnv* e
 /// register at this point without asking to modify it.
 #define RB_SEE(vec) __asm__ volatile("" : : "w"(vec))
 
+/*
+ * `fp_vecmax` / `fp_vecmin` — Advanced SIMD `vmax.f32` / `vmin.f32`, the *only* encoding of FP max/min
+ * an ARMv7 guest has: the scalar VFP forms (`vmaxnm.f32 s0,s1,s2`) need FPARMv8, and plain scalar
+ * `vmax.f32 s0,s1,s2` is not an ARMv7 instruction at all. Tier I implemented no FP vector op, so every
+ * `vmax.f32` in a real guest stopped the run; these two probes are what pins the implementation that
+ * followed, on the zero rule *and* the NaN rule.
+ *
+ * The operands are float *bit patterns* — the JNI signature is `(jint, jint)` because that is what the
+ * bridge drives, so `0x80000000` arrives as `-0.0f`. The `RB_HOLD` is load-bearing for the reason the
+ * ASIMD probes above give: without an opaque use of the result, clang is free to answer the whole thing
+ * at compile time, and then the probe measures the host compiler instead of the emulator. The proof is
+ * `llvm-objdump -d` showing `vmax.f32`/`vmin.f32`, not a pass rate.
+ */
+static float rb_f32_from_bits(jint bits) {
+  float v;
+  __builtin_memcpy(&v, &bits, sizeof v);
+  return v;
+}
+
+static jint rb_bits_from_f32(float v) {
+  jint bits;
+  __builtin_memcpy(&bits, &v, sizeof bits);
+  return bits;
+}
+
+JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_fp_vecmax(JNIEnv* env, jclass clazz,
+                                                                       jint a, jint b) {
+  (void)env; (void)clazz;
+  const float32x2_t x = vdup_n_f32(rb_f32_from_bits(a));
+  const float32x2_t y = vdup_n_f32(rb_f32_from_bits(b));
+  float32x2_t m = vmax_f32(x, y);
+  RB_HOLD(m);
+  return rb_bits_from_f32(vget_lane_f32(m, 0));
+}
+
+JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_fp_vecmin(JNIEnv* env, jclass clazz,
+                                                                       jint a, jint b) {
+  (void)env; (void)clazz;
+  const float32x2_t x = vdup_n_f32(rb_f32_from_bits(a));
+  const float32x2_t y = vdup_n_f32(rb_f32_from_bits(b));
+  float32x2_t m = vmin_f32(x, y);
+  RB_HOLD(m);
+  return rb_bits_from_f32(vget_lane_f32(m, 0));
+}
+
 /**
  * Integer ASIMD arithmetic and lane indexing, one lane width per `mode`.
  *
@@ -670,4 +715,137 @@ JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_fp_cmp(JNIEnv* env
                      : "cc");
   }
   return (int)((((f >> 28) & 0xfu) << 8) | (f & 0xffu));
+}
+
+/*
+ * fp_rmode — `FPSCR.RMode` is not decoration. A guest that sets it and then does arithmetic, or narrows
+ * a double, expects the result rounded *that way*, and the JIT path gets it for free: the back end puts
+ * the mode in the block's location descriptor and the JIT installs it in the host FPCR. Tier I computes
+ * with host arithmetic too and rounded everything to nearest, so the two tiers differed in the last bit
+ * of every directed-rounding result. No probe in this file set RMode before this one — which is exactly
+ * why that survived: every value the lane compared agreed, and the difference is one bit deep.
+ *
+ * `a` is the mode (0 nearest-even, 1 +inf, 2 -inf, 3 zero) and `b` seeds the operand. The divide and the
+ * narrowing are written as instructions rather than as C operators, for the reason the ASIMD probes give
+ * about scalarisation: `vdiv.f64` followed by `vcvt.f32.f64` has to be what runs, and a compiler is free
+ * to reassociate or fold `1.0/3.0`-shaped C. Both halves are folded into the returned int, so one row
+ * covers the arithmetic path (which takes its mode from FPSCR) and the conversion path (which carries it
+ * as an immediate) at once.
+ *
+ * FPSCR is cleared on the way out, like `fp_cmp` clears it on the way in: the mode is process state, and
+ * a probe that left RMode set would change what every later row in the same process measured.
+ */
+JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_fp_rmode(JNIEnv* env, jclass clazz, jint a,
+                                                                      jint b) {
+  (void)env; (void)clazz;
+  const uint32_t mode = (uint32_t)(a & 3) << 22; /* FPSCR.RMode is bits 23:22 */
+  const double x = 1.0 + (double)(b & 7) * 0.001;
+  const double three = 3.0;
+  double q = 0.0;
+  float n = 0.0f;
+  __asm__ volatile("vmsr         fpscr, %[mode]\n\t"
+                   "vdiv.f64     %[q], %[x], %[three]\n\t"
+                   "vcvt.f32.f64 %[n], %[q]\n\t"
+                   : [q] "=w"(q), [n] "=t"(n)
+                   : [mode] "r"(mode), [x] "w"(x), [three] "w"(three)
+                   : "cc");
+  const uint32_t zero = 0;
+  __asm__ volatile("vmsr fpscr, %0" :: "r"(zero) : "cc");
+  uint32_t qb = 0, nb = 0;
+  __builtin_memcpy(&qb, &q, 4); /* the low half of the quotient, where the mode shows */
+  __builtin_memcpy(&nb, &n, 4);
+  return (jint)(qb ^ nb);
+}
+
+/*
+ * fp_fz — flush-to-zero, in both of its ARMv7 flavours, which are *not* the same rule.
+ *
+ * The first flavour is the one the name suggests: a guest sets `FPSCR.FZ` and expects denormals to vanish —
+ * operands become zeros of their own sign (raising IDC) and denormal results become zeros too (raising
+ * UFC). The JIT has always got that from the host FPCR; Tier I ignored FZ entirely, so the two tiers
+ * disagreed on every denormal a guest produced.
+ *
+ * The second flavour is the one worth writing down: **Advanced SIMD flushes regardless of FZ**. Measured
+ * here on the SM-X710, `vmax.f32(0x00000001, +0)` answers +0 with IDC set even with FZ *clear*, while the
+ * VFP scalar `vmul.f32(0x00000001, 1.0)` answers the denormal itself. A probe that only ever set FZ would
+ * have missed the NEON rule, and a reader who knew only the scalar rule would have it backwards.
+ *
+ * `a` bit 0 selects FZ; `b` selects the case: 0 VFP mul input, 1 VFP mul result, 2 VFP sqrt input,
+ * 3 VFP widening input, 4 NEON max input.
+ *
+ * Every case is **one asm block** containing its own `vmsr`, and the first version of this probe is why.
+ * Case 4 was written with `vmax_f32` as an intrinsic next to a `vmsr` in a separate block, and clang
+ * scheduled the vmax *before* the vmsr — no FP state is declared clobbered by that asm, so nothing stopped
+ * it. The probe then measured whatever FZ the previous probe had left, answered the denormal at both FZ
+ * values, and disagreed with a standalone -O0 measurement of the same instruction on the same device. The
+ * flags are also left standing rather than cleared: FPSCR after the call is part of what the differential
+ * lane compares, so clearing it would hide a tier that forgot to raise IDC or UFC. Each case writes FPSCR
+ * itself, so no case inherits the previous one's stickiness.
+ */
+JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_fp_fz(JNIEnv* env, jclass clazz, jint a,
+                                                                   jint b) {
+  (void)env; (void)clazz;
+  const uint32_t flags = (a & 1) ? (1u << 24) : 0u;
+  const uint32_t dmin = 0x00000001u;    /* smallest positive denormal */
+  const uint32_t mnormal = 0x00800000u; /* smallest positive normal */
+  const uint32_t one = 0x3f800000u, half = 0x3f000000u, zero = 0u;
+  float fout = 0.0f;
+  uint32_t out = 0;
+  switch (b & 7) {
+    case 0: {
+      float x = rb_f32_from_bits(dmin), y = rb_f32_from_bits(one);
+      __asm__ volatile("vmsr fpscr, %[fl]\n\t"
+                       "vmul.f32 %[o], %[x], %[y]\n\t"
+                       : [o] "=t"(fout)
+                       : [fl] "r"(flags), [x] "t"(x), [y] "t"(y)
+                       : "cc");
+      break;
+    }
+    case 1: {
+      float x = rb_f32_from_bits(mnormal), y = rb_f32_from_bits(half);
+      __asm__ volatile("vmsr fpscr, %[fl]\n\t"
+                       "vmul.f32 %[o], %[x], %[y]\n\t"
+                       : [o] "=t"(fout)
+                       : [fl] "r"(flags), [x] "t"(x), [y] "t"(y)
+                       : "cc");
+      break;
+    }
+    case 2: {
+      float x = rb_f32_from_bits(dmin);
+      __asm__ volatile("vmsr fpscr, %[fl]\n\t"
+                       "vsqrt.f32 %[o], %[x]\n\t"
+                       : [o] "=t"(fout)
+                       : [fl] "r"(flags), [x] "t"(x)
+                       : "cc");
+      break;
+    }
+    case 3: {
+      double wide = 0.0;
+      float x = rb_f32_from_bits(dmin);
+      __asm__ volatile("vmsr fpscr, %[fl]\n\t"
+                       "vcvt.f64.f32 %[o], %[x]\n\t"
+                       : [o] "=w"(wide)
+                       : [fl] "r"(flags), [x] "t"(x)
+                       : "cc");
+      uint32_t lo = 0, hi = 0;
+      __builtin_memcpy(&lo, &wide, 4);
+      __builtin_memcpy(&hi, (const unsigned char*)&wide + 4, 4);
+      return (jint)(lo ^ hi); /* the double is only interesting through its bits */
+    }
+    default: {
+      float32x2_t x = vdup_n_f32(rb_f32_from_bits(dmin));
+      float32x2_t y = vdup_n_f32(rb_f32_from_bits(zero));
+      float32x2_t m = y;
+      __asm__ volatile("vmsr fpscr, %[fl]\n\t"
+                       "vmax.f32 %[o], %[x], %[y]\n\t"
+                       : [o] "=w"(m)
+                       : [fl] "r"(flags), [x] "w"(x), [y] "w"(y)
+                       : "cc");
+      RB_HOLD(m);
+      fout = vget_lane_f32(m, 0);
+      break;
+    }
+  }
+  __builtin_memcpy(&out, &fout, 4);
+  return (jint)out;
 }

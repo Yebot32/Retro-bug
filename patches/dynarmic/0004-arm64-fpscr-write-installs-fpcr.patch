@@ -1,0 +1,24 @@
+diff --git a/src/dynarmic/backend/arm64/emit_arm64_a32.cpp b/src/dynarmic/backend/arm64/emit_arm64_a32.cpp
+index 909dde7..7d8e593 100644
+--- a/src/dynarmic/backend/arm64/emit_arm64_a32.cpp
++++ b/src/dynarmic/backend/arm64/emit_arm64_a32.cpp
+@@ -681,6 +681,19 @@ void EmitIR<IR::Opcode::A32SetFpscr>(oaknut::CodeGenerator& code, EmitContext& c
+     code.ORR(Wscratch0, Wscratch0, Wscratch1);
+     code.STR(Wscratch0, Xstate, offsetof(A32JitState, upper_location_descriptor));
+ 
++    // RetroBug patch 0004: install the new mode in the host FPCR *now*, not at the next Run.
++    //
++    // The prelude installs FPCR once per Run from this descriptor (`a32_address_space.cpp:252-256`,
++    // `:290-294`), and the block emitters that compare `rounding_mode == ctx.FPCR().RMode()` rely on that
++    // invariant to skip their own `MSR` (`emit_arm64_floating_point.cpp:170-182`). A guest `vmsr fpscr`
++    // breaks it: the descriptor above is updated at runtime, the host register is not, and so every
++    // arithmetic op and every conversion after it kept rounding the *Run-entry* way until the embedder
++    // called `SetFpscr` again. The upper half of the descriptor is the FPCR image — the prelude writes it
++    // with exactly this `AND` — so the register can be brought back into step here. FPSCR is written by
++    // the embedder between Runs and by nothing else, which is why upstream never needed this.
++    code.AND(Wscratch0, Wscratch0, 0xffff'0000);
++    code.MSR(oaknut::SystemReg::FPCR, Xscratch0);
++
+     code.MOV(Wscratch0, 0x0800'009f);
+     code.AND(Wscratch0, Wfpscr, Wscratch0);
+     code.AND(Wscratch1, Wfpscr, 0xf000'0000);

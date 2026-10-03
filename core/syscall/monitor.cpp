@@ -128,8 +128,12 @@ enum class PathStatus { kOk, kUnmapped, kTooLong };
 PathStatus ReadGuestPath(mem::GuestMemory& mem, std::uint32_t at, std::string* out) {
   out->clear();
   for (std::size_t i = 0; i < kMaxPath; ++i) {
+    // The uint32 add wraps: a path pointer near the top of the window must refuse, not wrap round to
+    // address 0 and read a plausible-looking path from there.
+    const std::uint32_t where = at + static_cast<std::uint32_t>(i);
+    if (static_cast<std::uint64_t>(at) + i > 0xffff'ffffull) return PathStatus::kUnmapped;
     char c = 0;
-    if (!mem.Read(at + static_cast<std::uint32_t>(i), &c, 1)) return PathStatus::kUnmapped;
+    if (!mem.Read(where, &c, 1)) return PathStatus::kUnmapped;
     if (c == '\0') return PathStatus::kOk;
     out->push_back(c);
   }
@@ -200,8 +204,12 @@ std::string Describe(std::uint32_t number) {
 
 Frame Frame::Capture(const exec::MachineState& state, std::uint32_t svc_imm) {
   Frame f{};
-  // The kernel's own masking rule, applied here so a high bit cannot walk the table out of range.
-  f.number = state.r[7] & kSyscallMask;
+  // r7 is the syscall number, full stop. The kernel bounds-checks it against its table and answers
+  // -ENOSYS for a number past the end; masking it with `__NR_SYSCALL_MASK` — a bounds-check constant,
+  // not a mask — let a hand-written stub with a garbage high bit (r7 = 0x00100003) alias onto a real
+  // entry and *execute* it where the kernel would have refused. Numbers past the ARM private range
+  // are refused by the dispatch default below, which is the honest answer.
+  f.number = state.r[7];
   f.imm = svc_imm;
   for (int i = 0; i < 6; ++i) f.arg[i] = state.r[i];
   f.pc = state.pc;
@@ -341,7 +349,14 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
         return Outcome::Refused(err::kEnosys, "arm_cacheflush with no invalidator installed");
       }
       // AD-7's self-modifying-code path: the guest's own statement that executable bytes changed. An
-      // empty range is the guest asking for nothing, and the tier's Invalidate is a no-op for it.
+      // empty range is the guest asking for nothing, and the tier's Invalidate is a no-op for it. A
+      // reversed range is EINVAL on the measured kernel — a guest relying on the flush's success to
+      // have invalidated garbage gets a 0 here no device would give.
+      if (f.arg[1] < f.arg[0]) {
+        return Outcome::Answered(err::kEinval,
+                                 "arm_cacheflush(start=0x" + Hex(f.arg[0]) + ", end=0x" +
+                                     Hex(f.arg[1]) + "): the end precedes the start");
+      }
       invalidator_(f.arg[0], f.arg[1]);
       return Outcome::Emulated(0, "invalidated [" + Hex(f.arg[0]) + ", " + Hex(f.arg[1]) + ")");
     }
@@ -372,6 +387,13 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
     }
 
     case nr::kSetRobustList: {
+      // The kernel requires len == sizeof(struct robust_list_head) = 24 and EINVALs anything else;
+      // the first draft answered 0 for any len, hiding a caller that passed the wrong object.
+      if (f.arg[1] != 24u) {
+        return Outcome::Answered(err::kEinval, "set_robust_list(len=" + std::to_string(f.arg[1]) +
+                                                   ") = -EINVAL (-22): the kernel requires exactly "
+                                                   "sizeof(struct robust_list_head) = 24");
+      }
       robust_head_ = f.arg[0];
       robust_len_ = f.arg[1];
       const std::string why = "set_robust_list(head=0x" + Hex(robust_head_) + ", len=" +
@@ -407,6 +429,14 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
         nsec += 1'000'000'000;
         --sec;
       }
+      if (!wide && (sec > 0x7fff'ffffll || sec < -0x8000'0000ll)) {
+        // The 32-bit kernel answers EOVERFLOW when a time doesn't fit its timespec, not a silently
+        // truncated second count. (Inert until 2038, but it is the same class of plausible wrong
+        // number the monitor exists not to give.)
+        return Outcome::Answered(err::kEoverflow, call + "(" + std::to_string(id) +
+                                                      "): " + std::to_string(sec) +
+                                                      "s does not fit a 32-bit timespec");
+      }
       const std::uint32_t at = f.arg[1];
       bool wrote = false;
       if (wide) {
@@ -435,9 +465,12 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
       if (memory_ == nullptr) {
         return Outcome::Refused(err::kEnosys, "getrandom: no guest memory is attached to this monitor");
       }
-      if (flags != 0) {
+      if (flags & ~3u) {
+        // GRND_VALIDFLAGS: the kernel rejects unknown bits, not all flags. GRND_NONBLOCK (1) and
+        // GRND_RANDOM (2) are valid and succeed on a device; the first draft's "the kernel requires
+        // flags == 0" was factually wrong and EINVAL'd a call a real guest passes.
         return Outcome::Answered(err::kEinval, "getrandom(flags=0x" + Hex(flags) +
-                                                   "): the kernel requires flags == 0");
+                                                   "): unknown GRND_ flags (valid mask is 0x3)");
       }
       if (len == 0) return Outcome::Emulated(0, "getrandom(0) -> 0");
       /// Filled in bounded chunks straight into guest memory: the guest picks `len`, so a `std::vector`
@@ -449,6 +482,14 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
         if (!(random_ ? random_(chunk, n) : HostEntropy(chunk, n))) {
           return Outcome::Refused(err::kEnosys, "svc #384 (getrandom) is not implemented: no random "
                                                "source is installed and the host's own pool refused");
+        }
+        // `at + done` wraps mod 2^32 like any uint32 add; a buffer near the top of the window would
+        // write its second chunk at address 0, where a real kernel faults at the task-size boundary.
+        // Checked before the write, not after.
+        const std::uint64_t chunk_end = static_cast<std::uint64_t>(at) + done + n;
+        if (chunk_end > 0x1'0000'0000ull) {
+          return Outcome::Answered(err::kEfault, "getrandom: the buffer at 0x" + Hex(at) +
+                                                     " wraps past the end of guest memory");
         }
         if (!memory_->Write(at + done, chunk, n)) {
           return Outcome::Answered(err::kEfault, "getrandom: the buffer at 0x" + Hex(at) +
@@ -481,16 +522,19 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
                                                    ") = -EINVAL: not SIG_BLOCK(0)/SIG_UNBLOCK(1)/"
                                                    "SIG_SETMASK(2)");
       }
+      // The new set is read *before* the old set is written: the kernel validates and copies in first,
+      // so a stale `set` pointer leaves the caller's old-set out-parameter intact. The first draft
+      // wrote `old` first, and an EFAULT on `set` clobbered guest memory a device would not have.
+      std::uint64_t incoming = 0;
+      if (set != 0 && !memory_->Read(set, &incoming, sizeof incoming)) {
+        return Outcome::Answered(err::kEfault, "rt_sigprocmask: the set at 0x" + Hex(set) +
+                                                   " is not readable guest memory");
+      }
       if (old != 0 && !memory_->Write(old, &signal_mask_, sizeof signal_mask_)) {
         return Outcome::Answered(err::kEfault, "rt_sigprocmask: the old-set out-parameter at 0x" +
                                                    Hex(old) + " is not writable guest memory");
       }
       if (set != 0) {
-        std::uint64_t incoming = 0;
-        if (!memory_->Read(set, &incoming, sizeof incoming)) {
-          return Outcome::Answered(err::kEfault, "rt_sigprocmask: the set at 0x" + Hex(set) +
-                                                     " is not readable guest memory");
-        }
         if (how == 0) {
           signal_mask_ |= incoming;
         } else if (how == 1) {
@@ -516,10 +560,13 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
         }
         if (option == 15u) {
           // TASK_COMM_LEN bytes, NUL-terminated: read up to the terminator the way `strncpy_from_user`
-          // does, so a name whose last byte is the last byte of a page still reads.
+          // does, so a name whose last byte is the last byte of a page still reads. The per-byte
+          // address is checked against the 32-bit ceiling before the read, like every other
+          // guest-pointer walk in this file.
           std::array<char, 16> name{};
           for (std::size_t i = 0; i + 1 < name.size(); ++i) {
-            if (!memory_->Read(f.arg[1] + static_cast<std::uint32_t>(i), &name[i], 1)) {
+            if (static_cast<std::uint64_t>(f.arg[1]) + i > 0xffff'ffffull ||
+                !memory_->Read(f.arg[1] + static_cast<std::uint32_t>(i), &name[i], 1)) {
               return Outcome::Answered(err::kEfault, "prctl(PR_SET_NAME): the name pointer at 0x" +
                                                          Hex(f.arg[1]) + " is not readable guest memory");
             }
@@ -574,6 +621,16 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
                                      "(ENAMETOOLONG) on the SM-X710");
       }
       const std::uint32_t flags = f.arg[2];
+      // The provider is consulted *before* the policy refusals: a device answers ENOENT for a
+      // nonexistent path regardless of the open's intent, and an app that probes with
+      // open(path, O_WRONLY) to test existence then branches on the errno takes the wrong branch when
+      // EROFS comes back for a path nothing serves.
+      std::optional<std::vector<std::uint8_t>> bytes = files_(path);
+      if (!bytes) {
+        return Outcome::Answered(err::kEnoent, "openat('" + path +
+                                                   "') = -ENOENT (-2): the launcher's file provider does "
+                                                   "not serve that path");
+      }
       if ((flags & kOAccMode) != 0 || (flags & (kOCreat | kOTrunc | kOAppend)) != 0) {
         return Outcome::Answered(err::kErofs,
                                  "openat('" + path + "', flags=0x" + Hex(flags) + ") = -EROFS (-30): the "
@@ -585,12 +642,6 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
         return Outcome::Answered(err::kEnotdir, "openat('" + path + "', O_DIRECTORY) = -ENOTDIR (-20): "
                                                     "the provider serves files, and this build has no "
                                                     "directory descriptors");
-      }
-      std::optional<std::vector<std::uint8_t>> bytes = files_(path);
-      if (!bytes) {
-        return Outcome::Answered(err::kEnoent, "openat('" + path +
-                                                   "') = -ENOENT (-2): the launcher's file provider does "
-                                                   "not serve that path");
       }
       if (served_.size() >= kMaxServedFds) {
         return Outcome::Answered(err::kEmfile, "openat('" + path + "') = -EMFILE (-24): this monitor's "
@@ -752,6 +803,12 @@ Outcome Monitor::Handle(exec::MachineState& state, std::uint32_t svc_imm) {
   const Frame f = Frame::Capture(state, svc_imm);
   Note(f.number);
   Outcome o = Classify(f, state);
+  // Refusals and errno answers are recorded alongside the successes: the report's answer lines exist
+  // so a run that died on an `openat` can say which path and why, not merely that openat happened.
+  // Only four success sites called `Observe` before, so every refusal reached the report as a tally
+  // entry with no reason attached — the exact silent-ignore shape the note machinery was built to
+  // prevent.
+  if (o.r0 < 0) Observe(o.detail);
   f.ApplyReturn(state, o);
   return o;
 }

@@ -71,12 +71,19 @@ std::unique_ptr<GuestMemory> GuestMemory::Create(std::size_t window_bytes, const
   }
 
   const std::size_t host_page = std::size_t{1} << model.host_page_shift;
+  // Two host pages of slack, not one: the granule-sized mprotect/mmap calls in `RebalanceGranule`
+  // cover `GranuleBytes()` from the granule base, and the last granule of a window that is not a
+  // multiple of the host granule runs past `window_bytes` by up to a granule. With one page of slack
+  // that ran past the reservation whenever the aligned base was not already granule-aligned —
+  // mprotecting (or worse, MAP_FIXED-mapping) host memory this object does not own, and the
+  // destructor never releasing it. Two pages cover aligned-base shift plus granule overrun.
+  const std::size_t slack = 2 * host_page;
   void* raw = nullptr;
   if (model.kind == AddressModel::kFlatIdentity) {
     // Flat asks for the window low, so guest addresses stay in a range where a 32-bit truncation is
     // unambiguous. Address 0 itself is refused by the kernel (mmap_min_addr); the lowest hint that
     // worked on the x86_64 Android emulator was 0x10000 — the measurement behind docs/10 §17 U-2.
-    raw = mmap(reinterpret_cast<void*>(host_page), window_bytes + host_page, PROT_NONE,
+    raw = mmap(reinterpret_cast<void*>(host_page), window_bytes + slack, PROT_NONE,
                MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
     if (raw == MAP_FAILED) {
       if (err) *err = SysErr("flat-model low window reservation failed", errno);
@@ -86,7 +93,7 @@ std::unique_ptr<GuestMemory> GuestMemory::Create(std::size_t window_bytes, const
   if (raw == nullptr || raw == MAP_FAILED) {
     // Biased, or a flat request the kernel refused: take whatever the OS offers and never assume
     // where it landed.
-    raw = mmap(nullptr, window_bytes + host_page, PROT_NONE,
+    raw = mmap(nullptr, window_bytes + slack, PROT_NONE,
                MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     if (raw == MAP_FAILED) {
       if (err) *err = SysErr("window reservation failed", errno);
@@ -96,9 +103,9 @@ std::unique_ptr<GuestMemory> GuestMemory::Create(std::size_t window_bytes, const
 
   const auto raw_addr = reinterpret_cast<std::uintptr_t>(raw);
   const auto aligned = (raw_addr + host_page - 1) & ~static_cast<std::uintptr_t>(host_page - 1);
-  if (aligned + window_bytes > raw_addr + window_bytes + host_page) {
+  if (aligned + window_bytes > raw_addr + window_bytes + slack) {
     if (err) *err = "window reservation could not be aligned to the host page";
-    munmap(raw, window_bytes + host_page);
+    munmap(raw, window_bytes + slack);
     return nullptr;
   }
 
@@ -106,11 +113,15 @@ std::unique_ptr<GuestMemory> GuestMemory::Create(std::size_t window_bytes, const
   // there is nothing to trim and no way to reach it by a guest address.
   auto self = std::unique_ptr<GuestMemory>(new GuestMemory());
   self->raw_base_ = raw;
-  self->raw_bytes_ = window_bytes + host_page;
+  self->raw_bytes_ = window_bytes + slack;
   self->window_base_ = reinterpret_cast<void*>(aligned);
   self->window_bytes_ = window_bytes;
   self->host_page_shift_ = model.host_page_shift;
   self->kind_ = model.kind;
+  // The kernel's real page size, kept for the mmap-offset alignment rule: an mmap offset must be
+  // aligned to *this*, which is finer than the model granule exactly on the 16 KiB hosts this model
+  // exists for.
+  self->real_page_shift_ = real_shift;
   // One entry per guest page. At a full 4 GiB window this table is ~32 MiB, which is worth
   // chunking before shipping; see the note in docs/30. Not premature here: nothing maps more than
   // a module yet, and a chunked table would make the mixed-granule logic harder to read.
@@ -133,7 +144,7 @@ GuestMemory::~GuestMemory() {
 std::size_t GuestMemory::mapped_page_count() const {
   std::size_t n = 0;
   for (const auto& p : pages_) {
-    if (p.prot != kNone) ++n;
+    if (p.mapped) ++n;
   }
   return n;
 }
@@ -153,6 +164,11 @@ void GuestMemory::DropPage(std::size_t page_idx) {
 }
 
 bool GuestMemory::Map(std::uint32_t at, std::size_t len, unsigned prot, std::string* err) {
+  // Success is reported by leaving `err` empty, so a string that arrives already carrying last call's
+  // text must not be read as this call's failure. It was: a caller reusing one `std::string` across a
+  // sequence of maps had a *successful* map roll itself back and return false, and the launcher is exactly
+  // such a caller. Cleared here rather than left as an unwritten precondition on every call site.
+  if (err != nullptr) err->clear();
   if (len == 0) {
     if (err) *err = "zero-length mapping";
     return false;
@@ -163,10 +179,6 @@ bool GuestMemory::Map(std::uint32_t at, std::size_t len, unsigned prot, std::str
     if (err) *err = "mapping exceeds the guest window";
     return false;
   }
-  if (prot == kNone) {
-    if (err) *err = "mapping with no permissions";
-    return false;
-  }
 
   std::vector<std::size_t> fresh;
   fresh.reserve(last - first);
@@ -174,10 +186,21 @@ bool GuestMemory::Map(std::uint32_t at, std::size_t len, unsigned prot, std::str
     DropPage(i);
     pages_[i] = Page{};
     pages_[i].prot = prot;
+    // A `kNone` map is a guard reservation: mapped (the loader's placement scan and `Protect` see
+    // it), with no permissions and no backing, so every access refuses. The first draft refused
+    // `kNone` here outright, which made a guard page unrepresentable — and a range that can be
+    // reserved is a range a guest can be kept out of, which the launcher needs for its host-entry
+    // window.
+    pages_[i].mapped = true;
     fresh.push_back(i);
   }
   Rebalance(first, last, err, fresh);
   if (err && !err->empty()) {
+    // `DropPage` first, then clear: dropping is what munmaps an out-of-line block, and it finds the block
+    // through `Page::backing`. Zeroing the `Page` first threw that pointer away, so the block was never
+    // unmapped — the rejection path leaked the mapping until some later overwrite happened to reuse the
+    // address, which is the shape "refused, not corrupted" is supposed to rule out.
+    for (std::size_t i = first; i < last; ++i) DropPage(i);
     for (std::size_t i = first; i < last; ++i) pages_[i] = Page{};
     Rebalance(first, last, nullptr, {});
     return false;
@@ -187,8 +210,16 @@ bool GuestMemory::Map(std::uint32_t at, std::size_t len, unsigned prot, std::str
 
 bool GuestMemory::MapFile(std::uint32_t at, std::size_t len, unsigned prot, int fd,
                           std::uint64_t offset, bool shared, std::string* err) {
+  // Same precondition as `Map`: the caller's error string is an output, not an input.
+  if (err != nullptr) err->clear();
   if (len == 0) {
     if (err) *err = "zero-length file mapping";
+    return false;
+  }
+  if (prot == kNone) {
+    // Refused rather than silently mapped-as-nothing, as a first draft did: a file mapping with no
+    // permissions maps nothing and reports success, and the caller's bytes never reach memory.
+    if (err) *err = "file mapping with no permissions";
     return false;
   }
   const std::size_t first = at >> kGuestPageShift;
@@ -219,6 +250,7 @@ bool GuestMemory::MapFile(std::uint32_t at, std::size_t len, unsigned prot, int 
     DropPage(i);
     Page& p = pages_[i];
     p = Page{};
+    p.mapped = true;
     p.prot = prot;
     p.fd = owned;
     p.file_backed = true;
@@ -226,11 +258,27 @@ bool GuestMemory::MapFile(std::uint32_t at, std::size_t len, unsigned prot, int 
     p.file_off = offset + ((i - first) * kGuestPage) + (at & (kGuestPage - 1));
   }
   Rebalance(first, last, err, {});
-  if (err && !err->empty()) return false;
+  if (err && !err->empty()) {
+    // The pages this call claimed go back the same way `Map`'s do, and the duplicated descriptor goes with
+    // them: it was taken before the mapping existed and no page references it after the loop below. Leaving
+    // it in `owned_fds_` would keep a reference to a file this call never managed to map.
+    for (std::size_t i = first; i < last; ++i) DropPage(i);
+    for (std::size_t i = first; i < last; ++i) pages_[i] = Page{};
+    Rebalance(first, last, nullptr, {});
+    ::close(owned);
+    owned_fds_.pop_back();
+    return false;
+  }
   return true;
 }
 
 bool GuestMemory::Protect(std::uint32_t at, std::size_t len, unsigned prot, std::string* err) {
+  if (len == 0) {
+    // A zero-length mprotect is a kernel no-op; taking the unaligned-address path a first draft took
+    // re-protected (or unmapped) a whole page the caller never named.
+    if (err) *err = "zero-length mprotect";
+    return false;
+  }
   const std::size_t first = at >> kGuestPageShift;
   const std::size_t last = first + RoundUpPages(at, len);
   if (last > pages_.size()) {
@@ -239,7 +287,9 @@ bool GuestMemory::Protect(std::uint32_t at, std::size_t len, unsigned prot, std:
   }
   bool any = false;
   for (std::size_t i = first; i < last; ++i) {
-    if (pages_[i].prot != kNone) {
+    if (pages_[i].mapped) {
+      // Gated on `mapped`, not on a live protection: a guard page has to be re-protectable, or the
+      // reservation is a one-way trap and the re-protection the caller asks for reports "unmapped".
       pages_[i].prot = prot;
       any = true;
     }
@@ -253,6 +303,10 @@ bool GuestMemory::Protect(std::uint32_t at, std::size_t len, unsigned prot, std:
 }
 
 bool GuestMemory::Unmap(std::uint32_t at, std::size_t len, std::string* err) {
+  if (len == 0) {
+    if (err) *err = "zero-length munmap";
+    return false;
+  }
   const std::size_t first = at >> kGuestPageShift;
   const std::size_t last = first + RoundUpPages(at, len);
   if (last > pages_.size()) {
@@ -290,7 +344,10 @@ bool GuestMemory::RebalanceGranule(std::size_t granule, std::string* err,
     if (pages_[i].prot != kNone) live.push_back(i);
   }
   if (live.empty()) {
-    mprotect(granule_host, GranuleBytes(), PROT_NONE);
+    if (mprotect(granule_host, GranuleBytes(), PROT_NONE) != 0) {
+      if (err) *err = SysErr("withdrawing an empty granule failed", errno);
+      return false;
+    }
     return true;
   }
 
@@ -299,8 +356,11 @@ bool GuestMemory::RebalanceGranule(std::size_t granule, std::string* err,
   bool any_file = false;
   bool all_file = true;
   bool any_shared_file = false;
-  for (std::size_t i : live) {
+  bool any_guard = false;
+  for (std::size_t i = base; i < end; ++i) {
     const Page& p = pages_[i];
+    if (p.mapped && p.prot == kNone) any_guard = true;
+    if (!p.mapped || p.prot == kNone) continue;
     if (p.prot != prot) uniform = false;
     if (p.file_backed) any_file = true; else all_file = false;
     if (p.file_backed && p.shared) any_shared_file = true;
@@ -314,15 +374,39 @@ bool GuestMemory::RebalanceGranule(std::size_t granule, std::string* err,
     return false;
   }
 
-  if (uniform && !(any_file && !all_file)) {
+  // The in-place form needs every live page to be the same page of the same file at consecutive
+  // offsets. The first draft took the *first* live page's fd and offset for the whole granule: two
+  // libraries loaded into one host granule both read back the first one's bytes, and for a
+  // MAP_SHARED granule the post-remap snapshot restore wrote the second library's contents through
+  // the first one's file. Contiguity is also what makes the single (fd, offset) pair correct at all.
+  bool contiguous = true;
+  if (all_file) {
+    const Page& front = pages_[live.front()];
+    for (std::size_t k = 1; k < live.size(); ++k) {
+      const Page& p = pages_[live[k]];
+      if (p.fd != front.fd || p.shared != front.shared ||
+          p.file_off != front.file_off + k * kGuestPage) {
+        contiguous = false;
+        break;
+      }
+    }
+  }
+  // mmap offsets are aligned to the *real* page size, not the model granule: a 4 KiB ELF segment
+  // offset on a 16 KiB host cannot serve its granule in place at all.
+  const std::size_t real_page = std::size_t{1} << real_page_shift_;
+  const bool off_aligned = !all_file ||
+                           (pages_[live.front()].file_off & (real_page - 1)) == 0;
+  // A guard page shares the granule's host mapping while it is in place, so remapping the granule
+  // with the survivors' protection would hand the guard page live host permissions behind its
+  // `kNone` table entry. Guard-bearing granules go out of line, where the window stays PROT_NONE.
+  if (uniform && !any_guard && !(any_file && !all_file) && contiguous && off_aligned) {
     // In place: one host mapping serving the whole granule, addressed by window_base + guest.
     int fd = -1;
     std::uint64_t off = 0;
-    int flags = MAP_FIXED | MAP_PRIVATE;
+    int flags = MAP_FIXED | (any_shared_file ? MAP_SHARED : MAP_PRIVATE);
     if (all_file) {
       fd = pages_[live.front()].fd;
       off = pages_[live.front()].file_off;
-      if (any_shared_file) flags |= MAP_SHARED;
     } else {
       flags |= MAP_ANONYMOUS;
     }
@@ -354,42 +438,64 @@ bool GuestMemory::RebalanceGranule(std::size_t granule, std::string* err,
     void* got = mmap(granule_host, GranuleBytes(), ToHostProt(prot) | PROT_WRITE, flags, fd,
                      static_cast<off_t>(off));
     if (got == MAP_FAILED) {
-      // Fall back to out-of-line for this granule rather than failing the whole mapping.
-      if (all_file) {
-        if (err) *err = SysErr("in-place file mapping failed", errno);
-        return false;
-      }
-    } else {
-      for (auto& [idx, bytes] : saved) {
-        std::memcpy(static_cast<char*>(window_base_) + (idx << kGuestPageShift), bytes.data(),
-                    kGuestPage);
-      }
-      // Fresh anonymous pages must read back as zero, as a real mmap would. Done after the remap so
-      // it cannot be undone by it, and only for pages the caller actually just mapped.
-      if (!any_file) {
-        for (std::size_t idx : fresh) {
-          if (idx >= base && idx < end) {
-            std::memset(static_cast<char*>(window_base_) + (idx << kGuestPageShift), 0, kGuestPage);
-          }
+      // Fall back to out-of-line for this granule rather than failing the mapping — and carry the
+      // snapshot, which at this moment holds every live page's bytes (the snapshot above cleared
+      // all the backings). Falling through with empty carriers is what silently zeroed the granule.
+      std::vector<std::pair<std::size_t, std::vector<unsigned char>>> carries{std::move(saved)};
+      saved.clear();
+      return RebalanceGranuleOutOfLine(granule, err, std::move(carries));
+    }
+    for (auto& [idx, bytes] : saved) {
+      std::memcpy(static_cast<char*>(window_base_) + (idx << kGuestPageShift), bytes.data(),
+                  kGuestPage);
+    }
+    // Fresh anonymous pages must read back as zero, as a real mmap would. Done after the remap so
+    // it cannot be undone by it, and only for pages the caller actually just mapped.
+    if (!any_file) {
+      for (std::size_t idx : fresh) {
+        if (idx >= base && idx < end) {
+          std::memset(static_cast<char*>(window_base_) + (idx << kGuestPageShift), 0, kGuestPage);
         }
       }
-      if (mprotect(granule_host, GranuleBytes(), ToHostProt(prot)) != 0) {
-        if (err) *err = SysErr("applying in-place granule protection failed", errno);
-        return false;
-      }
-      for (std::size_t i : live) {
-        pages_[i].backing = InPlaceHostOf(i);
-      }
-      return true;
     }
+    if (mprotect(granule_host, GranuleBytes(), ToHostProt(prot)) != 0) {
+      if (err) *err = SysErr("applying in-place granule protection failed", errno);
+      return false;
+    }
+    for (std::size_t i : live) {
+      pages_[i].backing = InPlaceHostOf(i);
+    }
+    return true;
   }
 
-  // Out of line: each live page gets its own host-granule block, so its protection is its own.
-  //
-  // Order matters here, and getting it wrong faults: the bytes of a page that is still in place are
-  // only readable while the granule's window mapping has permissions, so every in-place page must be
-  // snapshotted *before* the granule is withdrawn.
-  std::vector<std::pair<std::size_t, std::vector<unsigned char>>> carries;
+  // A shared file granule that cannot serve in place has no honest home: out-of-line writes would
+  // not reach the file. Refusing names the reason; the loader (the only shared-file caller) can
+  // place the mapping differently.
+  if (any_shared_file) {
+    if (err) *err = all_file && !off_aligned
+                        ? "shared file mapping's offset is below the kernel's page alignment"
+                        : "shared file mapping's pages are not contiguous in one file";
+    return false;
+  }
+
+  return RebalanceGranuleOutOfLine(granule, err, {});
+}
+
+/// The out-of-line form: each live page gets its own host-granule block, so its protection is its
+/// own. `carries` holds snapshots of pages that already left the window (the in-place attempt's
+/// fall-through); pages still in place are snapshotted here, before the granule is withdrawn, because
+/// their bytes are only readable while the granule's window mapping has permissions.
+bool GuestMemory::RebalanceGranuleOutOfLine(std::size_t granule, std::string* err,
+                                            std::vector<std::pair<std::size_t, std::vector<unsigned char>>>&& carries) {
+  const std::size_t base = granule << (host_page_shift_ - kGuestPageShift);
+  const std::size_t end = std::min(base + PagesPerGranule(), pages_.size());
+  void* granule_host = static_cast<char*>(window_base_) + (base << kGuestPageShift);
+
+  std::vector<std::size_t> live;
+  for (std::size_t i = base; i < end; ++i) {
+    if (pages_[i].prot != kNone) live.push_back(i);
+  }
+
   for (std::size_t i : live) {
     Page& p = pages_[i];
     if (p.backing && IsFastmem(PageAddr(i))) {
@@ -400,7 +506,12 @@ bool GuestMemory::RebalanceGranule(std::size_t granule, std::string* err,
     }
   }
 
-  mprotect(granule_host, GranuleBytes(), PROT_NONE);
+  if (mprotect(granule_host, GranuleBytes(), PROT_NONE) != 0) {
+    // Unchecked once, and the failure mode was exactly the one the comment below promises cannot
+    // happen: the table said the granule was withdrawn while the host pages kept live permissions.
+    if (err) *err = SysErr("withdrawing the window granule failed", errno);
+    return false;
+  }
 
   for (std::size_t i : live) {
     Page& p = pages_[i];
@@ -427,19 +538,42 @@ bool GuestMemory::RebalanceGranule(std::size_t granule, std::string* err,
     if (carried != carries.end()) {
       std::memcpy(block.host, carried->second.data(), kGuestPage);  // migrated out of place
     } else if (p.file_backed) {
-      // Private file page: pull the bytes in; writes stay private, matching MAP_PRIVATE semantics.
-      void* tmp = mmap(nullptr, kGuestPage, PROT_READ, MAP_PRIVATE, p.fd, static_cast<off_t>(p.file_off));
-      if (tmp != MAP_FAILED) {
-        std::memcpy(block.host, tmp, kGuestPage);
-        munmap(tmp, kGuestPage);
+      // Private file page: pull the bytes in with pread; writes stay private, matching MAP_PRIVATE
+      // semantics. pread rather than a throwaway mmap because an mmap offset must be aligned to the
+      // kernel's real page size — a 4 KiB ELF segment on a 16 KiB host is not — and the mmap this
+      // replaced failed EINVAL and was *ignored*, so the page silently read back as zeros while the
+      // load reported success. A short read past EOF leaves the tail zeroed, which is what a real
+      // kernel's mapping of a partial last page reads as.
+      std::size_t got = 0;
+      bool ok = true;
+      while (got < kGuestPage) {
+        const ssize_t n = pread(p.fd, static_cast<char*>(block.host) + got, kGuestPage - got,
+                                static_cast<off_t>(p.file_off) + static_cast<off_t>(got));
+        if (n < 0) {
+          if (errno == EINTR) continue;
+          if (err) *err = SysErr("reading a file-backed page out of line failed", errno);
+          ok = false;
+          break;
+        }
+        if (n == 0) break;  // past EOF: the rest of the page reads as zeros
+        got += static_cast<std::size_t>(n);
+      }
+      if (!ok) {
+        munmap(block.host, block.bytes);
+        return false;
       }
     }  // else: freshly claimed anonymous page, already zeroed by the kernel
-    mprotect(block.host, block.bytes, ToHostProt(p.prot));
+    if (mprotect(block.host, block.bytes, ToHostProt(p.prot)) != 0) {
+      if (err) *err = SysErr("protecting an out-of-line block failed", errno);
+      munmap(block.host, block.bytes);
+      return false;
+    }
     out_of_line_.push_back(block);
     p.backing = block.host;
   }
   return true;
 }
+
 
 void* GuestMemory::Host(std::uint32_t at) const {
   if (!Contains(at)) return nullptr;
@@ -462,7 +596,11 @@ bool GuestMemory::Translate(const void* host, std::uint32_t* out) const {
   }
   for (const auto& block : out_of_line_) {
     const auto b = reinterpret_cast<std::uintptr_t>(block.host);
-    if (addr >= b && addr - b < block.bytes) {
+    if (addr >= b && addr - b < kGuestPage) {
+      // Bounded by the guest page the block serves, not by `block.bytes`: a block is one host
+      // granule holding one 4 KiB guest page, and a pointer past the page in the unused granule
+      // space translated to a *different* guest page's address — a wrong answer rather than a
+      // refusal, from a stale or foreign pointer.
       for (std::size_t i = 0; i < pages_.size(); ++i) {
         if (pages_[i].backing == block.host) {
           if (out) *out = static_cast<std::uint32_t>((i << kGuestPageShift) + (addr - b));
@@ -498,8 +636,18 @@ bool GuestMemory::Read(std::uint32_t at, void* dst, std::size_t len) const {
 
 bool GuestMemory::Write(std::uint32_t at, const void* src, std::size_t len) {
   if (len == 0 || !Contains(at) || static_cast<std::size_t>(at) + len > window_bytes_) return false;
+  // Verified before anything is copied. The recursive form a first draft used wrote page by page and
+  // returned false on the first bad one, so a write straddling a writable page and an unmapped (or
+  // read-only) one left the earlier pages holding new bytes while reporting failure — and a caller
+  // like the monitor's `read` then answered EFAULT with the guest buffer half-filled, retrying into
+  // the same partial state forever. Every page is checked first, so a refusal writes nothing.
+  for (std::size_t done = 0; done < len;) {
+    const std::uint32_t cur = at + static_cast<std::uint32_t>(done);
+    const Page& p = pages_[PageIndex(cur)];
+    if (!p.backing || !(p.prot & kWrite)) return false;
+    done += std::min<std::size_t>(kGuestPage - (cur & (kGuestPage - 1)), len - done);
+  }
   const Page& p = pages_[PageIndex(at)];
-  if (!p.backing || !(p.prot & kWrite)) return false;
   const std::size_t within = at & (kGuestPage - 1);
   if (within + len > kGuestPage) {
     std::size_t done = 0;
@@ -517,7 +665,9 @@ bool GuestMemory::Write(std::uint32_t at, const void* src, std::size_t len) {
 }
 
 bool GuestMemory::IsMapped(std::uint32_t at) const {
-  return Contains(at) && pages_[PageIndex(at)].prot != kNone && pages_[PageIndex(at)].backing != nullptr;
+  // `mapped`, not the protection: a guard page is mapped with no permissions, and callers that ask
+  // "is this guest page claimed" (the loader's placement scan, pointer translation) need to see it.
+  return Contains(at) && pages_[PageIndex(at)].mapped;
 }
 
 bool GuestMemory::IsFastmem(std::uint32_t at) const {

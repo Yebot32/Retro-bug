@@ -179,9 +179,11 @@ constexpr DeclinedForm kDeclinedForms[] = {
  * sets `tp` must not find a hole — `[UNVERIFIED]` that any corpus code does, since none was observed.
  *
  * A refusal is a *stop*, not a zero: an unmodelled coprocessor must not hand back a value the guest then
- * dereferences, which is what the memory callbacks are able to get away with only because
- * `check_halt_on_memory_access` re-tests after every data access. There is no such re-test for a
- * coprocessor result, so the halt comes first and the guest never sees a plausible register.
+ * dereferences. The memory callbacks get that from `check_halt_on_memory_access` re-testing after every
+ * data access, and the coprocessor path needed the same treatment — without it the callback recorded the
+ * refusal, raised `UserDefined1`, and the block still ran on with the callback's zero in the destination
+ * register. `EmitA32CheckCallbackHalt` (`emit_arm64_a32.cpp`, carried as `patches/dynarmic/0003`) is that
+ * re-test, so the halt takes effect where it is raised and the guest never sees the value.
  */
 class Arm15Coprocessor final : public Dynarmic::A32::Coprocessor {
  public:
@@ -364,12 +366,16 @@ JitExecutor::CoprocSite* JitExecutor::CoprocSiteFor(bool tp_read, bool tp_write,
 void JitExecutor::RefuseCoprocessor(const CoprocSite& site) {
   std::string detail = "the coprocessor access ";
   detail += site.detail.empty() ? "p15 c13 (thread pointer)" : site.detail;
-  // R15 is the address, and it is trustworthy *here* specifically because a coprocessor callback is a
-  // call: `PrepareForCall` flushes the register allocators' live state into the jit state first, which is
-  // also why the callbacks can read and write `live_` at all. `live_->pc` would not do — that field holds
-  // the address the `Run` was entered at, and by now the guest has moved.
+  // R15 names the *containing block* here, not the refusing instruction: a coprocessor callback is a
+  // call (`PrepareForCall` flushes the register allocators' live state into the jit state first, which
+  // is also why the callbacks can read and write `live_` at all), but the back end writes r15 only at
+  // block terminals, so mid-block it still holds the block entry. A deterministic address is worth
+  // having and a wrong one is not, so the message says which kind it is. The halt re-test emitted after
+  // the callback (`EmitA32CheckCallbackHalt`) returns from run code before the callback's zero can be
+  // read as a result, so this stop means what it says — and resuming at that address re-enters the same
+  // refusal rather than progressing, which is why the detail says the access is not modelled.
   if (jit_ != nullptr) {
-    detail += " at 0x" + Hex(jit_->Regs()[15]) + " is not modelled";
+    detail += " inside the block at 0x" + Hex(jit_->Regs()[15]) + " is not modelled";
   } else {
     detail += " is not modelled";
   }
@@ -443,6 +449,22 @@ RunResult JitExecutor::Run(MachineState& state, unsigned max_instructions) {
     out.detail = err_;
     return out;
   }
+  if (max_instructions == 0) {
+    // Tier I with a zero budget runs nothing and says so; this tier used to hand the whole first
+    // block to dynarmic, whose prelude checks the halt flag but not the tick count at entry — so a
+    // zero budget executed a block and reported a nonzero count. A budget of zero means zero.
+    //
+    // The state still goes through the sync pair. Tier I derives `cpsr`, `itstate` and `mode` on every
+    // Run exit, zero budget included, so returning before `SyncIn`/`SyncOut` made the two tiers report
+    // different `cpsr` and `itstate` after an identical no-op Run — a divergence in the one place a
+    // reader would take as "nothing happened". With nothing executed the pair is idempotent
+    // (`ClearExclusiveState` included, which Tier I also does at Run entry), so zero is still zero.
+    SyncIn(state);
+    SyncOut(state);
+    out.reason = StopReason::Budget;
+    out.detail = "a zero-instruction budget runs nothing";
+    return out;
+  }
   live_ = &state;
   budget_ = max_instructions;
   executed_ = 0;
@@ -455,11 +477,13 @@ RunResult JitExecutor::Run(MachineState& state, unsigned max_instructions) {
   SyncIn(state);
   const Dynarmic::HaltReason hr = jit_->Run();
   SyncOut(state);
-  if ((pending_ == Pending::Returned || pending_ == Pending::HostCall) && pending_pc_ != 0) {
+  if (pending_pc_ != 0 && pending_ != Pending::Syscall && pending_ != Pending::None) {
     // Dynarmic advances PC across the fetch it could not read, which leaves the core pointing one
-    // instruction *past* the address RetroBug stopped on. The stop address is the one that means
-    // something — it is where the sentinel or the host slot lives, and where the call bridge looks to
-    // resume — so the state is normalised back to it rather than to the core's arithmetic.
+    // instruction *past* the address RetroBug stopped on — and mid-block it points at the block
+    // entry rather than at the instruction that raised. The stop address is the one that means
+    // something: where the sentinel or the host slot lives, or the instruction a fault or refusal
+    // names. Syscalls are deliberately excluded — their PC is already the instruction *after* the
+    // SVC, which is the resume address the monitor hands back to.
     state.pc = pending_pc_;
     state.r[15] = pending_pc_;
   }
@@ -554,8 +578,8 @@ std::uint8_t JitExecutor::MemoryRead8(GuestAddr vaddr) {
   std::uint8_t v = 0;
   if (!memory_.Read(vaddr, &v, 1)) {
     SetPending(Pending::Fault,
-               "guest memory read at " + std::to_string(vaddr) + " is unmapped or not readable");
-    jit_->HaltExecution(Dynarmic::HaltReason::UserDefined1);
+               "guest memory read at 0x" + Hex(vaddr) + " is unmapped or not readable");
+    jit_->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
   }
   return v;
 }
@@ -564,8 +588,8 @@ std::uint16_t JitExecutor::MemoryRead16(GuestAddr vaddr) {
   std::uint16_t v = 0;
   if (!memory_.Read(vaddr, &v, 2)) {
     SetPending(Pending::Fault,
-               "guest memory read at " + std::to_string(vaddr) + " is unmapped or not readable");
-    jit_->HaltExecution(Dynarmic::HaltReason::UserDefined1);
+               "guest memory read at 0x" + Hex(vaddr) + " is unmapped or not readable");
+    jit_->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
   }
   return v;
 }
@@ -574,8 +598,8 @@ std::uint32_t JitExecutor::MemoryRead32(GuestAddr vaddr) {
   std::uint32_t v = 0;
   if (!memory_.Read(vaddr, &v, 4)) {
     SetPending(Pending::Fault,
-               "guest memory read at " + std::to_string(vaddr) + " is unmapped or not readable");
-    jit_->HaltExecution(Dynarmic::HaltReason::UserDefined1);
+               "guest memory read at 0x" + Hex(vaddr) + " is unmapped or not readable");
+    jit_->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
   }
   return v;
 }
@@ -584,8 +608,8 @@ std::uint64_t JitExecutor::MemoryRead64(GuestAddr vaddr) {
   std::uint64_t v = 0;
   if (!memory_.Read(vaddr, &v, 8)) {
     SetPending(Pending::Fault,
-               "guest memory read at " + std::to_string(vaddr) + " is unmapped or not readable");
-    jit_->HaltExecution(Dynarmic::HaltReason::UserDefined1);
+               "guest memory read at 0x" + Hex(vaddr) + " is unmapped or not readable");
+    jit_->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
   }
   return v;
 }
@@ -593,36 +617,36 @@ std::uint64_t JitExecutor::MemoryRead64(GuestAddr vaddr) {
 void JitExecutor::MemoryWrite8(GuestAddr vaddr, std::uint8_t value) {
   if (!memory_.Write(vaddr, &value, 1)) {
     SetPending(Pending::Fault,
-               "guest memory write at " + std::to_string(vaddr) +
+               "guest memory write at 0x" + Hex(vaddr) +
                    " is unmapped, read-only, or an executing page");
-    jit_->HaltExecution(Dynarmic::HaltReason::UserDefined1);
+    jit_->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
   }
 }
 
 void JitExecutor::MemoryWrite16(GuestAddr vaddr, std::uint16_t value) {
   if (!memory_.Write(vaddr, &value, 2)) {
     SetPending(Pending::Fault,
-               "guest memory write at " + std::to_string(vaddr) +
+               "guest memory write at 0x" + Hex(vaddr) +
                    " is unmapped, read-only, or an executing page");
-    jit_->HaltExecution(Dynarmic::HaltReason::UserDefined1);
+    jit_->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
   }
 }
 
 void JitExecutor::MemoryWrite32(GuestAddr vaddr, std::uint32_t value) {
   if (!memory_.Write(vaddr, &value, 4)) {
     SetPending(Pending::Fault,
-               "guest memory write at " + std::to_string(vaddr) +
+               "guest memory write at 0x" + Hex(vaddr) +
                    " is unmapped, read-only, or an executing page");
-    jit_->HaltExecution(Dynarmic::HaltReason::UserDefined1);
+    jit_->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
   }
 }
 
 void JitExecutor::MemoryWrite64(GuestAddr vaddr, std::uint64_t value) {
   if (!memory_.Write(vaddr, &value, 8)) {
     SetPending(Pending::Fault,
-               "guest memory write at " + std::to_string(vaddr) +
+               "guest memory write at 0x" + Hex(vaddr) +
                    " is unmapped, read-only, or an executing page");
-    jit_->HaltExecution(Dynarmic::HaltReason::UserDefined1);
+    jit_->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
   }
 }
 
@@ -634,8 +658,8 @@ bool JitExecutor::ExclusiveCompareAndStore(GuestAddr vaddr, std::uint64_t value,
   unsigned char raw[8] = {};
   if (!memory_.Read(vaddr, raw, bytes)) {
     SetPending(Pending::Fault,
-               "guest exclusive access at " + std::to_string(vaddr) + " is unmapped or not readable");
-    jit_->HaltExecution(Dynarmic::HaltReason::UserDefined1);
+               "guest exclusive access at 0x" + Hex(vaddr) + " is unmapped or not readable");
+    jit_->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
     return false;
   }
   std::uint64_t current = 0;
@@ -652,9 +676,9 @@ bool JitExecutor::ExclusiveCompareAndStore(GuestAddr vaddr, std::uint64_t value,
   }
   if (!memory_.Write(vaddr, raw, bytes)) {
     SetPending(Pending::Fault,
-               "guest exclusive write at " + std::to_string(vaddr) +
+               "guest exclusive write at 0x" + Hex(vaddr) +
                    " is unmapped, read-only, or an executing page");
-    jit_->HaltExecution(Dynarmic::HaltReason::UserDefined1);
+    jit_->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
     return false;
   }
   return true;
@@ -678,14 +702,18 @@ void JitExecutor::ExceptionRaised(GuestAddr pc, Dynarmic::A32::Exception excepti
   if (exception == Dynarmic::A32::Exception::NoExecuteFault) {
     // The other half of the sentinel/slot check — see MemoryReadCode for why both are needed.
     if (SurfaceNonCodeDestination(pc)) return;
-    SetPending(Pending::Fault, "instruction fetch failed at " + std::to_string(pc) +
+    SetPending(Pending::Fault, "instruction fetch failed at 0x" + Hex(pc) +
                                    " (no code could be read there)");
   } else if (exception == Dynarmic::A32::Exception::Breakpoint) {
     SetPending(Pending::Suspended, "guest breakpoint");
   } else {
-    SetPending(Pending::Unimplemented,
-               std::string{name} + " at " + std::to_string(pc));
+    SetPending(Pending::Unimplemented, std::string{name} + " at 0x" + Hex(pc));
   }
+  // Deliberately *not* recorded in `pending_pc_`: the translator emits the raising instruction's
+  // branch-write before this callback, so both tiers' reported PC is already the instruction after —
+  // the same convention the SVC stop uses, and the one the differential asserts agreement on. A raise
+  // that should stop *on* its instruction would want `pending_pc_ = pc` here plus the matching Tier I
+  // change, as one decision, not a tier divergence.
   jit_->HaltExecution(Dynarmic::HaltReason::UserDefined1);
 }
 

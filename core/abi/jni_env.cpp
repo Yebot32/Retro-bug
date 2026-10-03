@@ -144,8 +144,11 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
     // a guest dereferencing address 0, and the copy semantics do not matter to anything yet.
     const GuestAddr is_copy = Arg(s, 2);
     if (is_copy != 0) {
-      const std::uint32_t one = 1;
-      if (!memory_.Write(is_copy, &one, 4)) {
+      // `isCopy` points at a `jboolean` — one byte. Writing the 4-byte word a first draft used here
+      // overran three bytes into whatever the guest declared beside it, and a pointer one to three
+      // bytes before the end of a page turned a successful call into a fault.
+      const std::uint8_t one = 1;
+      if (!memory_.Write(is_copy, &one, 1)) {
         if (serr != nullptr) *serr = "GetStringUTFChars could not write isCopy";
         return false;
       }
@@ -154,15 +157,32 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
     return true;
   });
 
-  // The arena is bump-allocated and freed with the instance, so a release is genuinely a no-op — and
-  // that is a property of this design rather than an absence of one, which is why it is bound rather
-  // than left to the refusal path.
+  // Still a no-op, and still bound rather than left to the refusal path: "cleared" is the true answer for
+  // an environment that cannot have a pending exception — see the note on the exception family below.
   const auto noop = [](exec::MachineState& s, std::string*) {
     s.r[0] = 0;
     return true;
   };
-  abi_.Bind(jni::kReleaseStringUTFChars, noop);
-  abi_.Bind(jni::kDeleteLocalRef, noop);
+
+  // The local-reference lifecycle, which JNI defines and the first draft did not implement: strings were
+  // bump-allocated and freed only with the instance, so a guest that makes one string per frame walked the
+  // arena off its end in tens of frames and the failure surfaced as a bare "NewStringUTF failed" — far
+  // from the loop that caused it. Both entries now return the block, and `MakeString` reuses it.
+  abi_.Bind(jni::kReleaseStringUTFChars, [this](exec::MachineState& s, std::string* serr) {
+    // `(JNIEnv*, jstring, const char* chars)` — the *handle* is the second argument. The chars pointer is
+    // an address inside the same block, so validating it separately would be checking our own arithmetic.
+    if (!Free(Arg(s, 1), serr)) return false;
+    s.r[0] = 0;
+    return true;
+  });
+  abi_.Bind(jni::kDeleteLocalRef, [this](exec::MachineState& s, std::string* serr) {
+    // `(JNIEnv*, jobject)`. In this environment the only local references that exist are the strings it
+    // hands out, so anything else arriving here is refused by name rather than silently ignored — a guest
+    // deleting a reference it never got is a bug worth a line in the log.
+    if (!Free(Arg(s, 1), serr)) return false;
+    s.r[0] = 0;
+    return true;
+  });
   abi_.Bind(jni::kExceptionClear, noop);
 
   // A guest that reaches one of these has asked for something RetroBug does not model. Refusing with
@@ -180,13 +200,85 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
     (void)s;
     return refused(s, e, "GetObjectClass: needs the guest class model (C09)");
   });
-  abi_.Bind(jni::kExceptionOccurred, [refused](exec::MachineState& s, std::string* e) {
-    (void)s;
-    return refused(s, e, "ExceptionOccurred: there is no guest exception state to report (C09)");
+
+  // The exception family answers rather than refuses, because "no exception" is the *true* answer on
+  // this environment: every function it binds either cannot throw or refuses loudly, so a pending
+  // exception is unrepresentable. Binding ExceptionOccurred to the refusal path made the defensive
+  // style — `(*env)->ExceptionOccurred(env)` after every call — kill the whole guest call on its
+  // first check, and the fault it produced named C09 work that was never the guest's problem.
+  abi_.Bind(jni::kExceptionOccurred, [](exec::MachineState& s, std::string*) {
+    s.r[0] = 0;  ///< no `jthrowable` is ever pending here
+    return true;
   });
+  abi_.Bind(jni::kExceptionCheck, [](exec::MachineState& s, std::string*) {
+    s.r[0] = 0;  ///< JNI_FALSE: nothing to check
+    return true;
+  });
+  abi_.Bind(jni::kExceptionDescribe, noop);
 
   ok_ = true;
   if (err != nullptr) err->clear();
+}
+
+bool JniEnv::Free(GuestAddr handle, std::string* err) {
+  // `DeleteLocalRef(NULL)` is legal in JNI and means nothing to do — not a refusal. It is also what a
+  // guest reaches when a slot it called handed it a null reference back.
+  if (handle == 0) return true;
+
+  if (handle < arena_at_ || handle >= arena_next_ || (handle & 3u) != 0) {
+    if (err != nullptr) {
+      *err = "release of 0x" + std::to_string(handle) +
+             " which is not a word-aligned handle inside this instance's string arena (0x" +
+             std::to_string(arena_at_) + "..0x" + std::to_string(arena_next_) + ")";
+    }
+    return false;
+  }
+  std::uint32_t magic = 0, length = 0;
+  if (!memory_.Read(handle, &magic, 4) || magic != jni::kStringMagic ||
+      !memory_.Read(handle + 4u, &length, 4)) {
+    // The same check `CheckHandle` makes, for the same reason, and the wording says which case is most
+    // likely: a stale handle is what a double release or a use-after-release looks like.
+    if (err != nullptr) {
+      *err = "release of 0x" + std::to_string(handle) +
+             " which does not carry a live RetroBug string header (already released, or never one of "
+             "this environment's)";
+    }
+    return false;
+  }
+  const unsigned bytes = (jni::kStringHeaderBytes + length + 1u + 3u) & ~3u;
+
+  // Kill the handle *before* returning the space. A `jstring` a guest kept past its release then fails the
+  // magic check instead of being read as whatever the next string wrote there — the difference between a
+  // named refusal and a plausible string made of another string's bytes.
+  std::string werr;
+  if (!PutWord(memory_, handle, 0u, werr)) {
+    if (err != nullptr) *err = werr;
+    return false;
+  }
+
+  const FreeBlock block{handle, bytes};
+  std::size_t at = 0;
+  while (at < free_.size() && free_[at].at < block.at) ++at;
+  free_.insert(free_.begin() + static_cast<std::ptrdiff_t>(at), block);
+  // Adjacent holes are one hole: without this the list accumulates slivers and eventually refuses an
+  // allocation that the space as a whole holds.
+  for (std::size_t i = 0; i + 1 < free_.size();) {
+    if (free_[i].at + free_[i].bytes == free_[i + 1].at) {
+      free_[i].bytes += free_[i + 1].bytes;
+      free_.erase(free_.begin() + static_cast<std::ptrdiff_t>(i + 1));
+    } else {
+      ++i;
+    }
+  }
+  // Give a block that reaches the bump pointer straight back to it. This is what makes a strict
+  // make-then-release loop cost *nothing* rather than merely being reusable: the arena stays at one
+  // string's size instead of growing to the high-water mark of every size the guest ever asked for.
+  while (!free_.empty() && free_.back().at + free_.back().bytes == arena_next_) {
+    arena_next_ = free_.back().at;
+    free_.pop_back();
+  }
+  ++strings_freed_;
+  return true;
 }
 
 GuestAddr JniEnv::MakeString(GuestAddr chars_at) {
@@ -196,13 +288,37 @@ GuestAddr JniEnv::MakeString(GuestAddr chars_at) {
     err_ = why;
     return 0;
   }
-  const unsigned total = jni::kStringHeaderBytes + static_cast<unsigned>(text.size()) + 1u;
-  if (arena_next_ > arena_end_ || total > arena_end_ - arena_next_) {
-    err_ = "the JNIEnv string arena is full (" + std::to_string(arena_end_ - arena_at_) +
-           " bytes, wanted " + std::to_string(total) + ")";
-    return 0;
+  // Word-aligned, so a released block and a fresh one describe the same generous size.
+  const unsigned total =
+      (jni::kStringHeaderBytes + static_cast<unsigned>(text.size()) + 1u + 3u) & ~3u;
+  // First fit over the blocks releases handed back, so a guest that makes and frees strings in a loop
+  // reuses one slot instead of walking the arena off its end. Always splitting — even into a remainder too
+  // small to satisfy another allocation — is what keeps a *large* freed block from being consumed by a
+  // small string: the remainder would otherwise leave the free list and the arena would shrink by the
+  // difference on every iteration, which is the leak this change exists to remove. A sliver costs four
+  // bytes of list entry and is merged by the coalescing in `Free`.
+  GuestAddr handle = 0;
+  for (std::size_t i = 0; i < free_.size(); ++i) {
+    if (free_[i].bytes < total) continue;
+    handle = free_[i].at;
+    if (free_[i].bytes == total) {
+      free_.erase(free_.begin() + static_cast<std::ptrdiff_t>(i));
+    } else {
+      free_[i].at += total;
+      free_[i].bytes -= total;
+    }
+    break;
   }
-  const GuestAddr handle = arena_next_;
+  if (handle == 0) {
+    if (arena_next_ > arena_end_ || total > arena_end_ - arena_next_) {
+      err_ = "the JNIEnv string arena is full (" + std::to_string(arena_end_ - arena_at_) +
+             " bytes, wanted " + std::to_string(total) + ", " + std::to_string(free_.size()) +
+             " free block(s) too small)";
+      return 0;
+    }
+    handle = arena_next_;
+    arena_next_ += total;
+  }
   std::string werr;
   if (!PutWord(memory_, handle, jni::kStringMagic, werr) ||
       !PutWord(memory_, handle + 4u, static_cast<std::uint32_t>(text.size()), werr)) {
@@ -213,7 +329,6 @@ GuestAddr JniEnv::MakeString(GuestAddr chars_at) {
     err_ = "could not write the string body at 0x" + std::to_string(handle);
     return 0;
   }
-  arena_next_ += (total + 3u) & ~3u;  ///< keep the next handle word-aligned
   last_handle_ = handle;
   ++utf_calls_;
   ++strings_made_;
@@ -240,7 +355,14 @@ bool JniEnv::CheckHandle(GuestAddr handle, std::uint32_t& length_out, std::strin
   if (!memory_.Read(handle + 4u, &length_out, 4)) {
     return complain("JNI string handle has no readable length word");
   }
-  return length_out <= arena_end_ - handle - jni::kStringHeaderBytes;
+  if (length_out > arena_end_ - handle - jni::kStringHeaderBytes) {
+    // The one check that used to return bare `false`: every other refusal here names itself, and a
+    // corrupted length word arriving as a slot-number-only fault cost the reason that found it.
+    return complain("JNI string handle 0x" + std::to_string(handle) +
+                    " declares " + std::to_string(length_out) +
+                    " bytes, which runs past this instance's arena");
+  }
+  return true;
 }
 
 }  // namespace rb::abi

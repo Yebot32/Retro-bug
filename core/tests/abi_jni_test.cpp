@@ -217,7 +217,11 @@ void a_string_handle_round_trips_back_to_its_bytes() {
 
   // Calling a host entry through the bridge, with the arguments where a guest would have left them, is
   // also how C09 will reach them — so this exercises the real path rather than the implementation.
+  // The bytes after `is_copy` carry a sentinel: `isCopy` points at a *jboolean*, one byte, and the
+  // 4-byte write an early draft made zeroed whatever the guest had declared beside it.
   const exec::GuestAddr is_copy_at = kStackTop - 0x40u;
+  const std::uint32_t sentinel = 0x5a5a'a5a5u;
+  CHECK(rig.mem->Write(is_copy_at, &sentinel, 4));
   exec::RunResult run{};
   const auto chars = rig.bridge->CallGuest(
       rig.bridge->SlotFor(abi::jni::kGetStringUTFChars),
@@ -231,7 +235,9 @@ void a_string_handle_round_trips_back_to_its_bytes() {
   CHECK_CTX(std::strcmp(buf, "retrobug") == 0, std::string{"chars are \""} + buf + "\"");
   std::uint32_t copied = 0;
   CHECK(rig.mem->Read(is_copy_at, &copied, 4));
-  CHECK_CTX(copied == 1, "isCopy=" + std::to_string(copied));
+  CHECK_CTX((copied & 0xffu) == 1, "isCopy low byte=" + std::to_string(copied & 0xffu));
+  CHECK_CTX((copied & 0xffff'ff00u) == (sentinel & 0xffff'ff00u),
+            "isCopy wrote past the jboolean: bytes 1..3 are now 0x" + Hex(copied));
 
   const auto len = rig.bridge->CallGuest(
       rig.bridge->SlotFor(abi::jni::kGetStringUTFLength),
@@ -281,6 +287,35 @@ void unimplemented_entries_stop_naming_what_was_asked_for() {
   CHECK_CTX(run.detail.find("FindClass") != std::string::npos, run.detail);
 }
 
+/// The exception family answers rather than refuses: on an environment whose every implemented
+/// function either cannot throw or refuses loudly, "no exception" is the true answer, and the
+/// defensive `ExceptionOccurred(env)` after every call is the style real JNI code is written in. A
+/// refusal here killed the guest call on its first check, naming C09 work that was never the guest's.
+void the_exception_family_answers_no_exception_not_refuses() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  exec::RunResult run{};
+  const auto occurred = rig.bridge->CallGuest(
+      rig.bridge->SlotFor(abi::jni::kExceptionOccurred),
+      {abi::Value32::Ptr(rig.jni->env())}, abi::Shorty::For("LL"), 1000, &run);
+  CHECK_CTX(run.reason == exec::StopReason::Returned,
+            "ExceptionOccurred: " + std::to_string(static_cast<int>(run.reason)) + " " + run.detail);
+  CHECK_CTX(occurred.bits == 0, "ExceptionOccurred = 0x" + Hex(occurred.w()));
+
+  const auto check = rig.bridge->CallGuest(
+      rig.bridge->SlotFor(abi::jni::kExceptionCheck),
+      {abi::Value32::Ptr(rig.jni->env())}, abi::Shorty::For("ZL"), 1000, &run);
+  CHECK_CTX(run.reason == exec::StopReason::Returned,
+            "ExceptionCheck: " + std::to_string(static_cast<int>(run.reason)) + " " + run.detail);
+  CHECK_CTX(check.bits == 0, "ExceptionCheck = 0x" + Hex(check.w()));
+
+  const auto describe = rig.bridge->CallGuest(
+      rig.bridge->SlotFor(abi::jni::kExceptionDescribe),
+      {abi::Value32::Ptr(rig.jni->env())}, abi::Shorty::For("VL"), 1000, &run);
+  CHECK_CTX(run.reason == exec::StopReason::Returned,
+            "ExceptionDescribe: " + std::to_string(static_cast<int>(run.reason)) + " " + run.detail);
+}
+
 // --------------------------------------------------------------------- IT blocks, on measured values
 
 struct ItCase {
@@ -321,9 +356,188 @@ void it_state_does_not_leak_past_the_block_that_set_it() {
   CHECK(out.i == 1008);
   CHECK_CTX(rig.bridge->state().itstate == 0,
             "itstate left at 0x" + Hex(rig.bridge->state().itstate));
-  // And the guest's own IT encoding in CPSR is the same zero, not just the mirror field.
-  CHECK_CTX((rig.bridge->state().cpsr & 0x0c00'fc00u) == 0,
+  // And the guest's own IT encoding in CPSR is the same zero, not just the mirror field. The mask is
+  // IT[1:0] at bits 26:25 (0x0600_0000) plus IT[7:2] at bits 15:10 (0x0fc00) — the first draft here
+  // used 0x0c00_0000, which is bits 27:26 and so watched the wrong bit entirely.
+  CHECK_CTX((rig.bridge->state().cpsr & 0x0600'fc00u) == 0,
             "cpsr=" + Hex(rig.bridge->state().cpsr));
+}
+
+/// Makes a guest string at `text_at` through the `NewStringUTF` slot and releases it again through
+/// `ReleaseStringUTFChars`. The two calls are the guest's own path — the bridge, the table, the AAPCS
+/// registers — rather than the implementation, which is what makes these tests about the lifecycle the
+/// guest sees.
+struct StringCalls {
+  Rig* rig = nullptr;
+  exec::GuestAddr text_at = 0;
+  exec::RunResult run{};
+
+  std::uint32_t make() {
+    const auto made = rig->bridge->CallGuest(
+        rig->bridge->SlotFor(abi::jni::kNewStringUTF),
+        {abi::Value32::Ptr(rig->jni->env()), abi::Value32::Ptr(text_at)}, abi::Shorty::For("LL"), 1000,
+        &run);
+    return made.w();
+  }
+  bool release(std::uint32_t handle) {
+    rig->bridge->CallGuest(
+        rig->bridge->SlotFor(abi::jni::kReleaseStringUTFChars),
+        {abi::Value32::Ptr(rig->jni->env()), abi::Value32::Ptr(handle), abi::Value32::Ptr(0)},
+        abi::Shorty::For("VLLL"), 1000, &run);
+    return run.reason == exec::StopReason::Returned;
+  }
+  bool delete_local(std::uint32_t handle) {
+    rig->bridge->CallGuest(rig->bridge->SlotFor(abi::jni::kDeleteLocalRef),
+                           {abi::Value32::Ptr(rig->jni->env()), abi::Value32::Ptr(handle)},
+                           abi::Shorty::For("VL"), 1000, &run);
+    return run.reason == exec::StopReason::Returned;
+  }
+};
+
+/// Writes `text` (NUL-terminated) into the guest stack and hands back the address.
+exec::GuestAddr put_text(Rig& rig, const std::string& text, exec::GuestAddr at) {
+  if (!rig.mem->Write(at, text.c_str(), text.size() + 1u)) {
+    fail("could not write the source text", __LINE__, text);
+    return 0;
+  }
+  return at;
+}
+
+/// The audit's scenario, as a test: a guest that makes a string and releases it, every frame.
+///
+/// The arena was bump-allocated and freed only with the instance, so this loop walked it off its end —
+/// 2000 rounds of a twenty-byte slot is ~40 KiB against a 16 KiB arena — and the failure arrived as a bare
+/// "NewStringUTF failed", far from the loop that caused it. What is asserted is not that the calls
+/// returned (they could all return and still leak) but that the arena did not *grow*: with the free list
+/// and the bump-pointer rollback it stays at one string's size for the whole loop.
+void a_released_string_does_not_grow_the_arena() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  StringCalls calls{&rig, put_text(rig, "retrobug", kStackTop - 0x200u)};
+  const std::uint32_t first = calls.make();
+  CHECK_CTX(calls.run.reason == exec::StopReason::Returned && first != 0,
+            "NewStringUTF: reason " + std::to_string(static_cast<int>(calls.run.reason)) + " " +
+                calls.run.detail);
+  const unsigned one_string = rig.jni->arena_used();
+  CHECK_CTX(one_string != 0, "the arena did not move for the first string");
+  CHECK(calls.release(first));
+
+  unsigned failed = 0;
+  for (unsigned i = 1; i < 2000; ++i) {
+    const std::uint32_t handle = calls.make();
+    if (calls.run.reason != exec::StopReason::Returned || handle == 0) ++failed;
+    if (!calls.release(handle)) ++failed;
+  }
+  CHECK_CTX(failed == 0, std::to_string(failed) + " of 1999 make/release rounds failed");
+  CHECK_CTX(rig.jni->arena_used() <= one_string,
+            "the arena grew to " + std::to_string(rig.jni->arena_used()) + " bytes over 2000 released"
+            " strings (one string is " + std::to_string(one_string) + ")");
+  CHECK_CTX(rig.jni->strings_made() == 2000u, std::to_string(rig.jni->strings_made()));
+  CHECK_CTX(rig.jni->strings_freed() == 2000u, std::to_string(rig.jni->strings_freed()));
+  std::fprintf(stderr, "[jni] 2000 make/release rounds: arena_used=%u one_string=%u free=%u\n",
+               rig.jni->arena_used(), one_string, rig.jni->free_bytes());
+}
+
+/// A `jstring` kept past its release is stale, not still-good. The block's magic word is cleared when the
+/// space goes back, so the handle is refused by name instead of being read as whatever the next string
+/// wrote there — a use-after-release that produced a plausible string would be the worst version of this
+/// bug, because nothing would look wrong.
+void a_stale_handle_is_refused_not_read() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  StringCalls calls{&rig, put_text(rig, "retrobug", kStackTop - 0x200u)};
+  const std::uint32_t first = calls.make();
+  const std::uint32_t second = calls.make();  // keeps the arena's tail above `first`
+  CHECK(first != 0 && second != 0);
+  CHECK(calls.release(first));
+
+  rig.bridge->CallGuest(rig.bridge->SlotFor(abi::jni::kGetStringUTFLength),
+                        {abi::Value32::Ptr(rig.jni->env()), abi::Value32::Ptr(first)},
+                        abi::Shorty::For("IL"), 1000, &calls.run);
+  CHECK_CTX(calls.run.reason == exec::StopReason::Fault,
+            "a released handle was read: reason " +
+                std::to_string(static_cast<int>(calls.run.reason)) + " " + calls.run.detail);
+  CHECK_CTX(calls.run.detail.find("RetroBug string header") != std::string::npos, calls.run.detail);
+  // The second string is untouched: releasing one block must not disturb its neighbour.
+  const auto len = rig.bridge->CallGuest(rig.bridge->SlotFor(abi::jni::kGetStringUTFLength),
+                                         {abi::Value32::Ptr(rig.jni->env()), abi::Value32::Ptr(second)},
+                                         abi::Shorty::For("IL"), 1000, &calls.run);
+  CHECK_CTX(len.i() == 8, "the neighbouring string became " + std::to_string(len.i()) + " bytes");
+}
+
+/// `DeleteLocalRef` is the other half of JNI's local-reference lifecycle, and it frees too. A double
+/// release is refused rather than silently accepted, because the second one is the shape a guest bug
+/// takes and it is cheaper to name than to reason about later.
+void delete_local_ref_releases_too() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  StringCalls calls{&rig, put_text(rig, "retrobug", kStackTop - 0x200u)};
+  const std::uint32_t first = calls.make();
+  const unsigned after_make = rig.jni->arena_used();
+  CHECK(after_make != 0);
+  CHECK(calls.delete_local(first));
+  CHECK_CTX(rig.jni->arena_used() == 0, "the arena kept " + std::to_string(rig.jni->arena_used()) +
+                                            " bytes after DeleteLocalRef");
+  // The second delete of the same handle is refused by name — and deliberately not wrapped in `CHECK`,
+  // because the assertion is about *how* it failed rather than that it returned false: a refusal is a
+  // Fault with a reason, and `CHECK(false)` would have hidden which one.
+  calls.delete_local(first);
+  // Which name depends on where the handle now
+  // sits — the block went straight back to the bump pointer, so this is the range check rather than the
+  // magic check — but it must be a refusal: accepting it silently is how a double release becomes a
+  // double *allocation* later, with two live strings on one block.
+  CHECK_CTX(calls.run.reason == exec::StopReason::Fault,
+            "a double DeleteLocalRef was accepted: " + calls.run.detail);
+  CHECK_CTX(calls.run.detail.find("release of") != std::string::npos, calls.run.detail);
+  CHECK(calls.delete_local(0));  // JNI allows DeleteLocalRef(NULL)
+  std::fprintf(stderr, "[jni] DeleteLocalRef: freed=%u arena_used=%u\n", rig.jni->strings_freed(),
+               rig.jni->arena_used());
+}
+
+/// Two freed blocks that sit next to each other become one, which is what lets a later string use space no
+/// single release could have served. The layout is arranged so the bump pointer cannot help: the middle
+/// and first strings are freed while a third still sits above them, so the space only becomes usable
+/// through coalescing.
+void released_blocks_coalesce_for_a_larger_string() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  StringCalls calls{&rig, 0};
+  // 132 bytes of arena each (8 header + 120 text + NUL, rounded up), so two merged holes hold 264 — enough
+  // for the 212-byte `big` below, while neither hole alone is. An earlier version of this test used a
+  // nine-character string, whose 20-byte blocks coalesced to 40 and could never have shown the merge.
+  const std::string small(120, 'a');
+  const std::string big(200, 'b');  // 212 bytes of arena, more than one block and less than two
+
+  calls.text_at = put_text(rig, big, kStackTop - 0x400u);   // consume most of the arena with one string
+  const std::uint32_t parked = calls.make();
+  CHECK(parked != 0);
+  calls.text_at = put_text(rig, small, kStackTop - 0x200u);
+  const std::uint32_t a = calls.make();
+  const std::uint32_t b = calls.make();
+  const std::uint32_t c = calls.make();
+  CHECK(a != 0 && b != 0 && c != 0);
+  const unsigned before = rig.jni->arena_used();
+
+  // Free the middle, then the one below it: adjacent holes, but not the tail, so nothing rolls back.
+  CHECK(calls.release(b));
+  CHECK(calls.release(a));
+  CHECK_CTX(rig.jni->arena_used() == before,
+            "the bump pointer moved for a hole that was not at the tail: " +
+                std::to_string(rig.jni->arena_used()) + " vs " + std::to_string(before));
+
+  // 212 bytes, more than either hole held on its own. There is free space above the bump pointer, so this
+  // is not about the arena being full: it is that the allocation has to come out of the *coalesced* hole
+  // rather than off the top, which is exactly what `arena_used()` staying put shows. A first-fit that
+  // skipped the free list, or a free list that never merged neighbours, grows the arena here.
+  calls.text_at = put_text(rig, big, kStackTop - 0x400u);
+  const std::uint32_t reused = calls.make();
+  CHECK_CTX(reused != 0 && calls.run.reason == exec::StopReason::Returned,
+            "the reused allocation was refused: " + calls.run.detail);
+  CHECK_CTX(rig.jni->arena_used() == before,
+            "the coalesced space was not used: the arena grew from " + std::to_string(before) + " to " +
+                std::to_string(rig.jni->arena_used()));
+  std::fprintf(stderr, "[jni] coalesce: before=%u after=%u reused=0x%x\n", before,
+               rig.jni->arena_used(), reused);
 }
 
 }  // namespace
@@ -333,7 +547,12 @@ int main() {
   a_guest_string_call_out_matches_hardware();
   a_string_handle_round_trips_back_to_its_bytes();
   a_foreign_pointer_as_a_string_is_refused_not_read();
+  a_released_string_does_not_grow_the_arena();
+  a_stale_handle_is_refused_not_read();
+  delete_local_ref_releases_too();
+  released_blocks_coalesce_for_a_larger_string();
   unimplemented_entries_stop_naming_what_was_asked_for();
+  the_exception_family_answers_no_exception_not_refuses();
   predicated_thumb2_blocks_take_the_legs_the_hardware_took();
   it_state_does_not_leak_past_the_block_that_set_it();
 

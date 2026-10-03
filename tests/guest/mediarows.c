@@ -76,6 +76,7 @@ static const struct Row kRows[] = {
     {"usub8 mixed borrow", row_usub8, 0x01000080u, 0x01010101u, 0x00FFFF7Fu, 9u},
     {"sadd8 zero lane", row_sadd8, 0x01FF007Fu, 0x01010101u, 0x02000180u, 15u},
     {"sadd8 all-negative", row_sadd8, 0x80808080u, 0xFFFFFFFFu, 0x7F7F7F7Fu, 0u},
+    {"sadd8 minus-one lane", row_sadd8, 0x00000000u, 0xFFFFFFFFu, 0xFFFFFFFFu, 0u},
     {"ssub8 signed-only", row_ssub8, 0x00000000u, 0xFFFFFFFFu, 0x01010101u, 15u},
     {"uqsub8 no clamp", row_uqsub8, 0xFFFFFFFFu, 0x01010101u, 0xFEFEFEFEu, 15u},
     {"uqadd8 clamped", row_uqadd8, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 15u},

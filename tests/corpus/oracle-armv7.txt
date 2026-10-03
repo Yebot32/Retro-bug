@@ -1,7 +1,7 @@
 # device=SM-X710 serial=R52Y106BECZ abilist32=armeabi-v7a,armeabi page=4096
-# built from 124ed7f 2026-09-20T15:09:31+04:00
+# built from ad1f9da 2026-10-04T00:44:29+04:00
 --- numeric oracle
-thumb=1 fib_addr=0x1b6c5
+thumb=1 fib_addr=0x1b88d
 fib(0)=0 fib(1)=1 fib(2)=1 fib(20)=6765 fib(20)again=6765
 fib-curve: 0 1 1 2 3 5 8 13 21 34 55 89 144
 wide(0)=52 wide(2)=50 wide(-1)=55
@@ -14,6 +14,10 @@ fp_stack: 110125 144035 -55957 1023099 11269
 fp_args: 56 62 -13 351 8
 fp_round: 6 32 -45 637 -13
 fp_nan: 8 8 8 8 8
+fp_vecmax: -2147483648 0 0 0 1065353216 2143289344 2143289344
+fp_vecmin: -2147483648 -2147483648 -2147483648 0 -1082130432 2143289344 2143289344
+fp_rmode: 1374455510 1374455506 1374455510 1374455510 -375277457 -375277457 -375277458 -375277458
+fp_fz: 1 0 4194304 0 439682291 0 916455424 0 0 0
 simd_int: -25 67 67 30250 -1
 simd_lane: 1709337648 -1185945012 -1238834555 -450686130 -1656795248
 simd_bits: 1148729636 1143559836 -1080895096 -1479472860 442803864
@@ -27,14 +31,14 @@ midr: attempting
 rc=132
 Illegal instruction 
 ctr: attempting
-Illegal instruction 
 rc=132
+Illegal instruction 
 mpidr: attempting
 rc=132
 Illegal instruction 
 tpidrurw: attempting
-tpidrurw: 0xf22d7fe0
+tpidrurw: 0xeac06fe0
 rc=0
 fpsid: attempting
-rc=132
 Illegal instruction 
+rc=132

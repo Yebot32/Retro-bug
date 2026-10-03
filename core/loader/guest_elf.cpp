@@ -96,7 +96,10 @@ bool LooksLikeAArch32Elf(const std::uint8_t* data, std::size_t len) {
   if (data[4] != 1 /* ELFCLASS32 */) return false;
   if (data[5] != 1 /* ELFDATA2LSB */) return false;
   const auto* h = reinterpret_cast<const Ehdr32*>(data);
-  return (h->e_machine & ~EF_ARM_MASK) == EM_ARM;
+  // Exactly EM_ARM. The first draft masked with EF_ARM_MASK — whose bits belong in `e_flags`, not
+  // `e_machine` — so any word whose low byte was 40 (`0xFF28` among them) passed the gate and went on
+  // to be parsed as ARM.
+  return h->e_machine == EM_ARM;
 }
 
 namespace {
@@ -213,6 +216,33 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
     const auto* p = img.At<Phdr32>(h->e_phoff + static_cast<std::size_t>(i) * h->e_phentsize);
     if (!p) return fail("program headers run past the file");
     phdrs.push_back(*p);
+  }
+
+  // Every file range the headers claim must exist in the file. Checked here rather than discovered
+  // by a fault: mmap of pages past EOF succeeds, and the first access — this loader's own tail-zero
+  // write, or a relocation — raises SIGBUS in the *host*, which is the one failure a loader must
+  // never convert its refusals into. A truncated `.so` (a partial APK extraction is the realistic
+  // route) keeps an intact header table, so this is the check that catches it.
+  for (const auto& p : phdrs) {
+    if (p.p_type != PT_LOAD && p.p_type != PT_DYNAMIC && p.p_type != PT_NOTE) continue;
+    if (p.p_filesz == 0) continue;
+    if (static_cast<std::uint64_t>(p.p_offset) + p.p_filesz > fsize) {
+      return fail(Stage("program header claims file bytes past the end of the image",
+                        "type " + std::to_string(p.p_type) + " offset " +
+                            std::to_string(p.p_offset) + " filesz " + std::to_string(p.p_filesz) +
+                            " file " + std::to_string(fsize)));
+    }
+    if (p.p_type == PT_LOAD) {
+      // The mapping's file offset is `p_offset` reduced by the vaddr's page-alignment slack, which
+      // must not underflow: an offset smaller than its own slack describes a file that starts
+      // negative, and wrapping it would map the *end* of the file as the segment's head.
+      const std::uint32_t seg_page = AlignDown(p.p_vaddr, mem::kGuestPage);
+      if (p.p_offset < p.p_vaddr - seg_page) {
+        return fail(Stage("PT_LOAD file offset below its page alignment",
+                          "offset " + std::to_string(p.p_offset) + " vaddr " +
+                              std::to_string(p.p_vaddr)));
+      }
+    }
   }
 
   // Bounds of everything we must place.
@@ -381,13 +411,46 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
   };
 
   const char* strtab = nullptr;
+  std::size_t strtab_room = 0;
   {
     std::size_t off;
-    if (dyn.present && dyn.strtab && guest_to_file(dyn.strtab, off)) strtab = img.CStr(off);
+    if (dyn.present && dyn.strtab && guest_to_file(dyn.strtab, off)) {
+      // The whole table has to be in the file image, and names are read bounded by DT_STRSZ (or, if
+      // the image omits it, by the file's end): the raw reads a first draft used scanned for a NUL
+      // past the table and into whatever the mapping held next, and an offset far past it was a
+      // wild-pointer dereference rather than a refusal.
+      //
+      // A table that runs past the image is a *refusal*, not an empty name. The bound was once only
+      // applied: `strtab` was left null, every DT_NEEDED, DT_SONAME and symbol name came back empty, and
+      // the report said "no exports / no soname" about an image whose string table was simply damaged.
+      // Nothing crashes in that version and the diagnosis blames the guest's own library, which is why
+      // it is worse here than the wild read it replaced. The comparison is written subtraction-first so
+      // `declared` (a 32-bit DT_STRSZ) cannot wrap the sum.
+      const std::size_t declared = dyn.strsz ? dyn.strsz : img.size - off;
+      if (declared > img.size || off > img.size - declared) {
+        return fail(Stage("DT_STRTAB/DT_STRSZ runs past the end of the image",
+                          std::to_string(declared) + " bytes at file offset " + std::to_string(off) +
+                              ", image is " + std::to_string(img.size) + " bytes"));
+      }
+      strtab_room = declared;
+      // A zero-size table counts as absent rather than as a one-byte window: every other reader here
+      // takes DT_STRSZ == 0 to mean "unset", and DT_STRTAB alone names no length worth trusting.
+      if (strtab_room != 0) strtab = img.CStr(off);
+    }
   }
+  auto str_at = [&](std::uint32_t st_name) -> std::string {
+    if (!strtab || st_name >= strtab_room) return {};
+    const char* begin = strtab + st_name;
+    const char* nul =
+        static_cast<const char*>(std::memchr(begin, '\0', strtab_room - st_name));
+    return nul ? std::string(begin, nul) : std::string{};
+  };
   auto sym_name = [&](std::uint32_t st_name) -> std::string {
-    if (!strtab || st_name >= dyn.strsz) return {};
-    return std::string(strtab + st_name);
+    // Bounded by the room actually resolved, not by `dyn.strsz`: for an image that omits DT_STRSZ the
+    // only bound available is the file's end, and comparing against a zero `strsz` made every name in
+    // such an image empty — the same silent-empty-name shape the refusal above exists to end.
+    if (!strtab || st_name >= strtab_room) return {};
+    return str_at(st_name);
   };
   const Sym32* symtab = nullptr;
   std::size_t sym_off = 0;
@@ -468,6 +531,16 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
             if (err) *err = "cannot read REL addend";
             return false;
           }
+        }
+        // The target must fall inside the image's own span. Checked even though the write itself is
+        // bounds-checked, because a wrapped r_offset (`0xFFFFF000` against a small base) lands on
+        // the *previous* module's writable data — mapped, so the write succeeds, the load reports
+        // success, and the corruption surfaces somewhere else entirely.
+        if (r_offset < lo || r_offset >= hi) {
+          if (err) *err = Stage("relocation target outside the image",
+                                "r_offset " + std::to_string(r_offset) + " outside [" +
+                                    std::to_string(lo) + ", " + std::to_string(hi) + ")");
+          return false;
         }
         const std::uint32_t type = ELF32_R_TYPE(r_info);
         const std::uint32_t sidx = ELF32_R_SYM(r_info);
@@ -727,9 +800,10 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
             CodeAddress{entry ? (entry & ~1u) : 0u, (entry & 1u) != 0u});
       }
     }
-    if (dyn.soname && strtab) mod.soname = std::string(strtab + dyn.soname);
+    if (dyn.soname && strtab) mod.soname = str_at(dyn.soname);
     for (auto n : dyn.needed) {
-      if (strtab) mod.needed.emplace_back(strtab + n);
+      auto name = str_at(n);
+      if (!name.empty()) mod.needed.emplace_back(std::move(name));
     }
     if (symtab && symtab_bytes) {
       const std::size_t nsyms = symtab_bytes / sizeof(Sym32);
@@ -772,8 +846,13 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
       if (off + hdr + namesz + descsz > p.p_filesz) break;
       if (*type == NT_GNU_BUILD_ID && namesz == 4 &&
           std::memcmp(img.data + p.p_offset + off + hdr, "GNU", 4) == 0) {
-        const auto* desc = img.data + p.p_offset + off + hdr + AlignUp(namesz, 4u);
-        mod.build_id.assign(desc, desc + descsz);
+        // Bounded by the file, not by the note's own claim: the note header's earlier check bounds
+        // against `p_filesz` without the descriptor's alignment padding, and a descsz past the file
+        // was a read off the end of the mapping.
+        const std::size_t desc_off = p.p_offset + off + hdr + AlignUp(namesz, 4u);
+        if (desc_off + descsz <= img.size) {
+          mod.build_id.assign(img.data + desc_off, img.data + desc_off + descsz);
+        }
       }
       off += hdr + AlignUp(namesz, 4u) + AlignUp(descsz, 4u);
     }

@@ -42,6 +42,13 @@ extern jint Java_com_retrobug_fixture_MainActivity_fp_stack(JNIEnv* env, jclass 
 extern jint Java_com_retrobug_fixture_MainActivity_fp_args(JNIEnv* env, jclass clazz, jint a,
                                                            jint b);
 extern jint Java_com_retrobug_fixture_MainActivity_fp_nan(JNIEnv* env, jclass clazz, jint a);
+extern jint Java_com_retrobug_fixture_MainActivity_fp_vecmax(JNIEnv* env, jclass clazz, jint a,
+                                                             jint b);
+extern jint Java_com_retrobug_fixture_MainActivity_fp_vecmin(JNIEnv* env, jclass clazz, jint a,
+                                                             jint b);
+extern jint Java_com_retrobug_fixture_MainActivity_fp_rmode(JNIEnv* env, jclass clazz, jint a,
+                                                            jint b);
+extern jint Java_com_retrobug_fixture_MainActivity_fp_fz(JNIEnv* env, jclass clazz, jint a, jint b);
 extern jint Java_com_retrobug_fixture_MainActivity_fp_cmp(JNIEnv* env, jclass clazz, jint mode);
 extern jint Java_com_retrobug_fixture_MainActivity_simd_int(JNIEnv* env, jclass clazz, jint a,
                                                             jint b);
@@ -227,6 +234,58 @@ int main(int argc, char** argv) {
       }
       printf("\n");
     }
+
+    // fp_vecmax / fp_vecmin: the Advanced SIMD FP max/min group. Its operands are float *bit patterns*,
+    // and the shared pair set above cannot even spell -0.0 — while the rule this measures is entirely
+    // about signed zeros, plus the default-NaN answer for an unordered pair. So the pair set is its own,
+    // and it is the hardware half of `core/tests/exec_tier_diff_test.cpp`'s fp_vecmax/fp_vecmin rows.
+    static const jint minmax[][2] = {
+        {(jint)0x80000000u, (jint)0x80000000u},  // (-0, -0)
+        {(jint)0x00000000u, (jint)0x80000000u},  // (+0, -0)
+        {(jint)0x80000000u, (jint)0x00000000u},  // (-0, +0)
+        {(jint)0x00000000u, (jint)0x00000000u},  // (+0, +0)
+        {0x3f800000, 0xbf800000},                // (1.0, -1.0)
+        {0x7fc00000, 0x3f800000},                // (qNaN, 1.0)
+        {0x7f800001, 0x3f800000},                // (sNaN, 1.0)
+    };
+    const struct {
+      const char* label;
+      fn2 f2;
+    } mm[] = {{"fp_vecmax", Java_com_retrobug_fixture_MainActivity_fp_vecmax},
+              {"fp_vecmin", Java_com_retrobug_fixture_MainActivity_fp_vecmin}};
+    for (unsigned p = 0; p < sizeof mm / sizeof mm[0]; ++p) {
+      printf("%s:", mm[p].label);
+      for (unsigned i = 0; i < sizeof minmax / sizeof minmax[0]; ++i) {
+        printf(" %d", mm[p].f2(NULL, NULL, minmax[i][0], minmax[i][1]));
+      }
+      printf("\n");
+    }
+
+    // fp_rmode: `a` is the rounding mode (0 nearest, 1 +inf, 2 -inf, 3 zero) and `b` seeds the operand,
+    // so this pair set is (mode, seed) rather than two arithmetic operands. Two seeds per mode, because a
+    // single seed could in principle be insensitive to the mode and the row set would then say nothing
+    // while looking thorough — the shape `docs/30` §Step 16 was caught by once already.
+    static const jint rmodes[][2] = {{0, 1}, {1, 1}, {2, 1}, {3, 1},
+                                     {0, 5}, {1, 5}, {2, 5}, {3, 5}};
+    printf("fp_rmode:");
+    for (unsigned i = 0; i < sizeof rmodes / sizeof rmodes[0]; ++i) {
+      printf(" %d", Java_com_retrobug_fixture_MainActivity_fp_rmode(NULL, NULL, rmodes[i][0],
+                                                                   rmodes[i][1]));
+    }
+    printf("\n");
+
+    // fp_fz: `a` bit 0 is FPSCR.FZ and `b` is the case (0 scalar mul input, 1 scalar mul result, 2 scalar
+    // sqrt input, 3 widening input, 4 NEON max input). Every case is captured at both FZ values even
+    // though case 4 cannot depend on it: the invariance *is* the measurement, and a row that only ran at
+    // FZ=1 would not show it.
+    static const jint fzcases[][2] = {{0, 0}, {1, 0}, {0, 1}, {1, 1}, {0, 2},
+                                      {1, 2}, {0, 3}, {1, 3}, {0, 4}, {1, 4}};
+    printf("fp_fz:");
+    for (unsigned i = 0; i < sizeof fzcases / sizeof fzcases[0]; ++i) {
+      printf(" %d", Java_com_retrobug_fixture_MainActivity_fp_fz(NULL, NULL, fzcases[i][0],
+                                                                fzcases[i][1]));
+    }
+    printf("\n");
     printf("simd_int:");
     const fn2 simd = Java_com_retrobug_fixture_MainActivity_simd_int;
     for (unsigned i = 0; i < npairs; ++i) {

@@ -33,6 +33,15 @@ static void CallCoprocCallback(oaknut::CodeGenerator& code, EmitContext& ctx, A3
     code.MOV(Xscratch0, reinterpret_cast<u64>(callback.function));
     code.BLR(Xscratch0);
 
+    if (ctx.conf.check_halt_on_memory_access) {
+        // RetroBug patch: a callback may have refused (raised `HaltReason::UserDefined1`) and there was
+        // no re-test here, so the refusal was recorded and then ignored while the block kept running on
+        // the callback's zero. Same shape as the memory callbacks' abort check.
+        oaknut::Label end;
+        EmitA32CheckCallbackHalt(code, ctx, end);
+        code.l(end);
+    }
+
     if (inst) {
         ctx.reg_alloc.DefineAsRegister(inst, X0);
     }

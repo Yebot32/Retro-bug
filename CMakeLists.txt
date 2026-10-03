@@ -29,7 +29,13 @@ option(RB_BUILD_LAUNCHER "Build the host-side launcher's JNI library (rbguest) f
 set(DYNARMIC_FRONTENDS "A32" CACHE STRING "" FORCE)   # ARMv7 guest only (AD-1)
 set(DYNARMIC_TESTS OFF)
 set(DYNARMIC_NO_WARNING_FLAGS ON)
-set(DYNARMIC_USE_PRECOMPILED_HEADERS OFF)
+# `CACHE ... FORCE`, not a plain `set`: under policy CMP0077 OLD (which this project's
+# `cmake_minimum_required` selects) an `option()` in dynarmic's own CMakeLists overrides a normal
+# variable of the same name, and `DYNARMIC_USE_PRECOMPILED_HEADERS` defaults to ON there. The plain
+# `set` below therefore lost, silently: the option read OFF here and ON in every generated cache
+# (`build/tests-x86_64`, `build/tests-arm64-v8a`, `build/launcher-arm64` all said BOOL=ON), which is a
+# build configuration that does not match its source. A cache entry with FORCE is what wins the race.
+set(DYNARMIC_USE_PRECOMPILED_HEADERS OFF CACHE BOOL "dynarmic precompiled headers (RetroBug: OFF)" FORCE)
 set(BUILD_SHARED_LIBS OFF)
 
 if(NOT RB_USE_REAL_BOOST)
