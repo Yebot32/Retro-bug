@@ -5,7 +5,7 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
-import java.time.LocalDateTime;
+import java.util.GregorianCalendar;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Enumeration;
@@ -69,7 +69,7 @@ final class ApkRepackager {
             ZipEntry me = zip.getEntry(MANIFEST);
             if (me == null) throw new IOException("no " + MANIFEST + " in " + inApk);
             byte[] manifest;
-            try (InputStream in = zip.getInputStream(me)) { manifest = in.readAllBytes(); }
+            try (InputStream in = zip.getInputStream(me)) { manifest = readFully(in); }
             AxmlEditor ed = AxmlEditor.parse(manifest);
             r.packageName = ed.packageName();
 
@@ -133,7 +133,7 @@ final class ApkRepackager {
                     r.guestLibs.add(name);
                     String dest = GUEST_DIR + name;
                     claim(names, dest);
-                    try (InputStream in = zip.getInputStream(e)) { putBytes(zo, dest, in.readAllBytes(), ZipEntry.DEFLATED); }
+                    try (InputStream in = zip.getInputStream(e)) { putBytes(zo, dest, readFully(in), ZipEntry.DEFLATED); }
                     // Only .so files are loaded by name through the linker; anything else (gdbserver, data
                     // blobs) is carried along for the guest but gets no stub the platform would try to load.
                     if (name.endsWith(".so") && name.indexOf('/') < 0) stubs.add(name);
@@ -161,7 +161,18 @@ final class ApkRepackager {
     }
 
     // Fixed timestamp: the same input and runtime must give byte-identical output.
-    private static void stamp(ZipEntry e) { e.setTimeLocal(LocalDateTime.of(2008, 1, 1, 0, 0, 0)); }
+    private static void stamp(ZipEntry e) {
+        // Calendar fields in the default zone: ZipEntry stores local DOS time, so this is 2008-01-01 00:00 in every zone.
+        e.setTime(new GregorianCalendar(2008, 0, 1, 0, 0, 0).getTimeInMillis());
+    }
+
+    // InputStream.readAllBytes is API 33; this class runs on-device from API 26.
+    private static byte[] readFully(InputStream in) throws IOException {
+        java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+        byte[] buf = new byte[65536];
+        for (int n; (n = in.read(buf)) > 0; ) bo.write(buf, 0, n);
+        return bo.toByteArray();
+    }
 
     private static void putBytes(ZipOutputStream zo, String name, byte[] data, int method) throws IOException {
         ZipEntry e = new ZipEntry(name);
@@ -179,7 +190,7 @@ final class ApkRepackager {
     /** Copies an entry keeping its compression method (resources.arsc must stay STORED for newer Android). */
     private static void copy(ZipFile zip, ZipEntry src, ZipOutputStream zo) throws IOException {
         byte[] data;
-        try (InputStream in = zip.getInputStream(src)) { data = in.readAllBytes(); }
+        try (InputStream in = zip.getInputStream(src)) { data = readFully(in); }
         putBytes(zo, src.getName(), data, src.getMethod() == ZipEntry.STORED ? ZipEntry.STORED : ZipEntry.DEFLATED);
     }
 }

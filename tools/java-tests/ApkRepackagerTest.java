@@ -43,6 +43,15 @@ public class ApkRepackagerTest {
         return m;
     }
 
+    static long crcOf(byte[] d) { java.util.zip.CRC32 c = new java.util.zip.CRC32(); c.update(d); return c.getValue(); }
+
+    static void putStored(ZipOutputStream zo, String name, byte[] data) throws IOException {
+        ZipEntry e = new ZipEntry(name);
+        e.setMethod(ZipEntry.STORED);
+        e.setSize(data.length); e.setCompressedSize(data.length); e.setCrc(crcOf(data));
+        zo.putNextEntry(e); zo.write(data); zo.closeEntry();
+    }
+
     /** Copies the aapt2 APK's entries (manifest swapped if given) and appends extras in order. */
     static File build(String base, byte[] manifest, String tag, Map<String, byte[]> extras) throws IOException {
         File out = new File(scratch, tag + ".apk");
@@ -50,12 +59,15 @@ public class ApkRepackagerTest {
              ZipOutputStream zo = new ZipOutputStream(Files.newOutputStream(out.toPath()))) {
             for (Enumeration<? extends ZipEntry> en = src.entries(); en.hasMoreElements(); ) {
                 ZipEntry se = en.nextElement();
-                zo.putNextEntry(new ZipEntry(se.getName()));
-                if (manifest != null && se.getName().equals("AndroidManifest.xml")) zo.write(manifest);
-                else try (InputStream in = src.getInputStream(se)) { in.transferTo(zo); }
-                zo.closeEntry();
+                byte[] data;
+                if (manifest != null && se.getName().equals("AndroidManifest.xml")) data = manifest;
+                else try (InputStream in = src.getInputStream(se)) { data = in.readAllBytes(); }
+                // resources.arsc is STORED in real APKs; keep the fixture honest so the STORED path runs.
+                if (se.getName().equals("resources.arsc") || se.getName().equals("assets/stored.bin")) putStored(zo, se.getName(), data);
+                else { zo.putNextEntry(new ZipEntry(se.getName())); zo.write(data); zo.closeEntry(); }
             }
             for (Map.Entry<String, byte[]> e : extras.entrySet()) {
+                if (e.getKey().equals("assets/stored.bin")) { putStored(zo, e.getKey(), e.getValue()); continue; }
                 zo.putNextEntry(new ZipEntry(e.getKey()));
                 zo.write(e.getValue());
                 zo.closeEntry();
@@ -74,6 +86,7 @@ public class ApkRepackagerTest {
         x.put("META-INF/CERT.SF", b("sf"));
         x.put("META-INF/MANIFEST.MF", b("mf"));
         x.put("assets/x.txt", b("hello asset"));
+        x.put("assets/stored.bin", b("stored payload 00000001 bytes"));
         return x;
     }
 
@@ -133,6 +146,13 @@ public class ApkRepackagerTest {
             check(z.getEntry("assets/rb32/libfoo.so").getMethod() == ZipEntry.DEFLATED, ".so is DEFLATED");
             check(z.getEntry("lib/arm64-v8a/libfoo.so").getMethod() == ZipEntry.DEFLATED, "stub is DEFLATED");
             check(z.getEntry("resources.arsc").getMethod() == methodOf(in, "resources.arsc"), "resources.arsc method preserved");
+            check(methodOf(in, "assets/stored.bin") == ZipEntry.STORED, "fixture precondition: stored.bin is STORED in the input");
+            check(methodOf(in, "resources.arsc") == ZipEntry.STORED, "fixture precondition: resources.arsc is STORED in the input");
+            ZipEntry se = z.getEntry("assets/stored.bin");
+            check(se.getMethod() == ZipEntry.STORED, "stored.bin stays STORED");
+            check(se.getCrc() == crcOf(b("stored payload 00000001 bytes")), "stored.bin CRC equals independently computed CRC");
+            check(z.getEntry("resources.arsc").getMethod() == ZipEntry.STORED, "resources.arsc stays STORED");
+            check(Arrays.equals(o.get("assets/stored.bin"), b("stored payload 00000001 bytes")), "stored.bin bytes equal");
             check(z.getEntry("assets/x.txt").getTime() == z.getEntry("assets/rb32/libfoo.so").getTime(), "uniform entry times");
         }
         File out2 = new File(scratch, "full.out2.apk");
