@@ -46,3 +46,6 @@ javac -nowarn -Xlint:-options -d "$(to_host "$OUT/classes")" "${HOST_SRCS[@]}"
 
 java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.AxmlEditorTest \
   "$(to_host "$OUT/fixtures")" "$(to_host "$OUT/scratch")" "$(to_host "$BT/aapt2.exe")"
+
+java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ApkRepackagerTest \
+  "$(to_host "$OUT/fixtures")" "$(to_host "$OUT/scratch")" "$(to_host "$BT/aapt2.exe")"
