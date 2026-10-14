@@ -67,7 +67,8 @@ endif()
 # cannot start depending on this existing. `tools/build_launcher_apk.sh` names the target explicitly,
 # which is the only way it gets built.
 if(RB_BUILD_LAUNCHER)
-  add_library(rbguest SHARED EXCLUDE_FROM_ALL android/jni/launcher.cpp android/jni/gl_forward.cpp)
+  add_library(rbguest SHARED EXCLUDE_FROM_ALL android/jni/launcher.cpp android/jni/gl_forward.cpp
+              android/jni/runtime_boot.cpp)
   # The same set `rb_guest_apk_tests` links (`core/tests/CMakeLists.txt`), because this target does the
   # same sequence: memory, loader, linker, executors, bridge. `rb_mem` is already implied by the others,
   # and named anyway so that a reader of this line sees which layer every address in the launcher goes
@@ -79,4 +80,13 @@ if(RB_BUILD_LAUNCHER)
   # library this process asks the system loader for. Nothing here restricts the ABI, so an
   # `-DANDROID_ABI=x86_64` configure of this target builds and does not run: the emulator cannot execute
   # the AArch64 code Tier J emits.
+
+  # The 64-bit stub a repackaged game loads in place of each 32-bit library (android/jni/stub.cpp): its
+  # JNI_OnLoad hands the game's APK and its own file name to `rb_runtime_boot` in librbguest.so. No
+  # DT_SONAME, so each copy (libABK.so, ...) is known to the dynamic linker by its file name; -Bsymbolic so
+  # each copy's `&JNI_OnLoad` is its own, never an earlier-loaded copy's.
+  add_library(rbstub SHARED EXCLUDE_FROM_ALL android/jni/stub.cpp)
+  target_link_libraries(rbstub PRIVATE rbguest -llog -ldl)
+  target_link_options(rbstub PRIVATE -Wl,-Bsymbolic)
+  set_target_properties(rbstub PROPERTIES NO_SONAME ON)
 endif()

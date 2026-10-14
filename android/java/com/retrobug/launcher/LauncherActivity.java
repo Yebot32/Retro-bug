@@ -111,6 +111,11 @@ public class LauncherActivity extends Activity {
                                                String label, int tiers, String apkPath, int surfaceWidth,
                                                int surfaceHeight, Surface surface);
 
+    /// M1's in-process boot, checked from here: calls `rb_runtime_boot` (librbguest.so) on an APK laid out
+    /// as the repackager lays one out (`assets/rb32/<lib>`, `assets/rb32sys/*`) and returns what it did.
+    /// The report itself goes to logcat tag RBRUNTIME and to files/rb-report.txt.
+    private static native String nativeBootCheck(String apkPath, String libName);
+
     private enum Screen { HOME, LIBRARY, SETTINGS, DIAGNOSTICS, REPORT, RUN }
 
     private Screen screen_ = Screen.HOME;
@@ -129,6 +134,24 @@ public class LauncherActivity extends Activity {
          * resuming on rather than the one intended — each time costing a round trip and, once, producing a
          * "nothing happened" reading of a run that never started. A named intent cannot miss.
          */
+        /*
+         * `-e bootcheck <name>` resolves a staged game like `-e run` does, but runs M1's in-process boot
+         * (`rb_runtime_boot`) on it instead of the launcher's own path. The APK must carry the repackaged
+         * layout (`tools/make_bootcheck_apk.sh` makes one); `-e lib <libX.so>` picks the library, else the
+         * largest `assets/rb32/*.so`.
+         */
+        final String bootcheck = getIntent() == null ? null : getIntent().getStringExtra("bootcheck");
+        if (bootcheck != null && !bootcheck.isEmpty()) {
+            for (File f : games()) {
+                if (f.getName().toLowerCase().contains(bootcheck.toLowerCase())) {
+                    bootCheck(f, getIntent().getStringExtra("lib"));
+                    return;
+                }
+            }
+            Log.w(TAG, "bootcheck: no game matching '" + bootcheck + "'");
+            Toast.makeText(this, "no game matching '" + bootcheck + "'", Toast.LENGTH_LONG).show();
+            return;
+        }
         final String run = getIntent() == null ? null : getIntent().getStringExtra("run");
         if (run == null || run.isEmpty()) return;
         /*
@@ -554,6 +577,54 @@ public class LauncherActivity extends Activity {
     }
 
     private boolean wantPortrait_ = false;
+
+    /// The `-e bootcheck` run: `nativeBootCheck` on a worker thread, its answer shown as a report.
+    private void bootCheck(final File apk, final String lib) {
+        reportTitle_ = "bootcheck " + apk.getName();
+        currentReport_ = "bootcheck " + apk.getName() + " ...";
+        show(Screen.REPORT);
+        new Thread(new Runnable() {
+            @Override public void run() {
+                String report;
+                try {
+                    String name = lib;
+                    if (name == null || name.isEmpty()) name = largestRb32Lib(apk);
+                    if (name == null) {
+                        report = "FATAL: bootcheck: " + apk.getName() + " has no assets/rb32/*.so entry —"
+                                + " make it with tools/make_bootcheck_apk.sh";
+                    } else {
+                        Log.i(TAG, "bootcheck: " + apk.getName() + " lib=" + name);
+                        report = nativeBootCheck(apk.getAbsolutePath(), name);
+                    }
+                } catch (IOException | RuntimeException | UnsatisfiedLinkError e) {
+                    report = "FATAL: bootcheck: " + e.getClass().getSimpleName() + ": " + e.getMessage();
+                    Log.e(TAG, report);
+                }
+                final String text = report;
+                runOnUiThread(new Runnable() {
+                    @Override public void run() { saveAndShow("bootcheck", text); }
+                });
+            }
+        }, "rb-bootcheck").start();
+    }
+
+    private static String largestRb32Lib(File apk) throws IOException {
+        String best = null;
+        long bestSize = -1;
+        try (java.util.zip.ZipFile zip = new java.util.zip.ZipFile(apk)) {
+            java.util.Enumeration<? extends ZipEntry> it = zip.entries();
+            while (it.hasMoreElements()) {
+                ZipEntry e = it.nextElement();
+                String n = e.getName();
+                if (n.startsWith("assets/rb32/") && n.endsWith(".so") && n.indexOf('/', 12) < 0
+                        && e.getSize() > bestSize) {
+                    best = n.substring(12);
+                    bestSize = e.getSize();
+                }
+            }
+        }
+        return best;
+    }
 
     /// The run waiting for the run screen's surface; taken (and cleared) by `surfaceCreated`.
     private java.util.function.Consumer<Surface> pendingRun_;

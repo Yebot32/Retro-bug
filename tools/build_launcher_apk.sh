@@ -96,9 +96,13 @@ mkdir -p "$BUILD"
   -DCMAKE_TOOLCHAIN_FILE="$SDK/ndk/$NDK_VER/build/cmake/android.toolchain.cmake" \
   -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 -DCMAKE_BUILD_TYPE=Release \
   -DRB_BUILD_TESTS=OFF -DRB_BUILD_LAUNCHER=ON >/dev/null
-"$NJ" -C "$BUILD" rbguest
+"$NJ" -C "$BUILD" rbguest rbstub
 LIB="$BUILD/librbguest.so"
 [ -f "$LIB" ] || { echo "no $LIB: the rbguest target did not produce it" >&2; exit 1; }
+# The stub a repackaged game loads in place of each 32-bit library. The launcher does not load it; it
+# ships it so the repackager can copy it out of this APK (`lib/arm64-v8a/librbstub.so`).
+STUB="$BUILD/librbstub.so"
+[ -f "$STUB" ] || { echo "no $STUB: the rbstub target did not produce it" >&2; exit 1; }
 
 # ---- staging. The guest images travel as assets because that is the form the engine is handed them
 # in: `LoadFromBytes` takes a byte vector, and `android/java/.../LauncherActivity.java` reads the asset into
@@ -113,6 +117,8 @@ mkdir -p "$OUT/classes" "$OUT/dex" "$OUT/stage/lib/arm64-v8a" "$OUT/stage/assets
 # gets symbolized against afterwards.
 cp "$LIB" "$OUT/stage/lib/arm64-v8a/librbguest.so"
 "$TC/bin/llvm-strip.exe" --strip-unneeded "$OUT/stage/lib/arm64-v8a/librbguest.so"
+cp "$STUB" "$OUT/stage/lib/arm64-v8a/librbstub.so"
+"$TC/bin/llvm-strip.exe" --strip-unneeded "$OUT/stage/lib/arm64-v8a/librbstub.so"
 cp "$GUEST_APK" "$OUT/stage/assets/guest/rb_guestprobe.apk"
 cp "$GUEST_LIBM" "$OUT/stage/assets/guest/libm.so"
 cp "$GUEST_LIBZ" "$OUT/stage/assets/guest/libz.so"
@@ -228,6 +234,8 @@ echo "built:"
 printf '  %-38s %s bytes  (stripped, this is what installs)\n' "lib/arm64-v8a/librbguest.so" \
   "$(wc -c < "$OUT/stage/lib/arm64-v8a/librbguest.so" | tr -d ' ')"
 printf '  %-38s %s bytes  (unstripped, keep it for tombstones)\n' "$LIB" "$(wc -c < "$LIB" | tr -d ' ')"
+printf '  %-38s %s bytes  (stripped)\n' "lib/arm64-v8a/librbstub.so" \
+  "$(wc -c < "$OUT/stage/lib/arm64-v8a/librbstub.so" | tr -d ' ')"
 printf '  %-38s %s bytes\n' "rbguest-launcher.apk" "$(wc -c < "$OUT/rbguest-launcher.apk" | tr -d ' ')"
 echo "  packaged entries:"
 unzip -v "$OUT/rbguest-launcher.apk" | awk 'NR>3 && NF>7{printf "    %s  %s (%s)\n", $2, $8, $3}'

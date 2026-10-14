@@ -78,8 +78,21 @@
 #include <functional>
 
 #include "gl_forward.h"
+#include "inspect.h"
+#include "runtime_boot.h"
 
-#define RB_TAG "RBLAUNCH"
+#include <atomic>
+
+namespace rb::launcher {
+namespace {
+// A string literal (static lifetime) is the only thing ever stored: "RBLAUNCH" by default, "RBRUNTIME"
+// once `rb_runtime_boot` has run in this process.
+std::atomic<const char*> g_log_tag{"RBLAUNCH"};
+}  // namespace
+const char* LogTag() { return g_log_tag.load(std::memory_order_relaxed); }
+void SetLogTag(const char* tag) { g_log_tag.store(tag, std::memory_order_relaxed); }
+}  // namespace rb::launcher
+
 /// The milestones that a report line cannot cover. `Launch` returns its report as a string and the Java
 /// half logs every line, but a `SIGSEGV` inside a guest call is not a C++ exception: it takes the process
 /// before any string is built. These are the lines a tombstone then gets attributed to.
@@ -87,8 +100,10 @@
   do {                                                 \
     char _rb_line[512];                                \
     std::snprintf(_rb_line, sizeof _rb_line, __VA_ARGS__);         \
-    __android_log_print(ANDROID_LOG_INFO, RB_TAG, "%s", _rb_line); \
+    __android_log_print(ANDROID_LOG_INFO, ::rb::launcher::LogTag(), "%s", _rb_line); \
   } while (0)
+
+using namespace rb::launcher;
 
 namespace {
 
@@ -824,6 +839,9 @@ bool NeedsSoname(const std::vector<std::uint8_t>& img, const std::string& soname
   return false;
 }
 
+}  // namespace
+
+// Out of the anonymous namespace so `runtime_boot.cpp` can call it (declared in `inspect.h`).
 /// One entry of a zip held in memory, by exact name — what `AssetManager.open` reads for a game's
 /// `assets/` path. The central directory is the authority for sizes (a local header behind a data
 /// descriptor carries zeros), stored and deflated entries are both served (Angry Birds 1.0.0 ships 250
@@ -831,7 +849,7 @@ bool NeedsSoname(const std::vector<std::uint8_t>& img, const std::string& soname
 /// buffer, a size that does not inflate to what the directory claims — comes back as `nullopt` with
 /// `why` saying which. `name` empty means "the entry with the lowest local offset", which is the one
 /// `ZipInputStream.getNextEntry()` would return first.
-std::optional<std::vector<std::uint8_t>> ZipEntry(const std::vector<std::uint8_t>& zip,
+std::optional<std::vector<std::uint8_t>> rb::launcher::ZipEntry(const std::vector<std::uint8_t>& zip,
                                                   const std::string& name, std::string* why) {
   const auto fail = [&](const std::string& w) -> std::optional<std::vector<std::uint8_t>> {
     if (why != nullptr) *why = w;
@@ -895,6 +913,8 @@ std::optional<std::vector<std::uint8_t>> ZipEntry(const std::vector<std::uint8_t
   }
   return out;
 }
+
+namespace {
 
 struct Outcome {
   exec::StopReason reason = exec::StopReason::Internal;
@@ -1247,6 +1267,13 @@ std::string Launch(const std::vector<std::uint8_t>& app_image,
   return out;
 }
 
+}  // namespace
+
+// Out of the anonymous namespace so `runtime_boot.cpp` can call it (declared in `inspect.h`, with
+// `RenderHooks`). Its helpers above stay file-local.
+namespace rb::launcher {
+using namespace rb::mem;
+
 /**
  * Load one guest library the way `Launch` does and report what it *is*, rather than whether it passed.
  *
@@ -1280,17 +1307,6 @@ std::string Launch(const std::vector<std::uint8_t>& app_image,
  * pixels — the numbers a `GLSurfaceView.Renderer` would have reported to the game — supplied here on the
  * Java side's behalf; the report says they were given rather than measured by the game.
  */
-/// What a run needs to draw: the launcher's window (null for a headless run — the scripted lanes, or no
-/// screen), and how to turn an image file into a real GL texture on the context current on this thread.
-/// `upload` is the Java half's BitmapFactory + GLUtils.texImage2D, the same calls the game's own
-/// textureLoaded makes; it returns the GL name and the bitmap's size.
-struct RenderHooks {
-  ANativeWindow* window = nullptr;
-  std::function<bool(const std::vector<std::uint8_t>& encoded, std::uint32_t& id, std::uint32_t& w,
-                     std::uint32_t& h, std::string* why)>
-      upload;
-};
-
 std::string Inspect(const std::vector<std::uint8_t>& app_image,
                     const std::vector<std::uint8_t>& libm_image,
                     const std::vector<std::uint8_t>& libc_image,
@@ -3391,7 +3407,7 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
   return out;
 }
 
-}  // namespace
+}  // namespace rb::launcher
 
 /// The run's live status for the report screen: "<lines so far>\n<latest line or status>". Cheap and
 /// lock-guarded, so the UI can poll it a few times a second while `nativeInspect` works on another thread.
@@ -3585,6 +3601,51 @@ Java_com_retrobug_launcher_LauncherActivity_nativeLaunch(JNIEnv* env, jclass /*c
   if (!image_note.empty()) {
     report = "FATAL: the Java half could not hand over every guest image — a pending exception was cleared"
              " and the read returned nothing:" + image_note + "\n" + report;
+  }
+  return env->NewStringUTF(report.c_str());
+}
+
+/// `-e bootcheck`: M1's in-process boot, run from the launcher against a staged APK with the repackaged
+/// layout. `rb_runtime_boot` switches this process's log tag to RBRUNTIME (it is written for a game's own
+/// process); the launcher's is put back afterwards. Returns a summary line plus the report file it wrote.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_retrobug_launcher_LauncherActivity_nativeBootCheck(JNIEnv* env, jclass /*clazz*/, jstring apk_path,
+                                                            jstring lib_name) {
+  const auto text = [env](jstring s) {
+    std::string out;
+    if (s != nullptr) {
+      if (const char* chars = env->GetStringUTFChars(s, nullptr)) {
+        out = chars;
+        env->ReleaseStringUTFChars(s, chars);
+      }
+    }
+    return out;
+  };
+  const std::string apk = text(apk_path);
+  const std::string lib = text(lib_name);
+  JavaVM* vm = nullptr;
+  env->GetJavaVM(&vm);
+  // A report left by an earlier run must not be read back as this one's.
+  static const char* const kReport = "/data/data/com.retrobug.launcher/files/rb-report.txt";
+  std::remove(kReport);
+  const int rc = rb_runtime_boot(vm, apk.c_str(), lib.c_str());
+  rb::launcher::SetLogTag("RBLAUNCH");
+  char head[160];
+  std::snprintf(head, sizeof head, "bootcheck: rb_runtime_boot(%s) returned 0x%x", lib.c_str(),
+                static_cast<unsigned>(rc));
+  std::string report = head;
+  report += '\n';
+  FILE* f = std::fopen(kReport, "rb");
+  if (f == nullptr) {
+    report += std::string{"bootcheck: no rb-report.txt to read back: "} + std::strerror(errno) + "\n";
+  } else {
+    char buf[1 << 14];
+    for (std::size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0;) report.append(buf, n);
+    std::fclose(f);
+  }
+  for (char& c : report) {
+    const auto u = static_cast<unsigned char>(c);
+    if (u >= 0x80 || (u < 0x20 && c != '\n')) c = '?';
   }
   return env->NewStringUTF(report.c_str());
 }
