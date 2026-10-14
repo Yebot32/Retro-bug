@@ -165,6 +165,7 @@ const char* Name(std::uint32_t number) {
     case nr::kMunmap: return "munmap";
     case nr::kFstat: return "fstat";
     case nr::kMprotect: return "mprotect";
+    case nr::kMremap: return "mremap";
     case nr::kWritev: return "writev";
     case nr::kPrctl: return "prctl";
     case nr::kRtSigaction: return "rt_sigaction";
@@ -318,6 +319,32 @@ std::string Monitor::TallyText() const {
     out += std::to_string(count);
   }
   return out.empty() ? std::string{"(nothing yet)"} : out;
+}
+
+std::uint32_t Monitor::FindFreeRun(std::uint32_t hint, std::uint32_t size) const {
+  // The scan starts where the last anonymous mapping landed, so consecutive arenas stay consecutive,
+  // then wraps to the base; a hint is honoured only when page-aligned and entirely free, which is the
+  // kernel's own rule for a hint it is allowed to ignore. The base is one guest page in —
+  // window-agnostic on purpose, because the model's window is 64 MiB on the launcher and a few pages
+  // wide in tests, and a base tuned to one of them is a base the other cannot allocate above.
+  constexpr std::uint32_t kHeapBase = 0x0000'1000u;
+  const auto free_run = [&](std::uint32_t cand) {
+    if (cand < kHeapBase || static_cast<std::uint64_t>(cand) + size > memory_->window_bytes()) return false;
+    for (std::uint32_t pg = cand; pg < cand + size; pg += mem::kGuestPage) {
+      if (memory_->IsMapped(pg)) return false;
+    }
+    return true;
+  };
+  if (hint != 0 && (hint & (mem::kGuestPage - 1u)) == 0 && free_run(hint)) return hint;
+  const std::uint32_t start = mmap_next_ >= kHeapBase ? mmap_next_ : kHeapBase;
+  const std::uint32_t limit = static_cast<std::uint32_t>(memory_->window_bytes());
+  for (std::uint32_t cand = start; cand + size <= limit; cand += mem::kGuestPage) {
+    if (free_run(cand)) return cand;
+  }
+  for (std::uint32_t cand = kHeapBase; cand + size <= start && cand + size <= limit; cand += mem::kGuestPage) {
+    if (free_run(cand)) return cand;
+  }
+  return 0;
 }
 
 Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
@@ -849,36 +876,7 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
                                     "zero answer would be a mapping nobody owns");
       }
       const std::uint32_t size = (len + mem::kGuestPage - 1u) & ~(mem::kGuestPage - 1u);
-      // The scan starts where the last anonymous mapping landed, so consecutive arenas stay
-      // consecutive, then wraps to the base; a hint is honoured only when page-aligned and entirely
-      // free, which is the kernel's own rule for a hint it is allowed to ignore. The base is one guest
-      // page in — window-agnostic on purpose, because the model's window is 64 MiB on the launcher and
-      // a few pages wide in tests, and a base tuned to one of them is a base the other cannot allocate
-      // above.
-      constexpr std::uint32_t kHeapBase = 0x0000'1000u;
-      const auto free_run = [&](std::uint32_t cand) {
-        if (cand < kHeapBase ||
-            static_cast<std::uint64_t>(cand) + size > memory_->window_bytes()) {
-          return false;
-        }
-        for (std::uint32_t pg = cand; pg < cand + size; pg += mem::kGuestPage) {
-          if (memory_->IsMapped(pg)) return false;
-        }
-        return true;
-      };
-      std::uint32_t at = 0;
-      if (hint != 0 && (hint & (mem::kGuestPage - 1u)) == 0 && free_run(hint)) at = hint;
-      if (at == 0) {
-        const std::uint32_t start = mmap_next_ >= kHeapBase ? mmap_next_ : kHeapBase;
-        const std::uint32_t limit = static_cast<std::uint32_t>(memory_->window_bytes());
-        for (std::uint32_t cand = start; at == 0 && cand + size <= limit; cand += mem::kGuestPage) {
-          if (free_run(cand)) at = cand;
-        }
-        for (std::uint32_t cand = kHeapBase; at == 0 && cand + size <= start &&
-                                             cand + size <= limit; cand += mem::kGuestPage) {
-          if (free_run(cand)) at = cand;
-        }
-      }
+      const std::uint32_t at = FindFreeRun(hint, size);
       if (at == 0) {
         return Outcome::Answered(err::kEnomem,
                                  "mmap2(len=" + std::to_string(len) + ", prot=0x" + Hex(prot) +
@@ -898,6 +896,79 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
                                    ") -> 0x" + Hex(at) + ": " + std::to_string(size) +
                                    " bytes of the guest window's free space; protections are recorded, "
                                    "not enforced (see mprotect's note)");
+    }
+
+    case nr::kMremap: {
+      // `(old, old_size, new_size, flags, new_addr)`. bionic's `__cxa_atexit` grows its handler array
+      // with it once the first page fills — Angry Birds Go registers hundreds of static destructors and
+      // logged "mmap/mremap failed to allocate 8192 bytes" 136 times before this (SM-X710 2026-10-15).
+      // Kernel rules: shrink in place; grow in place when the pages after are free; otherwise move,
+      // but only under MREMAP_MAYMOVE. MREMAP_FIXED (a caller-chosen destination) is refused by name.
+      if (memory_ == nullptr) {
+        return Outcome::Refused(err::kEnosys, "mremap: no guest memory is attached to this monitor");
+      }
+      const std::uint32_t old_at = f.arg[0];
+      const std::uint32_t old_len = f.arg[1];
+      const std::uint32_t new_len = f.arg[2];
+      const std::uint32_t flags = f.arg[3];
+      constexpr std::uint32_t kMayMove = 1u, kFixed = 2u;
+      const std::string call = "mremap(0x" + Hex(old_at) + ", " + std::to_string(old_len) + " -> " +
+                               std::to_string(new_len) + ", flags=0x" + Hex(flags) + ")";
+      if ((old_at & (mem::kGuestPage - 1u)) != 0 || new_len == 0 || (flags & ~(kMayMove | kFixed)) != 0 ||
+          ((flags & kFixed) != 0 && (flags & kMayMove) == 0)) {
+        return Outcome::Answered(err::kEinval, call + " = -EINVAL (-22)");
+      }
+      if ((flags & kFixed) != 0) {
+        return Outcome::Refused(err::kEnosys, call + ": MREMAP_FIXED is not implemented");
+      }
+      const auto pages = [](std::uint32_t n) { return (n + mem::kGuestPage - 1u) & ~(mem::kGuestPage - 1u); };
+      const std::uint32_t old_size = pages(old_len);
+      const std::uint32_t new_size = pages(new_len);
+      if (static_cast<std::uint64_t>(old_at) + old_size > memory_->window_bytes()) {
+        return Outcome::Answered(err::kEfault, call + " = -EFAULT (-14): outside the guest window");
+      }
+      for (std::uint32_t pg = old_at; pg < old_at + old_size; pg += mem::kGuestPage) {
+        if (!memory_->IsMapped(pg)) {
+          return Outcome::Answered(err::kEfault, call + " = -EFAULT (-14): 0x" + Hex(pg) + " is not mapped");
+        }
+      }
+      const unsigned prot = memory_->ProtAt(old_at);
+      std::string merr;
+      if (new_size <= old_size) {
+        if (new_size < old_size && !memory_->Unmap(old_at + new_size, old_size - new_size, &merr)) {
+          return Outcome::Answered(err::kEfault, call + ": " + merr);
+        }
+        return Outcome::Emulated(static_cast<std::int32_t>(old_at), call + " -> 0x" + Hex(old_at) + " (in place)");
+      }
+      // Grow in place when every page after the old end is free and inside the window.
+      bool tail_free = static_cast<std::uint64_t>(old_at) + new_size <= memory_->window_bytes();
+      for (std::uint32_t pg = old_at + old_size; tail_free && pg < old_at + new_size; pg += mem::kGuestPage) {
+        if (memory_->IsMapped(pg)) tail_free = false;
+      }
+      if (tail_free) {
+        if (!memory_->Map(old_at + old_size, new_size - old_size, prot, &merr)) {
+          return Outcome::Answered(err::kEnomem, call + ": " + merr);
+        }
+        return Outcome::Emulated(static_cast<std::int32_t>(old_at), call + " -> 0x" + Hex(old_at) + " (grown in place)");
+      }
+      if ((flags & kMayMove) == 0) {
+        return Outcome::Answered(err::kEnomem, call + " = -ENOMEM (-12): the pages after it are taken and "
+                                                      "MREMAP_MAYMOVE was not given");
+      }
+      const std::uint32_t to = FindFreeRun(0, new_size);
+      if (to == 0) {
+        return Outcome::Answered(err::kEnomem, call + " = -ENOMEM (-12): no free run of " +
+                                                   std::to_string(new_size) + " bytes left");
+      }
+      std::vector<std::uint8_t> bytes(old_size);
+      if (!memory_->Map(to, new_size, prot | mem::kWrite, &merr) || !memory_->Read(old_at, bytes.data(), old_size) ||
+          !memory_->Write(to, bytes.data(), old_size) || !memory_->Unmap(old_at, old_size, &merr) ||
+          ((prot & mem::kWrite) == 0 && !memory_->Protect(to, new_size, prot, &merr))) {
+        return Outcome::Answered(err::kEnomem, call + ": moving the mapping failed: " + merr);
+      }
+      mmap_next_ = to + new_size;
+      return Outcome::Emulated(static_cast<std::int32_t>(to), call + " -> 0x" + Hex(to) + " (moved, " +
+                                                                  std::to_string(old_size) + " bytes copied)");
     }
 
     case nr::kFutex: {

@@ -28,7 +28,8 @@ target_compile_definitions(rb_linker_tests PRIVATE
   RB_LINK_IFUNC_LEAF_PATH="/data/local/tmp/librbifuncleaf.so"
   RB_LINK_IFUNC_USER_PATH="/data/local/tmp/librbifuncuser.so")
 # Path the fixture is pushed to on the device by tools/run_engine_tests.sh.
-target_compile_definitions(rb_guest_elf_tests PRIVATE RB_FIXTURE_PATH="/data/local/tmp/librb_fixture.so")
+target_compile_definitions(rb_guest_elf_tests PRIVATE RB_FIXTURE_PATH="/data/local/tmp/librb_fixture.so"
+  RB_WEAK_FIXTURE_PATH="/data/local/tmp/librbweak.so")
 
 # The front-end wrapper's test needs the engine by definition (C01 wraps it), and the loader to get
 # real Thumb-2 bytes into guest memory. That is why it is a separate target: rb_guest_elf_tests and

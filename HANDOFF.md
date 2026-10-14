@@ -23,6 +23,27 @@ Everything below this section is older, detailed session history — read it onl
   `jniTouch(x, y, action)`; a real tap on "Karate Chop Challenge" took the game MainMenu → LoadingScreen →
   **KarateChop**, drawn and taking taps (screenshot-verified). Details below under "Touch input".
 
+## Angry Birds Go 1.10.1 (2026-10-15, later) — startup complete, no engine driver yet
+
+- The human's "base.apk" (from `/sdcard/retro-bug test/32 bit games/` on the OnePlus) is **Angry Birds Go
+  1.10.1** (`com.rovio.angrybirdsgo`, `libABK.so` 16 MB, ARM-state, Exient engine, apktool-repackaged) —
+  NOT the dead "android_port" Angry Birds. It runs natively on the human's 32-bit phone. Staged on the
+  tablet as `angry-birds-go-1.10.1` (run: `-e run angry-birds-go`).
+- Walls fixed, each with rows (all 18 lanes green: elf 214, abi_call 123, diff 998, monitor 167):
+  1. Unresolved **weak** imports were bound to the `0xbad0000` trap instead of 0 — its static
+     `__cxa_guard_acquire` tests `__google_potentially_blocking_region_begin` for null. New
+     `LoadOptions::unresolved_trap`; corpus `tests/corpus/weak_unresolved.c` (`librbweak.so`).
+  2. **`mremap`** (163) served (grow in place / MAYMOVE move / shrink; FIXED refused) — bionic's
+     `__cxa_atexit` grows with it.
+  3. **kuser helpers** (0xffff0f60 cmpxchg64, 0xffff0fa0 barrier, 0xffff0fc0 cmpxchg, 0xffff0fe0 get_tls)
+     are host entries in `AbiContext::IsHostEntry`, run by `RunKuserHelper`; both tiers.
+  4. **CNTVCT** (`mrrc p15,#1,c14`, OpenSSL `_armv7_tick`) answered from host `cntvct_el0` on both tiers
+     (`HostVirtualCounter`); CNTPCT still refused.
+- Result: **all 253 libABK constructors run and `JNI_OnLoad` returns 0x10006.** The launcher has no profile
+  for it, so nothing is drawn. Next for it: an Exient profile (`ExientGLSurfaceView.nativeInitialize/
+  nativeSurfaceCreated/Changed/nativeDrawFrame/nativeInputAddTouchEvent`, read the DEX first), then GLES2
+  forwarding, `pthread_create`, OpenSL ES, `AAssetManager_*`, `libjnigraphics`. 53 imports still trapped.
+
 ## Git state
 
 - All 2026-10-14/15 work is committed on `main` (local, **not pushed** — ask the human before pushing).

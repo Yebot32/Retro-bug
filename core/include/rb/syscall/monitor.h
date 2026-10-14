@@ -113,6 +113,7 @@ constexpr std::uint32_t kGettimeofday = 78;
 constexpr std::uint32_t kMunmap = 91;
 constexpr std::uint32_t kFstat = 108;  ///< the 32-bit-time `stat`; bionic does not use it
 constexpr std::uint32_t kMprotect = 125;
+constexpr std::uint32_t kMremap = 163;
 constexpr std::uint32_t kWritev = 146;
 constexpr std::uint32_t kPrctl = 172;
 constexpr std::uint32_t kRtSigaction = 174;
@@ -410,6 +411,9 @@ class Monitor {
   /// Where the next anonymous `mmap2` tries first, so consecutive allocations stay consecutive the
   /// way a real allocator expects its arenas to be.
   std::uint32_t mmap_next_ = 0;
+  /// The first page-aligned run of `size` free bytes for an anonymous mapping (`mmap2`, a moving
+  /// `mremap`), or 0. A hint is honoured only when aligned and entirely free.
+  std::uint32_t FindFreeRun(std::uint32_t hint, std::uint32_t size) const;
   std::vector<std::string> notes_;
   std::size_t dropped_notes_ = 0;
   /// Counted at the same site that observes a refusal (`monitor.cpp` `Handle`), so the accessor and the

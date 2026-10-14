@@ -30,6 +30,9 @@
 #include <string>
 #include <vector>
 
+#ifndef RB_WEAK_FIXTURE_PATH
+#define RB_WEAK_FIXTURE_PATH "/data/local/tmp/librbweak.so"
+#endif
 #ifndef RB_FIXTURE_PATH
 #define RB_FIXTURE_PATH "/data/local/tmp/librb_fixture.so"
 #endif
@@ -677,6 +680,39 @@ void the_unwind_index_is_recorded_biased() {
   CHECK_CTX(read_word(*gm, mod->exidx) == file_word, "the recorded index does not hold the file's entries");
 }
 
+/// An unresolved *weak* reference is bound to 0, even when the resolver answers misses with a trap
+/// address. Angry Birds Go's own `__cxa_guard_acquire` calls `__google_potentially_blocking_region_begin`
+/// only when its address is non-null; with the launcher's `0xbad0000` trap in the slot the first guarded
+/// static initialiser faulted. The row runs both ways: with `unresolved_trap` set the word is 0, without
+/// it the loader takes the resolver at its word and the word is the trap — so neither a loader that
+/// ignores the option nor one that zeroes every weak answer passes.
+void an_unresolved_weak_reference_is_null_not_the_trap() {
+  const auto bytes = read_file(RB_WEAK_FIXTURE_PATH);
+  CHECK_CTX(!bytes.empty(), "fixture missing at " RB_WEAK_FIXTURE_PATH);
+  if (bytes.empty()) return;
+  static constexpr std::uint32_t kTrap = 0x0bad'0000u;
+  for (const bool with_trap : {true, false}) {
+    auto gm = make_mem();
+    if (!gm) return;
+    loader::LoadOptions opts;
+    opts.resolve = [](const std::string&) -> std::optional<std::uint32_t> { return kTrap; };
+    if (with_trap) opts.unresolved_trap = kTrap;
+    std::string err;
+    auto mod = loader::LoadFromBytes(*gm, bytes, "librbweak.so", opts, &err);
+    CHECK_CTX(mod.has_value(), err);
+    if (!mod) return;
+    std::uint32_t at = 0;
+    for (const auto& s : mod->exports) {
+      if (s.defined && s.name == "g_weak_ptr") at = s.value;
+    }
+    CHECK_CTX(at != 0, "librbweak.so exports no g_weak_ptr");
+    if (at == 0) return;
+    const std::uint32_t word = read_word(*gm, at);
+    CHECK_CTX(word == (with_trap ? 0u : kTrap), std::string{with_trap ? "with" : "without"} +
+                                                     " unresolved_trap, g_weak_ptr = " + std::to_string(word));
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -689,6 +725,7 @@ int main() {
   a_string_table_past_the_end_of_the_image_is_refused();
   a_wrapping_pt_load_is_refused();
   the_unwind_index_is_recorded_biased();
+  an_unresolved_weak_reference_is_null_not_the_trap();
 
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;

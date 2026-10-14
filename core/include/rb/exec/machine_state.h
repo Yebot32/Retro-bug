@@ -68,6 +68,26 @@ static_assert(sizeof(GuestAddr) == 4, "guest addresses are 32-bit by definition"
  * location descriptor and Tier J's from CPSR, and the two differ at the moment execution stops — a
  * redundant field with two definitions is a field that produces false findings and hides real ones.
  */
+/**
+ * `mrrc p15, #1, rT, rT2, c14` — CNTVCT, the generic timer's virtual count — is the one 64-bit coprocessor
+ * read both tiers answer, and from the same fact: the host's own `cntvct_el0`, which is the same counter at
+ * the same frequency an AArch32 process on this SoC reads (Android kernels enable EL0 access to it; the
+ * SM-X710 answers it natively). OpenSSL's `_armv7_tick` in Angry Birds Go's static initialisers reads it.
+ * One function so the two tiers cannot disagree about what the count is.
+ */
+[[nodiscard]] inline bool IsVirtualCounterRead(unsigned coproc, bool two, unsigned opc, unsigned crm) {
+  return coproc == 15 && !two && opc == 1 && crm == 14;
+}
+[[nodiscard]] inline std::uint64_t HostVirtualCounter() {
+#if defined(__aarch64__)
+  std::uint64_t v = 0;
+  asm volatile("mrs %0, cntvct_el0" : "=r"(v));
+  return v;
+#else
+  return 0;  // a non-AArch64 host build has no such counter; no shipping build is one
+#endif
+}
+
 [[nodiscard]] inline std::uint8_t ItStateFromCpsr(std::uint32_t cpsr) {
   return static_cast<std::uint8_t>(((cpsr >> 8) & 0xFCu) | ((cpsr >> 25) & 0x03u));
 }

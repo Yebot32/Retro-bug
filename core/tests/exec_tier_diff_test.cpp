@@ -985,6 +985,56 @@ void a_fauling_data_access_stops_both_tiers_at_the_instruction() {
 }
 
 /**
+ * A `blx` to the kernel's `__kuser_cmpxchg` (0xffff0fc0) is a host entry on both tiers, not a fetch of
+ * memory nobody mapped. Angry Birds Go's static constructors branch to the kuser page (its barrier at
+ * 0xffff0fa0 faulted the 248th one). Thumb code calls into the ARM-state helper and returns through
+ * `pop {pc}`, so the mode switch both ways is part of what is checked. Assembled, not recalled:
+ *   push {r4, lr}; movw r3, #0xfc0; movt r3, #0xffff; blx r3; pop {r4, pc}
+ *   → b510 / f640 73c0 / f6cf 73ff / 4798 / bd10
+ */
+void a_kuser_helper_call_is_answered_on_both_tiers() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  constexpr exec::GuestAddr kBlob = 0x0070'7000u;
+  constexpr std::uint16_t kCode[] = {0xB510, 0xF640, 0x73C0, 0xF6CF, 0x73FF, 0x4798, 0xBD10};
+  std::string err;
+  if (!rig.mem->Map(kBlob, mem::kGuestPage, kRead | kWrite | kExec, &err)) {
+    fail("could not map the kuser blob page", __LINE__, err);
+    return;
+  }
+  CHECK_CTX(rig.mem->Write(kBlob, kCode, sizeof(kCode)), "could not plant the kuser blob");
+  const exec::GuestAddr word = kStackTop - 0x4000u;
+  for (const bool jit : {false, true}) {
+    const char* tier = jit ? "J" : "I";
+    // Executors that know the bridge as their dispatch, as the launcher builds them: the rig's own have
+    // none, and with none a host entry is just an unmapped fetch.
+    abi::AbiContext bridge(*rig.mem, kStackTop, kReturnAddress);
+    exec::InterpExecutor interp(*rig.mem, kReturnAddress, &bridge);
+    exec::JitExecutor jit_engine(*rig.mem, kReturnAddress, &bridge);
+    if (jit && !jit_engine.ok()) {
+      fail("Tier J could not be built", __LINE__, jit_engine.error());
+      return;
+    }
+    bridge.set_executor(jit ? static_cast<exec::Executor&>(jit_engine) : static_cast<exec::Executor&>(interp));
+    const std::uint32_t five = 5;
+    CHECK_CTX(rig.mem->Write(word, &five, 4), "could not seed the word");
+    exec::RunResult out{};
+    const auto ok = bridge.CallGuest(kBlob | 1u, {abi::Value32::S32(5), abi::Value32::S32(9), abi::Value32::Ptr(word)},
+                                     abi::Shorty::For("IIIL"), 1000, &out);
+    std::uint32_t now = 0;
+    CHECK_CTX(rig.mem->Read(word, &now, 4), "could not read the word back");
+    CHECK_CTX(out.reason == exec::StopReason::Returned && ok.w() == 0 && now == 9,
+              std::string{"Tier "} + tier + ": cmpxchg(5->9) r0=" + Hex(ok.w()) + " word=" + Hex(now) + " " +
+                  out.detail);
+    const auto no = bridge.CallGuest(kBlob | 1u, {abi::Value32::S32(5), abi::Value32::S32(7), abi::Value32::Ptr(word)},
+                                     abi::Shorty::For("IIIL"), 1000, &out);
+    CHECK_CTX(rig.mem->Read(word, &now, 4), "could not read the word back");
+    CHECK_CTX(out.reason == exec::StopReason::Returned && no.w() != 0 && now == 9,
+              std::string{"Tier "} + tier + ": a failing cmpxchg stored or said it did: r0=" + Hex(no.w()));
+  }
+}
+
+/**
  * An *unmodelled* coprocessor access stops both tiers at the instruction, leaving the destination
  * register untouched.
  *
@@ -1028,6 +1078,45 @@ void an_unmodelled_coprocessor_access_stops_both_tiers() {
                                  " and 0x0 would mean the callback's zero was read as a result");
   std::fprintf(stderr, "[diff] unmodelled coprocessor: I r0=%08x \"%s\" / J r0=%08x \"%s\"\n", si.r[0],
                ri.detail.c_str(), sj.r[0], rj.detail.c_str());
+}
+
+/// CNTVCT (`mrrc p15, #1, rT, rT2, c14`) is the one 64-bit coprocessor read both tiers answer — from the
+/// host's `cntvct_el0`, as an AArch32 process on this SoC reads it — and CNTPCT next to it (opc 0) still
+/// refuses on both. OpenSSL's `_armv7_tick` in Angry Birds Go's 251st static initialiser is the reader.
+/// A count is not a constant, so the row pins what is true of a real counter: inside host reads taken
+/// before and after the run, and the second read no earlier than the first. Encoding (ARM state):
+///   f: mrrc p15,#1,r0,r1,c14 ; mrrc p15,#1,r2,r3,c14 ; bx lr  → ec510f1e ec532f1e e12fff1e
+///   g: mrrc p15,#0,r0,r1,c14 ; bx lr                          → ec510f0e e12fff1e
+void the_virtual_counter_reads_the_host_count_on_both_tiers() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  constexpr exec::GuestAddr kBlob = 0x0070'8000u;
+  constexpr std::uint32_t kCode[] = {0xEC510F1E, 0xEC532F1E, 0xE12FFF1E, 0xEC510F0E, 0xE12FFF1E};
+  std::string err;
+  if (!rig.mem->Map(kBlob, mem::kGuestPage, kRead | kWrite | kExec, &err)) {
+    fail("could not map the counter-probe page", __LINE__, err);
+    return;
+  }
+  CHECK_CTX(rig.mem->Write(kBlob, kCode, sizeof(kCode)), "could not plant the counter blob");
+  for (const bool jit : {false, true}) {
+    const char* tier = jit ? "J" : "I";
+    exec::Executor& engine = jit ? static_cast<exec::Executor&>(*rig.jit) : static_cast<exec::Executor&>(*rig.interp);
+    exec::MachineState s = EntryState(kBlob, 0, 0, false);
+    const std::uint64_t before = exec::HostVirtualCounter();
+    const exec::RunResult r = engine.Run(s, 1000);
+    const std::uint64_t after = exec::HostVirtualCounter();
+    const std::uint64_t first = (std::uint64_t{s.r[1]} << 32) | s.r[0];
+    const std::uint64_t second = (std::uint64_t{s.r[3]} << 32) | s.r[2];
+    CHECK_CTX(r.reason == exec::StopReason::Returned, std::string{"Tier "} + tier + ": " + r.detail);
+    CHECK_CTX(before != 0 && before <= first && first <= second && second <= after,
+              std::string{"Tier "} + tier + ": counts " + Hex(s.r[0]) + "/" + Hex(s.r[2]) +
+                  " not inside the host's [" + std::to_string(before) + ", " + std::to_string(after) + "]");
+    exec::MachineState p = EntryState(kBlob + 12, 0, 0, false);
+    p.r[0] = 0x11;
+    const exec::RunResult rp = engine.Run(p, 1000);
+    CHECK_CTX(rp.reason == exec::StopReason::Unimplemented && p.r[0] == 0x11,
+              std::string{"Tier "} + tier + ": CNTPCT must stay refused: " + rp.detail);
+  }
 }
 
 /// The same rule one coprocessor number over — and until the wrapper registered a refusing object for
@@ -2933,7 +3022,9 @@ int main(int argc, char** argv) {
   a_guest_cacheflush_reaches_the_tier_that_owns_the_cache();
   unmapped_code_faults_in_both_tiers();
   a_fauling_data_access_stops_both_tiers_at_the_instruction();
+  a_kuser_helper_call_is_answered_on_both_tiers();
   an_unmodelled_coprocessor_access_stops_both_tiers();
+  the_virtual_counter_reads_the_host_count_on_both_tiers();
   an_unmodelled_coprocessor_number_stops_both_tiers();
   the_thumb_acquire_byte_and_half_rows_execute_on_both_tiers();
   the_dsp_multiplies_publish_q_on_both_tiers();

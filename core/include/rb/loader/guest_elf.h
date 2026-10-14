@@ -176,6 +176,15 @@ struct LoadOptions {
   bool enforce_relro = true;           ///< Strip write from PT_GNU_RELRO after relocation.
   SymbolResolver resolve;
   /**
+   * The address `resolve` answers for a name it could *not* resolve, when it answers with a trap rather
+   * than nullopt (the launcher binds misses to a loud out-of-window address so a call names itself). A
+   * **weak** symbol given this answer is bound to 0 instead, as bionic's linker binds an unresolved weak
+   * reference: code tests such a symbol against null before calling it. Angry Birds Go's statically linked
+   * `__cxa_guard_acquire` does exactly that with `__google_potentially_blocking_region_begin`, and a
+   * non-zero trap there faulted the first guarded static initialiser. 0 (the default) means "no trap".
+   */
+  std::uint32_t unresolved_trap = 0;
+  /**
    * When false — the default — a relocation this loader cannot apply **fails the load**, naming every
    * slot involved.
    *

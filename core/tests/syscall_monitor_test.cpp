@@ -305,6 +305,7 @@ void guest_numbers_are_not_host_numbers() {
       {sc::nr::kClose, "close", 57}, {sc::nr::kGetpid, "getpid", 172},
       {sc::nr::kGettid, "gettid", 178}, {sc::nr::kOpenat, "openat", 56},
       {sc::nr::kExitGroup, "exit_group", 94}, {sc::nr::kMmap2, "mmap2", 0 /* no host counterpart */},
+      {sc::nr::kMremap, "mremap", 216},
   };
   for (const auto& r : rows) {
     CHECK_CTX(sc::Name(r.n) != nullptr, "nr 0x" + std::to_string(r.n) + " has no name");
@@ -481,6 +482,66 @@ void munmap_releases_served_pages() {
             "a range outside the window must be EINVAL");
 }
 
+/// `mremap` is how bionic's `__cxa_atexit` grows its handler array: Angry Birds Go logged "mmap/mremap
+/// failed to allocate 8192 bytes" 136 times while it was ENOSYS. Kernel rules, each a row: grow in
+/// place when the next pages are free; refuse with ENOMEM when they are taken and moving was not
+/// allowed; move (contents and all, old pages released) under MREMAP_MAYMOVE; shrink in place.
+void mremap_grows_moves_and_shrinks_like_a_kernel() {
+  sc::Monitor m;
+  auto window = Window();
+  if (!window) return;
+  m.set_memory(window.get());
+  const auto mmap = [&](std::uint32_t len) {
+    exec::MachineState s = State(sc::nr::kMmap2);
+    s.r[1] = len;
+    s.r[2] = 3;
+    s.r[3] = 0x22;
+    s.r[4] = 0xffff'ffffu;
+    return static_cast<std::uint32_t>(m.Handle(s, 0).r0);
+  };
+  const auto mremap = [&](std::uint32_t at, std::uint32_t old_len, std::uint32_t new_len, std::uint32_t flags) {
+    exec::MachineState s = State(sc::nr::kMremap);
+    s.r[0] = at;
+    s.r[1] = old_len;
+    s.r[2] = new_len;
+    s.r[3] = flags;
+    return m.Handle(s, 0);
+  };
+  const std::uint32_t a = mmap(0x1000);
+  CHECK(a != 0);
+  const std::uint32_t magic = 0xa7e7'1700u;
+  CHECK(window->Write(a + 0x10, &magic, 4));
+
+  sc::Outcome o = mremap(a, 0x1000, 0x2000, 0);
+  CHECK_CTX(o.verdict == sc::Verdict::kEmulated && static_cast<std::uint32_t>(o.r0) == a, o.detail);
+  CHECK_CTX(window->IsMapped(a + 0x1000), "grown in place, but the new page is not mapped");
+
+  const std::uint32_t blocker = mmap(0x1000);  // lands right after: mmap2 keeps arenas consecutive
+  CHECK_CTX(blocker == a + 0x2000, "the blocker landed at " + std::to_string(blocker));
+  o = mremap(a, 0x2000, 0x3000, 0);
+  CHECK_CTX(o.r0 == -static_cast<std::int32_t>(sc::err::kEnomem), "no MAYMOVE, no room: " + o.detail);
+  CHECK_CTX(window->IsMapped(a) && window->IsMapped(a + 0x1000), "a refused mremap touched the mapping");
+
+  o = mremap(a, 0x2000, 0x3000, 1 /* MREMAP_MAYMOVE */);
+  const std::uint32_t moved = static_cast<std::uint32_t>(o.r0);
+  CHECK_CTX(o.verdict == sc::Verdict::kEmulated && moved != a && (moved & 0xfffu) == 0, o.detail);
+  std::uint32_t back = 0;
+  CHECK(window->Read(moved + 0x10, &back, 4));
+  CHECK_CTX(back == magic, "the contents did not move: " + std::to_string(back));
+  CHECK_CTX(!window->IsMapped(a) && !window->IsMapped(a + 0x1000), "the old pages were not released");
+  CHECK_CTX(window->IsMapped(moved + 0x2000), "the moved mapping is not the new size");
+
+  o = mremap(moved, 0x3000, 0x1000, 0);
+  CHECK_CTX(static_cast<std::uint32_t>(o.r0) == moved && !window->IsMapped(moved + 0x1000) &&
+                window->IsMapped(moved),
+            "shrink: " + o.detail);
+
+  o = mremap(moved + 4, 0x1000, 0x2000, 1);
+  CHECK_CTX(o.r0 == -static_cast<std::int32_t>(sc::err::kEinval), "a misaligned address must be EINVAL");
+  o = mremap(moved, 0x1000, 0x2000, 2 /* FIXED without MAYMOVE */);
+  CHECK_CTX(o.r0 == -static_cast<std::int32_t>(sc::err::kEinval), "MREMAP_FIXED alone must be EINVAL");
+}
+
 /// fd 1 and 2 are the guest's console, and its own words must survive: the app printed to fd 2 four
 /// times before exiting 127 and every byte was dropped until this capture existed. The full length is
 /// reported written — that is what the fd does — and an unreadable buffer is EFAULT, not a silent
@@ -633,6 +694,7 @@ int main() {
   the_tally_is_per_monitor_and_in_first_seen_order();
   mmap2_serves_real_anonymous_pages();
   munmap_releases_served_pages();
+  mremap_grows_moves_and_shrinks_like_a_kernel();
   console_writes_are_captured_and_answered_as_written();
   futex_answers_the_single_threaded_truth();
   sigaction_and_faccessat_answer_their_facts();

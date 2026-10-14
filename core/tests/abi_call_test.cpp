@@ -491,6 +491,53 @@ void a_slot_range_misalignment_is_not_a_host_call() {
   CHECK_CTX(slot == 229, "slot " + std::to_string(slot));
 }
 
+/// The Linux ARM kuser helpers (fixed addresses the kernel answers), which Angry Birds Go's constructors
+/// branch to: a fetch at 0xffff0fa0 faulted the 248th static initialiser before this. Each is called
+/// directly, as a guest's `blx` to the constant would reach it, and each row can fail: a cmpxchg that
+/// always stores, never stores, or reports the wrong verdict; a get_tls that returns anything but TP.
+void the_kuser_helpers_answer_like_the_kernel() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  using A = abi::AbiContext;
+  const exec::GuestAddr word = kStackTop - 0x4000u;  // inside the mapped stack, far below any frame
+  const std::uint32_t five = 5;
+  CHECK(rig.mem->Write(word, &five, 4));
+  exec::RunResult run{};
+  const abi::Shorty iiil = abi::Shorty::For("IIIL");
+
+  auto ret = rig.abi_ctx->CallGuest(A::kKuserCmpxchg, {abi::Value32::S32(5), abi::Value32::S32(9),
+                                                       abi::Value32::Ptr(word)}, iiil, 1000, &run);
+  std::uint32_t now = 0;
+  CHECK(rig.mem->Read(word, &now, 4));
+  CHECK_CTX(run.reason == exec::StopReason::Returned && ret.w() == 0 && now == 9,
+            "cmpxchg(5->9) on 5: " + run.detail + " r0=" + Hex(ret.w()) + " word=" + Hex(now));
+  ret = rig.abi_ctx->CallGuest(A::kKuserCmpxchg, {abi::Value32::S32(5), abi::Value32::S32(7),
+                                                  abi::Value32::Ptr(word)}, iiil, 1000, &run);
+  CHECK(rig.mem->Read(word, &now, 4));
+  CHECK_CTX(run.reason == exec::StopReason::Returned && ret.w() != 0 && now == 9,
+            "cmpxchg(5->7) on 9 must fail and leave it: r0=" + Hex(ret.w()) + " word=" + Hex(now));
+
+  const std::uint64_t cur = 0x1111'2222'3333'4444ull, newer = 0xaaaa'bbbb'cccc'ddddull;
+  CHECK(rig.mem->Write(word + 8, &cur, 8) && rig.mem->Write(word + 16, &cur, 8) && rig.mem->Write(word + 24, &newer, 8));
+  ret = rig.abi_ctx->CallGuest(A::kKuserCmpxchg64, {abi::Value32::Ptr(word + 16), abi::Value32::Ptr(word + 24),
+                                                    abi::Value32::Ptr(word + 8)}, abi::Shorty::For("ILLL"), 1000, &run);
+  std::uint64_t got64 = 0;
+  CHECK(rig.mem->Read(word + 8, &got64, 8));
+  CHECK_CTX(run.reason == exec::StopReason::Returned && ret.w() == 0 && got64 == newer,
+            "cmpxchg64: " + run.detail + " r0=" + Hex(ret.w()));
+
+  ret = rig.abi_ctx->CallGuest(A::kKuserMemoryBarrier, {abi::Value32::S32(0x77)}, abi::Shorty::For("II"), 1000, &run);
+  CHECK_CTX(run.reason == exec::StopReason::Returned && ret.w() == 0x77, "barrier: " + run.detail);
+
+  rig.abi_ctx->state().tp = 0x0040'0000u;
+  ret = rig.abi_ctx->CallGuest(A::kKuserGetTls, {}, abi::Shorty::For("I"), 1000, &run);
+  CHECK_CTX(run.reason == exec::StopReason::Returned && ret.w() == 0x0040'0000u,
+            "get_tls returned " + Hex(ret.w()) + ": " + run.detail);
+
+  std::uint32_t slot = 0;
+  CHECK(!rig.abi_ctx->IsHostEntry(A::kKuserCmpxchg + 4, &slot));  ///< exact addresses only
+}
+
 // --------------------------------------------------------------------- through real guest code
 
 struct Expect {
@@ -657,6 +704,7 @@ int main() {
   a_refused_host_call_is_a_fault_naming_the_slot();
   an_unbound_slot_says_so_and_which_one_it_was();
   a_slot_range_misalignment_is_not_a_host_call();
+  the_kuser_helpers_answer_like_the_kernel();
   guest_functions_called_through_the_bridge_match_hardware();
   the_bridge_leaves_the_guest_stack_where_it_found_it();
   a_guest_syscall_in_a_jni_call_is_answered();

@@ -9,6 +9,8 @@
  */
 #include "rb/abi/abi.h"
 
+#include <cstdio>
+#include <string>
 #include <utility>
 
 #include "rb/syscall/monitor.h"
@@ -21,6 +23,12 @@ namespace {
 /// SP (the intra-procedure call stack). Not counting it is the bug where a function works until it
 /// calls another one.
 constexpr std::uint32_t kIpswr = 16;
+
+std::string Hex32(std::uint32_t v) {
+  char buf[9];
+  std::snprintf(buf, sizeof buf, "%x", v);
+  return buf;
+}
 
 /**
  * How many core registers an argument occupies.
@@ -273,6 +281,15 @@ void AbiContext::Bind(std::uint32_t slot, HostFn fn) {
 }
 
 bool AbiContext::IsHostEntry(GuestAddr pc, std::uint32_t* slot) const {
+  // The kuser helpers are entered in ARM state at their exact addresses (a `blx`/`mov pc` to a word-
+  // aligned constant), so an exact match is the whole test.
+  switch (pc) {
+    case kKuserCmpxchg64: *slot = kKuserSlotBase + 0; return true;
+    case kKuserMemoryBarrier: *slot = kKuserSlotBase + 1; return true;
+    case kKuserCmpxchg: *slot = kKuserSlotBase + 2; return true;
+    case kKuserGetTls: *slot = kKuserSlotBase + 3; return true;
+    default: break;
+  }
   if (pc < slot_base_) return false;
   const GuestAddr delta = pc - slot_base_;
   if (delta % 4u != 0) return false;
@@ -280,6 +297,56 @@ bool AbiContext::IsHostEntry(GuestAddr pc, std::uint32_t* slot) const {
   if (id >= kMaxSlots) return false;
   *slot = id;
   return true;
+}
+
+bool AbiContext::RunKuserHelper(std::uint32_t which, std::string* err) {
+  // The kernel's contract (kernel_user_helpers.rst): cmpxchg returns r0 = 0 with C set when it stored,
+  // non-zero with C clear when it did not; r3, ip and the flags are clobbered; get_tls returns the TLS
+  // value in r0 and touches nothing else.
+  constexpr std::uint32_t kCarry = 1u << 29;
+  auto& r = state_.r;
+  const auto set_carry = [&](bool c) { state_.cpsr = c ? (state_.cpsr | kCarry) : (state_.cpsr & ~kCarry); };
+  switch (which) {
+    case 0: {  // __kuser_cmpxchg64(const int64_t* oldval, const int64_t* newval, volatile int64_t* ptr)
+      std::uint64_t oldv = 0, newv = 0, cur = 0;
+      if (!memory_.Read(r[0], &oldv, 8) || !memory_.Read(r[1], &newv, 8) || !memory_.Read(r[2], &cur, 8)) {
+        *err = "__kuser_cmpxchg64: an operand is not readable";
+        return false;
+      }
+      const bool ok = cur == oldv;
+      if (ok && !memory_.Write(r[2], &newv, 8)) {
+        *err = "__kuser_cmpxchg64: the target is not writable";
+        return false;
+      }
+      r[0] = ok ? 0u : 1u;
+      set_carry(ok);
+      return true;
+    }
+    case 1:  // __kuser_memory_barrier: one modelled thread, so ordering is already total
+      return true;
+    case 2: {  // __kuser_cmpxchg(int32_t oldval, int32_t newval, volatile int32_t* ptr)
+      std::uint32_t cur = 0;
+      if (!memory_.Read(r[2], &cur, 4)) {
+        *err = "__kuser_cmpxchg: the target is not readable";
+        return false;
+      }
+      const bool ok = cur == r[0];
+      if (ok && !memory_.Write(r[2], &r[1], 4)) {
+        *err = "__kuser_cmpxchg: the target is not writable";
+        return false;
+      }
+      r[3] = cur;
+      r[0] = ok ? 0u : 1u;
+      set_carry(ok);
+      return true;
+    }
+    case 3:  // __kuser_get_tls
+      r[0] = state_.tp;
+      return true;
+    default:
+      *err = "no such kuser helper";
+      return false;
+  }
 }
 
 Ret32 AbiContext::CallGuest(GuestAddr fn, const Args32& args, const Shorty& shorty,
@@ -358,6 +425,19 @@ Ret32 AbiContext::CallGuest(GuestAddr fn, const Args32& args, const Shorty& shor
     }
 
     std::string herr;
+    if (run.host_slot >= kKuserSlotBase && run.host_slot < kKuserSlotBase + 4u) {
+      if (!RunKuserHelper(run.host_slot - kKuserSlotBase, &herr)) {
+        run.reason = exec::StopReason::Fault;
+        run.detail = "kuser helper at 0x" + Hex32(state_.pc) + ": " + herr;
+        break;
+      }
+      // Every helper ends in `bx lr`.
+      const GuestAddr lr = state_.r[RegLayout::kLr];
+      state_.mode = (lr & 1u) ? isa::Mode::Thumb : isa::Mode::Arm;
+      state_.pc = lr & (state_.mode == isa::Mode::Thumb ? ~1u : ~3u);
+      state_.r[15] = state_.pc;
+      continue;
+    }
     const auto fn = bound_.find(run.host_slot);
     const bool ok = fn != bound_.end() && fn->second(state_, &herr);
     if (!ok) {

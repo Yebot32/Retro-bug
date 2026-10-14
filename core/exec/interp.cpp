@@ -1227,6 +1227,19 @@ bool BlockRunner::Step(const Inst* inst) {
       state_.tp = value;
       return true;
     }
+    // MRRC: CNTVCT only (see `IsVirtualCounterRead`); the packing here is `[0]` coprocessor, `[1]` "2",
+    // `[2]` opc, `[3]` CRm, and the U64 result splits as Rt = low word, Rt2 = high word.
+    case Opcode::A32CoprocGetTwoWords: {
+      if (!HasArgs(inst, 1)) return false;
+      const auto info = inst->GetArg(0).GetCoprocInfo();
+      if (!IsVirtualCounterRead(info[0], info[1] != 0, info[2], info[3])) {
+        return Fail(inst, std::string{"MRRC"} + (info[1] ? "2" : "") + " p" + std::to_string(unsigned{info[0]}) +
+                              ", #" + std::to_string(unsigned{info[2]}) + ", c" + std::to_string(unsigned{info[3]}) +
+                              " is not modelled");
+      }
+      Put(inst, V{HostVirtualCounter(), 0});
+      return true;
+    }
 
     // ---------------------------------------------------------------- register file
     case Opcode::A32GetRegister: {

@@ -219,6 +219,9 @@ class Arm15Coprocessor final : public Dynarmic::A32::Coprocessor {
   }
 
   CallbackOrAccessTwoWords CompileGetTwoWords(bool two, unsigned opc, CoprocReg CRm) override {
+    if (IsVirtualCounterRead(15, two, opc, static_cast<unsigned>(CRm))) {
+      return Callback{&ReadVirtualCounter, Site(false, false, {})};  // Rt = low word, Rt2 = high word
+    }
     return Callback{&Refuse, Site(false, false, DescribePair("MRRC", two, opc, CRm))};
   }
 
@@ -237,6 +240,8 @@ class Arm15Coprocessor final : public Dynarmic::A32::Coprocessor {
   }
 
  private:
+  static std::uint64_t ReadVirtualCounter(void*, std::uint32_t, std::uint32_t) { return HostVirtualCounter(); }
+
   /// `mrc`/`mcr p15, #0, rX, c13, c0, #3`: ARMv7's user-mode thread ID register, which is what bionic's
   /// `__get_tls()` compiles to and therefore what `__errno()`, `assert`, and the property and locale
   /// accessors all begin with.

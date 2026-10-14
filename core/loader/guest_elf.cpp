@@ -610,6 +610,9 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
               if (err) *err = Stage("unresolved symbol", sname);
               return false;
             }
+          } else if (opts.unresolved_trap != 0 && *found == opts.unresolved_trap &&
+                     ELF32_ST_BIND(sym.st_info) == STB_WEAK) {
+            sym_addr = 0;  // an unresolved weak reference is null, never the trap (see LoadOptions)
           } else {
             sym_addr = *found;
           }

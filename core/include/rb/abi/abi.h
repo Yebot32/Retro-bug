@@ -230,6 +230,19 @@ class AbiContext : public exec::HostDispatch {
   /// headroom for host-provided symbols, and `IsHostEntry` refuses anything past it rather than
   /// aliasing one slot onto another.
   static constexpr std::uint32_t kMaxSlots = 512;
+  /**
+   * The Linux ARM "kuser helpers": fixed addresses at the top of every 32-bit process the kernel
+   * answers with tiny routines (`Documentation/arm/kernel_user_helpers.rst`). Old GCC-built code calls
+   * them for atomics and barriers instead of using ldrex/strex — Angry Birds Go's static constructors
+   * branch to `__kuser_memory_barrier` (0xffff0fa0). They are recognised here as host entries, beyond
+   * `kMaxSlots` so no `Bind` can alias them, and `CallGuest` runs their semantics and returns to `lr`.
+   * One guest thread is modelled, so each is atomic by construction.
+   */
+  static constexpr GuestAddr kKuserCmpxchg64 = 0xffff'0f60u;
+  static constexpr GuestAddr kKuserMemoryBarrier = 0xffff'0fa0u;
+  static constexpr GuestAddr kKuserCmpxchg = 0xffff'0fc0u;
+  static constexpr GuestAddr kKuserGetTls = 0xffff'0fe0u;
+  static constexpr std::uint32_t kKuserSlotBase = kMaxSlots;  ///< +0 cmpxchg64, +1 barrier, +2 cmpxchg, +3 get_tls
   /// How much guest stack one call gets: its spilled arguments plus the 16-byte intra-procedure area.
   /// A nesting level descends by this much, so the mapped stack bounds how deep a guest may call
   /// back into the host — which is a limit to state, not to discover at runtime.
@@ -297,6 +310,9 @@ class AbiContext : public exec::HostDispatch {
   unsigned stack_bytes() const { return stack_bytes_; }
 
  private:
+  /// One kuser helper's semantics on `state_` (index: 0 cmpxchg64, 1 barrier, 2 cmpxchg, 3 get_tls).
+  bool RunKuserHelper(std::uint32_t which, std::string* err);
+
   mem::GuestMemory& memory_;
   exec::Executor* executor_ = nullptr;
   syscall::Monitor* monitor_ = nullptr;

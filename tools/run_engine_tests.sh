@@ -93,6 +93,12 @@ IFLIBC="$BUILD/librbifunclibc.so"
   -mthumb -mfloat-abi=softfp -mfpu=neon -fPIC -shared -nostdlib -Os -fno-builtin -U_FORTIFY_SOURCE \
   -Wl,-soname,librbifunclibc.so -o "$IFLIBC" "$ROOT/tests/corpus/ifunc_libc_user.c" -lc
 
+# An unresolved weak reference (Angry Birds Go's __cxa_guard_acquire shape): the loader must bind it to 0.
+WEAK="$BUILD/librbweak.so"
+"$TC/bin/clang.exe" --target=armv7-none-linux-androideabi26 --sysroot="$TC/sysroot" \
+  -mthumb -mfloat-abi=softfp -mfpu=neon -fPIC -shared -nostdlib -Os \
+  -Wl,-soname,librbweak.so -o "$WEAK" "$ROOT/tests/corpus/weak_unresolved.c"
+
 # MSYS hands native programs /c/... paths and converts them on the way out — which is wrong for the
 # *device* path in `adb push a /data/local/tmp/b`, hence the MSYS_NO_PATHCONV=1 on every adb call
 # below. That switch also stops the conversion of the **local** path, so adb.exe is then handed a
@@ -141,6 +147,7 @@ adb push "$(to_host "$MID")" /data/local/tmp/librbmid.so >/dev/null
 adb push "$(to_host "$IFLEAF")" /data/local/tmp/librbifuncleaf.so >/dev/null
 adb push "$(to_host "$IFUSER")" /data/local/tmp/librbifuncuser.so >/dev/null
 adb push "$(to_host "$IFLIBC")" /data/local/tmp/librbifunclibc.so >/dev/null
+adb push "$(to_host "$WEAK")" /data/local/tmp/librbweak.so >/dev/null
 for t in $SUITES $ADVISORY; do
   src="$BUILD/core/tests/$t"
   [ -f "$src" ] || src="$BUILD/external/dynarmic/tests/$t"

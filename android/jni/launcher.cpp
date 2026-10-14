@@ -1155,6 +1155,7 @@ std::string Launch(const std::vector<std::uint8_t>& app_image,
   // Captured by reference, and that is safe here where the provider above had to be by value:
   // `LoadOptions::resolve` is only consulted inside `LoadFromBytes` below, which this function calls
   // synchronously and does not retain.
+  app_opts.unresolved_trap = kUnresolved;  // a weak import nothing answers is null, as on a device
   app_opts.resolve = [&](const std::string& name) -> std::optional<std::uint32_t> {
     if (const auto found = linker->Lookup(name)) return found;
     to_host.push_back(name);
@@ -1996,6 +1997,7 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
     // resolver is consulted only inside `LoadFromBytes`, which this lambda calls synchronously and does
     // not retain. It answers from what is already in the scope, which is what makes the load order below
     // dependency-first rather than a preference.
+    opts.unresolved_trap = kUnresolved;
     opts.resolve = [&](const std::string& name) -> std::optional<std::uint32_t> {
       for (const std::optional<loader::GuestModule>* placed : {&libc_mod, &libm_mod, &libz_mod, &libstdcxx_mod}) {
         if (*placed) {
@@ -2171,6 +2173,7 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
   if (ifunc.armed) {
     app_opts.resolve_ifunc = [&app_ifunc](const loader::IfuncSlot& s) { return app_ifunc(s); };
   }
+  app_opts.unresolved_trap = kUnresolved;  // a weak import nothing answers is null, as on a device
   app_opts.resolve = [&](const std::string& name) -> std::optional<std::uint32_t> {
     for (const std::optional<loader::GuestModule>* mod : {&libc_mod, &libz_mod, &libm_mod, &libstdcxx_mod}) {
       if (*mod) {
