@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Mirrors Gumball Lite's shape: minSdkVersion only, no targetSdkVersion. AxmlEditor has to insert one. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.retrobug.fixture">
+    <uses-sdk android:minSdkVersion="8"/>
+    <application android:label="fixture">
+        <activity android:name=".Main" android:exported="true"/>
+    </application>
+</manifest>

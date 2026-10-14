@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Mirrors Angry Birds Go's shape: targetSdkVersion=22 already present, so the edit is in place. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.retrobug.fixture">
+    <uses-sdk android:minSdkVersion="8" android:targetSdkVersion="22"/>
+    <application android:label="fixture" android:extractNativeLibs="false">
+        <activity android:name=".Main" android:exported="true"/>
+    </application>
+</manifest>
