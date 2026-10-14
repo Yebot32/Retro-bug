@@ -41,6 +41,10 @@ import android.os.Bundle;
 import android.util.Log;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.Surface;
+import android.view.SurfaceHolder;
+import android.view.SurfaceView;
+import android.widget.FrameLayout;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
@@ -78,6 +82,9 @@ public class LauncherActivity extends Activity {
     private static final String GUEST_SO_ENTRY = "lib/armeabi-v7a/libmathprobe.so";
     private static final String LIBM_ASSET = "guest/libm.so";
     private static final String LIBC_ASSET = "guest/libc.so";
+    /// The device's own 32-bit `libstdc++.so` (13 exports: operator new/delete, the guard functions,
+    /// `__cxa_pure_virtual`), which pre-r8 NDK games such as Gumball 2013 name in DT_NEEDED. Optional like libc.
+    private static final String LIBSTDCXX_ASSET = "guest/libstdc++.so";
     private static final String LIBZ_ASSET = "guest/libz.so";
     private static final int[] SEEDS = {0, 1, 4, 7, 100, -3};
     private static final String METHOD = "mathProbe";
@@ -92,11 +99,19 @@ public class LauncherActivity extends Activity {
     private static native String nativeLaunch(byte[] guestSo, byte[] libmSo, byte[] libcSo, byte[] libzSo,
                                               String method, int seed);
 
-    private static native String nativeInspect(byte[] guestSo, byte[] libmSo, byte[] libcSo, byte[] libzSo,
-                                               String label, int tiers, String apkPath, int surfaceWidth,
-                                               int surfaceHeight);
+    /// The running report's live status: the line count, a newline, then the latest line. Polled while a run is going.
+    private static native String nativeProgress();
 
-    private enum Screen { HOME, LIBRARY, SETTINGS, DIAGNOSTICS, REPORT }
+    /// One touch on the run screen, raw (getAction, getX, getY, the view's width, the time in ms): the native
+    /// side maps it exactly as the game's own `onTouchEvent` would and queues it for the frame loop.
+    private static native boolean nativeTouch(int action, float x, float y, int viewWidth, long timeMs);
+
+    private static native String nativeInspect(byte[] guestSo, byte[] libmSo, byte[] libcSo, byte[] libzSo,
+                                               byte[] libstdcxxSo,
+                                               String label, int tiers, String apkPath, int surfaceWidth,
+                                               int surfaceHeight, Surface surface);
+
+    private enum Screen { HOME, LIBRARY, SETTINGS, DIAGNOSTICS, REPORT, RUN }
 
     private Screen screen_ = Screen.HOME;
     private String reportTitle_ = "";
@@ -160,6 +175,7 @@ public class LauncherActivity extends Activity {
             case SETTINGS: setContentView(settingsScreen()); break;
             case DIAGNOSTICS: setContentView(diagnosticsScreen()); break;
             case REPORT: setContentView(reportScreen()); break;
+            case RUN: setContentView(runScreen()); break;
         }
     }
 
@@ -327,6 +343,7 @@ public class LauncherActivity extends Activity {
         LinearLayout root = column();
         root.addView(title(reportTitle_, 18f, true));
         final TextView body = text(currentReport(), 11f, true);
+        reportBody_ = body;
         body.setTextIsSelectable(true);
         ScrollView scroll = new ScrollView(this);
         scroll.addView(body);
@@ -347,6 +364,9 @@ public class LauncherActivity extends Activity {
     // ------------------------------------------------------------------ work
 
     private String currentReport_ = "";
+    /// The report screen's text, so a running game can show where it has got to; and whether one is running.
+    private TextView reportBody_;
+    private volatile boolean running_ = false;
 
     private String currentReport() {
         return currentReport_;
@@ -362,10 +382,22 @@ public class LauncherActivity extends Activity {
     /// screen. The report goes out untrimmed for the same reason: a reader who can grep is not the reader
     /// the trim was for.
     private void saveAndShow(String title, String report) {
+        setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
         for (String one : report.split("\n")) {
             if (!one.isEmpty()) Log.i(TAG, one);
         }
         reportTitle_ = title;
+        /*
+         * The verdict first. A run that prints a `RESULT:` line ends with it, below the fold the trim
+         * leaves and after a screenful of setup lines — so a successful run read as a failure on screen.
+         * The line is repeated at the top; the full report below it is unchanged.
+         */
+        for (String one : report.split("\n")) {
+            if (one.startsWith("RESULT:")) {
+                report = one + "\n\n" + report;
+                break;
+            }
+        }
         SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
         if (p.getBoolean(PREF_FULL_REPORT, false)) {
             currentReport_ = report;
@@ -437,7 +469,6 @@ public class LauncherActivity extends Activity {
         final String label = apk.getName();
         reportTitle_ = apk.getName().replaceAll("\\.apk$", "");
         currentReport_ = "reading " + apk.getName() + " ...";
-        show(Screen.REPORT);
         /*
          * The two ints the game's JNI entry point is given, taken where a real Java side would have taken
          * them: the Activity's own display, in pixels, which is exactly what GLSurfaceView.Renderer's
@@ -449,24 +480,157 @@ public class LauncherActivity extends Activity {
         final android.util.DisplayMetrics metrics = getResources().getDisplayMetrics();
         final int surfaceWidth = metrics.widthPixels;
         final int surfaceHeight = metrics.heightPixels;
+        running_ = true;
+        /*
+         * Live progress while the run works on its own thread. The report used to appear only at the end,
+         * so a long run — Gumball's frame loop is tens of seconds — showed "reading <apk> ..." and nothing
+         * else, indistinguishable from a hang. The native side publishes its latest line (and the frame loop
+         * a "frame N, scene X" status); this polls it a few times a second until the report replaces it.
+         */
+        final long started = android.os.SystemClock.elapsedRealtime();
+        final android.os.Handler ui = new android.os.Handler(android.os.Looper.getMainLooper());
+        ui.post(new Runnable() {
+            @Override public void run() {
+                if (!running_) return;
+                final String p = nativeProgress();
+                final int nl = p.indexOf('\n');
+                final String lines = nl < 0 ? "0" : p.substring(0, nl);
+                final String latest = nl < 0 ? p : p.substring(nl + 1);
+                final long secs = (android.os.SystemClock.elapsedRealtime() - started) / 1000;
+                if (reportBody_ != null && (screen_ == Screen.REPORT || screen_ == Screen.RUN)) {
+                    reportBody_.setText("running " + label + " — " + secs + " s, " + lines
+                            + " report line(s) so far\n\n" + latest);
+                }
+                ui.postDelayed(this, 300);
+            }
+        });
+        /*
+         * The run starts once the run screen's SurfaceView has a surface: the native side makes its GLES1
+         * context on that window, the game's GL calls draw into it, and each frame is presented there. The
+         * report replaces the screen when the run returns.
+         */
+        pendingRun_ = new java.util.function.Consumer<Surface>() {
+            @Override public void accept(final Surface surface) {
         new Thread(new Runnable() {
             @Override public void run() {
                 String report;
                 try {
-                    report = inspectApk(apk, tiers, surfaceWidth, surfaceHeight);
+                    report = inspectApk(apk, tiers, surfaceWidth, surfaceHeight, surface);
                 } catch (IOException | RuntimeException e) {
                     report = "FATAL: could not read " + apk.getName() + ": "
                             + e.getClass().getSimpleName() + ": " + e.getMessage();
                 }
                 final String text = report;
                 runOnUiThread(new Runnable() {
-                    @Override public void run() { saveAndShow(label.replaceAll("\\.apk$", ""), text); }
+                    @Override public void run() {
+                        running_ = false;
+                        saveAndShow(label.replaceAll("\\.apk$", ""), text);
+                    }
                 });
             }
         }, "rb-run").start();
+            }
+        };
+        /*
+         * The game's own orientation, from its own manifest: the first activity, which is the launch activity
+         * in these APKs (Gumball's GumballLiteActivity is screenOrientation=portrait, and its renderer
+         * rotates its content for a phone held sideways). A landscape surface instead made it draw rotated
+         * and zoomed. The run then starts on the first surface of that shape.
+         */
+        wantPortrait_ = false;
+        try {
+            android.content.pm.PackageInfo info = getPackageManager().getPackageArchiveInfo(
+                    apk.getAbsolutePath(), android.content.pm.PackageManager.GET_ACTIVITIES);
+            if (info != null && info.activities != null && info.activities.length > 0) {
+                final int o = info.activities[0].screenOrientation;
+                wantPortrait_ = o == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                        || o == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT;
+                setRequestedOrientation(o);
+            }
+        } catch (RuntimeException e) {
+            Log.w(TAG, "could not read the game's orientation: " + e);
+        }
+        show(Screen.RUN);
     }
 
-    private String inspectApk(File apk, int tiers, int surfaceWidth, int surfaceHeight) throws IOException {
+    private boolean wantPortrait_ = false;
+
+    /// The run waiting for the run screen's surface; taken (and cleared) by `surfaceCreated`.
+    private java.util.function.Consumer<Surface> pendingRun_;
+
+    /// The game's window: a SurfaceView filling the screen, with the live status line over it. The run
+    /// starts when the surface exists, and draws into it from its own thread through EGL.
+    private View runScreen() {
+        FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(Color.BLACK);
+        SurfaceView view = new SurfaceView(this);
+        view.getHolder().addCallback(new SurfaceHolder.Callback() {
+            @Override public void surfaceCreated(SurfaceHolder holder) {}
+            @Override public void surfaceChanged(SurfaceHolder holder, int format, int w, int h) {
+                if (wantPortrait_ && w > h) return;  // still rotating; wait for the game's shape
+                final java.util.function.Consumer<Surface> run = pendingRun_;
+                pendingRun_ = null;
+                if (run != null) run.accept(holder.getSurface());
+            }
+            @Override public void surfaceDestroyed(SurfaceHolder holder) {}
+        });
+        // The game's input: every MotionEvent on the surface, handed over raw. Consumed while a frame loop is
+        // taking touches (the game's onTouchEvent returns true for all of them), passed on otherwise.
+        view.setOnTouchListener(new View.OnTouchListener() {
+            @Override public boolean onTouch(View v, android.view.MotionEvent e) {
+                return nativeTouch(e.getAction(), e.getX(), e.getY(), v.getWidth(), System.currentTimeMillis());
+            }
+        });
+        root.addView(view, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT));
+        TextView status = text(currentReport(), 11f, true);
+        status.setTextColor(Color.WHITE);
+        status.setBackgroundColor(0x88000000);
+        status.setPadding(16, 8, 16, 8);
+        reportBody_ = status;
+        root.addView(status, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.START));
+        return root;
+    }
+
+    /**
+     * Called from native code, on the run thread, with the EGL context current there: decodes one image
+     * file and uploads it as a GL texture exactly the way Gumball's own `JNIGLSurface.textureLoaded` does —
+     * BitmapFactory, scaled to powers of two when it is not, LINEAR filtering, CLAMP_TO_EDGE wrapping,
+     * GLUtils.texImage2D. Returns {texture name, bitmap width, bitmap height}, or null if it cannot decode.
+     */
+    static int[] uploadTexture(byte[] encoded) {
+        android.graphics.Bitmap bmp = android.graphics.BitmapFactory.decodeByteArray(encoded, 0, encoded.length);
+        if (bmp == null) return null;
+        final int w = bmp.getWidth();
+        final int h = bmp.getHeight();
+        int pw = 1;
+        while (pw < w) pw <<= 1;
+        int ph = 1;
+        while (ph < h) ph <<= 1;
+        if (pw != w || ph != h) {
+            android.graphics.Bitmap scaled = android.graphics.Bitmap.createScaledBitmap(bmp, pw, ph, true);
+            bmp.recycle();
+            bmp = scaled;
+        }
+        int[] id = new int[1];
+        android.opengl.GLES10.glGenTextures(1, id, 0);
+        android.opengl.GLES10.glBindTexture(android.opengl.GLES10.GL_TEXTURE_2D, id[0]);
+        android.opengl.GLES10.glTexParameterf(android.opengl.GLES10.GL_TEXTURE_2D,
+                android.opengl.GLES10.GL_TEXTURE_MIN_FILTER, android.opengl.GLES10.GL_LINEAR);
+        android.opengl.GLES10.glTexParameterf(android.opengl.GLES10.GL_TEXTURE_2D,
+                android.opengl.GLES10.GL_TEXTURE_MAG_FILTER, android.opengl.GLES10.GL_LINEAR);
+        android.opengl.GLES10.glTexParameterf(android.opengl.GLES10.GL_TEXTURE_2D,
+                android.opengl.GLES10.GL_TEXTURE_WRAP_S, android.opengl.GLES10.GL_CLAMP_TO_EDGE);
+        android.opengl.GLES10.glTexParameterf(android.opengl.GLES10.GL_TEXTURE_2D,
+                android.opengl.GLES10.GL_TEXTURE_WRAP_T, android.opengl.GLES10.GL_CLAMP_TO_EDGE);
+        android.opengl.GLUtils.texImage2D(android.opengl.GLES10.GL_TEXTURE_2D, 0, bmp, 0);
+        bmp.recycle();
+        return new int[] {id[0], w, h};
+    }
+
+    private String inspectApk(File apk, int tiers, int surfaceWidth, int surfaceHeight, Surface surface)
+            throws IOException {
         byte[] libmBytes;
         try {
             libmBytes = readAll(getAssets().open(LIBM_ASSET));
@@ -475,6 +639,7 @@ public class LauncherActivity extends Activity {
         }
         final byte[] libcBytes = readAssetOrEmpty(LIBC_ASSET);
         final byte[] libzBytes = readAssetOrEmpty(LIBZ_ASSET);
+        final byte[] libstdcxxBytes = readAssetOrEmpty(LIBSTDCXX_ASSET);
 
         /*
          * One listing pass and one read, both through `ZipFile` rather than `ZipInputStream`.
@@ -567,8 +732,8 @@ public class LauncherActivity extends Activity {
              * becomes reachable: every other path is still a named refusal — see the provider in
              * `android/jni/launcher.cpp`.
              */
-            return facts + nativeInspect(so, libmBytes, libcBytes, libzBytes, chosen, tiers,
-                    apk.getAbsolutePath(), surfaceWidth, surfaceHeight);
+            return facts + nativeInspect(so, libmBytes, libcBytes, libzBytes, libstdcxxBytes, chosen, tiers,
+                    apk.getAbsolutePath(), surfaceWidth, surfaceHeight, surface);
         }
     }
 

@@ -128,6 +128,15 @@ else
   echo "         the launcher then reports the runs it can still make without it. To include one, pull the" >&2
   echo "         device's 32-bit /system/lib/libc.so to that path." >&2
 fi
+# The device's libstdc++.so, by the same rule: pulled, never relinked or stubbed. Only games that name it
+# in DT_NEEDED get it placed (pre-r8 NDK images such as Gumball 2013 do; Angry Birds does not).
+GUEST_LIBSTDCXX="$ROOT/build/device-libs/libstdc++.so"
+if [ -s "$GUEST_LIBSTDCXX" ]; then
+  cp "$GUEST_LIBSTDCXX" "$OUT/stage/assets/guest/libstdc++.so"
+else
+  echo "warning: $GUEST_LIBSTDCXX is missing — a game that needs libstdc++.so will report it unplaced;" >&2
+  echo "         pull the device's 32-bit /system/lib/libstdc++.so to that path." >&2
+fi
 
 # ---- java -> dex
 #
