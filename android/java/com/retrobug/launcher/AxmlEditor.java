@@ -65,6 +65,16 @@ final class AxmlEditor {
     }
 
     static AxmlEditor parse(byte[] axml) throws IOException {
+        try {
+            return parseChunks(axml);
+        } catch (IndexOutOfBoundsException | NegativeArraySizeException ex) {
+            // Chunk fields are untrusted offsets and lengths; the checks below catch the likely lies, and this
+            // is the backstop so no input ever escapes as an unnamed runtime exception.
+            throw new IOException("binary XML malformed: " + ex, ex);
+        }
+    }
+
+    private static AxmlEditor parseChunks(byte[] axml) throws IOException {
         if (axml.length < 8 || u16(axml, 0) != RES_XML_TYPE || u16(axml, 2) != 8 || s32(axml, 4) != axml.length) {
             throw new IOException("not a binary XML manifest (file header is not a RES_XML chunk covering the file)");
         }
@@ -82,15 +92,38 @@ final class AxmlEditor {
             if (type == RES_STRING_POOL_TYPE) {
                 e.readPool(chunk);
             } else if (type == RES_XML_RESOURCE_MAP_TYPE) {
+                if (u16(chunk, 2) < 8 || u16(chunk, 2) > size) throw new IOException("resource map header size " + u16(chunk, 2) + " is outside its chunk");
                 e.resIds = new int[(size - u16(chunk, 2)) / 4];
                 for (int i = 0; i < e.resIds.length; i++) e.resIds[i] = s32(chunk, u16(chunk, 2) + i * 4);
             } else {
+                checkNode(chunk, pos);
                 e.nodes.add(chunk);
             }
             pos += size;
         }
         if (e.poolBytes == null) throw new IOException("binary XML has no string pool");
         return e;
+    }
+
+    /** Reject a node chunk too short for the fields the readers and shifters will touch in it. */
+    private static void checkNode(byte[] c, int pos) throws IOException {
+        int type = u16(c, 0), min;
+        switch (type) {
+            case XML_START_ELEMENT: min = NODE_HEADER + 20; break;
+            case XML_START_NAMESPACE: case XML_END_NAMESPACE: case XML_END_ELEMENT: min = NODE_HEADER + 8; break;
+            case XML_CDATA: min = NODE_HEADER + 12; break;
+            default: min = 8;
+        }
+        if (c.length < min || (type >= XML_START_NAMESPACE && type <= XML_CDATA && u16(c, 2) != NODE_HEADER)) {
+            throw new IOException("binary XML malformed: node 0x" + Integer.toHexString(type) + " at " + pos
+                    + " is too short or has a bad header");
+        }
+        if (type == XML_START_ELEMENT) {
+            long end = (long) NODE_HEADER + u16(c, NODE_HEADER + 8) + (long) attrCount(c) * u16(c, NODE_HEADER + 10);
+            if (u16(c, NODE_HEADER + 10) < ATTR_SIZE || end > c.length) {
+                throw new IOException("binary XML malformed: attributes of element at " + pos + " overrun the chunk");
+            }
+        }
     }
 
     // ---------------------------------------------------------------- string pool

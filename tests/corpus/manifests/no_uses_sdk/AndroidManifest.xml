@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- No <uses-sdk> element at all: AxmlEditor has to create one under <manifest>. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.retrobug.fixture">
+    <application android:label="fixture">
+        <activity android:name=".Main" android:exported="true"/>
+    </application>
+</manifest>
