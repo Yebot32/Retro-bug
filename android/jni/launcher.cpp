@@ -2340,7 +2340,9 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
   // One failure, with everything needed to find where it stopped. `what` names the entry — module, tag and
   // index — because "a constructor failed" without one is a report a reader cannot act on, and `detail` is
   // where a named fault (an unanswered import called at 0xbad0000, an unimplemented IR op) appears.
+  std::string ctor_failed;  // the first constructor that did not return, for the RESULT line
   const auto say_ctor_failure = [&](const std::string& what) {
+    if (ctor_failed.empty()) ctor_failed = what + " (" + ctor_call.detail + ")";
     Say(&out, "constructors: %s did not return on tier=%s: %s", what.c_str(), ctor_tier,
         ReasonName(ctor_call.reason));
     if (!ctor_call.detail.empty()) Say(&out, "    stopped because: %s", ctor_call.detail.c_str());
@@ -2656,6 +2658,9 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
   if (!ctors_ok) {
     Say(&out, "JNI_OnLoad: not called — a constructor above did not return, so the library is not in a"
               " state a runtime would enter");
+    Say(&out, "RESULT: stopped during startup — constructor %s did not return; the library's own code"
+              " ran up to there, and the line above it names what this build is missing",
+        ctor_failed.empty() ? "?" : ctor_failed.c_str());
     say_guest_log();
     say_gl();
     say_dl();
@@ -3336,9 +3341,11 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
             " this host has, and a library that dereferences the null will fault *inside the emulator*,",
       Hex(static_cast<std::uint32_t>(onload->addr)).c_str());
   Say(&out, "  which is reported here as a Fault rather than crashing this process.");
+  bool onload_returned = false;
   const auto call_one = [&](exec::Executor& engine, const char* tier) {
     const Outcome got = Call(engine, ctx, app, "JNI_OnLoad", "II",
                              {abi::Value32::Ptr(0), abi::Value32::Ptr(0)});
+    onload_returned = got.reason == exec::StopReason::Returned;
     Say(&out, "JNI_OnLoad tier=%s reason=%s steps=%u value=0x%s", tier, ReasonName(got.reason), got.steps,
         Hex64(got.bits).c_str());
     if (got.reason != exec::StopReason::Returned && !got.detail.empty()) {
@@ -3359,6 +3366,22 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
               " one guest memory, so it runs once, on the constructor tier (%s), like the constructors"
               " did.",
         ctor_tier);
+  }
+  // The verdict, because without one a report that ends on the unanswered-import list reads as a failure
+  // even when nothing failed (Angry Birds Go, 2026-10-15: every constructor and JNI_OnLoad returned).
+  {
+    std::size_t java_entries = 0;
+    for (const std::string& name : app.ExportNames()) {
+      if (name.compare(0, 5, "Java_") == 0) ++java_entries;
+    }
+    if (onload_returned) {
+      Say(&out, "RESULT: startup finished with no fault — every constructor and JNI_OnLoad returned. This build"
+                " has no driver for this game's engine (%zu Java_* entry points its own Java would call), so"
+                " nothing is drawn yet",
+          java_entries);
+    } else {
+      Say(&out, "RESULT: the constructors finished, then JNI_OnLoad stopped — the lines above say where");
+    }
   }
   say_guest_log();
   say_gl();
