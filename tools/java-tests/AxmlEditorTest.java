@@ -199,6 +199,32 @@ public class AxmlEditorTest {
         }
     }
 
+    // Truncation alone is stopped by the outer size checks, so also corrupt every dword in turn with values
+    // that lie about lengths and offsets; whatever parses must still never throw a bare runtime exception.
+    static void refusesLyingFields() {
+        int[] lies = {0, 0x7ffffff0, -1, 0x10000, 3};
+        for (String name : new String[]{"min_only", "target22"}) {
+            byte[] full;
+            try { full = fixture(name); } catch (IOException ex) { check(false, "fixture " + name); return; }
+            for (int o = 8; o + 4 <= full.length; o += 4) {
+                for (int lie : lies) {
+                    byte[] t = full.clone();
+                    w32(t, o, lie);
+                    try {
+                        AxmlEditor e = AxmlEditor.parse(t);
+                        e.packageName(); e.minSdk(); e.targetSdk(); e.extractNativeLibs();
+                        e.setTargetSdk(24); e.toBytes();
+                    } catch (IOException ok) {
+                        // named refusal: what is wanted
+                    } catch (RuntimeException ex) {
+                        check(false, name + " dword at " + o + " set to " + lie + " threw " + ex);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
     public static void main(String[] a) throws Exception {
         fixtures = new File(a[0]); scratch = new File(a[1]); aapt2 = a[2];
         minOnlyReadsBack();
@@ -206,6 +232,7 @@ public class AxmlEditorTest {
         createUsesSdk();
         poolEncodings();
         refusesTruncation();
+        refusesLyingFields();
         rewriteTargetSdk();
         readsExtractNativeLibs();
         refusesGarbage();
