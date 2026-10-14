@@ -66,21 +66,23 @@ std::string PackageName() {
   return name;
 }
 
+/// One boot at a time per process. `Inspect` works on unsynchronized process globals (launcher.cpp's
+/// progress line, touch queue and log tag), so the lock is held across the whole boot: a second caller,
+/// for the same library or another, waits here until the first boot has finished. For the same library it
+/// then finds it in `g_booted` and returns immediately.
 std::mutex g_mu;
-std::set<std::string> g_booted;
+std::set<std::string> g_booted;  // guarded by g_mu
 
 }  // namespace
 
 extern "C" int rb_runtime_boot(JavaVM* /*vm*/, const char* apk_path, const char* lib_name) {
   const std::string lib = lib_name != nullptr ? lib_name : "";
   const std::string apk = apk_path != nullptr ? apk_path : "";
-  {
-    std::lock_guard<std::mutex> lock(g_mu);
-    if (!g_booted.insert(lib).second) {
-      __android_log_print(ANDROID_LOG_INFO, kTag, "rb_runtime_boot: %s already booted in this process",
-                          lib.c_str());
-      return JNI_VERSION_1_6;
-    }
+  std::lock_guard<std::mutex> lock(g_mu);  // held until return, see g_mu
+  if (!g_booted.insert(lib).second) {
+    __android_log_print(ANDROID_LOG_INFO, kTag, "rb_runtime_boot: %s already booted in this process",
+                        lib.c_str());
+    return JNI_VERSION_1_6;
   }
   rb::launcher::SetLogTag(kTag);
 
