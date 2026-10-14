@@ -329,6 +329,21 @@ class Monitor {
   /// rather than presenting a truncated list as complete.
   [[nodiscard]] std::size_t dropped_notes() const { return dropped_notes_; }
 
+  /// How many answers this run refused (negative errno). The self-audit asserts the notes kept up with
+  /// this: a refusal with no note is exactly the silent-ignore shape the note machinery exists to
+  /// prevent.
+  [[nodiscard]] std::size_t refusals() const { return refusals_; }
+
+  /// What the guest wrote to fd 1 / fd 2, capped per stream at `kCaptureCap`. The app's own words are
+  /// the only diagnostic a real process would show on a console, and dropping them was measured: the
+  /// game's constructor wrote to fd 2 four times before `exit_group(127)` and every byte went nowhere
+  /// (SM-X710, 2026-10-09). `capture_dropped` says the cap clipped something.
+  [[nodiscard]] const std::string& captured_stdout() const { return captured_out_; }
+  [[nodiscard]] const std::string& captured_stderr() const { return captured_err_; }
+  [[nodiscard]] bool capture_dropped() const { return capture_dropped_; }
+  /// How many bytes are kept per stream before the rest are counted rather than stored.
+  static constexpr std::size_t kCaptureCap = 8192;
+
   /// How many distinct notes are kept before the rest are counted rather than stored.
   static constexpr std::size_t kMaxNotes = 24;
 
@@ -385,8 +400,21 @@ class Monitor {
   std::uint32_t robust_head_ = 0;
   std::uint32_t robust_len_ = 0;
   std::array<char, 16> thread_name_{};  ///< `prctl(PR_SET_NAME)`, TASK_COMM_LEN bytes
+  /// Guest output for fd 1/2 — see `captured_stdout`. `CaptureOutput` answers the call as a console
+  /// fd would (the full length reported consumed) and counts over-cap bytes rather than losing them
+  /// silently.
+  Outcome CaptureOutput(std::int32_t fd, std::uint32_t at, std::uint32_t len);
+  std::string captured_out_;
+  std::string captured_err_;
+  bool capture_dropped_ = false;
+  /// Where the next anonymous `mmap2` tries first, so consecutive allocations stay consecutive the
+  /// way a real allocator expects its arenas to be.
+  std::uint32_t mmap_next_ = 0;
   std::vector<std::string> notes_;
   std::size_t dropped_notes_ = 0;
+  /// Counted at the same site that observes a refusal (`monitor.cpp` `Handle`), so the accessor and the
+  /// notes cannot drift apart.
+  std::size_t refusals_ = 0;
 };
 
 }  // namespace rb::syscall

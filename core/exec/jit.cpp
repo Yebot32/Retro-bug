@@ -282,16 +282,97 @@ class Arm15Coprocessor final : public Dynarmic::A32::Coprocessor {
   JitExecutor& exec_;
 };
 
+/**
+ * A coprocessor number RetroBug models nothing of: p0 through p14, every form refused by name.
+ *
+ * Why an object at all when nothing in it ever succeeds: an *empty* `Config::coprocessors[n]` makes the
+ * AArch64 back end compile the access into `EmitCoprocessorException()` —
+ * `ASSERT_FALSE("Should raise coproc exception here")` (`emit_arm64_a32_coprocessor.cpp:23`), which is
+ * not `NDEBUG`-gated — so one guest `mrc p14, 0, r0, c9, c13, 0` (PMCCNTR, say) terminates the whole
+ * host process inside `Run()` instead of stopping the guest with a line that names the access. Slot 15's
+ * object exists because one register in it has to work; these fifteen exist so that "not modelled" is a
+ * *stop*. Same refusal shape as slot 15's non-thread-pointer registers, so the two tiers name the same
+ * coordinates — Tier I's `A32CoprocGetOneWord`/`SendOneWord` handlers (`interp.cpp`) refuse everything
+ * but TPIDRURW the same way.
+ */
+class RefusingCoprocessor final : public Dynarmic::A32::Coprocessor {
+ public:
+  using CoprocReg = Dynarmic::A32::CoprocReg;
+
+  RefusingCoprocessor(JitExecutor& exec, unsigned number) : exec_{exec}, number_{number} {}
+
+  std::optional<Callback> CompileInternalOperation(bool two, unsigned opc1, CoprocReg CRd, CoprocReg CRn,
+                                                   CoprocReg CRm, unsigned opc2) override {
+    return Callback{&Refuse, Site(Describe("CDP", two, opc1, CRn, CRm, opc2))};
+  }
+
+  CallbackOrAccessOneWord CompileSendOneWord(bool two, unsigned opc1, CoprocReg CRn, CoprocReg CRm,
+                                             unsigned opc2) override {
+    return Callback{&Refuse, Site(Describe("MCR", two, opc1, CRn, CRm, opc2))};
+  }
+
+  CallbackOrAccessOneWord CompileGetOneWord(bool two, unsigned opc1, CoprocReg CRn, CoprocReg CRm,
+                                            unsigned opc2) override {
+    return Callback{&Refuse, Site(Describe("MRC", two, opc1, CRn, CRm, opc2))};
+  }
+
+  CallbackOrAccessTwoWords CompileSendTwoWords(bool two, unsigned opc, CoprocReg CRm) override {
+    return Callback{&Refuse, Site(DescribePair("MCRR", two, opc, CRm))};
+  }
+
+  CallbackOrAccessTwoWords CompileGetTwoWords(bool two, unsigned opc, CoprocReg CRm) override {
+    return Callback{&Refuse, Site(DescribePair("MRRC", two, opc, CRm))};
+  }
+
+  std::optional<Callback> CompileLoadWords(bool, bool, CoprocReg CRd,
+                                           std::optional<std::uint8_t>) override {
+    return Callback{&Refuse, Site(std::string{"LDC p"} + std::to_string(number_) +
+                                  ", c" + std::to_string(static_cast<unsigned>(CRd)))};
+  }
+
+  std::optional<Callback> CompileStoreWords(bool, bool, CoprocReg CRd,
+                                            std::optional<std::uint8_t>) override {
+    return Callback{&Refuse, Site(std::string{"STC p"} + std::to_string(number_) +
+                                  ", c" + std::to_string(static_cast<unsigned>(CRd)))};
+  }
+
+ private:
+  std::string Describe(const char* mnemonic, bool two, unsigned opc1, CoprocReg CRn, CoprocReg CRm,
+                       unsigned opc2) const {
+    return std::string{mnemonic} + (two ? "2" : "") + " p" + std::to_string(number_) + ", #" +
+           std::to_string(opc1) + ", c" + std::to_string(static_cast<unsigned>(CRn)) + ", c" +
+           std::to_string(static_cast<unsigned>(CRm)) + ", #" + std::to_string(opc2);
+  }
+
+  std::string DescribePair(const char* mnemonic, bool two, unsigned opc, CoprocReg CRm) const {
+    return std::string{mnemonic} + (two ? "2" : "") + " p" + std::to_string(number_) + ", #" +
+           std::to_string(opc) + ", c" + std::to_string(static_cast<unsigned>(CRm));
+  }
+
+  JitExecutor::CoprocSite* Site(std::string detail) {
+    return exec_.CoprocSiteFor(false, false, std::move(detail));
+  }
+
+  static std::uint64_t Refuse(void* user_arg, std::uint32_t, std::uint32_t) {
+    const auto* site = static_cast<const JitExecutor::CoprocSite*>(user_arg);
+    site->exec->RefuseCoprocessor(*site);
+    return 0;
+  }
+
+  JitExecutor& exec_;
+  unsigned number_;
+};
+
 }  // namespace
 
 JitExecutor::JitExecutor(mem::GuestMemory& memory, GuestAddr return_address,
                          const HostDispatch* dispatch)
     : memory_{memory}, return_address_{return_address}, dispatch_{dispatch} {
   Dynarmic::A32::UserConfig conf{this};
-  // ARMv7-A, not the default. `UserConfig::arch_version` ships as `v8`, which would accept encodings no
-  // armeabi-v7a binary may contain and is the same trap `rb::isa::Options()` already pins to v7 — the
-  // two tiers have to agree on the *architecture*, or a differential disagreement would be an
-  // configuration difference wearing its clothes.
+  // ARMv7-A, not the default — the rationale and the record of what "just widen it to v8" did and did
+  // not buy live in `rb::isa::Options()` (front_end.cpp), which this must mirror: the two tiers have
+  // to agree on the *architecture*, or a differential disagreement would be a configuration difference
+  // wearing its clothes.
   conf.arch_version = Dynarmic::A32::ArchVersion::v7;
   // The other two options `rb::isa::Options()` sets, and which this config was missing.
   //
@@ -333,6 +414,13 @@ JitExecutor::JitExecutor(mem::GuestMemory& memory, GuestAddr return_address,
   // self-reference must not be handed out before the object it points at is far enough along to answer.
   coproc15_ = std::make_shared<Arm15Coprocessor>(*this);
   conf.coprocessors[15] = coproc15_;
+  // Numbers 0-14, each one a name-refusing object rather than an empty slot: an empty slot is the back
+  // end's `ASSERT_FALSE`, i.e. the host process dies where the guest should have stopped. See
+  // `RefusingCoprocessor` for the failure this closed.
+  for (std::size_t n = 0; n < refusing_coprocs_.size(); ++n) {
+    refusing_coprocs_[n] = std::make_shared<RefusingCoprocessor>(*this, static_cast<unsigned>(n));
+    conf.coprocessors[n] = refusing_coprocs_[n];
+  }
   // The exclusive monitor, because Dynarmic dereferences this pointer unconditionally in the trampoline
   // it bakes for every LL/SC access. `processor_id` indexes that monitor's per-core slot, and this object
   // is one core, so it is 0 in a 1-processor monitor. See the member's declaration for why correctness

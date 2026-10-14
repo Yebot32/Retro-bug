@@ -1030,6 +1030,203 @@ void an_unmodelled_coprocessor_access_stops_both_tiers() {
                ri.detail.c_str(), sj.r[0], rj.detail.c_str());
 }
 
+/// The same rule one coprocessor number over — and until the wrapper registered a refusing object for
+/// every slot, this row could not even run: with `Config::coprocessors[14]` empty, the AArch64 back end
+/// compiled this `mrc p14` into `EmitCoprocessorException()`, which is `ASSERT_FALSE` and not
+/// NDEBUG-gated, so the whole test binary terminated inside `Run()` before reaching any assertion here.
+/// The registration loop in `jit.cpp` turned "nobody models this number" into the same named stop the
+/// p15 row pins, on both tiers.
+///
+/// Encoding: `mrc p14, #0, r0, c9, c13, #0 ; movs r0, #0x5a ; bx lr` via the recipe above —
+/// `ee19 0e1d / 205a / 4770`.
+void an_unmodelled_coprocessor_number_stops_both_tiers() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  constexpr exec::GuestAddr kBlob = 0x0070'2000u;
+  constexpr std::uint16_t kCode[] = {0xee19, 0x0e1d, 0x205a, 0x4770};
+  std::string err;
+  if (!rig.mem->Map(kBlob, mem::kGuestPage, kRead | kWrite | kExec, &err)) {
+    fail("could not map the coprocessor-probe page", __LINE__, err);
+    return;
+  }
+  CHECK_CTX(rig.mem->Write(kBlob, kCode, sizeof(kCode)), "could not plant the p14 blob");
+
+  exec::MachineState si = EntryState(kBlob, 0, 0, true);
+  si.r[0] = 0x11;  // the value a halted access must leave alone
+  exec::MachineState sj = si;
+  const exec::RunResult ri = rig.interp->Run(si, 1000);
+  const exec::RunResult rj = rig.jit->Run(sj, 1000);
+
+  CHECK_CTX(ri.reason == exec::StopReason::Unimplemented,
+            "Tier I: reason " + std::to_string(static_cast<int>(ri.reason)) + " " + ri.detail);
+  CHECK_CTX(rj.reason == exec::StopReason::Unimplemented,
+            "Tier J: reason " + std::to_string(static_cast<int>(rj.reason)) + " " + rj.detail);
+  // Both tiers name the coordinates of the access, so the refusal is actionable rather than a stop at
+  // an address. The process surviving to this point is itself the regression bar for the p0-p14 slots.
+  CHECK_CTX(ri.detail.find("p14") != std::string::npos, "Tier I names the access: " + ri.detail);
+  CHECK_CTX(rj.detail.find("p14") != std::string::npos, "Tier J names the access: " + rj.detail);
+  CHECK_CTX(si.r[0] == 0x11 && sj.r[0] == 0x11,
+            "an r0 of 0x5a would mean the rest of the block ran; got I=" + Hex(si.r[0]) +
+                " J=" + Hex(sj.r[0]));
+  std::fprintf(stderr, "[diff] unmodelled p14: I \"%s\" / J \"%s\"\n", ri.detail.c_str(),
+               rj.detail.c_str());
+}
+
+/// The byte and halfword members of the acquire/release group, which the Thumb decoder table lacked
+/// while its word forms (`LDA`/`STL`) and the whole ARM-state table had them — measured on device as
+/// the wall inside libc's own `__libc_safe_arc4random_buf` doing `ldab r2, [r2]` (`e8d2 2f8f`).
+/// Decoding is only half the claim: the value checks separate "decoded" from "executed as the
+/// instruction the architecture says it is".
+///
+/// Each phase plants at its **own** address, the same rule the exclusive lane's cursor follows and for
+/// the same reason: a second blob over a first one's address is executed from the first one's cached
+/// translation (neither tier invalidates on a host-side write), and the resulting red says nothing
+/// about the bytes under test. The first draft of this row reused one address and produced exactly
+/// that failure.
+void the_thumb_acquire_byte_and_half_rows_execute_on_both_tiers() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  constexpr exec::GuestAddr kPage = 0x0070'3000u;
+  constexpr exec::GuestAddr kBlobLdab = kPage + 0x00u;
+  constexpr exec::GuestAddr kBlobStlb = kPage + 0x40u;
+  constexpr exec::GuestAddr kBlobPair = kPage + 0x80u;
+  constexpr exec::GuestAddr kData = 0x0070'4000u;
+  std::string err;
+  if (!rig.mem->Map(kPage, mem::kGuestPage, kRead | kWrite | kExec, &err) ||
+      !rig.mem->Map(kData, mem::kGuestPage, kRead | kWrite, &err)) {
+    fail("could not map the acquire-row pages", __LINE__, err);
+    return;
+  }
+
+  // `ldab r0, [r1] ; bx lr` — assembled with the recipe's toolchain line plus `-march=armv8-a`.
+  constexpr std::uint16_t kLoad[] = {0xe8d1, 0x0f8f, 0x4770};
+  CHECK_CTX(rig.mem->Write(kBlobLdab, kLoad, sizeof(kLoad)), "could not plant the ldab blob");
+  const std::uint8_t stored = 0xAB;
+  CHECK_CTX(rig.mem->Write(kData, &stored, 1), "could not seed the data byte");
+
+  exec::MachineState si = EntryState(kBlobLdab, 0, 0, true);
+  si.r[1] = kData;
+  exec::MachineState sj = si;
+  const exec::RunResult ri = rig.interp->Run(si, 1000);
+  const exec::RunResult rj = rig.jit->Run(sj, 1000);
+  CHECK_CTX(ri.reason == exec::StopReason::Returned,
+            "Tier I: reason " + std::to_string(static_cast<int>(ri.reason)) + " " + ri.detail);
+  CHECK_CTX(rj.reason == exec::StopReason::Returned,
+            "Tier J: reason " + std::to_string(static_cast<int>(rj.reason)) + " " + rj.detail);
+  CHECK_CTX(si.r[0] == 0xAB, "Tier I's ldab read 0x" + Hex(si.r[0]));
+  CHECK_CTX(sj.r[0] == 0xAB, "Tier J's ldab read 0x" + Hex(sj.r[0]));
+  const std::uint32_t ldab_i = si.r[0], ldab_j = sj.r[0];
+
+  // `stlb r0, [r1] ; bx lr` — the release side, and only the low byte may land.
+  constexpr std::uint16_t kStore[] = {0xe8c1, 0x0f8f, 0x4770};
+  CHECK_CTX(rig.mem->Write(kBlobStlb, kStore, sizeof(kStore)), "could not plant the stlb blob");
+  std::uint32_t seen = 0x5a5a'5a5au;
+  CHECK_CTX(rig.mem->Write(kData, &seen, 4), "could not seed the store word");
+  si = EntryState(kBlobStlb, 0, 0, true);
+  si.r[0] = 0x1234'00CDu;
+  si.r[1] = kData;
+  sj = si;
+  const exec::RunResult ri2 = rig.interp->Run(si, 1000);
+  const exec::RunResult rj2 = rig.jit->Run(sj, 1000);
+  CHECK_CTX(ri2.reason == exec::StopReason::Returned && rj2.reason == exec::StopReason::Returned,
+            "stlb stopped: I " + ri2.detail + " / J " + rj2.detail);
+  CHECK_CTX(rig.mem->Read(kData, &seen, 4), "could not read back the store word");
+  CHECK_CTX(seen == 0x5a5a'5acdu, "stlb wrote 0x" + Hex(seen) + " (want 0x5a5a5acd)");
+
+  // `ldrex r3, [r1] ; stlex r2, r0, [r1] ; bx lr` — the exact pair `__cxa_guard_release` spins on, and
+  // the wall the device run hit right after `ldab` was fixed: the release store must report success
+  // (r2 = 0) and land the value, with the load-exclusive having seen what was there.
+  constexpr std::uint16_t kPair[] = {0xe851, 0x3f00, 0xe8c1, 0x0fe2, 0x4770};
+  CHECK_CTX(rig.mem->Write(kBlobPair, kPair, sizeof(kPair)), "could not plant the ldrex/stlex pair");
+  seen = 0x5a5a'5a5au;
+  CHECK_CTX(rig.mem->Write(kData, &seen, 4), "could not seed the exclusive word");
+  si = EntryState(kBlobPair, 0, 0, true);
+  si.r[0] = 0xABCD'1234u;
+  si.r[1] = kData;
+  sj = si;
+  const exec::RunResult ri3 = rig.interp->Run(si, 1000);
+  const exec::RunResult rj3 = rig.jit->Run(sj, 1000);
+  CHECK_CTX(ri3.reason == exec::StopReason::Returned && rj3.reason == exec::StopReason::Returned,
+            "ldrex/stlex stopped: I " + ri3.detail + " / J " + rj3.detail);
+  CHECK_CTX(si.r[2] == 0 && sj.r[2] == 0,
+            "stlex status: I " + Hex(si.r[2]) + " / J " + Hex(sj.r[2]) + " (0 = stored)");
+  // Tier I's destination holds the loaded value; Tier J's does not — see the divergence note below the
+  // pair phases. Asserting the J value here would pin a wrong answer, and asserting it nowhere would
+  // hide it: it is asserted in the *print* below and tracked as an open finding instead.
+  CHECK_CTX(si.r[3] == 0x5a5a'5a5au, "Tier I's ldrex value: " + Hex(si.r[3]));
+  CHECK_CTX(rig.mem->Read(kData, &seen, 4), "could not read back the exclusive word");
+  CHECK_CTX(seen == 0xABCD'1234u, "stlex left 0x" + Hex(seen) + " (want 0xabcd1234)");
+  std::fprintf(stderr,
+               "[diff] acquire rows: ldab I=%02x J=%02x, stlb -> ok, stlex status=%u, word=0x%08x,"
+               " dest r3 I=%08x J=%08x\n",
+               ldab_i, ldab_j, si.r[2], seen, si.r[3], sj.r[3]);
+  // The same shape with `strex` (ATOMIC) rather than `stlex` (ORDERED), fresh address: the pair above
+  // showed Tier J's exclusive-load destination ending as the *stored* value (0xabcd1234, where Tier I
+  // has the loaded 0x5a5a5a5a). This variant decides whether that is the release-store path's or the
+  // pair shape's; whichever it is, both tiers are asserted here.
+  constexpr exec::GuestAddr kBlobStrex = kPage + 0xC0u;
+  constexpr std::uint16_t kStrexPair[] = {0xe851, 0x3f00, 0xe841, 0x0200, 0x4770};
+  CHECK_CTX(rig.mem->Write(kBlobStrex, kStrexPair, sizeof(kStrexPair)),
+            "could not plant the ldrex/strex pair");
+  seen = 0x5a5a'5a5au;
+  CHECK_CTX(rig.mem->Write(kData, &seen, 4), "could not re-seed the exclusive word");
+  si = EntryState(kBlobStrex, 0, 0, true);
+  si.r[0] = 0xABCD'1234u;
+  si.r[1] = kData;
+  sj = si;
+  const exec::RunResult ri4 = rig.interp->Run(si, 1000);
+  const exec::RunResult rj4 = rig.jit->Run(sj, 1000);
+  CHECK_CTX(ri4.reason == exec::StopReason::Returned && rj4.reason == exec::StopReason::Returned,
+            "ldrex/strex stopped: I " + ri4.detail + " / J " + rj4.detail);
+  CHECK_CTX(si.r[2] == 0 && sj.r[2] == 0,
+            "strex status: I " + Hex(si.r[2]) + " / J " + Hex(sj.r[2]));
+  CHECK_CTX(si.r[3] == 0x5a5a'5a5au, "Tier I's ldrex value (strex pair): " + Hex(si.r[3]));
+  std::fprintf(stderr,
+               "[diff] acquire rows: strex pair r3 I=%08x J=%08x (J holding the stored word is the"
+               " open divergence this row documents)\n",
+               si.r[3], sj.r[3]);
+
+  // And the pair with one instruction between the store and the block end (the standing f10 row's
+  // shape, whose r3 is green): if this is green where the others are red, Tier J's writeback of the
+  // exclusive load's destination is *terminal-ordered* — it lands only when another instruction
+  // follows the exclusive store in the same block.
+  constexpr exec::GuestAddr kBlobTrail = kPage + 0x100u;
+  constexpr std::uint16_t kTrailPair[] = {0xe851, 0x3f00, 0xe8c1, 0x0fe2, 0x4610, 0x4770};
+  CHECK_CTX(rig.mem->Write(kBlobTrail, kTrailPair, sizeof(kTrailPair)),
+            "could not plant the trail pair");
+  seen = 0x5a5a'5a5au;
+  CHECK_CTX(rig.mem->Write(kData, &seen, 4), "could not re-seed the trail word");
+  si = EntryState(kBlobTrail, 0, 0, true);
+  si.r[0] = 0xABCD'1234u;
+  si.r[1] = kData;
+  sj = si;
+  const exec::RunResult ri5 = rig.interp->Run(si, 1000);
+  const exec::RunResult rj5 = rig.jit->Run(sj, 1000);
+  CHECK_CTX(ri5.reason == exec::StopReason::Returned && rj5.reason == exec::StopReason::Returned,
+            "trail pair stopped: I " + ri5.detail + " / J " + rj5.detail);
+  std::fprintf(stderr, "[diff] acquire rows: trail pair r3 I=%08x J=%08x (mov between store and end)\n",
+               si.r[3], sj.r[3]);
+
+  /**
+   * Open divergence, a minimal repro of the issue-#35 family (`docs/30` §Step 12's "Tier J gets the
+   * load's value late" — that lane went green by shaping rows around it, and this is a shape it did not
+   * cover): on Tier J the exclusive load's *destination register* ends holding the store's value
+   * (0xabcd1234 below) instead of the value the load read (0x5a5a5a5a). Measured on the SM-X710,
+   * 2026-10-09, reproduced three ways in the phases above:
+   *   - `ldrex r3,[r1]; stlex r2,r0,[r1]; bx lr`                -> J r3 = the store's value
+   *   - `ldrex r3,[r1]; strex r2,r0,[r1]; bx lr`                -> same (not ORDERED-specific)
+   *   - either, with `mov r0,r2` between the store and `bx lr`  -> same
+   * The standing f10 row (address in r0, stored value in r1) is green, so the trigger is in the
+   * register shape, not the opcode; the load itself and the store's status/effect are correct on both
+   * tiers (asserted above) — it is the destination writeback that is wrong. Impact if a guest path runs
+   * on Tier J: `__cxa_guard_release` compares the pre-store word (`cmp r1, #0x200` after the pair), so
+   * it would compare the wrong value — the launcher's constructor path runs Tier I today, which is why
+   * no device wall has shown this yet. Root cause belongs in the vendored A64 exclusive writeback
+   * (candidate for a patch once found); this row pins the reproduction and the parts that are correct
+   * rather than asserting the wrong value green.
+   */
+}
+
 /**
  * The ARM-state instructions Dynarmic's A32 front end *declines* to translate.
  *
@@ -2595,6 +2792,124 @@ void packed_media_rows_agree_with_the_arm64_recipes() {
                 " control rows, expected 8, 2 and 2");
 }
 
+/// The DSP multiply-accumulates, which publish overflow through `OrQFlag` — the one writer Tier I did
+/// not have, so the whole family refused there while Tier J completed the block (found for real inside
+/// libc's constructor once the guest heap existed, SM-X710, 2026-10-10). Two rows, because one alone
+/// cannot fail both ways: an overflowing `smlabb` must set Q on both tiers, and a non-overflowing one
+/// must leave it clear — a writer that always set (or never set) Q passes one row and fails the other.
+void the_dsp_multiplies_publish_q_on_both_tiers() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  constexpr exec::GuestAddr kPage = 0x0070'5000u;
+  constexpr exec::GuestAddr kOver = kPage + 0x00u;
+  constexpr exec::GuestAddr kExact = kPage + 0x40u;
+  std::string err;
+  if (!rig.mem->Map(kPage, mem::kGuestPage, kRead | kWrite | kExec, &err)) {
+    fail("could not map the smlabb blob page", __LINE__, err);
+    return;
+  }
+  // `smlabb r0, r1, r2, r3 ; bx lr` — r0 = (r1 * r2)[31:0] + r3, overflow judged in signed 64.
+  constexpr std::uint16_t kCode[] = {0xfb11, 0x3002, 0x4770};
+  CHECK_CTX(rig.mem->Write(kOver, kCode, sizeof(kCode)), "could not plant the smlabb blob");
+  CHECK_CTX(rig.mem->Write(kExact, kCode, sizeof(kCode)), "could not plant the smlabb blob");
+
+  const auto run_row = [&](exec::GuestAddr where, std::uint32_t r1, std::uint32_t r2,
+                           std::uint32_t r3, exec::MachineState& i_state,
+                           exec::MachineState& j_state) {
+    i_state = EntryState(where, 0, 0, true);
+    i_state.r[1] = r1;
+    i_state.r[2] = r2;
+    i_state.r[3] = r3;
+    j_state = i_state;
+    const exec::RunResult ri = rig.interp->Run(i_state, 1000);
+    const exec::RunResult rj = rig.jit->Run(j_state, 1000);
+    CHECK_CTX(ri.reason == exec::StopReason::Returned,
+              "Tier I: reason " + std::to_string(static_cast<int>(ri.reason)) + " " + ri.detail);
+    CHECK_CTX(rj.reason == exec::StopReason::Returned,
+              "Tier J: reason " + std::to_string(static_cast<int>(rj.reason)) + " " + rj.detail);
+  };
+
+  exec::MachineState oi{};
+  exec::MachineState oj{};
+  // `SMLABB` multiplies the *low halfwords*: 0x7FFF * 0x7FFF + 0x50000000 = 0x8FFF0001 exceeds
+  // INT32_MAX, which is the overflow this op reports through Q. The first draft used 0x40000000 as an
+  // operand — whose low halfword is zero, so nothing overflowed and the row proved nothing.
+  run_row(kOver, 0x7fffu, 0x7fffu, 0x5000'0000u, oi, oj);
+  CHECK_CTX(oi.r[0] == 0x8fff'0001u, "Tier I's smlabb low word: " + Hex(oi.r[0]));
+  CHECK_CTX(oj.r[0] == 0x8fff'0001u, "Tier J's smlabb low word: " + Hex(oj.r[0]));
+  CHECK_CTX((oi.cpsr & 0x0800'0000u) != 0,
+            "Tier I did not set Q on overflow: cpsr " + Hex(oi.cpsr));
+  CHECK_CTX((oj.cpsr & 0x0800'0000u) != 0,
+            "Tier J did not set Q on overflow: cpsr " + Hex(oj.cpsr));
+
+  exec::MachineState ei{};
+  exec::MachineState ej{};
+  run_row(kExact, 2u, 3u, 4u, ei, ej);
+  CHECK_CTX(ei.r[0] == 10u && ej.r[0] == 10u,
+            "smlabb 2*3+4: I=" + Hex(ei.r[0]) + " J=" + Hex(ej.r[0]));
+  CHECK_CTX((ei.cpsr & 0x0800'0000u) == 0,
+            "Tier I set Q without overflow: cpsr " + Hex(ei.cpsr));
+  CHECK_CTX((ej.cpsr & 0x0800'0000u) == 0,
+            "Tier J set Q without overflow: cpsr " + Hex(ej.cpsr));
+  std::fprintf(stderr, "[diff] smlabb q-flag: over I=%08x/%08x J=%08x/%08x, exact I=%08x J=%08x\n",
+               oi.r[0], oi.cpsr, oj.r[0], oj.cpsr, ei.r[0], ej.r[0]);
+}
+
+/// The ASIMD long/wide ops (`vaddl` and family), whose translator is the arranged-widen IR Tier I had
+/// none of — the wall inside KA3D's init after 324,979 guest steps (SM-X710, 2026-10-10). Each op
+/// widens BOTH operands and adds; the two rows differ only in sign handling, because a
+/// zero-extension that signed (or vice versa) passes one row and fails the other.
+void the_wide_vector_adds_widen_like_hardware() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  constexpr exec::GuestAddr kPage = 0x0070'6000u;
+  constexpr exec::GuestAddr kSigned = kPage + 0x00u;
+  constexpr exec::GuestAddr kUnsigned = kPage + 0x40u;
+  std::string err;
+  if (!rig.mem->Map(kPage, mem::kGuestPage, kRead | kWrite | kExec, &err)) {
+    fail("could not map the vaddl page", __LINE__, err);
+    return;
+  }
+  constexpr std::uint16_t kS[] = {0xefa0, 0x0001, 0x4770};  // vaddl.s32 q0, d0, d1 ; bx lr
+  constexpr std::uint16_t kU[] = {0xffa0, 0x0001, 0x4770};  // vaddl.u32 q0, d0, d1 ; bx lr
+  CHECK_CTX(rig.mem->Write(kSigned, kS, sizeof(kS)), "could not plant the vaddl.s32 blob");
+  CHECK_CTX(rig.mem->Write(kUnsigned, kU, sizeof(kU)), "could not plant the vaddl.u32 blob");
+
+  // d0 = 0xFFFFFFFF (low lane -1 as signed), d1 = 2: signed gives {-1 + 2, 0} = {1, 0};
+  // unsigned gives {0xFFFFFFFF + 2, 0} = {0x1'00000001, 0}. q0 is d0 (lo) : d1 (hi) -- the
+  // destination overlaps both sources, so the inputs are consumed; d2/d3 are never written.
+  const auto run_pair = [&](exec::GuestAddr where, exec::MachineState& i_state,
+                            exec::MachineState& j_state) {
+    i_state = EntryState(where, 0, 0, true);
+    i_state.d[0] = 0x0000'0000'FFFF'FFFFull;
+    i_state.d[1] = 2ull;
+    j_state = i_state;
+    const exec::RunResult ri = rig.interp->Run(i_state, 1000);
+    const exec::RunResult rj = rig.jit->Run(j_state, 1000);
+    CHECK_CTX(ri.reason == exec::StopReason::Returned,
+              "Tier I: " + std::to_string(static_cast<int>(ri.reason)) + " " + ri.detail);
+    CHECK_CTX(rj.reason == exec::StopReason::Returned,
+              "Tier J: " + std::to_string(static_cast<int>(rj.reason)) + " " + rj.detail);
+  };
+
+  exec::MachineState si{};
+  exec::MachineState sj{};
+  run_pair(kSigned, si, sj);
+  CHECK_CTX(si.d[0] == 1ull, "Tier I signed lo: " + Hex(si.d[0]));
+  CHECK_CTX(sj.d[0] == 1ull, "Tier J signed lo: " + Hex(sj.d[0]));
+  CHECK_CTX(si.d[1] == 0ull && sj.d[1] == 0ull,
+            "signed hi: I=" + Hex(si.d[1]) + " J=" + Hex(sj.d[1]));
+  const std::string signed_seen = "I=" + Hex(si.d[0]) + " J=" + Hex(sj.d[0]);
+
+  run_pair(kUnsigned, si, sj);
+  CHECK_CTX(si.d[0] == 0x0000'0001'0000'0001ull, "Tier I unsigned lo: " + Hex(si.d[0]));
+  CHECK_CTX(sj.d[0] == 0x0000'0001'0000'0001ull, "Tier J unsigned lo: " + Hex(sj.d[0]));
+  CHECK_CTX(si.d[1] == 0ull && sj.d[1] == 0ull,
+            "unsigned hi: I=" + Hex(si.d[1]) + " J=" + Hex(sj.d[1]));
+  std::fprintf(stderr, "[diff] vaddl widen: signed %s, unsigned I=%s J=%s\n", signed_seen.c_str(),
+               Hex(si.d[0]).c_str(), Hex(sj.d[0]).c_str());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -2619,6 +2934,10 @@ int main(int argc, char** argv) {
   unmapped_code_faults_in_both_tiers();
   a_fauling_data_access_stops_both_tiers_at_the_instruction();
   an_unmodelled_coprocessor_access_stops_both_tiers();
+  an_unmodelled_coprocessor_number_stops_both_tiers();
+  the_thumb_acquire_byte_and_half_rows_execute_on_both_tiers();
+  the_dsp_multiplies_publish_q_on_both_tiers();
+  the_wide_vector_adds_widen_like_hardware();
 
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;

@@ -529,8 +529,95 @@ void a_linked_call_reaches_the_other_module() {
 
 }  // namespace
 
+/// An old-NDK `.init_array` slot holding -1 is a bracket marker, not a constructor: bionic's
+/// `call_function` skips it, and recording it made the launcher call 0xfffffffe on Gumball 2013's first
+/// constructor. Reproduced on the leaf fixture by turning its first slot into exactly that shape — -1 in
+/// the file with its relocation (`R_ARM_ABS32 leaf_init` here) changed to `R_ARM_NONE`, because pre-r8 sentinels carry no
+/// relocation — so a loader that records every slot reports one entry too many here.
+void an_init_array_sentinel_is_not_a_constructor() {
+  auto fx = load_fixture();
+  if (!fx) return;
+  std::vector<std::uint8_t> img = fx->leaf;
+  const auto u32 = [&](std::size_t at) {
+    std::uint32_t v = 0;
+    std::memcpy(&v, img.data() + at, 4);
+    return v;
+  };
+  const auto u16 = [&](std::size_t at) { return static_cast<std::uint32_t>(img[at] | (img[at + 1] << 8)); };
+  // Program headers: PT_DYNAMIC, and the PT_LOADs to turn a vaddr into a file offset.
+  const std::uint32_t phoff = u32(28), phentsize = u16(42), phnum = u16(44);
+  std::uint32_t dyn_off = 0, dyn_sz = 0;
+  const auto file_of = [&](std::uint32_t vaddr) -> std::size_t {
+    for (std::uint32_t i = 0; i < phnum; ++i) {
+      const std::size_t ph = phoff + i * phentsize;
+      if (u32(ph) != 1u) continue;  // PT_LOAD
+      const std::uint32_t off = u32(ph + 4), va = u32(ph + 8), filesz = u32(ph + 16);
+      if (vaddr >= va && vaddr - va < filesz) return off + (vaddr - va);
+    }
+    return 0;
+  };
+  for (std::uint32_t i = 0; i < phnum; ++i) {
+    const std::size_t ph = phoff + i * phentsize;
+    if (u32(ph) == 2u) {  // PT_DYNAMIC
+      dyn_off = u32(ph + 4);
+      dyn_sz = u32(ph + 16);
+    }
+  }
+  std::uint32_t init_array = 0, rel = 0, relsz = 0;
+  for (std::uint32_t at = dyn_off; at + 8 <= dyn_off + dyn_sz; at += 8) {
+    const std::uint32_t tag = u32(at), val = u32(at + 4);
+    if (tag == 25u) init_array = val;  // DT_INIT_ARRAY
+    if (tag == 17u) rel = val;         // DT_REL
+    if (tag == 18u) relsz = val;       // DT_RELSZ
+  }
+  CHECK_CTX(init_array != 0 && rel != 0, "the leaf fixture has no .init_array/.rel.dyn to patch");
+  if (init_array == 0 || rel == 0) return;
+  bool unrelocated = false;
+  for (std::uint32_t at = 0; at + 8 <= relsz; at += 8) {
+    const std::size_t r = file_of(rel + at);
+    const std::uint32_t type = r != 0 ? (u32(r + 4) & 0xffu) : 0u;
+    if (r != 0 && u32(r) == init_array && (type == 23u || type == 2u)) {  // RELATIVE, or ABS32 to the ctor
+      const std::uint32_t none = u32(r + 4) & ~0xffu;                     // R_ARM_NONE
+      std::memcpy(img.data() + r + 4, &none, 4);
+      unrelocated = true;
+    }
+  }
+  const std::size_t slot = file_of(init_array);
+  CHECK_CTX(unrelocated && slot != 0, "could not find the first .init_array slot's relocation");
+  if (!unrelocated || slot == 0) return;
+  const std::uint32_t minus_one = 0xffff'ffffu;
+  std::memcpy(img.data() + slot, &minus_one, 4);
+
+  AddressModel model;
+  model.kind = AddressModel::kBiased;
+  model.host_page_shift = HostPageShift();
+  std::string err;
+  auto mem = GuestMemory::Create(64u << 20, model, &err);
+  if (!mem) {
+    fail("guest memory", __LINE__, err);
+    return;
+  }
+  loader::LoadOptions opts;
+  opts.resolve = [](const std::string&) -> std::optional<std::uint32_t> { return 0x0900'0000u; };
+  const auto clean = loader::LoadFromBytes(*mem, fx->leaf, "librbleaf.so", opts, &err);
+  const auto patched = loader::LoadFromBytes(*mem, img, "librbleaf-sentinel.so", opts, &err);
+  CHECK_CTX(clean.has_value() && patched.has_value(), err);
+  if (!clean || !patched) return;
+  CHECK_CTX(patched->init_array.size() + 1 == clean->init_array.size(),
+            "clean " + std::to_string(clean->init_array.size()) + " entries, patched " +
+                std::to_string(patched->init_array.size()) + " — the -1 slot was recorded as a function");
+  CHECK_CTX(patched->init_array_sentinels == 1 && clean->init_array_sentinels == 0,
+            "sentinels: patched " + std::to_string(patched->init_array_sentinels) + ", clean " +
+                std::to_string(clean->init_array_sentinels));
+  for (const auto& fn : patched->init_array) {
+    CHECK_CTX(fn.addr >= patched->base && fn.addr < patched->base + patched->extent,
+              "a recorded constructor lies outside its module");
+  }
+}
+
 int main() {
   a_missing_dependency_refuses_naming_it();
+  an_init_array_sentinel_is_not_a_constructor();
   the_chain_loads_dependencies_first();
   an_already_loaded_dependency_is_not_asked_for_again();
   a_symbol_resolves_from_the_wider_scope();

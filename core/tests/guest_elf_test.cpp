@@ -603,6 +603,80 @@ void a_string_table_past_the_end_of_the_image_is_refused() {
             "a string table past the end of the image was not refused by name: " + err);
 }
 
+/// A `vaddr + memsz` that would wrap the 32-bit address space is refused rather than allowed to fold
+/// each consumer's 32-bit sum to a different small number: the placement scan would "fit" a range it
+/// never checked and the segment would map wherever the wrap landed — the null page included — while
+/// the load reported success. Patching a real fixture rather than hand-building an image keeps the
+/// rest of it valid, so only the new check can be what refuses this one.
+void a_wrapping_pt_load_is_refused() {
+  Fixture f = parse_fixture();
+  auto gm = make_mem();
+  if (!f.ok || !gm) return;
+  auto bytes = f.bytes;
+  const auto* h = reinterpret_cast<const elf::Ehdr32*>(bytes.data());
+  bool patched = false;
+  for (std::uint16_t i = 0; i < h->e_phnum && !patched; ++i) {
+    const std::size_t ph = h->e_phoff + std::size_t{i} * h->e_phentsize;
+    if (ph + sizeof(elf::Phdr32) > bytes.size()) break;
+    auto* p = reinterpret_cast<elf::Phdr32*>(bytes.data() + ph);
+    if (p->p_type != elf::PT_LOAD) continue;
+    p->p_vaddr = 0xffff'e000u;  // one 8 KiB page below the top of the address space
+    p->p_memsz = 0x0000'2000u;  // so vaddr + memsz == 2^32 exactly, the end that folds to zero
+    patched = true;
+  }
+  CHECK_CTX(patched, "the fixture has no PT_LOAD entry to damage");
+
+  std::map<std::string, std::uint32_t> given;
+  loader::LoadOptions opts;
+  opts.resolve = make_resolver(f, given);
+  std::string err;
+  CHECK(!loader::LoadFromBytes(*gm, bytes, "wrap.so", opts, &err));
+  CHECK_CTX(err.find("guest window") != std::string::npos,
+            "a wrapping PT_LOAD was not refused by name: " + err);
+  CHECK_CTX(gm->mapped_page_count() == 0, "a refused wrapping image left pages mapped");
+}
+
+/// `PT_ARM_EXIDX` is recorded biased, with the entry count the file's own program header gives, and the
+/// first entry read back through guest memory is the file's first entry — so a missing bias, a byte
+/// count reported as entries, or an index aimed at the wrong segment each fail here. It is what
+/// `dl_unwind_find_exidx` answers from; answering NULL instead made every C++ throw in Angry Birds
+/// terminate on the SM-X710.
+void the_unwind_index_is_recorded_biased() {
+  Fixture f = parse_fixture();
+  auto gm = make_mem();
+  if (!f.ok || !gm) return;
+  const auto* h = reinterpret_cast<const elf::Ehdr32*>(f.bytes.data());
+  std::uint32_t vaddr = 0, memsz = 0, offset = 0;
+  for (std::uint16_t i = 0; i < h->e_phnum; ++i) {
+    const std::size_t ph = h->e_phoff + std::size_t{i} * h->e_phentsize;
+    if (ph + sizeof(elf::Phdr32) > f.bytes.size()) break;
+    const auto* p = reinterpret_cast<const elf::Phdr32*>(f.bytes.data() + ph);
+    if (p->p_type != elf::PT_ARM_EXIDX) continue;
+    vaddr = p->p_vaddr;
+    memsz = p->p_memsz;
+    offset = p->p_offset;
+  }
+  CHECK_CTX(memsz != 0, "the NDK fixture carries no PT_ARM_EXIDX, so this row cannot test anything");
+  if (memsz == 0) return;
+
+  std::map<std::string, std::uint32_t> given;
+  loader::LoadOptions opts;
+  opts.resolve = make_resolver(f, given);
+  std::string err;
+  auto mod = loader::LoadFromBytes(*gm, f.bytes, "exidx.so", opts, &err);
+  CHECK_CTX(mod.has_value(), err);
+  if (!mod) return;
+  CHECK_CTX(mod->base != 0, "base 0 cannot tell a biased address from an unbiased one");
+  CHECK_CTX(mod->exidx == mod->base + vaddr,
+            "exidx=" + std::to_string(mod->exidx) + " want base+vaddr=" + std::to_string(mod->base + vaddr));
+  CHECK_CTX(mod->exidx_count == memsz / 8u,
+            "count=" + std::to_string(mod->exidx_count) + " want " + std::to_string(memsz / 8u));
+  // Entry 0's first word (a prel31 offset to its function) as the guest sees it, against the file.
+  std::uint32_t file_word = 0;
+  std::memcpy(&file_word, f.bytes.data() + offset, 4);
+  CHECK_CTX(read_word(*gm, mod->exidx) == file_word, "the recorded index does not hold the file's entries");
+}
+
 }  // namespace
 
 int main() {
@@ -613,6 +687,8 @@ int main() {
   truncated_image_is_refused();
   symbol_table_without_a_bound_is_refused();
   a_string_table_past_the_end_of_the_image_is_refused();
+  a_wrapping_pt_load_is_refused();
+  the_unwind_index_is_recorded_biased();
 
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;

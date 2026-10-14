@@ -26,6 +26,7 @@
  */
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -241,14 +242,20 @@ class JitExecutor : public Executor, public Dynarmic::A32::UserCallbacks {
    * marker is address-granular too.
    */
   Dynarmic::ExclusiveMonitor monitor_{1};
-  std::unique_ptr<Dynarmic::A32::Jit> jit_;
-  std::unique_ptr<InterpExecutor> fallback_interp_;
-  std::string err_;
-
   /// Coprocessor 15, registered so that it is *never* absent. See `Arm15Coprocessor` for why an empty
   /// slot is a host-process abort rather than a guest-visible failure.
   std::shared_ptr<Dynarmic::A32::Coprocessor> coproc15_;
+  /// Coprocessor numbers 0-14, each a name-refusing object rather than an empty config slot. An empty
+  /// slot is not a refusal — the back end compiles the access into `ASSERT_FALSE` and the host process
+  /// dies — and these must outlive the code cache the `Jit` below builds around them, which is why
+  /// they are declared *above* it (members destruct in reverse declaration order).
+  std::array<std::shared_ptr<Dynarmic::A32::Coprocessor>, 15> refusing_coprocs_{};
+  /// The per-access sites the coprocessor callbacks point at, declared above the `Jit` for the same
+  /// reason: the code cache holds raw pointers into this deque.
   std::deque<CoprocSite> coproc_sites_;
+  std::unique_ptr<Dynarmic::A32::Jit> jit_;
+  std::unique_ptr<InterpExecutor> fallback_interp_;
+  std::string err_;
 
   MachineState* live_ = nullptr;  ///< the caller's state, for the duration of one Run
   unsigned budget_ = 0;

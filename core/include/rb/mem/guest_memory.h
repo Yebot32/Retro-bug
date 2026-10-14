@@ -12,6 +12,8 @@
 #include <utility>
 #include <vector>
 
+#include "rb/diag/audit.h"
+
 namespace rb::mem {
 
 /// Guest page granule is fixed at 4 KiB by AD-7: every armeabi-v7a ELF and guest libc assumption is
@@ -106,6 +108,13 @@ class GuestMemory {
   unsigned host_page_shift() const { return host_page_shift_; }
   std::size_t out_of_line_page_count() const { return out_of_line_.size(); }
   std::size_t mapped_page_count() const;
+
+  /// Walks the page table and reports named invariants into the self-audit: every live page backed,
+  /// and backed in one of the two legal ways (the window itself, or an out-of-line block); guards and
+  /// unmapped pages backing-free; file pages keeping their fd; the out-of-line blocks all referenced;
+  /// and the walk agreeing with `mapped_page_count()`. See `rb/diag/audit.h` for the rules this
+  /// follows. Const and side-effect-free: it reads the table, it never fixes or faults anything.
+  void Audit(diag::Auditor& audit) const;
 
  private:
   struct Page {

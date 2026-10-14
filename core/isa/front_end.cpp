@@ -49,6 +49,15 @@ std::optional<std::uint32_t> CodeReader::MemoryReadCode(std::uint32_t vaddr) {
 
 TranslationOptions Options() {
   TranslationOptions opts;
+  // v7, deliberately — and this comment is where "just widen it to v8" gets answered. The guest set
+  // does contain v8 encodings (the SM-X710's bionic runs `ldab` in its arc4random fallback, measured
+  // 2026-10-09), but the decoder *tables* do not consult this version at all: what stops a v8 encoding
+  // is a missing row, and each one the corpus actually reaches is added as a captured patch
+  // (`patches/dynarmic/0001` LDAEX, `0005` LDA/LDAB/LDAH + stores) rather than by accepting the whole
+  // v8 architecture. Widening to v8 was tried against this exact wall and changed *nothing* — the
+  // missing rows were the wall — while silently accepting every other v8-only encoding with no
+  // recorded decision. The pin stays v7; the same answer has to be given in `jit.cpp`, or a
+  // differential disagreement becomes a configuration difference wearing its clothes.
   opts.arch_version = Dynarmic::A32::ArchVersion::v7;
   // ARMv7-A leaves some encodings unpredictable rather than undefined, and a real core still does
   // *something* instead of faulting. RetroBug exists to keep legacy code running, so it takes the

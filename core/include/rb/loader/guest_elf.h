@@ -123,9 +123,15 @@ struct GuestModule {
    * look".
    */
   std::vector<CodeAddress> init_array;
+  /// `DT_INIT_ARRAY` slots holding 0 or -1 — old-NDK bracket markers, not functions — skipped the way
+  /// bionic's `call_function` skips them and counted so a report can say so.
+  std::uint32_t init_array_sentinels = 0;
   std::vector<std::string> needed;
   std::vector<Symbol> exports;
   std::vector<Symbol> imports;
+  /// Names of every undefined *weak* dynamic symbol, NOTYPE included (which `imports` omits): references a
+  /// device's linker binds to 0 when nothing defines them, so an unanswered one is not a missing import.
+  std::vector<std::string> weak_imports;
   std::vector<std::string> unsupported_relocs;  ///< Relocation kinds refused, named for diagnostics.
   /// Relocations whose target has to come from a guest call. Empty for every library built from an NDK
   /// archive so far — `libm.a` and `libz.a` contain no IFUNC — which is why this only shows up once a
@@ -140,6 +146,12 @@ struct GuestModule {
   /// so nothing here may assume it is present. App Revival's patch identity (docs/10 §12.2) needs a
   /// content hash as the fallback key; that lands with tier-3 patching, which is deliberately held.
   std::vector<std::uint8_t> build_id;
+
+  /// `PT_ARM_EXIDX`, biased: the guest address of the `.ARM.exidx` table and its entry count (8 bytes
+  /// each). 0/0 when the image has none or it does not fit the image. What `dl_unwind_find_exidx` answers
+  /// for a pc inside [base, base + extent).
+  std::uint32_t exidx = 0;
+  std::uint32_t exidx_count = 0;
 
   /// Set once this module's `DT_INIT`/`DT_INIT_ARRAY` have run, and never cleared. bionic guards
   /// constructors per-soinfo the same way: a shared dependency loaded by two dependents (or a retry

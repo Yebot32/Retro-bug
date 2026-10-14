@@ -14,6 +14,7 @@
  * end-to-end emulation on the OnePlus 12 (docs/21 §3).
  */
 #include <jni.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 
@@ -73,6 +74,103 @@ JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_jni_utf(JNIEnv* en
   static const char probe[] = "retrobug";
   void* made = (*env)->NewStringUTF(env, probe);
   return made == NULL ? 0 : seed + (jint)probe[0];
+}
+
+/*
+ * KA3D's asset path, compiled. Angry Birds' `io::FileInputStream` asks the renderer object for a
+ * file's bytes through a Java method: GetObjectClass, GetMethodID("readFile", "(Ljava/lang/String;)[B"),
+ * NewStringUTF, then CallObjectMethod through the inline C++ `_JNIEnv` wrapper — which is a va_list
+ * hand-off to the V entry (index 35), reproduced here by `rb_call_object_v`. The byte[] comes back
+ * through GetArrayLength / GetByteArrayRegion, and three DeleteLocalRefs end it. Every step folds
+ * into the result (length * 1000 + a position-weighted checksum), so a wrong answer anywhere moves it.
+ */
+static jobject rb_call_object_v(JNIEnv* env, jobject obj, jmethodID mid, ...) {
+  va_list ap;
+  va_start(ap, mid);
+  jobject r = (*env)->CallObjectMethodV(env, obj, mid, ap);
+  va_end(ap);
+  return r;
+}
+
+JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_read_file(JNIEnv* env, jobject thiz) {
+  jclass cls = (*env)->GetObjectClass(env, thiz);
+  if (cls == NULL) return -1;
+  jmethodID mid = (*env)->GetMethodID(env, cls, "readFile", "(Ljava/lang/String;)[B");
+  if (mid == NULL) return -2;
+  jstring name = (*env)->NewStringUTF(env, "data/probe.bin");
+  if (name == NULL) return -3;
+  jbyteArray arr = (jbyteArray)rb_call_object_v(env, thiz, mid, name);
+  if (arr == NULL) return -4;
+  jsize n = (*env)->GetArrayLength(env, arr);
+  jbyte buf[16];
+  if (n > 16) n = 16;
+  (*env)->GetByteArrayRegion(env, arr, 0, n, buf);
+  jint sum = 0;
+  for (jsize i = 0; i < n; ++i) sum += (i + 1) * (unsigned char)buf[i];
+  (*env)->DeleteLocalRef(env, arr);
+  (*env)->DeleteLocalRef(env, name);
+  (*env)->DeleteLocalRef(env, cls);
+  return n * 1000 + sum;
+}
+
+/*
+ * The elements pair, as Gumball 2013 uses it on the first file it reads: a pointer to the bytes rather
+ * than a copied region. Folds in everything that can go wrong — the bytes read through the pointer (sum),
+ * the isCopy flag, mode 0 copying a write back (b0 becomes 100) and JNI_ABORT discarding one (b1 stays
+ * 2): sum * 100000 + isCopy * 10000 + b0 * 10 + b1, which for {1..5} is 5511002.
+ */
+JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_elems_probe(JNIEnv* env, jobject thiz) {
+  jclass cls = (*env)->GetObjectClass(env, thiz);
+  jmethodID mid = (*env)->GetMethodID(env, cls, "readFile", "(Ljava/lang/String;)[B");
+  jstring name = (*env)->NewStringUTF(env, "data/probe.bin");
+  jbyteArray arr = (jbyteArray)rb_call_object_v(env, thiz, mid, name);
+  if (arr == NULL) return -1;
+  jsize n = (*env)->GetArrayLength(env, arr);
+  jboolean copy = 0;
+  jbyte* p = (*env)->GetByteArrayElements(env, arr, &copy);
+  if (p == NULL) return -2;
+  jint sum = 0;
+  for (jsize i = 0; i < n; ++i) sum += (i + 1) * (unsigned char)p[i];
+  p[0] = 100;
+  (*env)->ReleaseByteArrayElements(env, arr, p, 0);
+  jbyte b0 = 0, b1 = 0;
+  (*env)->GetByteArrayRegion(env, arr, 0, 1, &b0);
+  p = (*env)->GetByteArrayElements(env, arr, NULL);
+  p[1] = 7;
+  (*env)->ReleaseByteArrayElements(env, arr, p, JNI_ABORT);
+  (*env)->GetByteArrayRegion(env, arr, 1, 1, &b1);
+  (*env)->DeleteLocalRef(env, arr);
+  (*env)->DeleteLocalRef(env, name);
+  (*env)->DeleteLocalRef(env, cls);
+  return sum * 100000 + copy * 10000 + (unsigned char)b0 * 10 + (unsigned char)b1;
+}
+
+/*
+ * One call shape in all three argument forms, chosen to hit AAPCS's awkward cases: an int that lands
+ * in r3, then a double that cannot (a pair never starts on an odd register, so it goes to the stack
+ * 8-aligned), a jboolean and a float that `...` promotes to int and double — and the jvalue array,
+ * where neither promotion happens. `form` 0 = variadic, 1 = V (va_list), 2 = A (jvalue[]).
+ */
+static jint rb_call_int_v(JNIEnv* env, jobject obj, jmethodID mid, ...) {
+  va_list ap;
+  va_start(ap, mid);
+  jint r = (*env)->CallIntMethodV(env, obj, mid, ap);
+  va_end(ap);
+  return r;
+}
+
+JNIEXPORT jint JNICALL Java_com_retrobug_fixture_MainActivity_mix_args(JNIEnv* env, jobject thiz,
+                                                                      jint form) {
+  jclass cls = (*env)->GetObjectClass(env, thiz);
+  jmethodID mid = (*env)->GetMethodID(env, cls, "mix", "(IDZF)I");
+  if (form == 0) return (*env)->CallIntMethod(env, thiz, mid, (jint)7, 2.5, (jboolean)1, 0.75f);
+  if (form == 1) return rb_call_int_v(env, thiz, mid, (jint)7, 2.5, (jboolean)1, 0.75f);
+  jvalue v[4];
+  v[0].i = 7;
+  v[1].d = 2.5;
+  v[2].z = 1;
+  v[3].f = 0.75f;
+  return (*env)->CallIntMethodA(env, thiz, mid, v);
 }
 
 /*

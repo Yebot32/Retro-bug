@@ -235,7 +235,50 @@ unsigned Monitor::Note(std::uint32_t number) {
   return 1;
 }
 
+Outcome Monitor::CaptureOutput(std::int32_t fd, std::uint32_t at, std::uint32_t len) {
+  if (memory_ == nullptr) {
+    return Outcome::Refused(err::kEnosys, "write to fd " + std::to_string(fd) +
+                                              ": no guest memory is attached to this monitor, so the "
+                                              "bytes cannot be read");
+  }
+  std::string& sink = fd == 2 ? captured_err_ : captured_out_;
+  // Chunked, not one capped read: a single write larger than the per-read window used to store its
+  // first 4 KiB and silently lose the rest — the cap notice was keyed on a per-call `want` that never
+  // exceeded the window, so it could not fire (caught in review). Bytes past `kCaptureCap`, or a call
+  // past the 64 KiB sanity ceiling, are counted in `capture_dropped_` rather than lost wordlessly.
+  const std::size_t hard = std::min<std::size_t>(len, 65536u);
+  std::size_t consumed = 0;
+  std::string shown;
+  while (consumed < hard) {
+    const std::size_t want = std::min<std::size_t>(4096u, hard - consumed);
+    std::string buf;
+    buf.resize(want);
+    if (!memory_->Read(at + consumed, buf.data(), want)) {
+      return Outcome::Answered(err::kEfault, std::string(fd == 2 ? "write(fd=2)" : "write(fd=1)") +
+                                                 ": the buffer at 0x" + Hex(at + consumed) +
+                                                 " is not readable guest memory");
+    }
+    const std::size_t room = sink.size() < kCaptureCap ? kCaptureCap - sink.size() : 0;
+    const std::size_t kept = std::min(want, room);
+    sink.append(buf.data(), kept);
+    if (kept < want) capture_dropped_ = true;
+    for (std::size_t i = 0; i < kept && shown.size() < 120; ++i) {
+      const unsigned char c = static_cast<unsigned char>(buf[i]);
+      shown.push_back((c >= 0x20 && c < 0x7f) ? static_cast<char>(c) : '.');
+    }
+    consumed += want;
+  }
+  if (len > hard) capture_dropped_ = true;
+  // The full length is reported as written, which is what a console fd does; anything past the caps
+  // is counted in `capture_dropped`, not silently lost.
+  return Outcome::Emulated(static_cast<std::int32_t>(len),
+                           (fd == 2 ? "write(fd=2, " : "write(fd=1, ") + std::to_string(len) +
+                               ") -> " + std::to_string(len) + ": \"" + shown + "\"" +
+                               (capture_dropped_ ? " (capture capped)" : ""));
+}
+
 void Monitor::Observe(const std::string& detail) {
+
   for (const std::string& seen : notes_) {
     if (seen == detail) return;
   }
@@ -702,6 +745,11 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
 
     case nr::kWrite: {
       const std::int32_t fd = static_cast<std::int32_t>(f.arg[0]);
+      // The guest's own words, before the descriptor table is consulted: fd 1 and 2 are the console,
+      // and a build that answers EBADF drops exactly the line that explains what the guest is about to
+      // do — measured, not imagined (SM-X710 2026-10-09: the game's constructor wrote to fd 2 four
+      // times before `exit_group(127)`, and every byte went nowhere).
+      if (fd == 1 || fd == 2) return CaptureOutput(fd, f.arg[1], f.arg[2]);
       if (FileFor(fd) != nullptr) {
         return Outcome::Answered(err::kEbadf, "write(fd=" + std::to_string(fd) +
                                                   ") = -EBADF (-9): this descriptor was opened read-only "
@@ -711,6 +759,238 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
                                                 ") = -EBADF (-9): no descriptor with that number is open "
                                                 "in this instance (this build has no stdout/stderr "
                                                 "descriptors either)");
+    }
+
+    case nr::kWritev: {
+      const std::int32_t fd = static_cast<std::int32_t>(f.arg[0]);
+      if (fd != 1 && fd != 2) {
+        return Outcome::Answered(err::kEbadf, "writev(fd=" + std::to_string(fd) +
+                                                  ") = -EBADF (-9): no descriptor with that number is "
+                                                  "open in this instance");
+      }
+      if (memory_ == nullptr) {
+        return Outcome::Refused(err::kEnosys, "writev: no guest memory is attached to this monitor");
+      }
+      // The iovec array is guest memory: `{u32 base, u32 len}` per entry, arm32 layout. Entries past
+      // the eighth are not walked — the full count is still reported written, the way a console fd
+      // swallows everything — and the detail says so rather than pretending the cap does not exist.
+      const std::uint32_t asked = f.arg[2];
+      const std::uint32_t count = std::min<std::uint32_t>(asked, 8u);
+      std::int32_t total = 0;
+      for (std::uint32_t i = 0; i < count; ++i) {
+        std::uint32_t base = 0, len = 0;
+        if (!memory_->Read(f.arg[1] + i * 8u, &base, 4) ||
+            !memory_->Read(f.arg[1] + i * 8u + 4u, &len, 4)) {
+          return Outcome::Answered(err::kEfault,
+                                   "writev(fd=" + std::to_string(fd) + "): the iovec entry " +
+                                       std::to_string(i) + " at 0x" + Hex(f.arg[1] + i * 8u) +
+                                       " is not readable guest memory");
+        }
+        const Outcome one = CaptureOutput(fd, base, len);
+        if (one.r0 < 0) return one;
+        total += static_cast<std::int32_t>(len);
+      }
+      return Outcome::Emulated(total, "writev(fd=" + std::to_string(fd) + ", " +
+                                          std::to_string(asked) + " iovec(s)) -> " +
+                                          std::to_string(total) +
+                                          (asked > count ? " (entries past the eighth not walked)" : ""));
+    }
+
+    case nr::kMunmap: {
+      if (memory_ == nullptr) {
+        return Outcome::Refused(err::kEnosys, "munmap: no guest memory is attached to this monitor");
+      }
+      const std::uint64_t end = static_cast<std::uint64_t>(f.arg[0]) + f.arg[1];
+      if (f.arg[1] == 0 || end > memory_->window_bytes()) {
+        return Outcome::Answered(err::kEinval, "munmap(0x" + Hex(f.arg[0]) + ", " +
+                                                   std::to_string(f.arg[1]) +
+                                                   ") = -EINVAL (-22): the range is empty or outside the "
+                                                   "guest window");
+      }
+      // A kernel unmaps what covers the range and returns 0 for holes; doing the same per page keeps
+      // `free()` of a partly-freed arena from being an error the guest cannot act on.
+      const std::uint32_t first = f.arg[0] & ~(mem::kGuestPage - 1u);
+      const std::uint32_t stop =
+          static_cast<std::uint32_t>((end + mem::kGuestPage - 1u) &
+                                     ~static_cast<std::uint64_t>(mem::kGuestPage - 1u));
+      std::size_t unmapped = 0;
+      for (std::uint32_t at = first; at < stop; at += mem::kGuestPage) {
+        if (!memory_->IsMapped(at)) continue;
+        std::string uerr;
+        if (!memory_->Unmap(at, mem::kGuestPage, &uerr)) {
+          return Outcome::Answered(err::kEfault, "munmap(0x" + Hex(at) + "): " + uerr);
+        }
+        ++unmapped;
+      }
+      return Outcome::Emulated(0, "munmap(0x" + Hex(first) + "..0x" + Hex(stop) + ") -> 0 (" +
+                                     std::to_string(unmapped) + " mapped page(s) released)");
+    }
+
+    case nr::kMmap2: {
+      // ARM's `mmap2`: the sixth argument is an offset in *pages*. bionic's allocator reaches this
+      // call before anything else in an app can run, and refusing it is what made every allocation in
+      // the game's constructors fail — measured (SM-X710 2026-10-09: DT_INIT_ARRAY[5] left through
+      // `exit_group(127)` right after 19 refused mmaps). Anonymous mappings are served from the guest
+      // window's free space; fd-backed ones are refused by name rather than half-answered.
+      if (memory_ == nullptr) {
+        return Outcome::Refused(err::kEnosys, "mmap2: no guest memory is attached to this monitor");
+      }
+      const std::uint32_t hint = f.arg[0];
+      const std::uint32_t len = f.arg[1];
+      const std::uint32_t prot = f.arg[2];
+      const std::uint32_t flags = f.arg[3];
+      const std::int32_t fd = static_cast<std::int32_t>(f.arg[4]);
+      if (len == 0) return Outcome::Answered(err::kEinval, "mmap2(len=0) = -EINVAL (-22)");
+      constexpr std::uint32_t kMapAnonymous = 0x20u;
+      if ((flags & kMapAnonymous) == 0 && fd != -1) {
+        return Outcome::Refused(err::kEnosys,
+                                "mmap2 with a file descriptor (fd=" + std::to_string(fd) +
+                                    ") is not implemented: this monitor serves no file mappings, and a "
+                                    "zero answer would be a mapping nobody owns");
+      }
+      const std::uint32_t size = (len + mem::kGuestPage - 1u) & ~(mem::kGuestPage - 1u);
+      // The scan starts where the last anonymous mapping landed, so consecutive arenas stay
+      // consecutive, then wraps to the base; a hint is honoured only when page-aligned and entirely
+      // free, which is the kernel's own rule for a hint it is allowed to ignore. The base is one guest
+      // page in — window-agnostic on purpose, because the model's window is 64 MiB on the launcher and
+      // a few pages wide in tests, and a base tuned to one of them is a base the other cannot allocate
+      // above.
+      constexpr std::uint32_t kHeapBase = 0x0000'1000u;
+      const auto free_run = [&](std::uint32_t cand) {
+        if (cand < kHeapBase ||
+            static_cast<std::uint64_t>(cand) + size > memory_->window_bytes()) {
+          return false;
+        }
+        for (std::uint32_t pg = cand; pg < cand + size; pg += mem::kGuestPage) {
+          if (memory_->IsMapped(pg)) return false;
+        }
+        return true;
+      };
+      std::uint32_t at = 0;
+      if (hint != 0 && (hint & (mem::kGuestPage - 1u)) == 0 && free_run(hint)) at = hint;
+      if (at == 0) {
+        const std::uint32_t start = mmap_next_ >= kHeapBase ? mmap_next_ : kHeapBase;
+        const std::uint32_t limit = static_cast<std::uint32_t>(memory_->window_bytes());
+        for (std::uint32_t cand = start; at == 0 && cand + size <= limit; cand += mem::kGuestPage) {
+          if (free_run(cand)) at = cand;
+        }
+        for (std::uint32_t cand = kHeapBase; at == 0 && cand + size <= start &&
+                                             cand + size <= limit; cand += mem::kGuestPage) {
+          if (free_run(cand)) at = cand;
+        }
+      }
+      if (at == 0) {
+        return Outcome::Answered(err::kEnomem,
+                                 "mmap2(len=" + std::to_string(len) + ", prot=0x" + Hex(prot) +
+                                     ") = -ENOMEM (-12): the guest window has no free run of " +
+                                     std::to_string(size) + " bytes left");
+      }
+      const unsigned prot_bits = ((prot & 1u) ? mem::kRead : 0u) | ((prot & 2u) ? mem::kWrite : 0u) |
+                                 ((prot & 4u) ? mem::kExec : 0u);
+      std::string merr;
+      if (!memory_->Map(at, size, prot_bits, &merr)) {
+        return Outcome::Answered(err::kEnomem, "mmap2: could not map " + std::to_string(size) +
+                                                   " bytes at 0x" + Hex(at) + ": " + merr);
+      }
+      mmap_next_ = at + size;
+      return Outcome::Emulated(static_cast<std::int32_t>(at),
+                               "mmap2(anon, len=" + std::to_string(len) + ", prot=0x" + Hex(prot) +
+                                   ") -> 0x" + Hex(at) + ": " + std::to_string(size) +
+                                   " bytes of the guest window's free space; protections are recorded, "
+                                   "not enforced (see mprotect's note)");
+    }
+
+    case nr::kFutex: {
+      // One thread is modelled, so the two ops bionic's pthread layer actually drives are answered and
+      // the rest stay refusals. WAIT's immediate path is the kernel's own (value already changed ->
+      // EAGAIN); a matching value would park a device's caller, and answering 0 says out loud that no
+      // scheduler here will ever wake it.
+      const std::uint32_t uaddr = f.arg[0];
+      const std::uint32_t raw = f.arg[1] & 0x7fu;  ///< FUTEX_CMD_MASK: PRIVATE (128) and CLOCK_RT (256) off
+      // bionic drives BOTH forms: plain `__futex_wait`/`wake` (0x0/0x1, device libc at 0x43180/0x43144)
+      // and the _BITSET forms `__futex_wait_ex`/`wake_ex` use (0x89/0x8a, at 0x78418/0x75026 — measured
+      // on the SM-X710's libc). The bitset selects which futex bits to wake; with one thread there is no
+      // waiter set to select from, so both forms answer identically here and the note says as much. The
+      // 0x7f mask was always right (0x89 -> op 9); what was missing was mapping 9/10 onto WAIT/WAKE. An
+      // intermediate `& 0xff` kept the private flag and refused every private op — the device suite
+      // caught it (`futex_answers_the_single_threaded_truth`'s 0x80 row).
+      const std::uint32_t op = (raw == 9u) ? 0u : (raw == 10u) ? 1u : raw;
+      if (op == 1 /*WAKE*/) {
+        return Outcome::Emulated(0, "futex(WAKE, 0x" + Hex(uaddr) +
+                                        ") -> 0: no waiter existed — this build models one thread, so no "
+                                        "other thread can be parked");
+      }
+      if (op == 0 /*WAIT*/) {
+        if (memory_ == nullptr) {
+          return Outcome::Refused(err::kEnosys, "futex(WAIT): no guest memory is attached");
+        }
+        std::uint32_t cur = 0;
+        if (!memory_->Read(uaddr, &cur, 4)) {
+          return Outcome::Answered(err::kEfault, "futex(WAIT, 0x" + Hex(uaddr) +
+                                                     "): the word is not readable guest memory");
+        }
+        if (cur != f.arg[2]) {
+          return Outcome::Answered(err::kEagain,
+                                   "futex(WAIT, 0x" + Hex(uaddr) + ") = -EAGAIN (-11): the word holds " +
+                                       Hex(cur) + ", not the expected " + Hex(f.arg[2]) +
+                                       "; the kernel's own immediate-return path");
+        }
+        const std::string why =
+            "futex(WAIT, 0x" + Hex(uaddr) + ") saw the expected value and was answered 0 without "
+            "blocking: this build models one thread, so no wake can arrive — a device's scheduler would "
+            "park the caller here";
+        Observe(why);
+        return Outcome::Emulated(0, why);
+      }
+      return Outcome::Refused(err::kEnosys, "svc #240 (futex) op " + std::to_string(f.arg[1]) +
+                                                " is not implemented; WAIT and WAKE are");
+    }
+
+    case nr::kRtSigaction: {
+      // Accepted, recorded, never delivered: the host raises no signals into this build, and the call's
+      // job in startup code is to install a handler — a fact about the guest's own state. `oldact` is
+      // zeroed so a caller reading back the previous handler sees NULL, not whatever the buffer held.
+      if (f.arg[2] != 0 && memory_ != nullptr) {
+        const std::uint32_t zero[5] = {};  // arm32 struct sigaction: handler, flags, restorer, mask[2]
+        memory_->Write(f.arg[2], zero, sizeof(zero));
+      }
+      const std::string why = "rt_sigaction(sig=" + std::to_string(f.arg[0]) +
+                              ") accepted and recorded; no signal is ever delivered by this build, and "
+                              "the previous handler reads back as NULL";
+      Observe(why);
+      return Outcome::Emulated(0, why);
+    }
+
+    case nr::kFaccessat: {
+      if (!files_) {
+        return Outcome::Refused(err::kEnosys,
+                                "faccessat: no file provider is installed on this monitor");
+      }
+      if (memory_ == nullptr) {
+        return Outcome::Refused(err::kEnosys, "faccessat: no guest memory is attached");
+      }
+      if (static_cast<std::int32_t>(f.arg[0]) != kAtFdcwd) {
+        return Outcome::Refused(err::kEnosys,
+                                "svc #334 (faccessat) is not implemented for a dirfd other than "
+                                "AT_FDCWD (-100)");
+      }
+      std::string path;
+      const PathStatus status = ReadGuestPath(*memory_, f.arg[1], &path);
+      if (status == PathStatus::kUnmapped) {
+        return Outcome::Answered(err::kEfault, "faccessat: the path pointer 0x" + Hex(f.arg[1]) +
+                                                   " is not readable guest memory");
+      }
+      if (status == PathStatus::kTooLong) {
+        return Outcome::Answered(err::kEnametoolong,
+                                 "faccessat: the name at 0x" + Hex(f.arg[1]) +
+                                     " has no NUL in the first " + std::to_string(kMaxPath) + " bytes");
+      }
+      if (!files_(path)) {
+        return Outcome::Answered(err::kEnoent, "faccessat('" + path +
+                                                   "') = -ENOENT (-2): the launcher's file provider does "
+                                                   "not serve that path");
+      }
+      return Outcome::Emulated(0, "faccessat('" + path + "') -> 0 (served and readable)");
     }
 
     case nr::kFstat64: {
@@ -791,9 +1071,14 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
       // name is the same table `Describe` prints.
       const char* named = Name(f.number);
       std::string why = "svc #" + std::to_string(f.number);
-      if (named != nullptr) why += std::string{" ("} + named + ")";
-      why += " is not implemented; refusing with ENOSYS (-38), the value this kernel answers for a number "
-             "outside its table, rather than a 0 nobody produced";
+      if (named != nullptr) {
+        why += std::string{" ("} + named +
+               ") is not implemented in this build; refused with ENOSYS (-38) rather than inventing a"
+               " result a real kernel would produce";
+      } else {
+        why += " is not implemented; refusing with ENOSYS (-38), the value this kernel answers for a"
+               " number outside its table, rather than a 0 nobody produced";
+      }
       return Outcome::Refused(err::kEnosys, why);
     }
   }
@@ -808,7 +1093,10 @@ Outcome Monitor::Handle(exec::MachineState& state, std::uint32_t svc_imm) {
   // Only four success sites called `Observe` before, so every refusal reached the report as a tally
   // entry with no reason attached — the exact silent-ignore shape the note machinery was built to
   // prevent.
-  if (o.r0 < 0) Observe(o.detail);
+  if (o.r0 < 0) {
+    ++refusals_;
+    Observe(o.detail);
+  }
   f.ApplyReturn(state, o);
   return o;
 }

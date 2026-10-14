@@ -379,6 +379,11 @@ Ret32 AbiContext::CallGuest(GuestAddr fn, const Args32& args, const Shorty& shor
   }
 
   ret = ReturnValue(state_, shorty);
+  // The whole call's count, not the last segment's: `run` is the slice after the final host call or
+  // syscall, so a call that made any reported only its tail — Gumball's jniRun read "38 steps" every frame
+  // while issuing 17 GL calls. Nested calls a host function makes run on their own budgets and are not
+  // included.
+  run.instructions_executed = max_steps - remaining;
   if (outcome != nullptr) *outcome = run;
   // Copied out before the restore below, which is the only reason this is a parameter rather than
   // something a caller reads back from `state()`.

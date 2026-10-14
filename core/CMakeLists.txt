@@ -9,6 +9,10 @@
 # built and run on a target without compiling the DBT at all, which matters now that the AArch64
 # backend needs its own work against compat/ (docs/30 §Step 5).
 add_library(rb_mem STATIC mem/guest_memory.cpp)
+# `GuestMemory::Audit` reports into `rb::diag`'s auditor — the memory manager is one of the components
+# the self-audit checks, and the auditor is dependency-free by design so the arrow can only ever point
+# this way.
+target_link_libraries(rb_mem PUBLIC rb_diag)
 add_library(rb_loader STATIC loader/guest_elf.cpp)
 
 foreach(t rb_mem rb_loader)
@@ -67,7 +71,7 @@ target_link_libraries(rb_abi PUBLIC rb_exec rb_mem rb_syscall)
 # rb::diag (C17) has no engine dependency and must not gain one: it is the component that reports on the
 # others, so a report that could not be produced because something else failed to build would be the
 # worst possible failure mode for it. Header-only dependency is <string>/<vector>.
-add_library(rb_diag STATIC diag/diag.cpp)
+add_library(rb_diag STATIC diag/diag.cpp diag/audit.cpp)
 target_compile_features(rb_diag PUBLIC cxx_std_20)
 target_include_directories(rb_diag PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 

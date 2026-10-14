@@ -201,11 +201,17 @@ for name in "${targets[@]}"; do
   # one word containing every name. Names are matched with any `@@VERSION` suffix removed, which the
   # stubs carry and the built archive does not -- comparing `$NF` literally looked up `sin` in a table
   # of `sin@@LIBC` and reported every probe absent from both libraries alike.
+  #
+  # The awks read to end of input rather than `exit`-ing on the first match. `exit` closes the pipe
+  # while `llvm-readelf` is still writing a multi-thousand-line `--dyn-syms` list, and on the Windows CI
+  # runner that broken pipe came back as this pipeline exiting 74 under `pipefail` -- four of the eight
+  # red runs of Steps 39-46 died exactly here ("line 206 exited 74"), intermittently, because whether
+  # the reader wins the race depends on buffering. Draining costs one scan of output already produced.
   for probe in ${PROBES[$name]:-}; do
     sz="$("$RE" --dyn-syms "$OUT/$name.so" \
-         | awk -v s="$probe" '{n=$NF; sub(/@.*/, "", n); if ($4=="FUNC" && n==s) {print $3; exit}}')"
+         | awk -v s="$probe" '{n=$NF; sub(/@.*/, "", n); if ($4=="FUNC" && n==s && !p) {print $3; p=1}}')"
     stub_sz="$("$RE" --dyn-syms "$src" \
-         | awk -v s="$probe" '{n=$NF; sub(/@.*/, "", n); if ($4=="FUNC" && n==s) {print $3; exit}}')"
+         | awk -v s="$probe" '{n=$NF; sub(/@.*/, "", n); if ($4=="FUNC" && n==s && !p) {print $3; p=1}}')"
     case "$sz" in
       ''|0) probe_fail "$probe not exported by the stripped $name.so at all" ;;
       1|2|4) probe_fail "$probe is $sz bytes in the guest build -- a stub body ($probe is $stub_sz bytes in the NDK stub), so the input archive was wrong" ;;

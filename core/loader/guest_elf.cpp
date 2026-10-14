@@ -225,6 +225,27 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
   // route) keeps an intact header table, so this is the check that catches it.
   for (const auto& p : phdrs) {
     if (p.p_type != PT_LOAD && p.p_type != PT_DYNAMIC && p.p_type != PT_NOTE) continue;
+    // The segment's page-aligned end, in 64 bits — checked for every PT_LOAD including BSS-only
+    // (`p_filesz == 0`) ones, which skip the file-range checks below and still reach the same 32-bit
+    // sums: the image bounds at `hi`, `total_end`, `base + map_start`, and the placement scan's
+    // `cand + hi`. A crafted `vaddr + memsz` near the top of the address space makes each of those
+    // wrap to a *different* small value: the scan then "fits" a range it never checked and the segment
+    // maps wherever the wrap lands, the null page included — and for a BSS-only segment the load would
+    // go on to succeed outright. A native
+    // linker cannot produce this shape; a refused end also covers the segment whose page-aligned end is
+    // exactly 2^32, which the 32-bit AlignUp would fold to zero. (The offset-slack check further down
+    // deliberately does *not* apply to `p_filesz == 0` segments: a BSS-only PT_LOAD's `p_offset` is
+    // unconstrained by ELF and is commonly 0.)
+    if (p.p_type == PT_LOAD) {
+      const std::uint64_t end = static_cast<std::uint64_t>(p.p_vaddr) + p.p_memsz;
+      const std::uint64_t end_page = (end + (mem::kGuestPage - 1u)) & ~(mem::kGuestPage - 1ull);
+      if (end_page > mem.window_bytes()) {
+        return fail(Stage("PT_LOAD vaddr+memsz does not fit the guest window",
+                          "vaddr " + std::to_string(p.p_vaddr) + " memsz " +
+                              std::to_string(p.p_memsz) + " ends " + std::to_string(end_page) +
+                              " window " + std::to_string(mem.window_bytes())));
+      }
+    }
     if (p.p_filesz == 0) continue;
     if (static_cast<std::uint64_t>(p.p_offset) + p.p_filesz > fsize) {
       return fail(Stage("program header claims file bytes past the end of the image",
@@ -795,6 +816,13 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
                             "entry " + std::to_string(i) + " of " + std::to_string(count) +
                                 " is at an unmapped vaddr"));
         }
+        // 0 and -1 are not functions: pre-r8 NDK images bracket the array with a -1 head and a 0 tail
+        // (Gumball 2013's .fini_array is `ffffffff d8060300 00000000`), those slots carry no relocation,
+        // and bionic's `call_function` skips both. Recording -1 made the launcher call 0xfffffffe.
+        if (fn == 0u || fn == 0xffff'ffffu) {
+          ++mod.init_array_sentinels;
+          continue;
+        }
         const std::uint32_t entry = opts.apply_relocations ? fn : base + fn;
         mod.init_array.push_back(
             CodeAddress{entry ? (entry & ~1u) : 0u, (entry & 1u) != 0u});
@@ -811,6 +839,12 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
         Sym32 sym;
         if (!symbol_at(static_cast<std::uint32_t>(i), sym)) break;
         const std::uint8_t type = ELF32_ST_TYPE(sym.st_info);
+        // Every undefined weak reference, whatever its type: `imports` below keeps only typed symbols, and
+        // a NOTYPE weak one (Gumball 2013's three `__cxa_*`) is still a name the linker leaves at 0.
+        if (sym.st_shndx == SHN_UNDEF && ELF32_ST_BIND(sym.st_info) == STB_WEAK) {
+          const std::string weak_name = sym_name(sym.st_name);
+          if (!weak_name.empty()) mod.weak_imports.push_back(weak_name);
+        }
         if (type != STT_FUNC && type != STT_OBJECT && type != STT_GNU_IFUNC) continue;
         Symbol out;
         out.name = sym_name(sym.st_name);
@@ -856,6 +890,21 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
       }
       off += hdr + AlignUp(namesz, 4u) + AlignUp(descsz, 4u);
     }
+  }
+
+  // ---- the ARM unwind index. Recorded for `dl_unwind_find_exidx`, which libgcc's unwinder reaches
+  // through bionic's `__gnu_Unwind_Find_exidx` on every C++ throw: without it no frame has unwind info,
+  // no catch can be found, and a thrown exception is `std::terminate` (Angry Birds' first missing asset
+  // was exactly that). Entries are 8 bytes, so a size that is not a multiple of 8 is not an index.
+  for (const auto& p : phdrs) {
+    if (p.p_type != PT_ARM_EXIDX) continue;
+    if (p.p_memsz % 8u != 0 || p.p_vaddr + p.p_memsz < p.p_vaddr ||
+        p.p_vaddr + p.p_memsz > mod.extent) {
+      break;  // not an index this module's own range holds; leave it absent rather than half-trusted
+    }
+    mod.exidx = mod.base + p.p_vaddr;
+    mod.exidx_count = p.p_memsz / 8u;
+    break;
   }
 
   rollback.committed = true;

@@ -134,9 +134,15 @@ jobs:
           printf '%s' "$B64" | base64 -d > "$KS"
           { echo "RB_KEYSTORE=$KS"; echo "RB_KEYSTORE_PASS=$PASS"; echo "RB_KEY_ALIAS=$ALIAS"; } >> "$GITHUB_ENV"
 
-      - name: Build the guest libm
+      - name: Build the guest libraries (libm, libz)
         shell: bash
-        run: bash tools/build-guest-libs.sh libm
+        # `build_launcher_apk.sh` treats BOTH as required (`GUEST_LIBM`/`GUEST_LIBZ` in its requirement
+        # list) and exits 1 on either missing — and this step built `libm` alone, so the runs of Steps 42
+        # and 46 (checked with `gh run view`; the red X alone does not say which step) died one step later
+        # with "missing build/guest-libs/libz.so". Other runs in that stretch died earlier, inside this
+        # script's own gates — which is why the count of red runs was never attributed here precisely.
+        # Nothing noticed because no test builds or runs the launcher.
+        run: bash tools/build-guest-libs.sh libm libz
 
       - name: Build the guest probe APK
         shell: bash

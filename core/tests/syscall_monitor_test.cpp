@@ -404,6 +404,216 @@ void the_tally_is_per_monitor_and_in_first_seen_order() {
 
 }  // namespace
 
+// ------------------------------------------------------- the heap/console batch
+
+/// `mmap2` is what bionic's allocator calls before an app's first allocation, and until 2026-10-09 it
+/// was refused with ENOSYS — every allocation in the game's constructors failed and the first
+/// allocating constructor left through `exit_group(127)`. Served, the answer must be *real* memory:
+/// mapped in the model, writable, disjoint from the next allocation, and inside the window.
+void mmap2_serves_real_anonymous_pages() {
+  sc::Monitor m;
+  auto window = Window();
+  if (!window) return;
+  m.set_memory(window.get());
+  const auto mmap = [&](std::uint32_t hint, std::uint32_t len, std::uint32_t prot,
+                        std::uint32_t flags, std::uint32_t fd) {
+    exec::MachineState s = State(sc::nr::kMmap2);
+    s.r[0] = hint;
+    s.r[1] = len;
+    s.r[2] = prot;
+    s.r[3] = flags;
+    s.r[4] = fd;
+    return m.Handle(s, 0);
+  };
+  constexpr std::uint32_t kRw = 3, kPrivateAnon = 0x22, kNoFd = 0xffff'ffffu;
+
+  const sc::Outcome a = mmap(0, 0x2000, kRw, kPrivateAnon, kNoFd);
+  CHECK_CTX(a.verdict == sc::Verdict::kEmulated, a.detail);
+  const std::uint32_t at = static_cast<std::uint32_t>(a.r0);
+  CHECK_CTX(at != 0 && (at & 0xfffu) == 0, "returned " + std::to_string(at));
+  CHECK_CTX(window->IsMapped(at) && window->IsMapped(at + 0x1000),
+            "the mapping is not in the model's page table");
+  const std::uint32_t magic = 0x51ab'1e00u;
+  CHECK_CTX(window->Write(at + 0x40, &magic, 4), "the served mapping is not writable");
+  std::uint32_t back = 0;
+  CHECK(window->Read(at + 0x40, &back, 4));
+  CHECK_CTX(back == magic, std::to_string(back) + " want " + std::to_string(magic));
+
+  const sc::Outcome b = mmap(0, 0x1000, kRw, kPrivateAnon, kNoFd);
+  CHECK_CTX(b.verdict == sc::Verdict::kEmulated && static_cast<std::uint32_t>(b.r0) != at,
+            "the second allocation landed on the first");
+
+  const sc::Outcome zero = mmap(0, 0, kRw, kPrivateAnon, kNoFd);
+  CHECK_CTX(zero.r0 == -static_cast<std::int32_t>(sc::err::kEinval),
+            "len=0 must be EINVAL, got " + std::to_string(zero.r0));
+
+  const sc::Outcome file = mmap(0, 0x1000, kRw, 0x02 /*MAP_PRIVATE, no ANON*/, 7);
+  CHECK_CTX(file.verdict == sc::Verdict::kUnsupported, sc::Name(file.verdict));
+  CHECK_CTX(file.detail.find("file descriptor") != std::string::npos, file.detail);
+}
+
+/// `munmap` releases what `mmap2` served: the pages stop being mapped, the call answers 0 whether or
+/// not everything in the range was mapped — which is what a kernel does — and the range is validated
+/// rather than trusted (a range past the window is EINVAL, not a silent no-op).
+void munmap_releases_served_pages() {
+  sc::Monitor m;
+  auto window = Window();
+  if (!window) return;
+  m.set_memory(window.get());
+  exec::MachineState s = State(sc::nr::kMmap2);
+  s.r[1] = 0x2000;
+  s.r[2] = 3;
+  s.r[3] = 0x22;
+  s.r[4] = 0xffff'ffffu;
+  const std::uint32_t at = static_cast<std::uint32_t>(m.Handle(s, 0).r0);
+  CHECK(at != 0);
+  exec::MachineState u = State(sc::nr::kMunmap);
+  u.r[0] = at;
+  u.r[1] = 0x2000;
+  const sc::Outcome o = m.Handle(u, 0);
+  CHECK_CTX(o.r0 == 0, o.detail);
+  CHECK_CTX(!window->IsMapped(at) && !window->IsMapped(at + 0x1000), "pages still mapped");
+
+  exec::MachineState past = State(sc::nr::kMunmap);
+  past.r[0] = 0x0001'0000u + 0x1000u;  // past the 16-page window
+  past.r[1] = 0x1000;
+  CHECK_CTX(m.Handle(past, 0).r0 == -static_cast<std::int32_t>(sc::err::kEinval),
+            "a range outside the window must be EINVAL");
+}
+
+/// fd 1 and 2 are the guest's console, and its own words must survive: the app printed to fd 2 four
+/// times before exiting 127 and every byte was dropped until this capture existed. The full length is
+/// reported written — that is what the fd does — and an unreadable buffer is EFAULT, not a silent
+/// loss.
+void console_writes_are_captured_and_answered_as_written() {
+  sc::Monitor m;
+  auto window = Window();
+  if (!window) return;
+  m.set_memory(window.get());
+  std::string werr;
+  CHECK_CTX(window->Map(0, 0x8000, mem::kRead | mem::kWrite, &werr),
+            "could not map the fixture pages: " + werr);
+  const char text[] = "fatal: no level\n";
+  CHECK(window->Write(0x100, text, sizeof(text)));
+  exec::MachineState s = State(sc::nr::kWrite);
+  s.r[0] = 2;
+  s.r[1] = 0x100;
+  s.r[2] = sizeof(text) - 1;
+  const sc::Outcome o = m.Handle(s, 0);
+  CHECK_CTX(o.r0 == static_cast<std::int32_t>(sizeof(text) - 1), o.detail);
+  CHECK_CTX(m.captured_stderr() == "fatal: no level\n", m.captured_stderr());
+  CHECK_CTX(m.captured_stdout().empty(), "stderr text landed in stdout");
+
+  exec::MachineState t = State(sc::nr::kWrite);
+  t.r[0] = 1;
+  t.r[1] = 0x100;
+  t.r[2] = 7;
+  CHECK(m.Handle(t, 0).r0 == 7);
+  CHECK_CTX(m.captured_stdout() == "fatal: ", m.captured_stdout());
+
+  exec::MachineState bad = State(sc::nr::kWrite);
+  bad.r[0] = 2;
+  bad.r[1] = 0x0001'0000u + 0x100u;  // outside the 16-page window
+  bad.r[2] = 4;
+  CHECK_CTX(m.Handle(bad, 0).r0 == -static_cast<std::int32_t>(sc::err::kEfault), "want EFAULT");
+}
+
+/// The futex answers are the single-threaded truth, said out loud: WAIT's immediate path is the
+/// kernel's own (value changed -> EAGAIN), a matching value returns 0 with a note that no scheduler
+/// here can wake it, and WAKE reports no waiters.
+void futex_answers_the_single_threaded_truth() {
+  sc::Monitor m;
+  auto window = Window();
+  if (!window) return;
+  m.set_memory(window.get());
+  std::string werr;
+  CHECK_CTX(window->Map(0, 0x8000, mem::kRead | mem::kWrite, &werr),
+            "could not map the fixture pages: " + werr);
+  const std::uint32_t word = 7;
+  CHECK(window->Write(0x200, &word, 4));
+
+  exec::MachineState mismatch = State(sc::nr::kFutex);
+  mismatch.r[0] = 0x200;
+  mismatch.r[1] = 0;  // WAIT
+  mismatch.r[2] = 8;
+  CHECK_CTX(m.Handle(mismatch, 0).r0 == -static_cast<std::int32_t>(sc::err::kEagain),
+            "value-changed WAIT must be EAGAIN");
+
+  exec::MachineState wait = State(sc::nr::kFutex);
+  wait.r[0] = 0x200;
+  wait.r[1] = 0x80u;  // WAIT | FUTEX_PRIVATE_FLAG
+  wait.r[2] = 7;
+  const sc::Outcome o = m.Handle(wait, 0);
+  CHECK_CTX(o.r0 == 0 && o.verdict == sc::Verdict::kEmulated, o.detail);
+  CHECK_CTX(o.detail.find("no wake can arrive") != std::string::npos, o.detail);
+
+  exec::MachineState wake = State(sc::nr::kFutex);
+  wake.r[0] = 0x200;
+  wake.r[1] = 1;  // WAKE
+  wake.r[2] = 1;
+  CHECK(m.Handle(wake, 0).r0 == 0);
+
+  // bionic's mutex slow path: FUTEX_WAIT_BITSET|PRIVATE (0x89) and FUTEX_WAKE_BITSET|PRIVATE (0x8a).
+  // A mask that keeps the private flag, or one that drops the 9/10 mapping, refuses both as ENOSYS.
+  exec::MachineState wait_bs = State(sc::nr::kFutex);
+  wait_bs.r[0] = 0x200;
+  wait_bs.r[1] = 0x89u;
+  wait_bs.r[2] = 7;
+  const sc::Outcome ob = m.Handle(wait_bs, 0);
+  CHECK_CTX(ob.r0 == 0 && ob.verdict == sc::Verdict::kEmulated, ob.detail);
+  wait_bs.r[2] = 8;
+  CHECK_CTX(m.Handle(wait_bs, 0).r0 == -static_cast<std::int32_t>(sc::err::kEagain),
+            "value-changed WAIT_BITSET must be EAGAIN");
+  exec::MachineState wake_bs = State(sc::nr::kFutex);
+  wake_bs.r[0] = 0x200;
+  wake_bs.r[1] = 0x8au;
+  wake_bs.r[2] = 1;
+  const sc::Outcome wb = m.Handle(wake_bs, 0);
+  CHECK_CTX(wb.r0 == 0 && wb.verdict == sc::Verdict::kEmulated, wb.detail);
+}
+
+/// `rt_sigaction` installs without a delivery mechanism: 0 back, the previous handler reads NULL
+/// rather than stale bytes, and the note says no signal is ever delivered. `faccessat` goes through
+/// the same provider as `openat` and answers ENOENT for what the provider does not serve.
+void sigaction_and_faccessat_answer_their_facts() {
+  sc::Monitor m;
+  auto window = Window();
+  if (!window) return;
+  m.set_memory(window.get());
+  std::string werr;
+  CHECK_CTX(window->Map(0, 0x8000, mem::kRead | mem::kWrite, &werr),
+            "could not map the fixture pages: " + werr);
+  exec::MachineState sig = State(sc::nr::kRtSigaction);
+  sig.r[0] = 6;      // SIGABRT
+  sig.r[1] = 0x300;  // new handler struct (never read: nothing is delivered)
+  sig.r[2] = 0x400;  // previous handler out
+  const std::uint32_t dirty[5] = {0xdead, 0xdead, 0xdead, 0xdead, 0xdead};
+  CHECK(window->Write(0x400, dirty, sizeof(dirty)));
+  const sc::Outcome o = m.Handle(sig, 0);
+  CHECK_CTX(o.r0 == 0, o.detail);
+  std::uint32_t old[5] = {1, 1, 1, 1, 1};
+  CHECK(window->Read(0x400, old, sizeof(old)));
+  CHECK_CTX(old[0] == 0 && old[1] == 0, "oldact was not zeroed: " + std::to_string(old[0]));
+
+  m.set_file_provider([](const std::string& path) -> std::optional<std::vector<std::uint8_t>> {
+    if (path != "/data/app/game.apk") return std::nullopt;
+    return std::vector<std::uint8_t>{0x50, 0x4b};  // the bytes are not this row's subject
+  });
+  CHECK(window->Write(0x500, "/data/app/game.apk\0", 19));
+  exec::MachineState hit = State(sc::nr::kFaccessat);
+  hit.r[0] = 0xffff'ff9cu;  // AT_FDCWD
+  hit.r[1] = 0x500;
+  hit.r[2] = 0;  // F_OK
+  CHECK_CTX(m.Handle(hit, 0).r0 == 0, "a served path must be reachable");
+
+  CHECK(window->Write(0x600, "/nope\0", 6));
+  exec::MachineState miss = State(sc::nr::kFaccessat);
+  miss.r[0] = 0xffff'ff9cu;
+  miss.r[1] = 0x600;
+  miss.r[2] = 0;
+  CHECK_CTX(m.Handle(miss, 0).r0 == -static_cast<std::int32_t>(sc::err::kEnoent), "want ENOENT");
+}
+
 int main() {
   frame_takes_the_number_from_r7_not_the_encoding();
   r7_is_the_number_not_a_masked_remainder();
@@ -421,6 +631,11 @@ int main() {
   execve_is_denied_with_the_measured_errno();
   the_policy_is_echoed_not_assumed();
   the_tally_is_per_monitor_and_in_first_seen_order();
+  mmap2_serves_real_anonymous_pages();
+  munmap_releases_served_pages();
+  console_writes_are_captured_and_answered_as_written();
+  futex_answers_the_single_threaded_truth();
+  sigaction_and_faccessat_answer_their_facts();
 
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;

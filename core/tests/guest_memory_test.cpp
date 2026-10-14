@@ -547,6 +547,77 @@ void shared_file_mapping_succeeds_and_stays_shared() {
   ::close(fd);
 }
 
+/// The in-place file form mmaps from the *granule base*, so the file offset it uses must back up from
+/// the first *live* page by the unmapped pages before it. Using the front page's offset there shifted
+/// every live page's bytes by that gap — invisible to every row that maps at 0x0, and live on a 16 KiB
+/// host for the very first image, which the loader places at 0x2000 (granule 0, pages 0-1 unmapped):
+/// the guest would read bytes from the wrong file offset while the load reported success.
+void a_file_in_a_granule_with_unmapped_leading_pages_reads_its_own_offset() {
+  auto gm = make(14);  // one granule holds four guest pages on the injected shift
+  if (!gm) return;
+  std::string err;
+  int fd = -1;
+#if defined(SYS_memfd_create)
+  fd = static_cast<int>(syscall(SYS_memfd_create, "rb-shift", 0u));
+#endif
+  if (fd < 0) {
+    ++skipped;
+    std::printf("SKIP   granule-base offset (no memfd: %s)\n", std::strerror(errno));
+    return;
+  }
+  // Six pages, each stamped with its own index at the first byte, so a shifted window reads a
+  // *different* page's stamp rather than the same bytes from somewhere else.
+  std::vector<unsigned char> content(6 * kGuestPage, 0);
+  for (std::size_t pg = 0; pg < 6; ++pg) {
+    content[pg * kGuestPage] = static_cast<unsigned char>(0xA0 + pg);
+  }
+  CHECK(::pwrite(fd, content.data(), content.size(), 0) == static_cast<ssize_t>(content.size()));
+
+  // Guest 0x2000 is granule 0's third page and its bytes live at file offset 0x2000, so the granule's
+  // in-place window must start at 0x2000 - 2 * 4 KiB = 0. The front page's own offset (0x2000) mapped
+  // at the base would instead serve guest 0x2000 from file offset 0x4000 — stamp 0xA4 below.
+  CHECK(gm->MapFile(0x2000, kGuestPage, kRead | kWrite, fd, 0x2000, false, &err));
+  CHECK(gm->MapFile(0x3000, kGuestPage, kRead | kWrite, fd, 0x3000, false, &err));
+  unsigned char back = 0;
+  CHECK(gm->Read(0x2000, &back, 1));
+  CHECK_CTX(back == 0xA2,
+            "guest 0x2000 read stamp " + std::to_string(back) + " (want 162 = 0xA2) — the granule's"
+            " leading unmapped pages shifted the file window");
+  CHECK(gm->Read(0x3000, &back, 1));
+  CHECK_CTX(back == 0xA3, "guest 0x3000 read stamp " + std::to_string(back) + " (want 163)");
+  // The two skipped pages must stay unmapped: the in-place window covers their host range, but their
+  // table entries were never made, so guest reads there still refuse.
+  CHECK(!gm->Read(0x0000, &back, 1));
+  ::close(fd);
+
+  // The same shape as the first image of a real load — file offset 0 at guest 0x2000, which is the
+  // case that bit on the 16 KiB device class. It also has the *other* kernel's discrimination: the
+  // phase above only fails under the old code when the real page is 4 KiB (a 16 KiB kernel makes the
+  // old alignment check fail `0x2000 & 0x3FFF` and take the correct out-of-line path by luck), while
+  // this shape takes the wrong in-place path under 4 KiB *and* 16 KiB kernels alike.
+  auto gm0 = make(14);
+  if (!gm0) return;
+  int fd0 = -1;
+#if defined(SYS_memfd_create)
+  fd0 = static_cast<int>(syscall(SYS_memfd_create, "rb-shift0", 0u));
+#endif
+  if (fd0 < 0) {
+    ++skipped;
+    std::printf("SKIP   first-image offset (no memfd: %s)\n", std::strerror(errno));
+    return;
+  }
+  CHECK(::pwrite(fd0, content.data(), content.size(), 0) == static_cast<ssize_t>(content.size()));
+  CHECK(gm0->MapFile(0x2000, kGuestPage, kRead | kWrite, fd0, 0, false, &err));
+  CHECK(gm0->MapFile(0x3000, kGuestPage, kRead | kWrite, fd0, kGuestPage, false, &err));
+  CHECK(gm0->Read(0x2000, &back, 1));
+  CHECK_CTX(back == 0xA0,
+            "guest 0x2000 read stamp " + std::to_string(back) + " (want 160 = 0xA0, file offset 0)"
+            " — the old code served file offset 0x2000 here, the first-image shift");
+  CHECK(gm0->Read(0x3000, &back, 1));
+  CHECK_CTX(back == 0xA1, "guest 0x3000 read stamp " + std::to_string(back) + " (want 161)");
+  ::close(fd0);
+}
+
 // ------------------------------------------------------- refusals
 
 void zero_length_and_permissionless_requests_are_refused() {
@@ -612,6 +683,7 @@ int main() {
   RUN(guard_pages_are_representable_and_re_armable);
   RUN(two_files_in_one_granule_read_their_own_bytes);
   RUN(shared_file_mapping_succeeds_and_stays_shared);
+  RUN(a_file_in_a_granule_with_unmapped_leading_pages_reads_its_own_offset);
   RUN(zero_length_and_permissionless_requests_are_refused);
 
   std::printf("%d checks, %d failures, %d skipped (host page shift %u)\n", checks, failures, skipped,

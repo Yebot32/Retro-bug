@@ -1353,6 +1353,19 @@ bool BlockRunner::Step(const Inst* inst) {
       state_.cpsr = (state_.cpsr & ~0xf800'0000u) | (v & 0xf800'0000u);
       return true;
     }
+    case Opcode::A32OrQFlag: {
+      // The DSP multiply-accumulates publish overflow through this op — `ir.OrQFlag(ir.GetOverflowFrom
+      // (result))` in every SMLA*/SMLAL*/SMUAD shape (`translate/impl/multiply.cpp:260-572`) — and
+      // dynarmic's A64 emitter ORs the incoming 0/1 into CPSR bit 27 (`emit_arm64_a32.cpp:537-546`).
+      // Tier I had the operand side (`GetOverflowFromOp` above) and not this writer, so the whole
+      // family refused here while Tier J completed the block: first reached for real inside libc's
+      // constructor once the guest heap existed (SM-X710, 2026-10-10, `OrQFlag: no Tier I semantics
+      // yet` at 0x4d78c).
+      std::uint32_t v = 0;
+      if (!W32(inst, 0, v)) return false;
+      state_.cpsr |= (v & 1u) << 27;
+      return true;
+    }
     case Opcode::A32SetCpsrNZCV:
     case Opcode::A32SetCpsrNZ: {
       if (!HasArgs(inst, 1)) return false;
@@ -2609,6 +2622,48 @@ bool BlockRunner::Step(const Inst* inst) {
       V a{};
       if (!W128(inst, 0, a)) return false;
       Put(inst, V{~a.lo, ~a.hi});
+      return true;
+    }
+
+    case Opcode::VectorZeroExtend8: case Opcode::VectorZeroExtend16:
+    case Opcode::VectorZeroExtend32: case Opcode::VectorZeroExtend64:
+    case Opcode::VectorSignExtend8: case Opcode::VectorSignExtend16:
+    case Opcode::VectorSignExtend32: case Opcode::VectorSignExtend64: {
+      /**
+       * The arranged widen family — `UXTL`/`SXTL` per size: take the operand's *low half* and widen
+       * each lane into the full 128 bits, zero- or sign-extending (`emit_arm64_vector.cpp`
+       * `VectorZeroExtend8/16/32`/`VectorZeroExtend64`). The front end emits it from the ASIMD
+       * long/wide ops (`vaddl`, `vaddw`, `vshll`, `vmull` — `asimd_three_regs.cpp:198-236`,
+       * `asimd_two_regs_shift.cpp:317`), and Tier I had none of the eight, so KA3D's init stopped at
+       * `VectorZeroExtend32: no Tier I semantics yet` with the guest 324,979 steps in (SM-X710,
+       * 2026-10-10). The signed variants are here in the same batch because `vaddl.s32` is what a
+       * game's math reaches first and refusing them one at a time is a wall per instruction.
+       */
+      V a{};
+      if (!W128(inst, 0, a)) return false;
+      const bool sign = op == Opcode::VectorSignExtend8 || op == Opcode::VectorSignExtend16 ||
+                        op == Opcode::VectorSignExtend32 || op == Opcode::VectorSignExtend64;
+      const auto sext = [](std::uint64_t v, unsigned bits) -> std::uint64_t {
+        const unsigned shift = 64 - bits;
+        return static_cast<std::uint64_t>(static_cast<std::int64_t>(v << shift) >> shift);
+      };
+      V out{};
+      const auto widen = [&](unsigned bits) {
+        const unsigned lanes = 128 / (bits * 2);
+        for (unsigned i = 0; i < lanes; ++i) {
+          const std::uint64_t lane = (a.lo >> (bits * i)) & ((1ull << bits) - 1ull);
+          const std::uint64_t wide = sign ? sext(lane, bits) : lane;
+          const unsigned dest = i * bits * 2;
+          (dest < 64 ? out.lo : out.hi) |= wide << (dest & 63);
+        }
+      };
+      switch (op) {
+        case Opcode::VectorZeroExtend8: case Opcode::VectorSignExtend8: widen(8); break;
+        case Opcode::VectorZeroExtend16: case Opcode::VectorSignExtend16: widen(16); break;
+        case Opcode::VectorZeroExtend32: case Opcode::VectorSignExtend32: widen(32); break;
+        default: widen(64); break;
+      }
+      Put(inst, out);
       return true;
     }
 

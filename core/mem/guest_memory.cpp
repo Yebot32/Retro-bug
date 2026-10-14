@@ -384,18 +384,32 @@ bool GuestMemory::RebalanceGranule(std::size_t granule, std::string* err,
     const Page& front = pages_[live.front()];
     for (std::size_t k = 1; k < live.size(); ++k) {
       const Page& p = pages_[live[k]];
+      // The distance is the *guest* distance, not the live-list index: a granule with a hole (pages 0
+      // and 2 live, 1 unmapped) has k = 1 for page 2, and comparing against `front.file_off + 1 page`
+      // accepted a set the in-place mmap then serves from the wrong file offsets. A hole means no
+      // single (fd, offset) pair describes every live page, so the granule must leave the window.
+      const std::size_t span = (live[k] - live.front()) * static_cast<std::size_t>(kGuestPage);
       if (p.fd != front.fd || p.shared != front.shared ||
-          p.file_off != front.file_off + k * kGuestPage) {
+          p.file_off != front.file_off + span) {
         contiguous = false;
         break;
       }
     }
   }
   // mmap offsets are aligned to the *real* page size, not the model granule: a 4 KiB ELF segment
-  // offset on a 16 KiB host cannot serve its granule in place at all.
+  // offset on a 16 KiB host cannot serve its granule in place at all. The offset this checks is the
+  // one the mmap below will really use — `granule_off`, backed up from the first *live* page to the
+  // granule base — not `front.file_off` itself: the mmap starts at the granule base, so a granule whose
+  // leading pages are unmapped needs the file offset to back up by exactly those pages. Using the
+  // front page's offset at the base shifted every live page's bytes by that gap — invisible to every
+  // test that maps at 0x0, and live on a 16 KiB host for the very first image, which is placed at
+  // 0x2000 (granule 0 with pages 0-1 unmapped). A backing-up that would go negative (the file's bytes
+  // do not reach back to the base) or that leaves the real-page alignment falls out of line instead.
   const std::size_t real_page = std::size_t{1} << real_page_shift_;
-  const bool off_aligned = !all_file ||
-                           (pages_[live.front()].file_off & (real_page - 1)) == 0;
+  const std::uint64_t back = (live.front() - base) * static_cast<std::uint64_t>(kGuestPage);
+  const bool off_aligned =
+      !all_file || (pages_[live.front()].file_off >= back &&
+                    ((pages_[live.front()].file_off - back) & (real_page - 1)) == 0);
   // A guard page shares the granule's host mapping while it is in place, so remapping the granule
   // with the survivors' protection would hand the guard page live host permissions behind its
   // `kNone` table entry. Guard-bearing granules go out of line, where the window stays PROT_NONE.
@@ -406,7 +420,10 @@ bool GuestMemory::RebalanceGranule(std::size_t granule, std::string* err,
     int flags = MAP_FIXED | (any_shared_file ? MAP_SHARED : MAP_PRIVATE);
     if (all_file) {
       fd = pages_[live.front()].fd;
-      off = pages_[live.front()].file_off;
+      // `granule_off`, not the front page's offset: the mmap targets `granule_host` (the granule base),
+      // and `off_aligned` above already established that backing up by the leading unmapped pages is
+      // both non-negative and real-page aligned. See its comment for the bug this closes.
+      off = pages_[live.front()].file_off - back;
     } else {
       flags |= MAP_ANONYMOUS;
     }
@@ -679,6 +696,59 @@ bool GuestMemory::IsFastmem(std::uint32_t at) const {
 
 unsigned GuestMemory::ProtAt(std::uint32_t at) const {
   return Contains(at) ? pages_[PageIndex(at)].prot : kNone;
+}
+
+void GuestMemory::Audit(diag::Auditor& audit) const {
+  std::size_t live = 0, guards = 0, mapped = 0;
+  std::size_t missing_backing = 0, stray_backing = 0, bad_fd = 0, out_refs = 0;
+  const auto* window = static_cast<const std::uint8_t*>(window_base_);
+  for (std::size_t i = 0; i < pages_.size(); ++i) {
+    const Page& p = pages_[i];
+    if (!p.mapped) {
+      // An unmapped page holding a block is host memory nothing will ever release.
+      if (p.backing != nullptr) ++stray_backing;
+      continue;
+    }
+    ++mapped;
+    if (p.prot == kNone) {
+      // A guard/reservation is mapped with no backing by design — a backing here would mean a module
+      // could have been placed on a page the layout believes reserved.
+      ++guards;
+      if (p.backing != nullptr) ++stray_backing;
+      continue;
+    }
+    ++live;
+    if (p.backing == nullptr) {
+      ++missing_backing;
+      continue;
+    }
+    if (p.backing == static_cast<const void*>(window + (i << kGuestPageShift))) {
+      // In place: the fastmem window itself.
+    } else {
+      bool referenced = false;
+      for (const OutOfLine& b : out_of_line_) {
+        if (p.backing == b.host) {
+          referenced = true;
+          ++out_refs;
+          break;
+        }
+      }
+      if (!referenced) ++stray_backing;
+    }
+    if (p.file_backed && p.fd < 0) ++bad_fd;
+  }
+
+  audit.Check("mem/page-table", missing_backing == 0 && stray_backing == 0 && bad_fd == 0,
+              "missing_backing=" + std::to_string(missing_backing) + " stray_backing=" +
+                  std::to_string(stray_backing) + " file_pages_without_fd=" + std::to_string(bad_fd));
+  audit.Check("mem/out-of-line-blocks", out_refs == out_of_line_.size(),
+              std::to_string(out_of_line_.size()) + " block(s) held, " + std::to_string(out_refs) +
+                  " referenced — the rest is host memory no page will release");
+  audit.Check("mem/page-count", mapped == mapped_page_count(),
+              "walk counted " + std::to_string(mapped) + ", accessor says " +
+                  std::to_string(mapped_page_count()));
+  audit.Info("mem/pages", std::to_string(live) + " live, " + std::to_string(guards) +
+                             " reservation(s), window " + std::to_string(window_bytes_) + " bytes");
 }
 
 }  // namespace rb::mem
