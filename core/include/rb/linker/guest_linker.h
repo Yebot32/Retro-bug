@@ -61,6 +61,34 @@ using ExecFn = std::function<bool(loader::CodeAddress)>;
 /// failure instead of as a dependency silently never loaded.
 std::vector<std::string> PeekNeeded(const std::vector<std::uint8_t>& image, std::string* err);
 
+/**
+ * The IFUNC resolver `m.FindExport(name)` would hand an importer, or nullopt when its answer is already
+ * something to call.
+ *
+ * `FindExport` returns an IFUNC export's implementation only when `m`'s *own* relocations resolved a slot
+ * of the same name. For the device's 32-bit `libc.so` that covers `strcmp`, `strlen`, `memcpy`, `memmove`,
+ * `memset` and two `_chk`s — and not `strcpy`, `stpcpy`, `strcat` or the other `_chk`s, which libc never
+ * calls through its own GOT. An importer of those bound to `FindExport`'s answer is bound to the
+ * *resolver*: every call runs it and returns a code pointer, and the copy is never made (Gumball 2013's
+ * `strcpy` was bound to libc's resolver at 0xcb0a5 and copied nothing, measured on the SM-X710
+ * 2026-10-14). This is the test for that state; running the resolver is the caller's, because it is guest
+ * code.
+ */
+std::optional<loader::CodeAddress> UnresolvedIfuncExport(const loader::GuestModule& m,
+                                                         const std::string& name);
+
+/// One IFUNC export an import was bound through, resolved or refused. Kept for reporting: "which
+/// resolvers ran at bind time, and what did they choose" is a launch's question, and a refusal has to be
+/// readable by name after the load that it stopped.
+struct IfuncExport {
+  std::string name;    ///< without its `@VERSION`, which is how the cache is keyed
+  std::string module;  ///< the soname of the defining module
+  loader::CodeAddress resolver;
+  /// What the resolver returned, Thumb tag included; 0 when it was refused, and then `refusal` says why.
+  std::uint32_t implementation = 0;
+  std::string refusal;
+};
+
 class GuestLinker {
  public:
   /// `host` answers symbols no guest module exports — the nine names a real `libc.so` asks the host for
@@ -70,6 +98,11 @@ class GuestLinker {
   /// `tolerate_unresolved_relocs` (a real bionic still has TLS slots to hand to a linker, so loading it
   /// needs the opt-in) and `resolve_ifunc`. Its `resolve` and `hint` are ignored: the scope is this
   /// object's, and each image has to be placed where the chain can.
+  ///
+  /// `resolve_ifunc` is also what `Lookup` runs for an import that names another module's unresolved
+  /// IFUNC export (see `UnresolvedIfuncExport`). The `IfuncSlot` it gets then has `where == 0` — there is
+  /// no slot, only an import to bind — `slot_value` set to the tagged resolver, as the defining module's
+  /// own GOT slot for the name would hold, and `name` without its version.
   GuestLinker(mem::GuestMemory& memory, ImageProvider provider, loader::SymbolResolver host = {},
               const loader::LoadOptions& base = {})
       : memory_{memory}, provider_{std::move(provider)}, host_{std::move(host)}, base_{base} {
@@ -100,7 +133,17 @@ class GuestLinker {
   /// `FindExport`, which is also what distinguishes a resolved IFUNC from its resolver. Reading
   /// `exports` directly gets both wrong: `Symbol::value` still points at the resolver of an
   /// unresolved IFUNC, and `CodeAddress::addr` has the ISA bit masked out.
-  std::optional<std::uint32_t> Lookup(const std::string& symbol) const;
+  ///
+  /// Where `FindExport` can only answer with an IFUNC resolver, the resolver is run through
+  /// `resolve_ifunc` — once per resolver; later lookups reuse the answer — and its implementation is
+  /// returned, the way bionic's linker binds an IFUNC import. When there is no hook, or the resolver does
+  /// not return a non-zero implementation, the answer is nullopt and the refusal is recorded by name in
+  /// `ifunc_exports()`: the resolver is never handed out as if it were the function. Non-const for that
+  /// reason — a lookup can run guest code.
+  std::optional<std::uint32_t> Lookup(const std::string& symbol);
+
+  /// Every IFUNC export an import has been bound through, in first-asked order, resolved or refused.
+  const std::vector<IfuncExport>& ifunc_exports() const { return ifunc_exports_; }
 
   /// Run `DT_INIT` then `DT_INIT_ARRAY` for every module in load order — a dependency's constructors
   /// before its dependent's, because the dependent's init code may call into it.
@@ -119,6 +162,12 @@ class GuestLinker {
   std::optional<loader::GuestModule*> LinkAt(const std::string& soname,
                                              const std::vector<std::uint8_t>& image, int depth,
                                              std::string* err);
+  /// The cached or freshly run answer for `m`'s IFUNC export `name` whose resolver is `resolver`.
+  const IfuncExport& BindIfuncExport(const loader::GuestModule& m, const std::string& name,
+                                     loader::CodeAddress resolver);
+  /// The refused entry for `name`, if `Lookup` refused it — so a load can name it instead of asking the
+  /// host, whose stand-in would bind the import to something that is not the function either.
+  const IfuncExport* RefusedIfunc(const std::string& name) const;
 
   mem::GuestMemory& memory_;
   ImageProvider provider_;
@@ -130,6 +179,7 @@ class GuestLinker {
   std::vector<loader::GuestModule*> order_;
   std::vector<std::string> loading_;  ///< the `DT_NEEDED` path being resolved, for cycle detection
   std::vector<std::string> host_requests_;
+  std::vector<IfuncExport> ifunc_exports_;
 };
 
 }  // namespace rb::linker

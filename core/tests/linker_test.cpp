@@ -22,11 +22,13 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -36,6 +38,12 @@
 #endif
 #ifndef RB_LINK_MID_PATH
 #define RB_LINK_MID_PATH "/data/local/tmp/librbmid.so"
+#endif
+#ifndef RB_LINK_IFUNC_LEAF_PATH
+#define RB_LINK_IFUNC_LEAF_PATH "/data/local/tmp/librbifuncleaf.so"
+#endif
+#ifndef RB_LINK_IFUNC_USER_PATH
+#define RB_LINK_IFUNC_USER_PATH "/data/local/tmp/librbifuncuser.so"
 #endif
 
 namespace {
@@ -527,6 +535,182 @@ void a_linked_call_reaches_the_other_module() {
   CHECK_CTX(s.r[0] == 15u, "mid_call(7) = " + Hex(s.r[0]) + ", expected 15");
 }
 
+// ------------------------------------------------------------------ IFUNC exports bound across modules
+
+/// `fn(r0, r1)` on Tier I, returning r0 — or nullopt with `why` when it did not come back.
+std::optional<std::uint32_t> call_guest(mem::GuestMemory& mem, loader::CodeAddress fn, std::uint32_t r0,
+                                        std::uint32_t r1, std::string* why) {
+  exec::MachineState s{};
+  s.pc = fn.addr;
+  s.r[0] = r0;
+  s.r[1] = r1;
+  s.r[13] = kStackTop;
+  s.r[14] = kReturnAddress;
+  s.mode = fn.thumb ? isa::Mode::Thumb : isa::Mode::Arm;
+  s.cpsr = fn.thumb ? (1u << 5) : 0u;
+  exec::InterpExecutor engine{mem, kReturnAddress};
+  for (int guard = 0; guard < 100; ++guard) {
+    const exec::RunResult r = engine.Run(s, 500);
+    if (r.reason == exec::StopReason::Returned) return s.r[0];
+    if (r.reason == exec::StopReason::Budget) continue;
+    if (why) *why = "stopped as reason=" + std::to_string(static_cast<int>(r.reason)) + " " + r.detail;
+    return std::nullopt;
+  }
+  if (why) *why = "never reached the return sentinel";
+  return std::nullopt;
+}
+
+struct IfuncFixture {
+  std::vector<std::uint8_t> leaf;
+  std::vector<std::uint8_t> user;
+};
+
+std::optional<IfuncFixture> load_ifunc_fixture() {
+  IfuncFixture f;
+  f.leaf = read_file(RB_LINK_IFUNC_LEAF_PATH);
+  f.user = read_file(RB_LINK_IFUNC_USER_PATH);
+  if (f.leaf.empty() || f.user.empty()) {
+    fail("read the two IFUNC guest libraries", __LINE__,
+         std::string{"leaf "} + std::to_string(f.leaf.size()) + " bytes, user " +
+             std::to_string(f.user.size()) + " bytes — pushed from tools/run_engine_tests.sh?");
+    return std::nullopt;
+  }
+  return f;
+}
+
+/// By value, for the reason `provider_for` gives.
+lnk::ImageProvider ifunc_provider(const IfuncFixture& f) {
+  return [f](const std::string& soname) -> std::optional<std::vector<std::uint8_t>> {
+    if (soname == "librbifuncleaf.so") return std::optional{f.leaf};
+    if (soname == "librbifuncuser.so") return std::optional{f.user};
+    return std::nullopt;
+  };
+}
+
+std::unique_ptr<GuestMemory> ifunc_memory(std::string* err) {
+  AddressModel model;
+  model.kind = AddressModel::kBiased;
+  model.host_page_shift = HostPageShift();
+  auto mem = GuestMemory::Create(64u << 20, model, err);
+  if (!mem) return nullptr;
+  if (!mem->Map(kStackTop - (64u << 10), 64u << 10, kRead | kWrite, err) ||
+      !mem->Map(kReturnAddress, kGuestPage, kRead | kWrite, err)) {
+    return nullptr;
+  }
+  return mem;
+}
+
+/**
+ * An import naming another module's IFUNC export is bound to what the resolver *returns*.
+ *
+ * `librbifuncleaf.so` never calls its own `ifunc_add`, so loading it resolves no slot and its
+ * `FindExport` can only answer with the resolver — the state of bionic's `strcpy`, `stpcpy` and `strcat`,
+ * which libc never calls through its GOT either. Bound to that answer, `ifunc_user_call(7)` runs the
+ * resolver and returns a code pointer plus one (Gumball 2013's `strcpy` copied nothing this way); bound
+ * the way bionic binds it, it returns 15. The data pointer is the second question for the same name, so
+ * the resolver's own run counter in guest memory says whether the answer was reused.
+ */
+void an_import_of_an_ifunc_export_is_bound_to_the_implementation() {
+  std::string err;
+  auto fx = load_ifunc_fixture();
+  if (!fx) return;
+  auto mem = ifunc_memory(&err);
+  if (!mem) {
+    fail("guest memory for the IFUNC chain", __LINE__, err);
+    return;
+  }
+  std::vector<std::string> hook_asked;
+  std::string hook_err;
+  loader::LoadOptions base;
+  base.resolve_ifunc = [&](const loader::IfuncSlot& s) -> std::optional<std::uint32_t> {
+    hook_asked.push_back(s.name);
+    return call_guest(*mem, s.resolver, s.slot_value, 0, &hook_err);
+  };
+  lnk::GuestLinker linker{*mem, ifunc_provider(*fx), {}, base};
+  const auto user = linker.LinkNamed("librbifuncuser.so", &err);
+  if (!user) {
+    fail("link the IFUNC chain", __LINE__, err);
+    return;
+  }
+  const loader::GuestModule* leaf = linker.order()[0];
+  const auto resolver = lnk::UnresolvedIfuncExport(*leaf, "ifunc_add");
+  CHECK_CTX(resolver.has_value(),
+            "the leaf resolved a slot for ifunc_add after all, so this row no longer has a resolver-only "
+            "export to bind and proves nothing");
+  CHECK_CTX(hook_asked.size() == 1 && hook_asked[0] == "ifunc_add",
+            "the resolve_ifunc hook was asked " + std::to_string(hook_asked.size()) +
+                " time(s) for two relocations naming ifunc_add; once is the cache working" +
+                (hook_err.empty() ? std::string{} : " — resolver run: " + hook_err));
+  const unsigned runs = read_word(*mem, data_symbol(*leaf, "g_ifunc_resolver_runs"));
+  CHECK_CTX(runs == 1u, "the guest resolver ran " + std::to_string(runs) + " times; one binding needs one run");
+
+  const auto bound = linker.Lookup("ifunc_add");
+  CHECK_CTX(bound.has_value() && resolver && *bound != resolver->tagged(),
+            "Lookup('ifunc_add') = 0x" + Hex(bound.value_or(0)) + ", which is the resolver");
+  CHECK_CTX(linker.ifunc_exports().size() == 1 && linker.ifunc_exports()[0].implementation == *bound &&
+                linker.ifunc_exports()[0].module == "librbifuncleaf.so",
+            "ifunc_exports() does not record the one binding it made");
+  const unsigned ptr = read_word(*mem, data_symbol(**user, "g_ifunc_add_ptr"));
+  CHECK_CTX(ptr == bound.value_or(0), "g_ifunc_add_ptr holds 0x" + Hex(ptr) +
+                                          ", not the implementation the calls reach (0x" +
+                                          Hex(bound.value_or(0)) + ")");
+
+  const auto fn = (*user)->FindExport("ifunc_user_call");
+  CHECK_CTX(fn.has_value(), "ifunc_user_call is not exported");
+  if (!fn) return;
+  const auto got = call_guest(*mem, *fn, 7, 0, &err);
+  CHECK_CTX(got.has_value() && *got == 15u,
+            "ifunc_user_call(7) = " + (got ? "0x" + Hex(*got) : "<did not return: " + err + ">") +
+                ", expected 15 — a code pointer plus one is the resolver bound in its place");
+}
+
+/**
+ * When the resolver cannot be run, the import is refused by name — not bound to the resolver, and not
+ * handed to the host. The host here answers *every* name with a stand-in, so a linker that fell through
+ * to it would load the user successfully; a linker that bound the resolver would too. Both refusals are
+ * tried: no hook at all, and a hook that declines.
+ */
+void an_ifunc_import_that_cannot_be_resolved_is_refused_by_name() {
+  for (const bool with_hook : {false, true}) {
+    std::string err;
+    auto fx = load_ifunc_fixture();
+    if (!fx) return;
+    auto mem = ifunc_memory(&err);
+    if (!mem) {
+      fail("guest memory for the IFUNC chain", __LINE__, err);
+      return;
+    }
+    std::vector<std::string> host_asked;
+    const loader::SymbolResolver host = [&](const std::string& name) -> std::optional<std::uint32_t> {
+      host_asked.push_back(name);
+      return 0x0bad'0000u;
+    };
+    loader::LoadOptions base;
+    if (with_hook) {
+      base.resolve_ifunc = [](const loader::IfuncSlot&) -> std::optional<std::uint32_t> {
+        return std::nullopt;
+      };
+    }
+    lnk::GuestLinker linker{*mem, ifunc_provider(*fx), host, base};
+    const auto user = linker.LinkNamed("librbifuncuser.so", &err);
+    const std::string which = with_hook ? "a declining hook" : "no hook";
+    CHECK_CTX(!user.has_value(), "with " + which + ", librbifuncuser.so loaded anyway — its ifunc_add is "
+                                 "bound to something that is not the implementation");
+    CHECK_CTX(err.find("ifunc_add") != std::string::npos && err.find("IFUNC") != std::string::npos,
+              "with " + which + ", the refusal does not name the IFUNC: " + err);
+    CHECK_CTX(err.find(with_hook ? "did not produce" : "no resolve_ifunc hook") != std::string::npos,
+              "with " + which + ", the refusal does not say why: " + err);
+    CHECK_CTX(std::find(host_asked.begin(), host_asked.end(), "ifunc_add") == host_asked.end(),
+              "with " + which + ", the host was asked for ifunc_add, which the scope defines");
+    CHECK_CTX(linker.ifunc_exports().size() == 1 && linker.ifunc_exports()[0].implementation == 0 &&
+                  !linker.ifunc_exports()[0].refusal.empty(),
+              "with " + which + ", ifunc_exports() does not record the refusal");
+    CHECK_CTX(!linker.Lookup("ifunc_add").has_value(),
+              "with " + which + ", Lookup('ifunc_add') hands out an address after refusing it");
+    CHECK_CTX(linker.order().size() == 1, "with " + which + ", the refused importer is in order()");
+  }
+}
+
 }  // namespace
 
 /// An old-NDK `.init_array` slot holding -1 is a bracket marker, not a constructor: bionic's
@@ -623,6 +807,8 @@ int main() {
   a_symbol_resolves_from_the_wider_scope();
   guest_constructors_run_in_dependency_order();
   a_linked_call_reaches_the_other_module();
+  an_import_of_an_ifunc_export_is_bound_to_the_implementation();
+  an_ifunc_import_that_cannot_be_resolved_is_refused_by_name();
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;
 }

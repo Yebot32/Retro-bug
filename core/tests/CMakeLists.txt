@@ -24,7 +24,9 @@ add_executable(rb_linker_tests linker_test.cpp)
 target_link_libraries(rb_linker_tests PRIVATE rb_linker rb_exec rb_abi rb_loader rb_mem)
 target_compile_definitions(rb_linker_tests PRIVATE
   RB_LINK_LEAF_PATH="/data/local/tmp/librbleaf.so"
-  RB_LINK_MID_PATH="/data/local/tmp/librbmid.so")
+  RB_LINK_MID_PATH="/data/local/tmp/librbmid.so"
+  RB_LINK_IFUNC_LEAF_PATH="/data/local/tmp/librbifuncleaf.so"
+  RB_LINK_IFUNC_USER_PATH="/data/local/tmp/librbifuncuser.so")
 # Path the fixture is pushed to on the device by tools/run_engine_tests.sh.
 target_compile_definitions(rb_guest_elf_tests PRIVATE RB_FIXTURE_PATH="/data/local/tmp/librb_fixture.so")
 
@@ -99,7 +101,8 @@ target_compile_definitions(rb_guest_apk_tests PRIVATE
 # TLS relocations and the host-provided symbol set are what make C06's first feature list a measurement
 # rather than a guess, so it is kept separate from rb_guest_apk_tests even though they share a rig shape.
 add_executable(rb_guest_libc_tests guest_libc_test.cpp)
-target_link_libraries(rb_guest_libc_tests PRIVATE rb_exec rb_abi rb_loader)
+target_link_libraries(rb_guest_libc_tests PRIVATE rb_exec rb_abi rb_loader rb_linker)
 target_compile_definitions(rb_guest_libc_tests PRIVATE
   RB_DEVICE_LIBC_PATH="/data/local/tmp/rb_device_libc.so"
+  RB_IFUNC_LIBC_USER_PATH="/data/local/tmp/librbifunclibc.so"
   RB_GUEST_APK_PATH="/data/local/tmp/rb_guestprobe.apk")

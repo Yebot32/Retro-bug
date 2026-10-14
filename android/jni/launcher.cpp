@@ -1953,22 +1953,19 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
                              const std::string& name) -> std::optional<std::uint32_t> {
     const auto fn = m.FindExport(name);
     if (!fn) return std::nullopt;
+    // The same test `GuestLinker::Lookup` makes; this scope is built by hand, so it runs the resolver here.
+    if (!linker::UnresolvedIfuncExport(m, name)) return fn->tagged();
+    // FindExport handed back the resolver itself: run it.
     const std::string base = name.substr(0, name.find('@'));
-    for (const loader::Symbol& s : m.exports) {
-      if (!s.defined || !s.ifunc || (s.value & ~1u) != fn->addr) continue;
-      if (s.name.substr(0, s.name.find('@')) != base) continue;
-      // FindExport handed back the resolver itself: run it.
-      if (const auto hit = export_ifunc_cache.find(base); hit != export_ifunc_cache.end()) return hit->second;
-      if (!export_ifunc.armed) return fn->tagged();  // reported once below: nothing could run it
-      loader::IfuncSlot slot{};
-      slot.name = base;
-      slot.resolver = *fn;
-      const auto impl = export_ifunc(slot);
-      if (!impl) return fn->tagged();  // the tally names the failure; the resolver stays bound
-      export_ifunc_cache[base] = *impl;
-      return *impl;
-    }
-    return fn->tagged();
+    if (const auto hit = export_ifunc_cache.find(base); hit != export_ifunc_cache.end()) return hit->second;
+    if (!export_ifunc.armed) return fn->tagged();  // reported once below: nothing could run it
+    loader::IfuncSlot slot{};
+    slot.name = base;
+    slot.resolver = *fn;
+    const auto impl = export_ifunc(slot);
+    if (!impl) return fn->tagged();  // the tally names the failure; the resolver stays bound
+    export_ifunc_cache[base] = *impl;
+    return *impl;
   };
   /// Scope imports the host could not answer, so the report can NAME them. The app's imports were
   /// always recorded; the scope's were not, and on 2026-10-09 a libc constructor (`netdClientInitImpl`)

@@ -7,6 +7,7 @@
 #include "rb/linker/guest_linker.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <utility>
 
@@ -25,6 +26,15 @@ bool CheckHeader(const std::vector<std::uint8_t>& img, const elf::Ehdr32** out) 
   }
   *out = h;
   return true;
+}
+
+/// A dynamic symbol name without its `@VERSION` — the form `FindExport` matches on.
+std::string BaseName(const std::string& name) { return name.substr(0, name.find('@')); }
+
+std::string Hex(std::uint32_t v) {
+  char buf[11];
+  std::snprintf(buf, sizeof buf, "0x%x", v);
+  return buf;
 }
 
 /// `std::string` from a possibly-unterminated, bounded byte run. Returns false if the name does not end
@@ -117,6 +127,22 @@ std::vector<std::string> PeekNeeded(const std::vector<std::uint8_t>& image, std:
   return out;
 }
 
+std::optional<loader::CodeAddress> UnresolvedIfuncExport(const loader::GuestModule& m,
+                                                         const std::string& name) {
+  const auto fn = m.FindExport(name);
+  if (!fn) return std::nullopt;
+  // The resolver is recognised by address, not by the `ifunc` flag alone: when `m` resolved a slot of
+  // this name, `FindExport` already answered with the implementation, and that answer must not be
+  // resolved a second time.
+  const std::string base = BaseName(name);
+  for (const loader::Symbol& s : m.exports) {
+    if (!s.defined || !s.ifunc || (s.value & ~1u) != fn->addr) continue;
+    if (BaseName(s.name) != base) continue;
+    return fn;
+  }
+  return std::nullopt;
+}
+
 std::optional<loader::GuestModule*> GuestLinker::Find(const std::string& soname) {
   for (auto& m : modules_) {
     if (m.path == soname || m.soname == soname) return const_cast<loader::GuestModule*>(&m);
@@ -193,13 +219,32 @@ std::optional<loader::GuestModule*> GuestLinker::LinkAt(const std::string& sonam
 
   loader::LoadOptions opts = base_;
   opts.hint = 0;  // the chain places each image itself; a caller's hint means one module
+  std::string ifunc_refusal;
   opts.resolve = [&](const std::string& name) -> std::optional<std::uint32_t> {
     if (auto v = Lookup(name)) return v;
+    // A refused IFUNC is answered here and not by the host: the scope *does* define the name, and a host
+    // stand-in would bind the import to something that is not the function — the same silent wrong
+    // answer as binding the resolver, one step removed.
+    if (const IfuncExport* refused = RefusedIfunc(name)) {
+      if (ifunc_refusal.empty()) ifunc_refusal = refused->refusal;
+      return std::nullopt;
+    }
     host_requests_.push_back(name);
     return host_ ? host_(name) : std::nullopt;
   };
 
   auto mod = loader::LoadFromBytes(memory_, image, soname, opts, err);
+  // The refusal outranks the loader's own verdict. For a non-weak import the loader has already failed
+  // with "unresolved symbol", which is true and unhelpful; for a weak one it bound the import to 0 and
+  // succeeded, so the image is unmapped again here — a module whose call to `strcpy` branches to the null
+  // page is not loaded either.
+  if (!ifunc_refusal.empty()) {
+    if (mod) {
+      std::string ignored;
+      memory_.Unmap(mod->base, mod->extent, &ignored);
+    }
+    return fail("loading '" + soname + "': " + ifunc_refusal);
+  }
   if (!mod) return fail("loading '" + soname + "': " + (err ? *err : std::string{}));
 
   modules_.push_back(std::move(*mod));
@@ -208,11 +253,63 @@ std::optional<loader::GuestModule*> GuestLinker::LinkAt(const std::string& sonam
   return placed;
 }
 
-std::optional<std::uint32_t> GuestLinker::Lookup(const std::string& symbol) const {
+std::optional<std::uint32_t> GuestLinker::Lookup(const std::string& symbol) {
   for (auto* m : order_) {
-    if (auto fn = m->FindExport(symbol)) return fn->tagged();
+    const auto fn = m->FindExport(symbol);
+    if (!fn) continue;
+    const auto resolver = UnresolvedIfuncExport(*m, symbol);
+    if (!resolver) return fn->tagged();
+    // The first definer wins even when its IFUNC is refused: falling through to a later module's
+    // definition would bind a different library's `strcpy` than the global scope says is the one.
+    const std::uint32_t impl = BindIfuncExport(*m, symbol, *resolver).implementation;
+    if (impl == 0) return std::nullopt;
+    return impl;
   }
   return std::nullopt;
+}
+
+const IfuncExport& GuestLinker::BindIfuncExport(const loader::GuestModule& m, const std::string& name,
+                                                loader::CodeAddress resolver) {
+  // Keyed by the resolver, so `strcpy@LIBC` and `strcpy` share one answer and one run, and a refusal is
+  // not retried: a resolver is guest code, and the same one asked again answers the same way. bionic does
+  // re-run resolvers per relocation; caching changes the cost, not the binding.
+  for (const IfuncExport& e : ifunc_exports_) {
+    if (e.resolver.tagged() == resolver.tagged()) return e;
+  }
+  IfuncExport e;
+  e.name = BaseName(name);
+  e.module = m.soname.empty() ? m.path : m.soname;
+  e.resolver = resolver;
+  const std::string what =
+      "'" + e.name + "' is an IFUNC export of '" + e.module + "' (resolver " + Hex(resolver.tagged()) + ")";
+  if (!base_.resolve_ifunc) {
+    e.refusal = what + " and this linker has no resolve_ifunc hook to run it; binding the resolver would"
+                       " make every call return a code pointer instead of doing the work";
+  } else {
+    loader::IfuncSlot slot;
+    slot.where = 0;  // no slot: this is an import being bound, not a relocation of the defining module
+    slot.resolver = resolver;
+    slot.slot_value = resolver.tagged();
+    slot.name = e.name;
+    const auto impl = base_.resolve_ifunc(slot);
+    if (!impl) {
+      e.refusal = what + " and its resolver did not produce an implementation";
+    } else if (*impl == 0) {
+      e.refusal = what + " and its resolver returned 0, which is not an implementation";
+    } else {
+      e.implementation = *impl;
+    }
+  }
+  ifunc_exports_.push_back(std::move(e));
+  return ifunc_exports_.back();
+}
+
+const IfuncExport* GuestLinker::RefusedIfunc(const std::string& name) const {
+  const std::string base = BaseName(name);
+  for (const IfuncExport& e : ifunc_exports_) {
+    if (e.implementation == 0 && e.name == base) return &e;
+  }
+  return nullptr;
 }
 
 bool GuestLinker::RunInitializers(const ExecFn& exec, std::string* err) {

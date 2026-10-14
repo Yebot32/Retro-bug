@@ -75,6 +75,7 @@
 #include "rb/abi/abi.h"
 #include "rb/exec/interp.h"
 #include "rb/exec/jit.h"
+#include "rb/linker/guest_linker.h"
 #include "rb/loader/elf_defs.h"
 #include "rb/loader/guest_elf.h"
 #include "rb/mem/guest_memory.h"
@@ -97,6 +98,9 @@
 #endif
 #ifndef RB_GUEST_APK_PATH
 #define RB_GUEST_APK_PATH "/data/local/tmp/rb_guestprobe.apk"
+#endif
+#ifndef RB_IFUNC_LIBC_USER_PATH
+#define RB_IFUNC_LIBC_USER_PATH "/data/local/tmp/librbifunclibc.so"
 #endif
 
 namespace {
@@ -308,6 +312,28 @@ bool write_cstr(GuestMemory& mem, exec::GuestAddr at, const char* s) {
   return mem.Write(at, s, static_cast<std::uint32_t>(std::strlen(s) + 1));
 }
 
+/// The lane's `resolve_ifunc` hook: run the resolver on Tier J, then Tier I, and take what it returns.
+/// Shared by the rig's own libc load and by the `GuestLinker` row, which binds imports through it.
+std::optional<std::uint32_t> RunResolver(Rig& rig, const loader::IfuncSlot& s) {
+  for (exec::Executor* engine : {static_cast<exec::Executor*>(rig.jit.get()),
+                                 static_cast<exec::Executor*>(rig.interp.get())}) {
+    rig.abi_ctx->set_executor(*engine);
+    exec::RunResult out{};
+    exec::MachineState exit_state{};
+    const abi::Ret32 r = rig.abi_ctx->CallGuest(
+        s.resolver.tagged(), {abi::Value32::U32(s.slot_value)}, abi::Shorty::For("ILI"), 200'000,
+        &out, &exit_state);
+    if (out.reason != exec::StopReason::Returned) continue;
+    ++rig.ifunc_resolved;
+    rig.ifunc_log.push_back(std::string{s.name.empty() ? "<IRELATIVE>" : s.name} + " -> 0x" +
+                            Hex(static_cast<std::uint32_t>(r.bits)) + " on Tier " +
+                            (engine->tier() == exec::CodeTier::Interp ? "I" : "J"));
+    return static_cast<std::uint32_t>(r.bits);
+  }
+  rig.ifunc_unresolved.push_back(s.name.empty() ? "<IRELATIVE>" : s.name);
+  return std::nullopt;
+}
+
 Rig build() {
   Rig rig;
   const auto image = read_file(RB_DEVICE_LIBC_PATH);
@@ -386,25 +412,7 @@ Rig build() {
   rig.abi_ctx->set_monitor(rig.monitor.get());
   rig.interp = std::make_unique<exec::InterpExecutor>(*rig.mem, kReturnAddress);
   rig.jit = std::make_unique<exec::JitExecutor>(*rig.mem, kReturnAddress);
-  opts.resolve_ifunc = [&](const loader::IfuncSlot& s) -> std::optional<std::uint32_t> {
-    for (exec::Executor* engine : {static_cast<exec::Executor*>(rig.jit.get()),
-                                   static_cast<exec::Executor*>(rig.interp.get())}) {
-      rig.abi_ctx->set_executor(*engine);
-      exec::RunResult out{};
-      exec::MachineState exit_state{};
-      const abi::Ret32 r = rig.abi_ctx->CallGuest(
-          s.resolver.tagged(), {abi::Value32::U32(s.slot_value)}, abi::Shorty::For("ILI"), 200'000,
-          &out, &exit_state);
-      if (out.reason != exec::StopReason::Returned) continue;
-      ++rig.ifunc_resolved;
-      rig.ifunc_log.push_back(std::string{s.name.empty() ? "<IRELATIVE>" : s.name} + " -> 0x" +
-                              Hex(static_cast<std::uint32_t>(r.bits)) + " on Tier " +
-                              (engine->tier() == exec::CodeTier::Interp ? "I" : "J"));
-      return static_cast<std::uint32_t>(r.bits);
-    }
-    rig.ifunc_unresolved.push_back(s.name.empty() ? "<IRELATIVE>" : s.name);
-    return std::nullopt;
-  };
+  opts.resolve_ifunc = [&](const loader::IfuncSlot& s) { return RunResolver(rig, s); };
   rig.libc = loader::LoadFromBytes(*rig.mem, image, "libc.so", opts, &err);
   if (!rig.libc) {
     ++checks;
@@ -1300,6 +1308,128 @@ void resolved_ifunc_implementations_compute_what_hardware_does() {
   }
 }
 
+/**
+ * An importer of libc's `strcpy` and `strcat`, linked by `GuestLinker`, gets the copy made.
+ *
+ * Those two are IFUNC exports libc never calls through its own GOT, so loading libc resolves no slot for
+ * them and `FindExport` answers with the *resolver*. Bound to that, `rb_strcpy(dst, src)` runs the
+ * resolver with `dst` in r0, gets an implementation pointer back as its "result", and writes nothing —
+ * Gumball 2013's texture names stayed untouched heap exactly this way (2026-10-14). So the row reads the
+ * destination back, on both tiers, rather than trusting the call to have returned.
+ *
+ * libc's own `DT_NEEDED` is `ld-android.so` and `libdl.so`. They are read off the device this lane runs
+ * on — the same 32-bit system that shipped the libc — rather than stubbed, so the chain is bionic's own.
+ */
+void an_importer_of_strcpy_and_strcat_gets_the_work_done() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  using abi::Value32;
+  const auto user = read_file(RB_IFUNC_LIBC_USER_PATH);
+  if (user.empty()) {
+    ++checks;
+    fail("read the strcpy/strcat importer", __LINE__,
+         std::string{"nothing at "} + RB_IFUNC_LIBC_USER_PATH + " — pushed from tools/run_engine_tests.sh?");
+    return;
+  }
+  const auto libc_image = read_file(RB_DEVICE_LIBC_PATH);
+  const auto libdl = read_file("/system/lib/libdl.so");
+  const auto ld_android = read_file("/system/lib/ld-android.so");
+  // By value: the linker keeps the provider for as long as it lives.
+  const linker::ImageProvider provider =
+      [libc_image, libdl, ld_android, user](
+          const std::string& soname) -> std::optional<std::vector<std::uint8_t>> {
+    const std::vector<std::uint8_t>* img = soname == "libc.so"             ? &libc_image
+                                           : soname == "libdl.so"          ? &libdl
+                                           : soname == "ld-android.so"     ? &ld_android
+                                           : soname == "librbifunclibc.so" ? &user
+                                                                           : nullptr;
+    if (img == nullptr || img->empty()) return std::nullopt;
+    return *img;
+  };
+  std::vector<std::string> host_asked;
+  const loader::SymbolResolver host = [&](const std::string& name) -> std::optional<std::uint32_t> {
+    host_asked.push_back(name);
+    return kUnimplemented;
+  };
+  loader::LoadOptions base;
+  base.tolerate_unresolved_relocs = true;  // libc's TLS slots, exactly as `build()` loads it
+  base.resolve_ifunc = [&](const loader::IfuncSlot& s) { return RunResolver(rig, s); };
+  linker::GuestLinker scope{*rig.mem, provider, host, base};
+  std::string err;
+  const auto mod = scope.LinkNamed("librbifunclibc.so", &err);
+  CHECK_CTX(mod.has_value(), "GuestLinker could not link the importer against the device libc: " + err);
+  if (!mod) return;
+  std::fprintf(stderr, "[libc] GuestLinker scope: %zu modules; host asked for: %s\n", scope.order().size(),
+               Join(host_asked).c_str());
+  for (const linker::IfuncExport& e : scope.ifunc_exports()) {
+    std::fprintf(stderr, "[libc] cross-module IFUNC %s of %s: resolver 0x%s -> %s\n", e.name.c_str(),
+                 e.module.c_str(), Hex(e.resolver.tagged()).c_str(),
+                 e.implementation ? ("0x" + Hex(e.implementation)).c_str() : e.refusal.c_str());
+  }
+
+  const auto libc = scope.Find("libc.so");
+  CHECK_CTX(libc.has_value(), "libc.so is not in the linker's scope");
+  if (!libc) return;
+  for (const char* name : {"strcpy", "strcat"}) {
+    const auto resolver = linker::UnresolvedIfuncExport(**libc, name);
+    CHECK_CTX(resolver.has_value(),
+              std::string{name} + ": libc resolved a slot for it during its own load, so FindExport no "
+                                  "longer hands out the resolver and this row has lost its premise");
+    const auto bound = scope.Lookup(name);
+    CHECK_CTX(bound.has_value() && resolver && *bound != resolver->tagged(),
+              std::string{name} + ": the linker binds 0x" + Hex(bound.value_or(0)) +
+                  ", which is libc's resolver — every call would return a code pointer");
+  }
+
+  const auto fn_cpy = (*mod)->FindExport("rb_strcpy");
+  const auto fn_cat = (*mod)->FindExport("rb_strcat");
+  CHECK_CTX(fn_cpy && fn_cat, "the importer does not export rb_strcpy and rb_strcat");
+  if (!fn_cpy || !fn_cat) return;
+  constexpr exec::GuestAddr kSrc = kData + 0xc00;
+  constexpr exec::GuestAddr kDst = kData + 0xc40;
+  write_cstr(*rig.mem, kSrc, "texture_0001.png");
+  const auto run = [&](exec::Executor& e, loader::CodeAddress fn, Outcome* o) {
+    rig.abi_ctx->set_executor(e);
+    exec::RunResult result{};
+    exec::MachineState exit_state{};
+    const abi::Ret32 r = rig.abi_ctx->CallGuest(fn.tagged(), {Value32::Ptr(kDst), Value32::Ptr(kSrc)},
+                                                abi::Shorty::For("LLL"), 4'000'000, &result, &exit_state);
+    o->reason = result.reason;
+    o->bits = r.bits;
+    o->detail = result.detail;
+  };
+  for (auto* engine : {static_cast<exec::Executor*>(rig.interp.get()),
+                       static_cast<exec::Executor*>(rig.jit.get())}) {
+    // Pre-filled with a sentinel longer than the answer, so "wrote nothing" and "wrote too little" both
+    // read back as something other than the source.
+    write_cstr(*rig.mem, kDst, "XXXXXXXXXXXXXXXXXXXXXXXX");
+    Outcome cpy;
+    run(*engine, *fn_cpy, &cpy);
+    char out[40] = {};
+    rig.mem->Read(kDst, out, sizeof out - 1);
+    CHECK_CTX(cpy.ok() && std::string{out} == "texture_0001.png" &&
+                  static_cast<std::uint32_t>(cpy.bits) == kDst,
+              std::string{"strcpy through the importer on Tier "} + Tier(*engine) + " left \"" + out +
+                  "\" and returned 0x" + Hex(static_cast<std::uint32_t>(cpy.bits)) + " (ok=" +
+                  (cpy.ok() ? "yes" : "no " + cpy.detail) + "); want \"texture_0001.png\" and 0x" +
+                  Hex(kDst));
+    std::fprintf(stderr, "[libc] %-22s Tier %s -> \"%s\"\n", "strcpy via importer", Tier(*engine), out);
+
+    write_cstr(*rig.mem, kDst, "atlas/");
+    Outcome cat;
+    run(*engine, *fn_cat, &cat);
+    std::memset(out, 0, sizeof out);
+    rig.mem->Read(kDst, out, sizeof out - 1);
+    CHECK_CTX(cat.ok() && std::string{out} == "atlas/texture_0001.png" &&
+                  static_cast<std::uint32_t>(cat.bits) == kDst,
+              std::string{"strcat through the importer on Tier "} + Tier(*engine) + " left \"" + out +
+                  "\" and returned 0x" + Hex(static_cast<std::uint32_t>(cat.bits)) + " (ok=" +
+                  (cat.ok() ? "yes" : "no " + cat.detail) + "); want \"atlas/texture_0001.png\" and 0x" +
+                  Hex(kDst));
+    std::fprintf(stderr, "[libc] %-22s Tier %s -> \"%s\"\n", "strcat via importer", Tier(*engine), out);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -1307,6 +1437,7 @@ int main() {
   a_load_without_that_flag_refuses_and_names_the_slots();
   the_ifunc_slots_are_recorded_for_the_linker();
   resolved_ifunc_implementations_compute_what_hardware_does();
+  an_importer_of_strcpy_and_strcat_gets_the_work_done();
   string_scanning_matches_bionic();
   numeric_conversion_matches_bionic();
   libc_calls_back_into_a_guest_function();

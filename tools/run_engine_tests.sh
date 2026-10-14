@@ -76,6 +76,23 @@ MID="$BUILD/librbmid.so"
   -mthumb -mfloat-abi=softfp -mfpu=neon -fPIC -shared -nostdlib -Os \
   -Wl,-soname,librbmid.so -o "$MID" "$ROOT/tests/corpus/link_mid.c" -L"$BUILD" -lrbleaf
 
+# The cross-module IFUNC pair, built the same way: a leaf whose IFUNC its own image never relocates
+# against (so only an importer can need it resolved) and the importer. And the libc importer, which is the
+# same question asked of the device's own `strcpy`/`strcat` — linked against the NDK's stub `libc.so` for
+# its `DT_NEEDED`, `-fno-builtin` so the calls are emitted, fortify off so they are not `__strcpy_chk`.
+IFLEAF="$BUILD/librbifuncleaf.so"
+IFUSER="$BUILD/librbifuncuser.so"
+IFLIBC="$BUILD/librbifunclibc.so"
+"$TC/bin/clang.exe" --target=armv7-none-linux-androideabi26 --sysroot="$TC/sysroot" \
+  -mthumb -mfloat-abi=softfp -mfpu=neon -fPIC -shared -nostdlib -Os \
+  -Wl,-soname,librbifuncleaf.so -o "$IFLEAF" "$ROOT/tests/corpus/link_ifunc_leaf.c"
+"$TC/bin/clang.exe" --target=armv7-none-linux-androideabi26 --sysroot="$TC/sysroot" \
+  -mthumb -mfloat-abi=softfp -mfpu=neon -fPIC -shared -nostdlib -Os \
+  -Wl,-soname,librbifuncuser.so -o "$IFUSER" "$ROOT/tests/corpus/link_ifunc_user.c" -L"$BUILD" -lrbifuncleaf
+"$TC/bin/clang.exe" --target=armv7-none-linux-androideabi26 --sysroot="$TC/sysroot" \
+  -mthumb -mfloat-abi=softfp -mfpu=neon -fPIC -shared -nostdlib -Os -fno-builtin -U_FORTIFY_SOURCE \
+  -Wl,-soname,librbifunclibc.so -o "$IFLIBC" "$ROOT/tests/corpus/ifunc_libc_user.c" -lc
+
 # MSYS hands native programs /c/... paths and converts them on the way out — which is wrong for the
 # *device* path in `adb push a /data/local/tmp/b`, hence the MSYS_NO_PATHCONV=1 on every adb call
 # below. That switch also stops the conversion of the **local** path, so adb.exe is then handed a
@@ -121,6 +138,9 @@ adb wait-for-device
 adb push "$(to_host "$FIXTURE")" /data/local/tmp/librb_fixture.so >/dev/null
 adb push "$(to_host "$LEAF")" /data/local/tmp/librbleaf.so >/dev/null
 adb push "$(to_host "$MID")" /data/local/tmp/librbmid.so >/dev/null
+adb push "$(to_host "$IFLEAF")" /data/local/tmp/librbifuncleaf.so >/dev/null
+adb push "$(to_host "$IFUSER")" /data/local/tmp/librbifuncuser.so >/dev/null
+adb push "$(to_host "$IFLIBC")" /data/local/tmp/librbifunclibc.so >/dev/null
 for t in $SUITES $ADVISORY; do
   src="$BUILD/core/tests/$t"
   [ -f "$src" ] || src="$BUILD/external/dynarmic/tests/$t"
