@@ -1,0 +1,107 @@
+diff --git a/src/dynarmic/frontend/A32/decoder/thumb32.inc b/src/dynarmic/frontend/A32/decoder/thumb32.inc
+index 18853e6..144ea79 100644
+--- a/src/dynarmic/frontend/A32/decoder/thumb32.inc
++++ b/src/dynarmic/frontend/A32/decoder/thumb32.inc
+@@ -21,6 +21,14 @@ INST(thumb32_LDRD_imm_1,     "LDRD (imm)",               "11101000U111nnnnttttss
+ INST(thumb32_LDRD_imm_2,     "LDRD (imm)",               "11101001U1W1nnnnttttssssiiiiiiii")
+ INST(thumb32_STL,            "STL",                      "111010001100nnnntttt111110101111") // v8
+ INST(thumb32_LDA,            "LDA",                      "111010001101nnnntttt111110101111") // v8
++// RetroBug: the byte and halfword members of the same acquire group. The ARM-state table carries all
++// six (arm.inc:111-131); the Thumb table had the word forms only, and the device's own bionic reaches
++// `ldab` in `__libc_safe_arc4random_buf` (`e8d2 2f8f`, measured as the wall after the auxv fix). See
++// patches/dynarmic/0005; encodings assembled with the recipe 0001's commit message records.
++INST(thumb32_LDAB,           "LDAB",                    "111010001101nnnntttt111110001111") // v8
++INST(thumb32_LDAH,           "LDAH",                    "111010001101nnnntttt111110011111") // v8
++INST(thumb32_STLB,           "STLB",                    "111010001100nnnntttt111110001111") // v8
++INST(thumb32_STLH,           "STLH",                    "111010001100nnnntttt111110011111") // v8
+ INST(thumb32_STREXB,         "STREXB",                   "111010001100nnnntttt11110100dddd")
+ INST(thumb32_STREXH,         "STREXH",                   "111010001100nnnntttt11110101dddd")
+ INST(thumb32_STREXD,         "STREXD",                   "111010001100nnnnttttuuuu0111dddd")
+diff --git a/src/dynarmic/frontend/A32/translate/impl/a32_translate_impl.h b/src/dynarmic/frontend/A32/translate/impl/a32_translate_impl.h
+index d61f618..cf2cd4b 100644
+--- a/src/dynarmic/frontend/A32/translate/impl/a32_translate_impl.h
++++ b/src/dynarmic/frontend/A32/translate/impl/a32_translate_impl.h
+@@ -496,6 +496,9 @@ struct TranslatorVisitor final {
+ 
+     // thumb32 load/store dual, load/store exclusive, table branch instructions
+     bool thumb32_LDA(Reg n, Reg t);
++    // RetroBug: the byte/half members of the same group; see decoder/thumb32.inc and patch 0005.
++    bool thumb32_LDAB(Reg n, Reg t);
++    bool thumb32_LDAH(Reg n, Reg t);
+     bool thumb32_LDRD_imm_1(bool U, Reg n, Reg t, Reg t2, Imm<8> imm8);
+     bool thumb32_LDRD_imm_2(bool U, bool W, Reg n, Reg t, Reg t2, Imm<8> imm8);
+     bool thumb32_LDRD_lit_1(bool U, Reg t, Reg t2, Imm<8> imm8);
+@@ -507,6 +510,9 @@ struct TranslatorVisitor final {
+     bool thumb32_LDREXB(Reg n, Reg t);
+     bool thumb32_LDREXH(Reg n, Reg t);
+     bool thumb32_STL(Reg n, Reg t);
++    // RetroBug: the byte/half members of the same group; see decoder/thumb32.inc and patch 0005.
++    bool thumb32_STLB(Reg n, Reg t);
++    bool thumb32_STLH(Reg n, Reg t);
+     bool thumb32_STREX(Reg n, Reg t, Reg d, Imm<8> imm8);
+     bool thumb32_STREXB(Reg n, Reg t, Reg d);
+     bool thumb32_STREXD(Reg n, Reg t, Reg t2, Reg d);
+diff --git a/src/dynarmic/frontend/A32/translate/impl/thumb32_load_store_dual.cpp b/src/dynarmic/frontend/A32/translate/impl/thumb32_load_store_dual.cpp
+index 063d9f7..64f36e0 100644
+--- a/src/dynarmic/frontend/A32/translate/impl/thumb32_load_store_dual.cpp
++++ b/src/dynarmic/frontend/A32/translate/impl/thumb32_load_store_dual.cpp
+@@ -136,6 +136,30 @@ bool TranslatorVisitor::thumb32_LDA(Reg n, Reg t) {
+     return true;
+ }
+ 
++// RetroBug: the byte and halfword acquire loads (patch 0005). Same shape as `thumb32_LDA`, one size
++// down, and `ORDERED` is again the whole point: an acquire load that used `NORMAL` would be a
++// different instruction wearing the same name. Zero-extended, as the byte/half exclusive loads above
++// are.
++bool TranslatorVisitor::thumb32_LDAB(Reg n, Reg t) {
++    if (t == Reg::PC || n == Reg::PC) {
++        return UnpredictableInstruction();
++    }
++
++    const auto address = ir.GetRegister(n);
++    ir.SetRegister(t, ir.ZeroExtendToWord(ir.ReadMemory8(address, IR::AccType::ORDERED)));
++    return true;
++}
++
++bool TranslatorVisitor::thumb32_LDAH(Reg n, Reg t) {
++    if (t == Reg::PC || n == Reg::PC) {
++        return UnpredictableInstruction();
++    }
++
++    const auto address = ir.GetRegister(n);
++    ir.SetRegister(t, ir.ZeroExtendToWord(ir.ReadMemory16(address, IR::AccType::ORDERED)));
++    return true;
++}
++
+ bool TranslatorVisitor::thumb32_LDRD_imm_1(bool U, Reg n, Reg t, Reg t2, Imm<8> imm8) {
+     return LoadDualImmediate(*this, false, U, true, n, t, t2, imm8);
+ }
+@@ -274,6 +298,28 @@ bool TranslatorVisitor::thumb32_STL(Reg n, Reg t) {
+     return true;
+ }
+ 
++// RetroBug: the byte and halfword store-releases (patch 0005), mirroring `thumb32_STL` one size down
++// with the truncation `load_store.cpp`'s STRB/STRH and `synchronization.cpp`'s ARM-state STLB use.
++bool TranslatorVisitor::thumb32_STLB(Reg n, Reg t) {
++    if (t == Reg::PC || n == Reg::PC) {
++        return UnpredictableInstruction();
++    }
++
++    const auto address = ir.GetRegister(n);
++    ir.WriteMemory8(address, ir.LeastSignificantByte(ir.GetRegister(t)), IR::AccType::ORDERED);
++    return true;
++}
++
++bool TranslatorVisitor::thumb32_STLH(Reg n, Reg t) {
++    if (t == Reg::PC || n == Reg::PC) {
++        return UnpredictableInstruction();
++    }
++
++    const auto address = ir.GetRegister(n);
++    ir.WriteMemory16(address, ir.LeastSignificantHalf(ir.GetRegister(t)), IR::AccType::ORDERED);
++    return true;
++}
++
+ bool TranslatorVisitor::thumb32_STREX(Reg n, Reg t, Reg d, Imm<8> imm8) {
+     if (d == Reg::PC || t == Reg::PC || n == Reg::PC) {
+         return UnpredictableInstruction();

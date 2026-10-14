@@ -496,6 +496,9 @@ struct TranslatorVisitor final {
 
     // thumb32 load/store dual, load/store exclusive, table branch instructions
     bool thumb32_LDA(Reg n, Reg t);
+    // RetroBug: the byte/half members of the same group; see decoder/thumb32.inc and patch 0005.
+    bool thumb32_LDAB(Reg n, Reg t);
+    bool thumb32_LDAH(Reg n, Reg t);
     bool thumb32_LDRD_imm_1(bool U, Reg n, Reg t, Reg t2, Imm<8> imm8);
     bool thumb32_LDRD_imm_2(bool U, bool W, Reg n, Reg t, Reg t2, Imm<8> imm8);
     bool thumb32_LDRD_lit_1(bool U, Reg t, Reg t2, Imm<8> imm8);
@@ -507,10 +510,19 @@ struct TranslatorVisitor final {
     bool thumb32_LDREXB(Reg n, Reg t);
     bool thumb32_LDREXH(Reg n, Reg t);
     bool thumb32_STL(Reg n, Reg t);
+    // RetroBug: the byte/half members of the same group; see decoder/thumb32.inc and patch 0005.
+    bool thumb32_STLB(Reg n, Reg t);
+    bool thumb32_STLH(Reg n, Reg t);
     bool thumb32_STREX(Reg n, Reg t, Reg d, Imm<8> imm8);
     bool thumb32_STREXB(Reg n, Reg t, Reg d);
     bool thumb32_STREXD(Reg n, Reg t, Reg t2, Reg d);
     bool thumb32_STREXH(Reg n, Reg t, Reg d);
+    // RetroBug: the store-release-exclusive members of the same group; see decoder/thumb32.inc and
+    // patch 0006.
+    bool thumb32_STLEX(Reg n, Reg t, Reg d);
+    bool thumb32_STLEXB(Reg n, Reg t, Reg d);
+    bool thumb32_STLEXD(Reg n, Reg t, Reg t2, Reg d);
+    bool thumb32_STLEXH(Reg n, Reg t, Reg d);
     // RetroBug: Thumb-state acquire-exclusive loads, the counterpart of the ARM-state declarations above.
     bool thumb32_LDAEX(Reg n, Reg t);
     bool thumb32_LDAEXB(Reg n, Reg t);

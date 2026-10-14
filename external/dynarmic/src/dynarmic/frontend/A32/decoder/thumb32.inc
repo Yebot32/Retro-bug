@@ -21,6 +21,14 @@ INST(thumb32_LDRD_imm_1,     "LDRD (imm)",               "11101000U111nnnnttttss
 INST(thumb32_LDRD_imm_2,     "LDRD (imm)",               "11101001U1W1nnnnttttssssiiiiiiii")
 INST(thumb32_STL,            "STL",                      "111010001100nnnntttt111110101111") // v8
 INST(thumb32_LDA,            "LDA",                      "111010001101nnnntttt111110101111") // v8
+// RetroBug: the byte and halfword members of the same acquire group. The ARM-state table carries all
+// six (arm.inc:111-131); the Thumb table had the word forms only, and the device's own bionic reaches
+// `ldab` in `__libc_safe_arc4random_buf` (`e8d2 2f8f`, measured as the wall after the auxv fix). See
+// patches/dynarmic/0005; encodings assembled with the recipe 0001's commit message records.
+INST(thumb32_LDAB,           "LDAB",                    "111010001101nnnntttt111110001111") // v8
+INST(thumb32_LDAH,           "LDAH",                    "111010001101nnnntttt111110011111") // v8
+INST(thumb32_STLB,           "STLB",                    "111010001100nnnntttt111110001111") // v8
+INST(thumb32_STLH,           "STLH",                    "111010001100nnnntttt111110011111") // v8
 INST(thumb32_STREXB,         "STREXB",                   "111010001100nnnntttt11110100dddd")
 INST(thumb32_STREXH,         "STREXH",                   "111010001100nnnntttt11110101dddd")
 INST(thumb32_STREXD,         "STREXD",                   "111010001100nnnnttttuuuu0111dddd")
@@ -36,6 +44,14 @@ INST(thumb32_LDAEXB,         "LDAEXB",                   "111010001101nnnntttt11
 INST(thumb32_LDAEXH,         "LDAEXH",                   "111010001101nnnntttt111111011111") // v8
 INST(thumb32_LDAEX,          "LDAEX",                    "111010001101nnnntttt111111101111") // v8
 INST(thumb32_LDAEXD,         "LDAEXD",                   "111010001101nnnnttttuuuu11111111") // v8
+// RetroBug: the store-release-exclusive half of the same group — the pair every C++ static
+// initialization takes (`ldrex`/`stlex` in `__cxa_guard_release`'s spin, measured as the wall right
+// after patch 0005 cleared `ldab`). The ARM-state table has all four (arm.inc:112-128). See
+// patches/dynarmic/0006.
+INST(thumb32_STLEX,          "STLEX",                    "111010001100nnnntttt11111110dddd") // v8
+INST(thumb32_STLEXB,         "STLEXB",                   "111010001100nnnntttt11111100dddd") // v8
+INST(thumb32_STLEXH,         "STLEXH",                   "111010001100nnnntttt11111101dddd") // v8
+INST(thumb32_STLEXD,         "STLEXD",                   "111010001100nnnnttttuuuu1111dddd") // v8
 
 // Data Processing (Shifted Register)
 INST(thumb32_TST_reg,        "TST (reg)",                "111010100001nnnn0vvv1111vvttmmmm")

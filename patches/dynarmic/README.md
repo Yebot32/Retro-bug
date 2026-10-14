@@ -85,3 +85,33 @@ FPCR image, which is what the prelude already relies on when it writes the same 
 **Retire when:** upstream installs `FPCR` where the descriptor changes rather than only at `Run` entry —
 or when a guest can be stopped from writing FPSCR mid-run, which is not something an emulator can
 decline.
+
+## 0005-thumb32-load-acquire-byte-half-rows.patch
+
+**Why:** the same gap as 0001, one instruction family over. The Thumb decoder table had the
+acquire/release *word* rows (`LDA`/`STL`) but none of the byte or halfword forms (`LDAB`/`LDAH`/
+`STLB`/`STLH`), while the ARM-state table carries all six (`arm.inc:111-131`). The device's own
+bionic reaches `ldab` in `__libc_safe_arc4random_buf` — the AT_RANDOM fallback of the setjmp cookie,
+where /dev/urandom is a refused path — and the run stopped there with `UndefinedInstruction` the
+moment the auxv fix let libc's constructor get that far (measured on the SM-X710, 2026-10-09).
+Note the decoder tables do not consult `ArchVersion`: widening the accepted architecture to v8 was
+tried against this wall first and changed nothing, because the missing *rows* were the wall. The
+implementations mirror `thumb32_LDA`/`thumb32_STL` with the byte/half sizes and keep
+`IR::AccType::ORDERED`, which is the acquire/release semantics the forms exist for. Retire together
+with 0001 if the pinned upstream grows one of the two.
+
+**Retire when:** the pinned upstream grows these four rows (compare `thumb32.inc` at re-import).
+
+## 0006-thumb32-store-release-exclusive-stlex-rows.patch
+
+**Why:** the third and last missing member of the same Thumb group. 0001 added the load-acquire-
+**exclusive** rows, 0005 the plain acquire/release byte/half rows, and this adds the
+store-release-**exclusive** family (`STLEX`/`STLEXB`/`STLEXH`/`STLEXD`) — again present in the
+ARM-state table (arm.inc:112-128) and absent from the Thumb one. Measured as the wall immediately
+after 0005 cleared `ldab`: libc's `__cxa_guard_release`, which every C++ static initialization in the
+image reaches through `__libc_safe_arc4random_buf`'s once-init, spins on `ldrex` + `stlex`
+(`e8c4 0fe2`, SM-X710, 2026-10-09). `ORDERED` is the whole difference from `STREX`, per the
+LDAEX/STLEX pairing; the doubleword form takes an explicit Rt2 register (`uuuu`), unlike the ARM
+encoding's implicit `t + 1`. Retire together with 0001 and 0005 if upstream grows the set.
+
+**Retire when:** the pinned upstream grows these four rows (compare `thumb32.inc` at re-import).

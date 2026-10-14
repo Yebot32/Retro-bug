@@ -136,6 +136,30 @@ bool TranslatorVisitor::thumb32_LDA(Reg n, Reg t) {
     return true;
 }
 
+// RetroBug: the byte and halfword acquire loads (patch 0005). Same shape as `thumb32_LDA`, one size
+// down, and `ORDERED` is again the whole point: an acquire load that used `NORMAL` would be a
+// different instruction wearing the same name. Zero-extended, as the byte/half exclusive loads above
+// are.
+bool TranslatorVisitor::thumb32_LDAB(Reg n, Reg t) {
+    if (t == Reg::PC || n == Reg::PC) {
+        return UnpredictableInstruction();
+    }
+
+    const auto address = ir.GetRegister(n);
+    ir.SetRegister(t, ir.ZeroExtendToWord(ir.ReadMemory8(address, IR::AccType::ORDERED)));
+    return true;
+}
+
+bool TranslatorVisitor::thumb32_LDAH(Reg n, Reg t) {
+    if (t == Reg::PC || n == Reg::PC) {
+        return UnpredictableInstruction();
+    }
+
+    const auto address = ir.GetRegister(n);
+    ir.SetRegister(t, ir.ZeroExtendToWord(ir.ReadMemory16(address, IR::AccType::ORDERED)));
+    return true;
+}
+
 bool TranslatorVisitor::thumb32_LDRD_imm_1(bool U, Reg n, Reg t, Reg t2, Imm<8> imm8) {
     return LoadDualImmediate(*this, false, U, true, n, t, t2, imm8);
 }
@@ -274,6 +298,28 @@ bool TranslatorVisitor::thumb32_STL(Reg n, Reg t) {
     return true;
 }
 
+// RetroBug: the byte and halfword store-releases (patch 0005), mirroring `thumb32_STL` one size down
+// with the truncation `load_store.cpp`'s STRB/STRH and `synchronization.cpp`'s ARM-state STLB use.
+bool TranslatorVisitor::thumb32_STLB(Reg n, Reg t) {
+    if (t == Reg::PC || n == Reg::PC) {
+        return UnpredictableInstruction();
+    }
+
+    const auto address = ir.GetRegister(n);
+    ir.WriteMemory8(address, ir.LeastSignificantByte(ir.GetRegister(t)), IR::AccType::ORDERED);
+    return true;
+}
+
+bool TranslatorVisitor::thumb32_STLH(Reg n, Reg t) {
+    if (t == Reg::PC || n == Reg::PC) {
+        return UnpredictableInstruction();
+    }
+
+    const auto address = ir.GetRegister(n);
+    ir.WriteMemory16(address, ir.LeastSignificantHalf(ir.GetRegister(t)), IR::AccType::ORDERED);
+    return true;
+}
+
 bool TranslatorVisitor::thumb32_STREX(Reg n, Reg t, Reg d, Imm<8> imm8) {
     if (d == Reg::PC || t == Reg::PC || n == Reg::PC) {
         return UnpredictableInstruction();
@@ -316,6 +362,72 @@ bool TranslatorVisitor::thumb32_STREXD(Reg n, Reg t, Reg t2, Reg d) {
     const auto value_lo = ir.GetRegister(t);
     const auto value_hi = ir.GetRegister(t2);
     const auto passed = ir.ExclusiveWriteMemory64(address, value_lo, value_hi, IR::AccType::ATOMIC);
+    ir.SetRegister(d, passed);
+    return true;
+}
+
+// RetroBug: the store-release-exclusive family (patch 0006). `ORDERED` is the whole difference from
+// `STREX`: the exclusive store with release semantics is what `__cxa_guard_release` spins on, and an
+// `ATOMIC` here would silently be the weaker instruction. Guards mirror the STREX* siblings above and
+// the ARM-state bodies in synchronization.cpp; the doubleword form takes an explicit Rt2 register
+// (the `uuuu` field), unlike the ARM encoding's implicit `t + 1`.
+bool TranslatorVisitor::thumb32_STLEX(Reg n, Reg t, Reg d) {
+    if (d == Reg::PC || t == Reg::PC || n == Reg::PC) {
+        return UnpredictableInstruction();
+    }
+    if (d == n || d == t) {
+        return UnpredictableInstruction();
+    }
+
+    const auto address = ir.GetRegister(n);
+    const auto value = ir.GetRegister(t);
+    const auto passed = ir.ExclusiveWriteMemory32(address, value, IR::AccType::ORDERED);
+    ir.SetRegister(d, passed);
+    return true;
+}
+
+bool TranslatorVisitor::thumb32_STLEXB(Reg n, Reg t, Reg d) {
+    if (d == Reg::PC || t == Reg::PC || n == Reg::PC) {
+        return UnpredictableInstruction();
+    }
+    if (d == n || d == t) {
+        return UnpredictableInstruction();
+    }
+
+    const auto address = ir.GetRegister(n);
+    const auto value = ir.LeastSignificantByte(ir.GetRegister(t));
+    const auto passed = ir.ExclusiveWriteMemory8(address, value, IR::AccType::ORDERED);
+    ir.SetRegister(d, passed);
+    return true;
+}
+
+bool TranslatorVisitor::thumb32_STLEXH(Reg n, Reg t, Reg d) {
+    if (d == Reg::PC || t == Reg::PC || n == Reg::PC) {
+        return UnpredictableInstruction();
+    }
+    if (d == n || d == t) {
+        return UnpredictableInstruction();
+    }
+
+    const auto address = ir.GetRegister(n);
+    const auto value = ir.LeastSignificantHalf(ir.GetRegister(t));
+    const auto passed = ir.ExclusiveWriteMemory16(address, value, IR::AccType::ORDERED);
+    ir.SetRegister(d, passed);
+    return true;
+}
+
+bool TranslatorVisitor::thumb32_STLEXD(Reg n, Reg t, Reg t2, Reg d) {
+    if (d == Reg::PC || t == Reg::PC || t2 == Reg::PC || n == Reg::PC) {
+        return UnpredictableInstruction();
+    }
+    if (d == n || d == t || d == t2) {
+        return UnpredictableInstruction();
+    }
+
+    const auto address = ir.GetRegister(n);
+    const auto value_lo = ir.GetRegister(t);
+    const auto value_hi = ir.GetRegister(t2);
+    const auto passed = ir.ExclusiveWriteMemory64(address, value_lo, value_hi, IR::AccType::ORDERED);
     ir.SetRegister(d, passed);
     return true;
 }

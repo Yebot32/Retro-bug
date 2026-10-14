@@ -1,0 +1,113 @@
+diff --git a/src/dynarmic/frontend/A32/decoder/thumb32.inc b/src/dynarmic/frontend/A32/decoder/thumb32.inc
+index 144ea79..a6d5b4f 100644
+--- a/src/dynarmic/frontend/A32/decoder/thumb32.inc
++++ b/src/dynarmic/frontend/A32/decoder/thumb32.inc
+@@ -44,6 +44,14 @@ INST(thumb32_LDAEXB,         "LDAEXB",                   "111010001101nnnntttt11
+ INST(thumb32_LDAEXH,         "LDAEXH",                   "111010001101nnnntttt111111011111") // v8
+ INST(thumb32_LDAEX,          "LDAEX",                    "111010001101nnnntttt111111101111") // v8
+ INST(thumb32_LDAEXD,         "LDAEXD",                   "111010001101nnnnttttuuuu11111111") // v8
++// RetroBug: the store-release-exclusive half of the same group — the pair every C++ static
++// initialization takes (`ldrex`/`stlex` in `__cxa_guard_release`'s spin, measured as the wall right
++// after patch 0005 cleared `ldab`). The ARM-state table has all four (arm.inc:112-128). See
++// patches/dynarmic/0006.
++INST(thumb32_STLEX,          "STLEX",                    "111010001100nnnntttt11111110dddd") // v8
++INST(thumb32_STLEXB,         "STLEXB",                   "111010001100nnnntttt11111100dddd") // v8
++INST(thumb32_STLEXH,         "STLEXH",                   "111010001100nnnntttt11111101dddd") // v8
++INST(thumb32_STLEXD,         "STLEXD",                   "111010001100nnnnttttuuuu1111dddd") // v8
+ 
+ // Data Processing (Shifted Register)
+ INST(thumb32_TST_reg,        "TST (reg)",                "111010100001nnnn0vvv1111vvttmmmm")
+diff --git a/src/dynarmic/frontend/A32/translate/impl/a32_translate_impl.h b/src/dynarmic/frontend/A32/translate/impl/a32_translate_impl.h
+index cf2cd4b..e806d74 100644
+--- a/src/dynarmic/frontend/A32/translate/impl/a32_translate_impl.h
++++ b/src/dynarmic/frontend/A32/translate/impl/a32_translate_impl.h
+@@ -517,6 +517,12 @@ struct TranslatorVisitor final {
+     bool thumb32_STREXB(Reg n, Reg t, Reg d);
+     bool thumb32_STREXD(Reg n, Reg t, Reg t2, Reg d);
+     bool thumb32_STREXH(Reg n, Reg t, Reg d);
++    // RetroBug: the store-release-exclusive members of the same group; see decoder/thumb32.inc and
++    // patch 0006.
++    bool thumb32_STLEX(Reg n, Reg t, Reg d);
++    bool thumb32_STLEXB(Reg n, Reg t, Reg d);
++    bool thumb32_STLEXD(Reg n, Reg t, Reg t2, Reg d);
++    bool thumb32_STLEXH(Reg n, Reg t, Reg d);
+     // RetroBug: Thumb-state acquire-exclusive loads, the counterpart of the ARM-state declarations above.
+     bool thumb32_LDAEX(Reg n, Reg t);
+     bool thumb32_LDAEXB(Reg n, Reg t);
+diff --git a/src/dynarmic/frontend/A32/translate/impl/thumb32_load_store_dual.cpp b/src/dynarmic/frontend/A32/translate/impl/thumb32_load_store_dual.cpp
+index 64f36e0..9c30a03 100644
+--- a/src/dynarmic/frontend/A32/translate/impl/thumb32_load_store_dual.cpp
++++ b/src/dynarmic/frontend/A32/translate/impl/thumb32_load_store_dual.cpp
+@@ -366,6 +366,72 @@ bool TranslatorVisitor::thumb32_STREXD(Reg n, Reg t, Reg t2, Reg d) {
+     return true;
+ }
+ 
++// RetroBug: the store-release-exclusive family (patch 0006). `ORDERED` is the whole difference from
++// `STREX`: the exclusive store with release semantics is what `__cxa_guard_release` spins on, and an
++// `ATOMIC` here would silently be the weaker instruction. Guards mirror the STREX* siblings above and
++// the ARM-state bodies in synchronization.cpp; the doubleword form takes an explicit Rt2 register
++// (the `uuuu` field), unlike the ARM encoding's implicit `t + 1`.
++bool TranslatorVisitor::thumb32_STLEX(Reg n, Reg t, Reg d) {
++    if (d == Reg::PC || t == Reg::PC || n == Reg::PC) {
++        return UnpredictableInstruction();
++    }
++    if (d == n || d == t) {
++        return UnpredictableInstruction();
++    }
++
++    const auto address = ir.GetRegister(n);
++    const auto value = ir.GetRegister(t);
++    const auto passed = ir.ExclusiveWriteMemory32(address, value, IR::AccType::ORDERED);
++    ir.SetRegister(d, passed);
++    return true;
++}
++
++bool TranslatorVisitor::thumb32_STLEXB(Reg n, Reg t, Reg d) {
++    if (d == Reg::PC || t == Reg::PC || n == Reg::PC) {
++        return UnpredictableInstruction();
++    }
++    if (d == n || d == t) {
++        return UnpredictableInstruction();
++    }
++
++    const auto address = ir.GetRegister(n);
++    const auto value = ir.LeastSignificantByte(ir.GetRegister(t));
++    const auto passed = ir.ExclusiveWriteMemory8(address, value, IR::AccType::ORDERED);
++    ir.SetRegister(d, passed);
++    return true;
++}
++
++bool TranslatorVisitor::thumb32_STLEXH(Reg n, Reg t, Reg d) {
++    if (d == Reg::PC || t == Reg::PC || n == Reg::PC) {
++        return UnpredictableInstruction();
++    }
++    if (d == n || d == t) {
++        return UnpredictableInstruction();
++    }
++
++    const auto address = ir.GetRegister(n);
++    const auto value = ir.LeastSignificantHalf(ir.GetRegister(t));
++    const auto passed = ir.ExclusiveWriteMemory16(address, value, IR::AccType::ORDERED);
++    ir.SetRegister(d, passed);
++    return true;
++}
++
++bool TranslatorVisitor::thumb32_STLEXD(Reg n, Reg t, Reg t2, Reg d) {
++    if (d == Reg::PC || t == Reg::PC || t2 == Reg::PC || n == Reg::PC) {
++        return UnpredictableInstruction();
++    }
++    if (d == n || d == t || d == t2) {
++        return UnpredictableInstruction();
++    }
++
++    const auto address = ir.GetRegister(n);
++    const auto value_lo = ir.GetRegister(t);
++    const auto value_hi = ir.GetRegister(t2);
++    const auto passed = ir.ExclusiveWriteMemory64(address, value_lo, value_hi, IR::AccType::ORDERED);
++    ir.SetRegister(d, passed);
++    return true;
++}
++
+ bool TranslatorVisitor::thumb32_STREXH(Reg n, Reg t, Reg d) {
+     if (d == Reg::PC || t == Reg::PC || n == Reg::PC) {
+         return UnpredictableInstruction();
