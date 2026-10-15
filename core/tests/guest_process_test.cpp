@@ -15,6 +15,14 @@
  * thread (`__libc_get_static_tls_bounds` -> [start, start+0xba8) with the tcb at +0, bionic_tls at +0x2c,
  * libc's own TLS module at +0xb78; start_routine 0; the byte at +0x2c4 is 0). RetroBug registers no TLS
  * module, so its static TLS ends at 0xb78 where the device's continues with libc's 0x30-byte segment.
+ *
+ * Each expectation is tagged with where its value comes from, because only some of them can fail for a
+ * reason outside GuestProcess:
+ *   [libc code]     the guest's own bionic computed it (getauxval, pthread_self, __errno, strtol,
+ *                   __libc_get_static_tls_bounds, __libc_init_common) — independent of the host.
+ *   [image]         a fact of the libc file (llvm-readelf / llvm-objdump), asserted at load as well.
+ *   [device probe]  the device's own main thread, measured by tests/guest/tls_layout_probe.c.
+ *   [host echo]     a value GuestProcess wrote and the test reads back — it checks plumbing, not truth.
  */
 #include <unistd.h>
 
@@ -233,22 +241,22 @@ void boots_the_real_libc(const Images& im, int tier) {
 
   const Call rnd = CallLibc(p, tier, "getauxval", {abi::Value32::U32(kAtRandom)}, "II");
   CHECK_CTX(rnd.ok, rnd.why);
-  CHECK_CTX(rnd.r0 == p.at_random() && rnd.r0 != 0,
+  CHECK_CTX(rnd.r0 == p.at_random() && rnd.r0 != 0,  // [libc code reads what the host published; at_random() itself is host echo]
             "getauxval(AT_RANDOM)=" + Hex(rnd.r0) + " want " + Hex(p.at_random()));
   const Call pg = CallLibc(p, tier, "getauxval", {abi::Value32::U32(kAtPagesz)}, "II");
-  CHECK_CTX(pg.ok && pg.r0 == 4096u, pg.why + " = " + Hex(pg.r0));
+  CHECK_CTX(pg.ok && pg.r0 == 4096u, pg.why + " = " + Hex(pg.r0));  // [libc code: getauxval]
   const Call hw = CallLibc(p, tier, "getauxval", {abi::Value32::U32(kAtHwcap)}, "II");
-  CHECK_CTX(hw.ok && hw.r0 == kHwcap, hw.why + " = " + Hex(hw.r0) + " want " + Hex(kHwcap));
+  CHECK_CTX(hw.ok && hw.r0 == kHwcap, hw.why + " = " + Hex(hw.r0) + " want " + Hex(kHwcap));  // [libc code: getauxval; value is the brief's set, host echo]
 
   // preinit_impl's first store: `str.w r1, [r0, #0x438]` into the globals __loader_shared_globals returned.
-  CHECK_CTX(Word(p, p.shared_globals() + 0x438) != 0, "globals+0x438 still 0: __libc_preinit_impl did not run");
+  CHECK_CTX(Word(p, p.shared_globals() + 0x438) != 0, "globals+0x438 still 0: __libc_preinit_impl did not run");  // [libc code: __libc_preinit_impl's store]
   // __libc_preinit: `ldr r1, [TP, #0x14]; str r1, [__stack_chk_guard]`.
   const std::uint32_t guard = Word(p, p.thread_pointer() + 0x14);
   const auto chk = p.libc()->FindExport("__stack_chk_guard");
   CHECK(chk.has_value());
   CHECK_CTX(guard != 0, "TP+0x14 (the main thread's stack guard) is 0");
   if (chk) {
-    CHECK_CTX(Word(p, chk->addr) == guard,
+    CHECK_CTX(Word(p, chk->addr) == guard,  // [libc code: __libc_preinit's copy]
               "__stack_chk_guard=" + Hex(Word(p, chk->addr)) + " TP+0x14=" + Hex(guard));
   }
 }
@@ -264,12 +272,12 @@ void main_thread_is_real(const Images& im, int tier) {
   CHECK(thread != 0 && tp != 0);
 
   const Call self = CallLibc(p, tier, "pthread_self", {}, "I");
-  CHECK_CTX(self.ok && self.r0 == thread, self.why + " = " + Hex(self.r0) + " want " + Hex(thread));
+  CHECK_CTX(self.ok && self.r0 == thread, self.why + " = " + Hex(self.r0) + " want " + Hex(thread));  // [libc code: pthread_self]
   const Call tid = CallLibc(p, tier, "gettid", {}, "I");
-  CHECK_CTX(tid.ok && tid.r0 == Word(p, thread + 0x8), tid.why + " = " + Hex(tid.r0));
-  CHECK(Word(p, thread + 0x8) == static_cast<std::uint32_t>(GuestProcess::kMainTid));
+  CHECK_CTX(tid.ok && tid.r0 == Word(p, thread + 0x8), tid.why + " = " + Hex(tid.r0));  // [libc code: gettid]
+  CHECK(Word(p, thread + 0x8) == static_cast<std::uint32_t>(GuestProcess::kMainTid));  // [host echo]
   const Call err = CallLibc(p, tier, "__errno", {}, "I");
-  CHECK_CTX(err.ok && err.r0 == thread + 0x29c, err.why + " = " + Hex(err.r0));
+  CHECK_CTX(err.ok && err.r0 == thread + 0x29c, err.why + " = " + Hex(err.r0));  // [libc code: __errno]
 
   // errno round trip through bionic: strtol overflow sets ERANGE (34) via __errno() = thread + 0x29c.
   std::string merr;
@@ -280,29 +288,29 @@ void main_thread_is_real(const Images& im, int tier) {
     p.memory().Write(buf, big, sizeof big);
     const Call r = CallLibc(p, tier, "strtol",
                             {abi::Value32::Ptr(buf), abi::Value32::Ptr(0), abi::Value32::S32(10)}, "ILLI");
-    CHECK_CTX(r.ok && r.r0 == 0x7fff'ffffu, r.why + " = " + Hex(r.r0));
-    CHECK_CTX(Word(p, thread + 0x29c) == 34u, "errno at thread+0x29c = " + Hex(Word(p, thread + 0x29c)));
+    CHECK_CTX(r.ok && r.r0 == 0x7fff'ffffu, r.why + " = " + Hex(r.r0));  // [libc code: strtol]
+    CHECK_CTX(Word(p, thread + 0x29c) == 34u, "errno at thread+0x29c = " + Hex(Word(p, thread + 0x29c)));  // [libc code: errno write]
   }
 
   const auto list = p.libc()->FindLocalSymbol("g_thread_list");
   CHECK(list.has_value());
-  if (list) CHECK_CTX(Word(p, *list) == thread, "g_thread_list head = " + Hex(Word(p, *list)));
+  if (list) CHECK_CTX(Word(p, *list) == thread, "g_thread_list head = " + Hex(Word(p, *list)));  // [libc code: __libc_init_common]
   // The sole entry: next = prev = 0.
-  CHECK_CTX(Word(p, thread + 0x0) == 0 && Word(p, thread + 0x4) == 0,
+  CHECK_CTX(Word(p, thread + 0x0) == 0 && Word(p, thread + 0x4) == 0,  // [libc code + device probe: sole entry]
             "next = " + Hex(Word(p, thread)) + " prev = " + Hex(Word(p, thread + 4)));
-  CHECK(Word(p, tp + 0x4) == thread);                                // TLS_SLOT_THREAD_ID
-  CHECK(Word(p, tp - 0x4) == Word(p, thread + 0x298));               // TLS_SLOT_BIONIC_TLS
-  CHECK(Word(p, thread + 0x2a0) == tp - 0xc);                        // bionic_tcb
-  CHECK(Word(p, thread + 0x30) == 0);                                // start_routine 0: bionic's is_main()
+  CHECK(Word(p, tp + 0x4) == thread);                                // TLS_SLOT_THREAD_ID  // [image + libc code: __init_tcb]
+  CHECK(Word(p, tp - 0x4) == Word(p, thread + 0x298));               // TLS_SLOT_BIONIC_TLS  // [image]
+  CHECK(Word(p, thread + 0x2a0) == tp - 0xc);                        // bionic_tcb  // [image]
+  CHECK(Word(p, thread + 0x30) == 0);                                // start_routine 0: bionic's is_main()  // [device probe]
   std::uint8_t b2c4 = 0xff;
   p.memory().Read(thread + 0x2c4, &b2c4, 1);
-  CHECK_CTX(b2c4 == 0, "byte at +0x2c4 = " + Hex(b2c4) + "; the device's own main thread has 0 there");
-  CHECK(Word(p, thread + 0x10) == 0x4u);                              // attr.flags, as the device's main thread
-  CHECK(p.monitor().clear_child_tid() == thread + 0x8);              // set_tid_address(&main_thread.tid)
+  CHECK_CTX(b2c4 == 0, "byte at +0x2c4 = " + Hex(b2c4) + "; the device's own main thread has 0 there");  // [device probe]
+  CHECK(Word(p, thread + 0x10) == 0x4u);                              // attr.flags, as the device's main thread  // [device probe]
+  CHECK(p.monitor().clear_child_tid() == thread + 0x8);              // set_tid_address(&main_thread.tid)  // [host echo]
   // bionic_tls's temp-buffer pointer (basename/dirname): a writable 0x2000-byte region.
   const std::uint32_t bt = Word(p, thread + 0x298);
   const std::uint32_t bufs = Word(p, bt + 0x414);
-  CHECK_CTX(bufs != 0 && p.memory().ProtAt(bufs) == (mem::kRead | mem::kWrite) &&
+  CHECK_CTX(bufs != 0 && p.memory().ProtAt(bufs) == (mem::kRead | mem::kWrite) &&  // [device probe: scratch at static-TLS end, 0x2000]
                 p.memory().ProtAt(bufs + 0x1fffu) == (mem::kRead | mem::kWrite),
             "bionic_tls+0x414 = " + Hex(bufs));
 }
@@ -315,23 +323,23 @@ void static_tls_fields_match_libc(const Images& im, int tier) {
   if (!b.p) return;
   GuestProcess& p = *b.p;
   const runtime::BionicLayout& l = p.layout();
-  CHECK(l.thread_size == 0x2c8u);
-  CHECK(l.tcb_size == 0x2cu);
-  CHECK(l.tp_offset_in_tcb == 0xcu);
-  CHECK(l.bionic_tls_size == 0xb4cu);
-  CHECK(l.offset_bionic_tcb == 0u);
-  CHECK(l.offset_bionic_tls == 0x2cu);
-  CHECK(l.static_tls_size == 0xb78u);
+  CHECK(l.thread_size == 0x2c8u);  // [image]
+  CHECK(l.tcb_size == 0x2cu);  // [device probe]
+  CHECK(l.tp_offset_in_tcb == 0xcu);  // [image]
+  CHECK(l.bionic_tls_size == 0xb4cu);  // [device probe]
+  CHECK(l.offset_bionic_tcb == 0u);  // [device probe]
+  CHECK(l.offset_bionic_tls == 0x2cu);  // [device probe]
+  CHECK(l.static_tls_size == 0xb78u);  // [derived from the above]
 
   const std::uint32_t g = p.shared_globals();
-  CHECK_CTX(Word(p, g + 0x420) == l.static_tls_size, "+0x420 = " + Hex(Word(p, g + 0x420)));
-  CHECK_CTX(Word(p, g + 0x428) == l.offset_bionic_tcb, "+0x428 = " + Hex(Word(p, g + 0x428)));
-  CHECK_CTX(Word(p, g + 0x42c) == l.offset_bionic_tls, "+0x42c = " + Hex(Word(p, g + 0x42c)));
-  CHECK_CTX(Word(p, g + 0x464) == 0u, "tls_modules count = " + Hex(Word(p, g + 0x464)));
+  CHECK_CTX(Word(p, g + 0x420) == l.static_tls_size, "+0x420 = " + Hex(Word(p, g + 0x420)));  // [host echo of the layout]
+  CHECK_CTX(Word(p, g + 0x428) == l.offset_bionic_tcb, "+0x428 = " + Hex(Word(p, g + 0x428)));  // [host echo]
+  CHECK_CTX(Word(p, g + 0x42c) == l.offset_bionic_tls, "+0x42c = " + Hex(Word(p, g + 0x42c)));  // [host echo]
+  CHECK_CTX(Word(p, g + 0x464) == 0u, "tls_modules count = " + Hex(Word(p, g + 0x464)));  // [host echo]
 
   const std::uint32_t tp = p.thread_pointer();
   const std::uint32_t static_tls = tp - l.tp_offset_in_tcb - l.offset_bionic_tcb;
-  CHECK(Word(p, tp - 4) == static_tls + l.offset_bionic_tls);
+  CHECK(Word(p, tp - 4) == static_tls + l.offset_bionic_tls);  // [host echo]
 
   std::string merr;
   const std::uint32_t out = p.MapFree(mem::kGuestPage, mem::kRead | mem::kWrite, &merr);
@@ -340,8 +348,8 @@ void static_tls_fields_match_libc(const Images& im, int tier) {
     const Call c = CallLibc(p, tier, "__libc_get_static_tls_bounds",
                             {abi::Value32::Ptr(out), abi::Value32::Ptr(out + 4)}, "VLL");
     CHECK_CTX(c.ok, c.why);
-    CHECK_CTX(Word(p, out) == static_tls, "start = " + Hex(Word(p, out)) + " want " + Hex(static_tls));
-    CHECK_CTX(Word(p, out + 4) - Word(p, out) == l.static_tls_size,
+    CHECK_CTX(Word(p, out) == static_tls, "start = " + Hex(Word(p, out)) + " want " + Hex(static_tls));  // [libc code: __libc_get_static_tls_bounds]
+    CHECK_CTX(Word(p, out + 4) - Word(p, out) == l.static_tls_size,  // [libc code]
               "end - start = " + Hex(Word(p, out + 4) - Word(p, out)));
   }
 }
@@ -372,11 +380,11 @@ void find_local_symbol(const Images& im) {
   if (b.p) {
     const loader::GuestModule* libc = b.p->libc();
     const auto st = libc->FindLocalSymbol("__start_thread");
-    CHECK_CTX(st && *st == libc->base + 0x79124u, st ? Hex(*st) : std::string{"nullopt"});
+    CHECK_CTX(st && *st == libc->base + 0x79124u, st ? Hex(*st) : std::string{"nullopt"});  // [image: llvm-readelf -s]
     const auto gl = libc->FindLocalSymbol("g_thread_list");  // `_ZL13g_thread_list`
-    CHECK_CTX(gl && *gl == libc->base + 0xe40bcu, gl ? Hex(*gl) : std::string{"nullopt"});
+    CHECK_CTX(gl && *gl == libc->base + 0xe40bcu, gl ? Hex(*gl) : std::string{"nullopt"});  // [image: llvm-readelf -s]
     const auto pc = libc->FindLocalSymbol("pthread_create");  // a global, also in .symtab
-    CHECK(pc && *pc == libc->FindExport("pthread_create")->addr);
+    CHECK(pc && *pc == libc->FindExport("pthread_create")->addr);  // [image: .dynsym]
     CHECK(!libc->FindLocalSymbol("no_such_symbol_anywhere"));
     // Before constructors the list is empty: it is libc's own __libc_init_common that links the main
     // thread (`__pthread_internal_add(__get_thread())`), not the linker — so not GuestProcess either.

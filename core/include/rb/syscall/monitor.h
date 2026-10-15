@@ -314,6 +314,11 @@ class Monitor {
   void set_clear_child_tid(std::uint32_t at) { clear_child_tid_ = at; }
   [[nodiscard]] std::uint32_t clear_child_tid() const { return clear_child_tid_; }
 
+  /// Anonymous mappings (`mmap2`, a moving or growing `mremap`) are placed only below this guest address,
+  /// whatever the window holds above it: the top of a 4 GiB window carries the runtime's trap and the kuser
+  /// helpers. 0 (the default) means "the window's end".
+  void set_alloc_ceiling(std::uint32_t ceiling) { alloc_ceiling_ = ceiling; }
+
   /// Capture, dispatch, write the result back. This is what an executor's `Syscall` stop hands to.
   Outcome Handle(exec::MachineState& state, std::uint32_t svc_imm);
 
@@ -417,9 +422,12 @@ class Monitor {
   /// Where the next anonymous `mmap2` tries first, so consecutive allocations stay consecutive the
   /// way a real allocator expects its arenas to be.
   std::uint32_t mmap_next_ = 0;
+  std::uint32_t alloc_ceiling_ = 0;  ///< see set_alloc_ceiling; 0 = the window's end
   /// The first page-aligned run of `size` free bytes for an anonymous mapping (`mmap2`, a moving
   /// `mremap`), or 0. A hint is honoured only when aligned and entirely free.
   std::uint32_t FindFreeRun(std::uint32_t hint, std::uint32_t size) const;
+  /// min(window end, alloc ceiling), 64-bit: the first byte no anonymous mapping may reach.
+  std::uint64_t AllocLimit() const;
   std::vector<std::string> notes_;
   std::size_t dropped_notes_ = 0;
   /// Counted at the same site that observes a refusal (`monitor.cpp` `Handle`), so the accessor and the

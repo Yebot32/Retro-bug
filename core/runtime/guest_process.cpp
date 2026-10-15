@@ -58,30 +58,42 @@ const char* ReasonName(exec::StopReason r) {
 // TPIDRURW). Each is checked against this image's own instructions — a Thumb-2 encoding inside the named
 // function — so a different build is a refusal that says which fact moved.
 
-constexpr std::uint32_t kThreadSize = 0x2c8;       // sizeof(pthread_internal_t)
-constexpr std::uint32_t kTpOffsetInTcb = 0xc;      // TP = tcb + 0xc: slots -3..-1 below TLS_SLOT_DTV
-constexpr std::uint32_t kTcbSize = 0x2c;           // 11 slots, -3..7 (TLS_SLOT_ART_THREAD_SELF = 7)
-constexpr std::uint32_t kBionicTlsLastByte = 0xb49;  // bionic_systrace_disabled; then char padding[2]
-constexpr std::uint32_t kBionicTlsSize = 0xb4c;
-constexpr std::uint32_t kStaticTlsAlign = 4;       // alignof(bionic_tcb) == alignof(bionic_tls) == 4
-constexpr std::uint32_t kGlobalsStaticTlsSize = 0x420;
-constexpr std::uint32_t kGlobalsOffsetTcb = 0x428;
-constexpr std::uint32_t kGlobalsOffsetTls = 0x42c;
-constexpr std::uint32_t kGlobalsTlsModuleCount = 0x464;
-/// __allocate_thread_mapping(stack, guard): mmap_size = round(static_tls + stack + guard + 0x3000); the
-/// static TLS sits 0x3000 below the top: 0x2000 of basename/dirname buffers (bionic_tls+0x414) and a
-/// 0x1000 guard page.
-constexpr std::uint32_t kMappingTop = 0x3000;
-constexpr std::uint32_t kPthreadGuard = 0x1000;
+// Two kinds of constant below, and the difference is the point:
+//   [image]  asserted at load against this libc's own instructions (kFacts in VerifyBionicLayout); a
+//            different build is a refusal naming the fact that moved.
+//   [probe]  NOT derivable from libc.so — the linker (ld-android, not libc) computes the static-TLS layout,
+//            so libc's code never states sizeof(bionic_tcb), alignof/sizeof(bionic_tls) or the reservation
+//            order. These are the device's answers for its own main thread, measured by the committed
+//            probe `tests/guest/tls_layout_probe.c` on R52Y106BECZ (it checks each value and exits 1 on a
+//            mismatch; its header says how to run it). Re-run it against any new libc build.
 
-// pthread_internal_t fields (the main thread's are written by the host, as the linker does).
+constexpr std::uint32_t kThreadSize = 0x2c8;          // [image] sizeof(pthread_internal_t)
+constexpr std::uint32_t kTpOffsetInTcb = 0xc;         // [image] TP = tcb + 0xc: slots -3..-1 below TLS_SLOT_DTV
+constexpr std::uint32_t kTcbSize = 0x2c;              // [probe] offset_bionic_tls 0x2c with the tcb at 0: 11 slots
+constexpr std::uint32_t kBionicTlsLastByte = 0xb49;   // [image] bionic_systrace_disabled (a lower bound only)
+constexpr std::uint32_t kBionicTlsSize = 0xb4c;       // [probe] libc's TLS module at align8(0x2c + size) == 0xb78
+constexpr std::uint32_t kStaticTlsAlign = 4;          // [probe] bionic_tls at 0x2c, not 0x30: 4-aligned
+static_assert(kBionicTlsSize > kBionicTlsLastByte, "the probed size must cover the last field the image touches");
+constexpr std::uint32_t kGlobalsStaticTlsSize = 0x420;   // [image]
+constexpr std::uint32_t kGlobalsOffsetTcb = 0x428;       // [image]
+constexpr std::uint32_t kGlobalsOffsetTls = 0x42c;       // [image]
+constexpr std::uint32_t kGlobalsTlsModuleCount = 0x464;  // [image]
+/// [image] __allocate_thread_mapping(stack, guard): mmap_size = round(static_tls + stack + guard + 0x3000);
+/// the static TLS sits 0x3000 below the top: 0x2000 of basename/dirname buffers (bionic_tls+0x414) and a
+/// 0x1000 guard page; the body [base+guard, end-0x1000) is the read/write part.
+constexpr std::uint32_t kMappingTop = 0x3000;
+constexpr std::uint32_t kPthreadGuard = 0x1000;  // [image] PTHREAD_GUARD_SIZE: pthread_create's (0, 0x1000) call
+
+// [image] pthread_internal_t fields (the main thread's are written by the host, as the linker does).
 constexpr std::uint32_t kThNext = 0x0, kThPrev = 0x4, kThTid = 0x8, kThCachedPid = 0xc, kThAttrFlags = 0x10;
 constexpr std::uint32_t kThMmapBase = 0x60, kThMmapSize = 0x64, kThMmapBaseUnguarded = 0x68;
 constexpr std::uint32_t kThMmapSizeUnguarded = 0x6c, kThBionicTls = 0x298, kThBionicTcb = 0x2a0;
-constexpr std::uint32_t kBtTempBuffers = 0x414;    // bionic_tls: basename/dirname scratch (0x2000)
-constexpr std::uint32_t kTcbBionicTls = 0x8;       // slot -1, TP-4
-constexpr std::uint32_t kTcbStackGuard = 0x20;     // slot 5, TP+0x14
-constexpr std::uint32_t kPthreadAttrFlagInherit = 0x4;  // what the device's main thread carries
+constexpr std::uint32_t kBtTempBuffers = 0x414;    // [image] bionic_tls: basename/dirname scratch (0x2000)
+constexpr std::uint32_t kTcbBionicTls = 0x8;       // [image] slot -1, TP-4
+constexpr std::uint32_t kTcbStackGuard = 0x20;     // [image] slot 5, TP+0x14
+/// [probe] the value the device's main thread carries (PTHREAD_ATTR_FLAG_INHERIT); [image] that bit 2 of
+/// attr.flags is what __init_thread tests.
+constexpr std::uint32_t kPthreadAttrFlagInherit = 0x4;
 
 struct Fact {
   const char* fn;     ///< the function whose code states it (a .symtab name)
@@ -137,6 +149,25 @@ std::optional<BionicLayout> VerifyBionicLayout(const mem::GuestMemory& mem, cons
       {"basename", {0xf8d1, 0x4414}, "bionic_tls's temp-buffer pointer at +0x414"},
       {"__init_static_tls", {0xf8d5, 0x0464}, "the TLS module count at shared-globals +0x464"},
       {"__init_static_tls", {0xf8d5, 0x146c}, "the TLS module array at shared-globals +0x46c"},
+      // The pthread_internal_t fields the host writes for the main thread, each where libc's own code puts it.
+      {"pthread_create", {0x68f2, 0x4479, 0xf360, 0x021e, 0x60f2}, "pthread_internal_t::cached_pid_:31 at +0xc (`ldr r2,[r6,#0xc]; bfi r2,r0,#0,#31; str r2,[r6,#0xc]`)"},
+      {"pthread_create", {0xf10b, 0x0110}, "pthread_internal_t::attr copied to +0x10 (`add.w r1, r11, #0x10`)"},
+      {"__init_thread", {0x6920}, "__init_thread reads attr.flags at +0x10 (`ldr r0, [r4, #0x10]`)"},
+      {"__init_thread", {0x0740}, "__init_thread tests attr.flags bit 2, PTHREAD_ATTR_FLAG_INHERIT (`lsls r0, r0, #0x1d`)"},
+      {"pthread_create", {0xf8cb, 0x8060}, "pthread_internal_t::mmap_base at +0x60 (`str.w r8, [r11, #0x60]`)"},
+      {"pthread_create", {0xf8cb, 0x1064}, "pthread_internal_t::mmap_size at +0x64 (`str.w r1, [r11, #0x64]`)"},
+      {"pthread_create", {0xe9cb, 0x171a}, "pthread_internal_t::mmap_base_unguarded/mmap_size_unguarded at +0x68/+0x6c (`strd r1, r7, [r11, #104]`)"},
+      {"__pthread_internal_remove_and_free", {0x6e61}, "the thread's unmap reads mmap_size at +0x64"},
+      {"__pthread_internal_remove_and_free", {0x6e20}, "the thread's unmap reads mmap_base at +0x60"},
+      // The thread mapping's shape, as __allocate_thread_mapping builds it.
+      {"pthread_create", {0x2100, 0xf44f, 0x5280}, "PTHREAD_GUARD_SIZE 0x1000 (`__allocate_thread_mapping(0, 0x1000)`)"},
+      {"__allocate_thread_mapping", {0xf511, 0x5180}, "mapping size adds 0x1000"},
+      {"__allocate_thread_mapping", {0xf511, 0x5100}, "mapping size adds 0x2000 (0x3000 in all above static TLS)"},
+      {"__allocate_thread_mapping", {0xeb07, 0x0806}, "mmap_base_unguarded = mmap_base + guard (`add.w r8, r7, r6`)"},
+      {"__allocate_thread_mapping", {0x1ba8}, "mmap_size_unguarded = mmap_size - guard ... (`subs r0, r5, r6`)"},
+      {"__allocate_thread_mapping", {0xf5a0, 0x5680}, "... - 0x1000, the top guard page (`sub.w r6, r0, #0x1000`)"},
+      {"__allocate_thread_mapping", {0xe9c4, 0x1006}, "the static-TLS end (mapping end - 0x3000) recorded at ThreadMapping+0x1c"},
+      {"pthread_create", {0xf8c1, 0x9414}, "bionic_tls+0x414 = that static-TLS end, the 0x2000 scratch (`str.w r9, [r1, #0x414]`)"},
   };
   for (const Fact& f : kFacts) {
     const loader::LocalSymbol* fn = libc.FindLocalSymbolEntry(f.fn);
@@ -154,8 +185,8 @@ std::optional<BionicLayout> VerifyBionicLayout(const mem::GuestMemory& mem, cons
   l.thread_size = kThreadSize;
   l.tp_offset_in_tcb = kTpOffsetInTcb;
   l.tcb_size = kTcbSize;
-  l.bionic_tls_size = RoundUp(kBionicTlsLastByte + 1u + 2u /* char padding[2] */, kStaticTlsAlign);
-  if (l.bionic_tls_size != kBionicTlsSize) return refuse("sizeof(bionic_tls) did not come out as 0xb4c");
+  // [probe] facts (see the constants): libc.so does not state them; tests/guest/tls_layout_probe.c does.
+  l.bionic_tls_size = kBionicTlsSize;
   // StaticTlsLayout with no executable TLS segment and no module: reserve_exe_segment_and_tcb(nullptr)
   // reserves the tcb at 0, reserve_bionic_tls() follows it, finish_layout() rounds to the alignment.
   l.offset_bionic_tcb = 0;
@@ -238,6 +269,7 @@ std::unique_ptr<GuestProcess> GuestProcess::Create(const GuestProcessOptions& op
   p->monitor_ = std::make_unique<syscall::Monitor>();
   p->monitor_->set_memory(&m);
   p->monitor_->set_ids(kPid, kMainTid);
+  p->monitor_->set_alloc_ceiling(kAllocCeiling);  // mmap2/mremap never place at or above it
   p->abi_->set_monitor(p->monitor_.get());
 
   // The JNIEnv maps its own table and arena from a page-aligned base; a free run is found for it now,

@@ -71,19 +71,25 @@ FIXTURE_STRIPPED="$BUILD/librb_fixture_stripped.so"
 # The guest images the libc/process lanes boot. None is made here: the device's own bionic is pulled off a
 # 32-bit-capable phone (`build/device-libs/`, not in git) and libm/libz come from tools/build-guest-libs.sh.
 # These pushes used to be manual (a stale or missing copy on the device was a lane failing for a reason
-# the tree could not see); a missing input is now a refusal that names the command that makes it.
+# the tree could not see). An input a *gating* lane needs is a refusal that names the command that makes
+# it; an input only an advisory lane needs is a warning, and that lane is skipped rather than run against
+# whatever stale copy the device may still hold.
 DEVICE_LIBC="$ROOT/build/device-libs/libc.so"
-DEVICE_LIBSTDCXX="$ROOT/build/device-libs/libstdc++.so"
 GUEST_LIBM="$ROOT/build/guest-libs/libm.so"
 GUEST_LIBZ="$ROOT/build/guest-libs/libz.so"
 GUEST_APK="$ROOT/build/guest-apk/rb_guestprobe.apk"
 for spec in "$DEVICE_LIBC|adb pull /system/lib/libc.so build/device-libs/libc.so (from a 32-bit-capable device)" \
-            "$DEVICE_LIBSTDCXX|adb pull /system/lib/libstdc++.so build/device-libs/libstdc++.so" \
-            "$GUEST_LIBM|bash tools/build-guest-libs.sh libm" "$GUEST_LIBZ|bash tools/build-guest-libs.sh libz" \
-            "$GUEST_APK|bash tools/build-guest-apk.sh"; do
+            "$GUEST_LIBM|bash tools/build-guest-libs.sh libm" "$GUEST_LIBZ|bash tools/build-guest-libs.sh libz"; do
   in="${spec%%|*}"
   [ -s "$in" ] || { echo "missing $in — this script does not create it. Run: ${spec##*|}" >&2; exit 1; }
 done
+# Only the advisory rb_guest_apk_tests cannot run without the probe APK (rb_guest_libc_tests reads it
+# optionally and says so when it is absent).
+if [ ! -s "$GUEST_APK" ]; then
+  echo "WARNING: missing $GUEST_APK (run: bash tools/build-guest-apk.sh) — skipping the advisory" \
+       "rb_guest_apk_tests" >&2
+  ADVISORY="${ADVISORY/rb_guest_apk_tests/}"
+fi
 
 # C06's fixture: two libraries with a real DT_NEEDED edge and a constructor each, built `-nostdlib` so
 # the chain under test is two modules and not libc wearing a hat. `-Wl,-soname` is what makes the
@@ -171,10 +177,9 @@ adb push "$(to_host "$IFLIBC")" /data/local/tmp/librbifunclibc.so >/dev/null
 adb push "$(to_host "$WEAK")" /data/local/tmp/librbweak.so >/dev/null
 adb push "$(to_host "$FIXTURE_STRIPPED")" /data/local/tmp/librb_fixture_stripped.so >/dev/null
 adb push "$(to_host "$DEVICE_LIBC")" /data/local/tmp/rb_device_libc.so >/dev/null
-adb push "$(to_host "$DEVICE_LIBSTDCXX")" /data/local/tmp/rb_device_libstdcxx.so >/dev/null
 adb push "$(to_host "$GUEST_LIBM")" /data/local/tmp/libm.so >/dev/null
 adb push "$(to_host "$GUEST_LIBZ")" /data/local/tmp/libz.so >/dev/null
-adb push "$(to_host "$GUEST_APK")" /data/local/tmp/rb_guestprobe.apk >/dev/null
+if [ -s "$GUEST_APK" ]; then adb push "$(to_host "$GUEST_APK")" /data/local/tmp/rb_guestprobe.apk >/dev/null; fi
 for t in $SUITES $ADVISORY; do
   src="$BUILD/core/tests/$t"
   [ -f "$src" ] || src="$BUILD/external/dynarmic/tests/$t"

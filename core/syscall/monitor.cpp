@@ -321,28 +321,36 @@ std::string Monitor::TallyText() const {
   return out.empty() ? std::string{"(nothing yet)"} : out;
 }
 
+std::uint64_t Monitor::AllocLimit() const {
+  const std::uint64_t window = memory_->window_bytes();
+  return alloc_ceiling_ != 0 ? std::min<std::uint64_t>(window, alloc_ceiling_) : window;
+}
+
 std::uint32_t Monitor::FindFreeRun(std::uint32_t hint, std::uint32_t size) const {
   // The scan starts where the last anonymous mapping landed, so consecutive arenas stay consecutive,
   // then wraps to the base; a hint is honoured only when page-aligned and entirely free, which is the
   // kernel's own rule for a hint it is allowed to ignore. The base is one guest page in —
   // window-agnostic on purpose, because the model's window is 64 MiB on the launcher and a few pages
   // wide in tests, and a base tuned to one of them is a base the other cannot allocate above.
-  constexpr std::uint32_t kHeapBase = 0x0000'1000u;
-  const auto free_run = [&](std::uint32_t cand) {
-    if (cand < kHeapBase || static_cast<std::uint64_t>(cand) + size > memory_->window_bytes()) return false;
-    for (std::uint32_t pg = cand; pg < cand + size; pg += mem::kGuestPage) {
-      if (memory_->IsMapped(pg)) return false;
+  //
+  // All bounds are 64-bit and end at `AllocLimit()`: a 4 GiB window's size is 0 as a uint32, which made a
+  // 32-bit limit refuse every allocation, and `cand + size` wraps at the top of the space.
+  constexpr std::uint64_t kHeapBase = 0x0000'1000u;
+  const std::uint64_t limit = AllocLimit();
+  const auto free_run = [&](std::uint64_t cand) {
+    if (cand < kHeapBase || cand + size > limit) return false;
+    for (std::uint64_t pg = cand; pg < cand + size; pg += mem::kGuestPage) {
+      if (memory_->IsMapped(static_cast<std::uint32_t>(pg))) return false;
     }
     return true;
   };
   if (hint != 0 && (hint & (mem::kGuestPage - 1u)) == 0 && free_run(hint)) return hint;
-  const std::uint32_t start = mmap_next_ >= kHeapBase ? mmap_next_ : kHeapBase;
-  const std::uint32_t limit = static_cast<std::uint32_t>(memory_->window_bytes());
-  for (std::uint32_t cand = start; cand + size <= limit; cand += mem::kGuestPage) {
-    if (free_run(cand)) return cand;
+  const std::uint64_t start = mmap_next_ >= kHeapBase ? mmap_next_ : kHeapBase;
+  for (std::uint64_t cand = start; cand + size <= limit; cand += mem::kGuestPage) {
+    if (free_run(cand)) return static_cast<std::uint32_t>(cand);
   }
-  for (std::uint32_t cand = kHeapBase; cand + size <= start && cand + size <= limit; cand += mem::kGuestPage) {
-    if (free_run(cand)) return cand;
+  for (std::uint64_t cand = kHeapBase; cand + size <= start && cand + size <= limit; cand += mem::kGuestPage) {
+    if (free_run(cand)) return static_cast<std::uint32_t>(cand);
   }
   return 0;
 }
@@ -941,9 +949,10 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
         return Outcome::Emulated(static_cast<std::int32_t>(old_at), call + " -> 0x" + Hex(old_at) + " (in place)");
       }
       // Grow in place when every page after the old end is free and inside the window.
-      bool tail_free = static_cast<std::uint64_t>(old_at) + new_size <= memory_->window_bytes();
-      for (std::uint32_t pg = old_at + old_size; tail_free && pg < old_at + new_size; pg += mem::kGuestPage) {
-        if (memory_->IsMapped(pg)) tail_free = false;
+      bool tail_free = static_cast<std::uint64_t>(old_at) + new_size <= AllocLimit();
+      for (std::uint64_t pg = std::uint64_t{old_at} + old_size; tail_free && pg < std::uint64_t{old_at} + new_size;
+           pg += mem::kGuestPage) {
+        if (memory_->IsMapped(static_cast<std::uint32_t>(pg))) tail_free = false;
       }
       if (tail_free) {
         if (!memory_->Map(old_at + old_size, new_size - old_size, prot, &merr)) {
