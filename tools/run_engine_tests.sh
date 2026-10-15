@@ -132,6 +132,13 @@ CTORFAULT="$BUILD/librbctorfault.so"
   -mthumb -mfloat-abi=softfp -mfpu=neon -fPIC -shared -nostdlib -Os \
   -Wl,-soname,librbctorfault.so -o "$CTORFAULT" "$ROOT/tests/corpus/ctor_fault.c"
 
+# M2 Task 4: guest pthreads. Built exactly as tools/run_pthread_oracle.sh builds the copy it runs natively
+# (keep the two lines in step), linked against the NDK stub libc for its DT_NEEDED.
+PTHREAD_FIXTURE="$BUILD/libpthread_fixture.so"
+"$TC/bin/clang.exe" --target=armv7-none-linux-androideabi26 --sysroot="$TC/sysroot" \
+  -mthumb -mfloat-abi=softfp -mfpu=neon -fPIC -shared -nostdlib -Os \
+  -Wl,-soname,libpthread_fixture.so -o "$PTHREAD_FIXTURE" "$ROOT/tests/corpus/pthread_fixture.c" -lc
+
 # MSYS hands native programs /c/... paths and converts them on the way out — which is wrong for the
 # *device* path in `adb push a /data/local/tmp/b`, hence the MSYS_NO_PATHCONV=1 on every adb call
 # below. That switch also stops the conversion of the **local** path, so adb.exe is then handed a
@@ -182,6 +189,8 @@ adb push "$(to_host "$IFUSER")" /data/local/tmp/librbifuncuser.so >/dev/null
 adb push "$(to_host "$IFLIBC")" /data/local/tmp/librbifunclibc.so >/dev/null
 adb push "$(to_host "$WEAK")" /data/local/tmp/librbweak.so >/dev/null
 adb push "$(to_host "$CTORFAULT")" /data/local/tmp/librbctorfault.so >/dev/null
+adb push "$(to_host "$PTHREAD_FIXTURE")" /data/local/tmp/libpthread_fixture.so >/dev/null
+adb push "$(to_host "$ROOT/tests/corpus/oracle-pthread.txt")" /data/local/tmp/oracle-pthread.txt >/dev/null
 adb push "$(to_host "$FIXTURE_STRIPPED")" /data/local/tmp/librb_fixture_stripped.so >/dev/null
 adb push "$(to_host "$DEVICE_LIBC")" /data/local/tmp/rb_device_libc.so >/dev/null
 adb push "$(to_host "$GUEST_LIBM")" /data/local/tmp/libm.so >/dev/null

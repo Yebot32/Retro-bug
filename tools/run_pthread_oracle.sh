@@ -65,5 +65,8 @@ esac
        "libc_md5=$(adb shell md5sum /system/lib/libc.so | awk '{print $1}' | tr -d '\r')"
   echo "# built from $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo 'uncommitted tree') $(date -Is)"
   echo "$rows" | grep -v '^rc='
+  # The process-ending row: exit_group from a thread while the caller is parked in pthread_join.
+  eg="$(adb shell "LD_LIBRARY_PATH=$DIR $DIR/pthread_oracle exit_group 7; echo rc=\$?" | tr -d '\r' | sed -n 's/^rc=//p')"
+  echo "pt_exit_group_from_thread(7):rc=$eg"
 } > "$OUT"
 cat "$OUT"

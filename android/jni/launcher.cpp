@@ -1071,6 +1071,13 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
     gl_calls.push_back(GlEntry{name, 0});
     // The name is captured by value and the counter is reached by index, so a later `push_back` moving
     // the vector cannot leave this closure counting into freed memory.
+    //
+    // Bound `kHoldsGgl` (M2 Task 4, ruling i): no part of a forwarded GL call is pure host work. The driver
+    // dereferences guest memory through translated pointers — the call's own pointer arguments, and client
+    // arrays an earlier `gl*Pointer` registered, which `glDrawArrays` reads with no pointer argument at all —
+    // and the counters and `gl_forward_fail` are run state. With the GGL released another guest thread could
+    // munmap/mprotect (rebalance) those pages mid-read. A GL call never waits on another guest thread, so
+    // holding the lock cannot deadlock; it only serializes GL with guest code, as one GL context does anyway.
     ctx.Bind(slot, [&gl_calls, &gl_forward, &gl_live, &gl_forward_fail, mem, gl_strings, gl_empty, index,
                     name](exec::MachineState& s, std::string*) {
       ++gl_calls[index].calls;
@@ -1086,7 +1093,7 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
       const bool parsed_by_the_game = s.r[0] == kGlVendor || s.r[0] == kGlRenderer || s.r[0] == kGlVersion;
       s.r[0] = wants_a_string ? (parsed_by_the_game ? gl_strings : gl_empty) : 0u;
       return true;
-    });
+    }, abi::AbiContext::SlotLock::kHoldsGgl);
     return ctx.SlotFor(slot);
   };
 
@@ -1683,6 +1690,9 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
         // By index, not reference: the nested jniTextureReady may queue more textures and reallocate.
         const auto deliver = [&](std::size_t idx) {
           TexAsk t = textures[idx];
+          // Ruling iv (M2 Task 4): the name is written into guest memory and the env called under the GGL —
+          // once guest threads exist, one may be running (and remapping) while this host code runs.
+          rb::runtime::Ggl::Held guest_lock(ctx.ggl());
           // jniTextureReady(String name, int glTexture, int w, int h) on the surface object; the raw form
           // would hand RGBA pixels this build does not decode, so it is reported rather than faked.
           if (t.raw) {
@@ -1780,7 +1790,7 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
                [&](abi::JniEnv& env, const std::vector<std::uint64_t>& a, std::uint64_t& ret, std::string* e) {
                  std::string name;
                  if (a.size() != 2 || !env.StringText(static_cast<abi::GuestAddr>(a[0]), name, e)) return false;
-                 const auto* bytes = env.HostArray(static_cast<abi::GuestAddr>(a[1]));
+                 const auto bytes = env.HostArray(static_cast<abi::GuestAddr>(a[1]));
                  databank[name] = bytes != nullptr ? *bytes : std::vector<std::uint8_t>{};
                  ret = 0;
                  return true;
@@ -1938,6 +1948,7 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
         const abi::GuestAddr scene_slot = app.base + 0xa5224u + 4u;  // Game::getCurrentGame's `current`
         const auto scene_name = [&](std::uint32_t obj) -> std::string {
           std::uint32_t vptr = 0;
+          rb::runtime::Ggl::Held g(ctx.ggl());  // reads guest memory: other guest threads may be running
           if (obj == 0 || !mem->Read(obj, &vptr, 4)) return obj == 0 ? "none" : "unreadable";
           for (const loader::Symbol& s : app.exports) {
             if (s.defined && s.value == vptr - 8u && s.name.compare(0, 4, "_ZTV") == 0) {
@@ -1988,7 +1999,7 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
               ++touch_lines;
               idle_since = std::chrono::steady_clock::now();
               std::uint32_t before = 0;
-              mem->Read(scene_slot, &before, 4);
+              { rb::runtime::Ggl::Held g(ctx.ggl()); mem->Read(scene_slot, &before, 4); }
               o = step("jniTouch", "V",
                        {abi::Value32::S32(t.x), abi::Value32::S32(t.y), abi::Value32::S32(t.action)}, kCallBudget);
               if (!alive) break;
@@ -2012,7 +2023,7 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
           }
           ++frames;
           std::uint32_t now_scene = 0;
-          mem->Read(scene_slot, &now_scene, 4);
+          { rb::runtime::Ggl::Held g(ctx.ggl()); mem->Read(scene_slot, &now_scene, 4); }
           if (f % 10 == 0) {  // the screen's live line; the report keeps only switches and samples
             SetProgress("gumball frame " + std::to_string(f) + " of " + std::to_string(kFrames) + " on tier " +
                         run_tier + " - scene " + scene_name(now_scene) + ", " + std::to_string(gl_total()) +
@@ -2057,6 +2068,7 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
         // for its image (`mm_splash_cn.png`, index next+0x84). These are the facts that say why a frame
         // draws nothing. `checkUnclaimedTexturesFor` is the game's own by-name lookup of delivered textures.
         {
+          rb::runtime::Ggl::Held guest_lock(ctx.ggl());  // guest reads/writes + calls below (ruling i/iv)
           const abi::GuestAddr scene = app.base + 0xa5224u;
           std::uint32_t next = 0, current = 0;
           mem->Read(scene, &next, 4);
@@ -2135,7 +2147,7 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
         // thing this build does not do yet. Without it the report ended on a list of weak symbols and read
         // as a failure on a run that had reached the main menu without a fault.
         std::uint32_t final_scene = 0;
-        mem->Read(scene_slot, &final_scene, 4);
+        { rb::runtime::Ggl::Held g(ctx.ggl()); mem->Read(scene_slot, &final_scene, 4); }
         if (stop_note.empty()) {
           if (egl) {
             Say(&out, "RESULT: ran to the end — %u frame(s) on tier %s, final scene %s, no fault, drawn on screen"

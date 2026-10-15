@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstring>
 #include <random>
+#include <system_error>
 
 #include "rb/linker/guest_linker.h"
 
@@ -214,7 +215,7 @@ std::optional<BionicLayout> VerifyBionicLayout(const mem::GuestMemory& mem, cons
 
 // ------------------------------------------------------------------------------------ GuestProcess
 
-GuestProcess::~GuestProcess() = default;
+GuestProcess::~GuestProcess() { StopThreads(); }
 
 void GuestProcess::Log(const std::string& line) const {
   if (opts_.log) opts_.log(line);
@@ -272,6 +273,12 @@ std::unique_ptr<GuestProcess> GuestProcess::Create(const GuestProcessOptions& op
   p->monitor_->set_ids(kPid, kMainTid);
   p->monitor_->set_alloc_ceiling(kAllocCeiling);  // mmap2/mremap never place at or above it
   p->abi_->set_monitor(p->monitor_.get());
+  // Guest threads (Task 4): futex waits park on this process's table, and `clone` starts a host thread here.
+  p->monitor_->set_futex_table(&p->futex_);
+  {
+    GuestProcess* owner = p.get();
+    p->monitor_->set_thread_spawner([owner](std::unique_ptr<GuestThread> t) { return owner->Spawn(std::move(t)); });
+  }
 
   // The JNIEnv maps its own table and arena from a page-aligned base; a free run is found for it now,
   // before any module is placed.
@@ -423,6 +430,8 @@ bool GuestProcess::LoadScope(const std::vector<std::uint8_t>& libc, const std::v
   // caller's own later calls) runs there; another host thread must be bound to its own GuestThread (or, for
   // a caller that boots on one thread and continues on another, rebind the main thread under its own lock).
   runtime::BindCurrentHostThread(abi_->main_thread());
+  // Everything below writes guest memory and the module list, which the GGL protects (Task 3 ruling iii).
+  Ggl::Held hold(abi_->ggl());
 
   // The linker's shared globals (zeroed, two pages: libc writes up to +0x564) and the function that
   // returns them, `__loader_shared_globals`, as twelve bytes of ARM:
@@ -596,6 +605,9 @@ bool GuestProcess::SetUpMainThread(std::string* err) {
 
 const loader::GuestModule* GuestProcess::LoadApp(const std::vector<std::uint8_t>& image,
                                                  const std::string& soname, std::string* err) {
+  // Loading maps and relocates guest memory and runs IFUNC resolvers: GGL-protected state, and once guest
+  // threads exist another one may be running (Task 3 ruling iii).
+  Ggl::Held hold(abi_->ggl());
   if (!scope_loaded_) {
     if (err) *err = "LoadApp(" + soname + "): the scope is not loaded";
     return nullptr;
@@ -608,6 +620,7 @@ const loader::GuestModule* GuestProcess::LoadApp(const std::vector<std::uint8_t>
 }
 
 bool GuestProcess::RunConstructors(std::string* failed) {
+  Ggl::Held hold(abi_->ggl());  // the module list and ctor bookkeeping are GGL-protected (Task 3 ruling iii)
   if (!scope_loaded_) {
     if (failed) *failed = "the scope is not loaded";
     return false;
@@ -651,6 +664,105 @@ bool GuestProcess::RunConstructors(std::string* failed) {
   }
   Log("constructors: " + std::to_string(ctors_run_) + " ran on Tier " + (opts_.ctor_tier == 2 ? "J" : "I"));
   return true;
+}
+
+// ------------------------------------------------------------------------------------ guest threads (Task 4)
+
+std::string GuestProcess::Spawn(std::unique_ptr<GuestThread> t) {
+  // Called by the monitor's `clone` with the GGL held: the new host thread binds its GuestThread and then
+  // waits for the GGL, so it runs no guest code before the parent's clone has returned and released it.
+  std::lock_guard<std::mutex> lk(threads_mu_);
+  ReapLocked();
+  auto rec = std::make_unique<HostThread>();
+  rec->guest = std::move(t);
+  HostThread* raw = rec.get();
+  try {
+    rec->host = std::thread([this, raw] { ThreadMain(raw); });
+  } catch (const std::system_error& e) {
+    return std::string{"the host could not start a thread: "} + e.what();
+  }
+  threads_.push_back(std::move(rec));
+  threads_started_.fetch_add(1, std::memory_order_relaxed);
+  return {};
+}
+
+void GuestProcess::ThreadMain(HostThread* rec) {
+  GuestThread& t = *rec->guest;
+  BindCurrentHostThread(t);
+  exec::RunResult rr{};
+  // Re-entered while the turn's budget (or the per-turn syscall cap) runs out: a guest thread runs until it
+  // calls `exit`, stops with the process, or faults.
+  for (;;) {
+    rr = abi_->RunThread(t, kThreadTurnBudget);
+    if (rr.reason == exec::StopReason::Budget && !monitor_->group_exited()) continue;
+    break;
+  }
+  if (rr.reason != exec::StopReason::Exited) {
+    // A fault or a refusal that stopped a guest thread ends the process, as a fatal signal in one thread
+    // does on a device — the other threads must not carry on around a dead one (a joiner would wait forever).
+    const std::string why = "guest thread tid " + std::to_string(t.tid) + " stopped: " + ReasonName(rr.reason) +
+                            (rr.detail.empty() ? "" : " (" + rr.detail + ")") + " at pc " + Hex(t.state.pc) +
+                            " lr " + Hex(t.state.r[14]);
+    {
+      std::lock_guard<std::mutex> lk(threads_mu_);
+      thread_faults_.push_back(why);
+    }
+    Ggl::Held hold(abi_->ggl());  // the log callback and the monitor are GGL-protected
+    Log("threads: " + why + " — the process stops with it");
+    monitor_->RequestGroupExit(why);
+  }
+  UnbindCurrentHostThread();
+  rec->done.store(true, std::memory_order_release);
+}
+
+void GuestProcess::ReapLocked() {
+  for (auto it = threads_.begin(); it != threads_.end();) {
+    if ((*it)->done.load(std::memory_order_acquire)) {
+      if ((*it)->host.joinable()) (*it)->host.join();  // past its last statement: returns at once
+      it = threads_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+std::size_t GuestProcess::running_threads() const {
+  std::lock_guard<std::mutex> lk(threads_mu_);
+  std::size_t n = 0;
+  for (const auto& r : threads_) n += r->done.load(std::memory_order_acquire) ? 0 : 1;
+  return n;
+}
+
+bool GuestProcess::WaitForThreads(std::chrono::milliseconds limit) {
+  const auto until = std::chrono::steady_clock::now() + limit;
+  for (;;) {
+    if (running_threads() == 0) return true;
+    if (std::chrono::steady_clock::now() >= until) return false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+}
+
+std::vector<std::string> GuestProcess::thread_faults() const {
+  std::lock_guard<std::mutex> lk(threads_mu_);
+  return thread_faults_;
+}
+
+void GuestProcess::StopThreads() {
+  if (threads_started_.load(std::memory_order_relaxed) == 0) return;
+  // Every guest thread stops at its next check and every parked one is woken; then their host threads are
+  // joined. The caller does not hold the GGL (it is a destructor), so they can take it to reach that check.
+  if (monitor_ != nullptr) monitor_->RequestGroupExit("the guest process is being destroyed");
+  futex_.Shutdown();
+  // A barrier: a `clone` that was mid-way (GGL held) has finished adding its thread before the list is taken.
+  if (abi_ != nullptr) Ggl::Held barrier(abi_->ggl());
+  std::list<std::unique_ptr<HostThread>> all;
+  {
+    std::lock_guard<std::mutex> lk(threads_mu_);
+    all.swap(threads_);
+  }
+  for (auto& r : all) {
+    if (r->host.joinable()) r->host.join();
+  }
 }
 
 }  // namespace rb::runtime

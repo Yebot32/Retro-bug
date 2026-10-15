@@ -126,4 +126,12 @@ target_compile_definitions(rb_guest_process_tests PRIVATE
 # cmpxchg, slice preemption, the GGL released around host calls and blocking syscalls). Gating; every row has
 # a watchdog that names a hang instead of hanging the run.
 add_executable(rb_guest_thread_tests guest_thread_test.cpp)
-target_link_libraries(rb_guest_thread_tests PRIVATE rb_abi rb_exec rb_syscall rb_guest_thread rb_mem)
+# M2 Task 4 adds guest pthreads on a GuestProcess: the device libc + libpthread_fixture.so, compared with the
+# native oracle tests/corpus/oracle-pthread.txt (all pushed by tools/run_engine_tests.sh).
+target_link_libraries(rb_guest_thread_tests PRIVATE rb_runtime rb_abi rb_exec rb_syscall rb_guest_thread rb_mem)
+target_compile_definitions(rb_guest_thread_tests PRIVATE
+  RB_DEVICE_LIBC_PATH="/data/local/tmp/rb_device_libc.so"
+  RB_GUEST_LIBM_PATH="/data/local/tmp/libm.so"
+  RB_GUEST_LIBZ_PATH="/data/local/tmp/libz.so"
+  RB_PTHREAD_FIXTURE_PATH="/data/local/tmp/libpthread_fixture.so"
+  RB_PTHREAD_ORACLE_PATH="/data/local/tmp/oracle-pthread.txt")

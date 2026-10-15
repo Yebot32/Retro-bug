@@ -10,6 +10,8 @@
  * The row list is the contract between the two: a row name is the call exactly as written here.
  */
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 int pt_create_join(int n);
 int pt_mutex_contend(int threads, int iters);
@@ -18,8 +20,13 @@ int pt_keys_and_destructors(void);
 int pt_detached(int n);
 int pt_once(void);
 int pt_errno_per_thread(void);
+int pt_timeouts(void);
+int pt_sleeps(void);
+int pt_exit_group_from_thread(int code);
 
-int main(void) {
+int main(int argc, char** argv) {
+  // `exit_group <code>`: the process must end with <code> from another thread (the script records rc).
+  if (argc == 3 && strcmp(argv[1], "exit_group") == 0) return pt_exit_group_from_thread(atoi(argv[2]));
   printf("pt_create_join(8)=%d\n", pt_create_join(8));
   printf("pt_mutex_contend(2,100000)=%d\n", pt_mutex_contend(2, 100000));
   printf("pt_mutex_contend(4,2000)=%d\n", pt_mutex_contend(4, 2000));
@@ -28,5 +35,7 @@ int main(void) {
   printf("pt_detached(8)=%d\n", pt_detached(8));
   printf("pt_once()=%d\n", pt_once());
   printf("pt_errno_per_thread()=%d\n", pt_errno_per_thread());
+  printf("pt_timeouts()=%d\n", pt_timeouts());
+  printf("pt_sleeps()=%d\n", pt_sleeps());
   return 0;
 }

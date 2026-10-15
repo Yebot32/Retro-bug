@@ -63,8 +63,9 @@ target_link_libraries(rb_exec PUBLIC rb_isa rb_mem)
 # rb::runtime's thread context (M2): `GuestThread` (one guest thread's registers, stack and per-thread
 # kernel state) and its host-thread binding, plus the header-only Global Guest Lock (rb/runtime/ggl.h). It
 # lives below the bridge and the monitor because both read a thread's fields; the rest of rb::runtime
-# (GuestProcess) composes everything and stays on top.
-add_library(rb_guest_thread STATIC runtime/guest_thread.cpp)
+# (GuestProcess) composes everything and stays on top. Also the futex table (M2 Task 4): the monitor parks
+# futex waiters on it, and GuestProcess owns one per process.
+add_library(rb_guest_thread STATIC runtime/guest_thread.cpp runtime/futex_table.cpp)
 target_compile_features(rb_guest_thread PUBLIC cxx_std_20)
 target_link_libraries(rb_guest_thread PUBLIC rb_exec)
 

@@ -19,6 +19,8 @@
 #include <pthread.h>
 #include <sched.h>
 #include <stdint.h>
+#include <time.h>
+#include <unistd.h>
 
 #define MAX_THREADS 16
 
@@ -265,4 +267,99 @@ __attribute__((visibility("default"))) int pt_errno_per_thread(void) {
   const int main_ok = errno == 77 ? 10 : 0;
   pthread_barrier_destroy(&g_errno_barrier);
   return ok + main_ok;
+}
+
+/* ---- pt_timeouts: the timed waits time out. A condvar nobody signals, waited on for 50 ms (absolute
+ * CLOCK_REALTIME deadline: futex WAIT_BITSET | CLOCK_REALTIME), and a mutex another thread holds, timed-locked
+ * for 50 ms. Result: 1000 * cond_timedwait's return + mutex_timedlock's (110110: ETIMEDOUT twice). */
+static pthread_mutex_t g_to_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_to_held = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_to_cv = PTHREAD_COND_INITIALIZER;
+
+static struct timespec in_ms(clockid_t clock, int ms) {
+  struct timespec ts;
+  clock_gettime(clock, &ts);
+  ts.tv_nsec += (long)ms * 1000000L;
+  while (ts.tv_nsec >= 1000000000L) {
+    ts.tv_nsec -= 1000000000L;
+    ts.tv_sec += 1;
+  }
+  return ts;
+}
+
+static void* timedlocker(void* arg) {
+  (void)arg;
+  const struct timespec ts = in_ms(CLOCK_REALTIME, 50);
+  const int rc = pthread_mutex_timedlock(&g_to_held, &ts);
+  if (rc == 0) pthread_mutex_unlock(&g_to_held);
+  return (void*)(intptr_t)rc;
+}
+
+__attribute__((visibility("default"))) int pt_timeouts(void) {
+  pthread_mutex_lock(&g_to_mu);
+  const struct timespec ts = in_ms(CLOCK_REALTIME, 50);
+  const int rc1 = pthread_cond_timedwait(&g_to_cv, &g_to_mu, &ts);
+  pthread_mutex_unlock(&g_to_mu);
+  pthread_mutex_lock(&g_to_held);
+  pthread_t t;
+  if (pthread_create(&t, 0, timedlocker, 0) != 0) return -2;
+  void* r = 0;
+  if (pthread_join(t, &r) != 0) return -3;
+  pthread_mutex_unlock(&g_to_held);
+  return rc1 * 1000 + (int)(intptr_t)r;
+}
+
+/* ---- pt_sleeps: nanosleep, usleep, relative and absolute clock_nanosleep and sched_yield all return 0 (one
+ * each: 5), and the monotonic clock advanced by at least the 25 ms asked for (+10). Result 15. */
+__attribute__((visibility("default"))) int pt_sleeps(void) {
+  struct timespec t0, t1;
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  int ok = 0;
+  const struct timespec ten = {0, 10 * 1000000L};
+  ok += nanosleep(&ten, 0) == 0;
+  ok += usleep(5000) == 0;
+  const struct timespec five = {0, 5 * 1000000L};
+  ok += clock_nanosleep(CLOCK_MONOTONIC, 0, &five, 0) == 0;
+  const struct timespec until = in_ms(CLOCK_MONOTONIC, 5);
+  ok += clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &until, 0) == 0;
+  ok += sched_yield() == 0;
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  const long long ms = (long long)(t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+  return ok + (ms >= 25 ? 10 : 0);
+}
+
+/* ---- pt_exit_group_from_thread: one thread parks forever on a condvar, one spins forever with no syscall,
+ * and a third calls _exit(code) (exit_group) after 20 ms, while the caller is parked in pthread_join on the
+ * first. Never returns: the process ends with `code`, and every thread with it. Not part of the numeric
+ * oracle run (it ends the process); the oracle records its exit status separately. */
+static pthread_mutex_t g_eg_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_eg_cv = PTHREAD_COND_INITIALIZER;
+static volatile unsigned g_spins;
+
+static void* parked_forever(void* arg) {
+  (void)arg;
+  pthread_mutex_lock(&g_eg_mu);
+  for (;;) pthread_cond_wait(&g_eg_cv, &g_eg_mu);
+  return 0;
+}
+
+static void* spin_forever(void* arg) {
+  (void)arg;
+  for (;;) ++g_spins;
+  return 0;
+}
+
+static void* exit_soon(void* arg) {
+  usleep(20000);
+  _exit((int)(intptr_t)arg);
+  return 0;
+}
+
+__attribute__((visibility("default"))) int pt_exit_group_from_thread(int code) {
+  pthread_t a, b, c;
+  if (pthread_create(&a, 0, parked_forever, 0) != 0) return -2;
+  if (pthread_create(&b, 0, spin_forever, 0) != 0) return -2;
+  if (pthread_create(&c, 0, exit_soon, (void*)(intptr_t)code) != 0) return -2;
+  pthread_join(a, 0);
+  return -1;
 }

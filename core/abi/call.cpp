@@ -485,6 +485,14 @@ exec::RunResult AbiContext::RunThread(runtime::GuestThread& thread, unsigned bud
   unsigned held = 0;  ///< progress under the current hold of the GGL (Tier I: IR steps) — the slice clock
   unsigned syscalls = 0;
   for (;;) {
+    // `exit_group` on another thread (or a fatal fault in one, or the process's teardown) ends this one too: it
+    // stops here, at its next slice boundary, syscall or host call, instead of running guest code in a process
+    // that has finished (Review Focus: no host thread is left running guest code).
+    if (monitor_ != nullptr && monitor_->group_exited()) {
+      run.reason = exec::StopReason::Exited;
+      run.detail = "the guest process exited (" + monitor_->group_exit_reason() + "); this thread stopped with it";
+      break;
+    }
     if (held >= kSliceSteps) {
       // The slice boundary: hand the GGL to the longest waiter (the lock is a FIFO ticket lock, so this
       // thread queues behind it), then carry on. State is consistent here — the executor stopped on a
@@ -547,6 +555,12 @@ exec::RunResult AbiContext::RunThread(runtime::GuestThread& thread, unsigned bud
         run.reason = exec::StopReason::Exited;
         run.detail = o.detail;
         exit_status_ = o.r0;
+        break;
+      }
+      if (o.verdict == syscall::Verdict::kThreadExit) {
+        // `exit` (1): this guest thread is finished; the process and its other threads carry on.
+        run.reason = exec::StopReason::Exited;
+        run.detail = o.detail;
         break;
       }
       continue;

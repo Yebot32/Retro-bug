@@ -69,8 +69,14 @@
 #include <utility>
 #include <vector>
 
+#include <atomic>
+#include <memory>
+#include <mutex>
+#include <set>
+
 #include "rb/diag/diag.h"
 #include "rb/exec/machine_state.h"
+#include "rb/runtime/futex_table.h"
 #include "rb/runtime/guest_thread.h"
 
 namespace rb::mem {
@@ -99,6 +105,8 @@ constexpr std::int32_t kMaxErrno = 4095;
 /// Guest-side numbers, from the `arm-eabi` column of `tests/corpus/syscall-abi-map.txt`. Only the ones
 /// this file actually uses are given a name; the rest are deliberately not a copy of a kernel header.
 namespace nr {
+/// `exit`: ends the calling *thread* (bionic's `__exit`, reached from `pthread_exit`); `exit_group` ends the process.
+constexpr std::uint32_t kExit = 1;
 constexpr std::uint32_t kRead = 3;
 constexpr std::uint32_t kWrite = 4;
 constexpr std::uint32_t kClose = 6;
@@ -113,6 +121,8 @@ constexpr std::uint32_t kIoctl = 54;
 constexpr std::uint32_t kGettimeofday = 78;
 constexpr std::uint32_t kMunmap = 91;
 constexpr std::uint32_t kFstat = 108;  ///< the 32-bit-time `stat`; bionic does not use it
+/// `clone`: bionic's `__bionic_clone` (r7 = 120, measured in the tablet libc). Only `pthread_create`'s flags are served.
+constexpr std::uint32_t kClone = 120;
 constexpr std::uint32_t kMprotect = 125;
 constexpr std::uint32_t kSchedYield = 158;  ///< blocking: answered with the GGL released (M2)
 constexpr std::uint32_t kNanosleep = 162;   ///< blocking: answered with the GGL released (M2)
@@ -163,6 +173,7 @@ constexpr std::uint32_t kGetTls = kArmNrBase + 6;
 namespace err {
 constexpr std::uint32_t kEperm = 1;
 constexpr std::uint32_t kEnoent = 2;
+constexpr std::uint32_t kEsrch = 3;  ///< tgkill of a tid that is not a live thread of this process
 constexpr std::uint32_t kEintr = 4;
 constexpr std::uint32_t kEbadf = 9;
 constexpr std::uint32_t kEagain = 11;
@@ -179,6 +190,7 @@ constexpr std::uint32_t kErrange = 34;
 constexpr std::uint32_t kEnametoolong = 36;   ///< measured: -36 from a real openat, not the 62 of history
 constexpr std::uint32_t kEnosys = 38;
 constexpr std::uint32_t kEoverflow = 75;
+constexpr std::uint32_t kEtimedout = 110;  ///< a futex wait or a timed sleep whose deadline passed
 
 /// Host errno to guest errno. Identity today, measured on the SM-X710 for all 47 names sampled; the
 /// function exists so that "identity" is a value in one place rather than a property of the code.
@@ -200,7 +212,16 @@ enum class Verdict {
   /// run meanwhile — and whose result it hands to `Monitor::Finish` once the lock is held again. The callable
   /// captures what it needs by value and touches no monitor state.
   kBlocking,
+  /// `exit` (1): the calling guest *thread* is finished (its clear-child-tid word zeroed and woken); `r0` is
+  /// its status. The bridge's run loop returns `StopReason::Exited` for that thread only — the process and
+  /// its other threads carry on (contrast `kExit`, which is `exit_group`).
+  kThreadExit,
 };
+
+/// The one `clone` flag set served: bionic `pthread_create`'s, read from the tablet libc (`clone(flags
+/// 0x003d0f00)` -> `__bionic_clone`): CLONE_VM | FS | FILES | SIGHAND | THREAD | SYSVSEM | SETTLS |
+/// PARENT_SETTID | CHILD_CLEARTID. Anything else (fork, vfork, a new namespace) is refused by name.
+constexpr std::uint32_t kBionicCloneFlags = 0x003d'0f00u;
 
 [[nodiscard]] const char* Name(Verdict v);
 
@@ -285,6 +306,13 @@ using ClockSource = std::function<bool(std::int32_t clock_id, std::int64_t* nano
 /// contract is "these bytes are not predictable".
 using RandomSource = std::function<bool(std::uint8_t* dst, std::size_t len)>;
 
+/// Starts a host thread for a guest thread `clone` just made (registers, tid, clear-child-tid all set). The
+/// owner of the threads (`GuestProcess`) installs it; it is called with the GGL held, so the new host thread
+/// cannot run guest code before the parent's `clone` has returned and released the lock. Returns an empty
+/// string on success, or why the thread could not be started (the guest then sees EAGAIN, as from a kernel
+/// out of threads).
+using ThreadSpawner = std::function<std::string(std::unique_ptr<runtime::GuestThread> thread)>;
+
 /// The monitor. One per guest instance, like everything else that is per-instance: a refusal tally that
 /// mixes apps would be a diagnostics lie, and no isolation property is shared across apps.
 ///
@@ -342,6 +370,26 @@ class Monitor {
   /// whatever the window holds above it: the top of a 4 GiB window carries the runtime's trap and the kuser
   /// helpers. 0 (the default) means "the window's end".
   void set_alloc_ceiling(std::uint32_t ceiling) { alloc_ceiling_ = ceiling; }
+
+  /// Guest threads (M2 Task 4). With a futex table attached, `futex(WAIT)` really parks the caller (with the
+  /// GGL released) until a `futex(WAKE)`, a thread exit's clear-child-tid wake, its timeout or `exit_group`;
+  /// without one (a bare single-threaded monitor) a matching WAIT is answered 0 without blocking, as before,
+  /// and the note says no other thread exists to wake it. Not owned.
+  void set_futex_table(runtime::FutexTable* table) { futex_ = table; }
+  [[nodiscard]] runtime::FutexTable* futex_table() const { return futex_; }
+  /// What `clone` hands its new thread to. Unset, `clone` is refused by name (this monitor has no way to run
+  /// a second thread).
+  void set_thread_spawner(ThreadSpawner spawner) { spawner_ = std::move(spawner); }
+
+  /// `exit_group` (from any thread), a fatal fault in a guest thread, or the process's teardown: every guest
+  /// thread stops at its next slice boundary, syscall or host call (the bridge's run loop checks this) and
+  /// every futex waiter and sleeper is woken. Sticky. `why` is kept for the report; the first one wins.
+  void RequestGroupExit(const std::string& why);
+  [[nodiscard]] bool group_exited() const { return group_exited_.load(std::memory_order_acquire); }
+  /// Why the process stopped (empty while it has not). Read after `group_exited()` is true.
+  [[nodiscard]] std::string group_exit_reason() const;
+  /// Guest threads `clone` started that have not called `exit` yet (not counting the main thread).
+  [[nodiscard]] std::size_t live_threads() const { return live_tids_.size(); }
 
   /// Capture, dispatch, write the result back, for a single-threaded caller: a blocking call's wait runs in
   /// place (there is no lock to release), so the verdict returned is never `kBlocking`. `thread` is the
@@ -457,6 +505,23 @@ class Monitor {
   /// way a real allocator expects its arenas to be.
   std::uint32_t mmap_next_ = 0;
   std::uint32_t alloc_ceiling_ = 0;  ///< see set_alloc_ceiling; 0 = the window's end
+  /// Threads (Task 4). `live_tids_`/`next_tid_` are GGL-protected like every other table here.
+  runtime::FutexTable* futex_ = nullptr;
+  ThreadSpawner spawner_;
+  std::set<std::int32_t> live_tids_;
+  std::int32_t next_tid_ = 0;  ///< 0 = not started: the first clone takes main tid + 1
+  std::atomic<bool> group_exited_{false};
+  mutable std::mutex exit_mu_;  ///< leaf lock for `group_exit_reason_` (written by a thread that may not hold the GGL)
+  std::string group_exit_reason_;
+  /// "Now" on `clock_id` as the guest sees it (the installed clock, else the host's).
+  bool Now(std::int32_t clock_id, std::int64_t* nanos) const;
+  /// A host steady-clock deadline for a guest absolute time on `clock_id`.
+  std::optional<runtime::FutexTable::Clock::time_point> DeadlineFor(std::int32_t clock_id, std::int64_t abs_nanos) const;
+  /// The clone / exit / futex / sleep cases, split out of Classify.
+  Outcome Clone(const Frame& f, exec::MachineState& state, runtime::GuestThread& th);
+  Outcome ThreadExit(const Frame& f, runtime::GuestThread& th);
+  Outcome Futex(const Frame& f);
+  Outcome Sleep(const std::string& what, std::int64_t nanos);
   /// The first page-aligned run of `size` free bytes for an anonymous mapping (`mmap2`, a moving
   /// `mremap`), or 0. A hint is honoured only when aligned and entirely free.
   std::uint32_t FindFreeRun(std::uint32_t hint, std::uint32_t size) const;

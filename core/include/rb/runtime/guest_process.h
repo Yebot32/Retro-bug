@@ -21,10 +21,15 @@
 #pragma once
 
 #include <cstddef>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
+#include <list>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <optional>
 #include <string>
 #include <vector>
@@ -35,6 +40,7 @@
 #include "rb/exec/jit.h"
 #include "rb/loader/guest_elf.h"
 #include "rb/mem/guest_memory.h"
+#include "rb/runtime/futex_table.h"
 #include "rb/syscall/monitor.h"
 
 namespace rb::runtime {
@@ -147,8 +153,37 @@ class GuestProcess {
   /// Imports (scope and apps) nothing answered, each once, in first-asked order.
   const std::vector<std::string>& unanswered() const { return unanswered_; }
 
+  // ---- guest threads (M2 Task 4)
+  /// The process's futex waiters (the monitor's `futex`, thread exits' clear-child-tid wakes).
+  FutexTable& futex() { return futex_; }
+  /// Host threads started by guest `clone` that have not finished yet (a thread is finished once its guest
+  /// thread called `exit`, faulted, or stopped with the process).
+  [[nodiscard]] std::size_t running_threads() const;
+  /// Guest threads ever started by `clone`.
+  [[nodiscard]] std::size_t threads_started() const { return threads_started_.load(std::memory_order_relaxed); }
+  /// Waits (without the GGL — never call it while holding it) until no `clone`d host thread is running, up to
+  /// `limit`. True when none is.
+  bool WaitForThreads(std::chrono::milliseconds limit);
+  /// One line per `clone`d guest thread that stopped other than through `exit` (a fault, a refused call):
+  /// such a stop ends the whole process, as a fatal signal in one thread does on a device.
+  [[nodiscard]] std::vector<std::string> thread_faults() const;
+  /// The budget one `RunThread` turn of a `clone`d thread gets (it is re-entered until the thread exits).
+  static constexpr unsigned kThreadTurnBudget = 1u << 30;
+
  private:
   GuestProcess() = default;
+  /// The monitor's `ThreadSpawner`: adopts `t` and starts its host thread (called with the GGL held).
+  std::string Spawn(std::unique_ptr<GuestThread> t);
+  struct HostThread {
+    std::unique_ptr<GuestThread> guest;
+    std::thread host;
+    std::atomic<bool> done{false};
+  };
+  void ThreadMain(HostThread* rec);
+  /// Joins and drops records whose host thread finished. `threads_mu_` held.
+  void ReapLocked();
+  /// Stops every guest thread (process teardown) and joins their host threads. Never with the GGL held.
+  void StopThreads();
 
   void Log(const std::string& line) const;
   GuestAddr FindFree(std::size_t bytes) const;
@@ -163,7 +198,9 @@ class GuestProcess {
 
   GuestProcessOptions opts_;
   // Declaration order is destruction order reversed: the executors and the JNIEnv reference the bridge
-  // and the memory, so they go first.
+  // and the memory, so they go first. Guest threads are stopped and joined in the destructor's body,
+  // before any member goes.
+  FutexTable futex_;
   std::unique_ptr<mem::GuestMemory> mem_;
   std::unique_ptr<abi::AbiContext> abi_;
   std::unique_ptr<syscall::Monitor> monitor_;
@@ -184,6 +221,12 @@ class GuestProcess {
   std::map<const loader::GuestModule*, std::string> ctor_faults_;
   std::vector<std::string> unanswered_;
   std::size_t ctors_run_ = 0;
+  /// `clone`d threads. `threads_mu_` is a leaf lock: never held while waiting for the GGL or joining a thread
+  /// that might need it.
+  mutable std::mutex threads_mu_;
+  std::list<std::unique_ptr<HostThread>> threads_;
+  std::vector<std::string> thread_faults_;
+  std::atomic<std::size_t> threads_started_{0};
 };
 
 }  // namespace rb::runtime

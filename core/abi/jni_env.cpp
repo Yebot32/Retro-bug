@@ -358,7 +358,7 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
       if (serr != nullptr) *serr = "GetArrayLength(0x" + Hex32(Arg(s, 1)) + "): not a live byte[] of this environment";
       return false;
     }
-    s.r[0] = static_cast<std::uint32_t>(it->second.size());
+    s.r[0] = static_cast<std::uint32_t>(it->second->size());
     return true;
   });
   abi_.Bind(jni::kGetByteArrayRegion, [this](exec::MachineState& s, std::string* serr) {
@@ -375,7 +375,7 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
       if (serr != nullptr) *serr = "GetByteArrayRegion: the stacked buf argument is not readable";
       return false;
     }
-    const auto size = static_cast<std::int64_t>(it->second.size());
+    const auto size = static_cast<std::int64_t>(it->second->size());
     if (start < 0 || len < 0 || static_cast<std::int64_t>(start) + len > size) {
       // JNI throws ArrayIndexOutOfBoundsException here; with no exceptions to raise, refuse by name.
       if (serr != nullptr) {
@@ -384,7 +384,7 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
       }
       return false;
     }
-    if (len != 0 && !memory_.Write(buf, it->second.data() + start, static_cast<std::size_t>(len))) {
+    if (len != 0 && !memory_.Write(buf, it->second->data() + start, static_cast<std::size_t>(len))) {
       if (serr != nullptr) {
         *serr = "GetByteArrayRegion: could not write " + std::to_string(len) + " bytes to guest 0x" + Hex32(buf);
       }
@@ -422,7 +422,7 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
       if (serr != nullptr) *serr = "SetByteArrayRegion: the stacked buf argument is not readable";
       return false;
     }
-    const auto size = static_cast<std::int64_t>(it->second.size());
+    const auto size = static_cast<std::int64_t>(it->second->size());
     if (start < 0 || len < 0 || static_cast<std::int64_t>(start) + len > size) {
       if (serr != nullptr) {
         *serr = "SetByteArrayRegion: [" + std::to_string(start) + ", +" + std::to_string(len) +
@@ -430,7 +430,7 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
       }
       return false;
     }
-    if (len != 0 && !memory_.Read(buf, it->second.data() + start, static_cast<std::size_t>(len))) {
+    if (len != 0 && !memory_.Read(buf, it->second->data() + start, static_cast<std::size_t>(len))) {
       if (serr != nullptr) {
         *serr = "SetByteArrayRegion: could not read " + std::to_string(len) + " bytes from guest 0x" + Hex32(buf);
       }
@@ -449,7 +449,7 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
       if (serr != nullptr) *serr = "GetByteArrayElements(0x" + Hex32(arr) + "): not a live byte[] of this environment";
       return false;
     }
-    const auto n = static_cast<std::uint32_t>(it->second.size());
+    const auto n = static_cast<std::uint32_t>(it->second->size());
     const unsigned total = (jni::kStringHeaderBytes + n + 3u) & ~3u;
     const GuestAddr block = AllocBlock(total);
     std::string werr;
@@ -463,7 +463,7 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
       return false;
     }
     live_.emplace(block, LiveBlock{total, n, jni::kElementsMagic});
-    if (n != 0 && !memory_.Write(block + jni::kStringHeaderBytes, it->second.data(), n)) {
+    if (n != 0 && !memory_.Write(block + jni::kStringHeaderBytes, it->second->data(), n)) {
       ReleaseInternal(block);
       if (serr != nullptr) *serr = "GetByteArrayElements: could not write the copy at 0x" + Hex32(block);
       return false;
@@ -503,8 +503,8 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
         if (serr != nullptr) *serr = "ReleaseByteArrayElements: the array 0x" + Hex32(arr) + " was deleted before its elements";
         return false;
       }
-      if (!it->second.empty() &&
-          !memory_.Read(block + jni::kStringHeaderBytes, it->second.data(), it->second.size())) {
+      if (!it->second->empty() &&
+          !memory_.Read(block + jni::kStringHeaderBytes, it->second->data(), it->second->size())) {
         if (serr != nullptr) *serr = "ReleaseByteArrayElements: the copy at 0x" + Hex32(elems) + " is unreadable";
         return false;
       }
@@ -882,7 +882,7 @@ GuestAddr JniEnv::ClassOf(GuestAddr obj) const {
 GuestAddr JniEnv::NewHostByteArray(std::vector<std::uint8_t> bytes) {
   if (next_array_ >= jni::kHandleSpan / 4u) return 0;
   const GuestAddr h = jni::kArrayRefBase + next_array_++ * 4u;
-  arrays_.emplace(h, std::move(bytes));
+  arrays_.emplace(h, std::make_shared<std::vector<std::uint8_t>>(std::move(bytes)));
   ++arrays_made_;
   return h;
 }
@@ -1039,7 +1039,7 @@ void JniEnv::Audit(diag::Auditor& audit) const {
   audit.Info("jni/arena", std::to_string(arena_total) + " bytes, " + std::to_string(strings_made_) +
                              " string(s) made, " + std::to_string(chars_made_) + " copy/copies");
   std::size_t array_bytes = 0;
-  for (const auto& [handle, bytes] : arrays_) array_bytes += bytes.size();
+  for (const auto& [handle, bytes] : arrays_) array_bytes += bytes->size();
   audit.Check("jni/array-accounting", arrays_made_ - arrays_freed_ == arrays_.size(),
               std::to_string(arrays_made_) + " made - " + std::to_string(arrays_freed_) + " freed vs " +
                   std::to_string(arrays_.size()) + " live (" + std::to_string(array_bytes) + " B on the host)");
