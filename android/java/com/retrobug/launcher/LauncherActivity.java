@@ -10,11 +10,10 @@
  * libc, no DEX, no JavaVM, and a game that needs any of those stops early. So the library screen says what
  * "run" does and what it found, rather than showing a spinner and a fake progress bar.
  *
- * Screens are built in code rather than from layouts, and there is exactly one Activity and one file,
- * because `tools/build_launcher_apk.sh` compiles this single path with `javac` and packages it with
- * `aapt2 link` against a manifest with no resources. Anything that needed a resource file, an XML layout,
- * or a second source file would need that script rewritten, and its output is what has been verified on
- * hardware (`docs/30` §Step 37, §Step 38).
+ * Screens are built in code rather than from layouts, and there is exactly one Activity, because
+ * `tools/build_launcher_apk.sh` compiles this package's sources with `javac` (plus apksig, for the
+ * repackager's signing) and packages them with `aapt2 link` against a manifest with no layouts. The
+ * repackager's pieces (ApkRepackager, AxmlEditor, RepackSigner, RepackInstaller) are separate files.
  *
  * Two things this file is careful not to assume:
  *
@@ -140,6 +139,23 @@ public class LauncherActivity extends Activity {
          * layout (`tools/make_bootcheck_apk.sh` makes one); `-e lib <libX.so>` picks the library, else the
          * largest `assets/rb32/*.so`.
          */
+        /*
+         * `-e repack <name>` runs the library row's "Make installable" on the first matching game: rewrite,
+         * sign, keep the result under getExternalFilesDir(null)/repack/, then hand it to the installer.
+         * `-e install 0` stops after signing (scripted checks of the artifact without an installer dialog).
+         */
+        final String repack = getIntent() == null ? null : getIntent().getStringExtra("repack");
+        if (repack != null && !repack.isEmpty()) {
+            for (File f : games()) {
+                if (f.getName().toLowerCase().contains(repack.toLowerCase())) {
+                    repackGame(f, !"0".equals(getIntent().getStringExtra("install")));
+                    return;
+                }
+            }
+            Log.w(TAG, "repack: no game matching '" + repack + "'");
+            Toast.makeText(this, "no game matching '" + repack + "'", Toast.LENGTH_LONG).show();
+            return;
+        }
         final String bootcheck = getIntent() == null ? null : getIntent().getStringExtra("bootcheck");
         if (bootcheck != null && !bootcheck.isEmpty()) {
             for (File f : games()) {
@@ -281,6 +297,9 @@ public class LauncherActivity extends Activity {
             @Override public void run() { removeGame(apk); }
         }), weight(1f));
         row.addView(buttons);
+        row.addView(button("Make installable", new Runnable() {
+            @Override public void run() { repackGame(apk, true); }
+        }));
 
         View divider = new View(this);
         divider.setBackgroundColor(0xFFDDDDDD);
@@ -624,6 +643,147 @@ public class LauncherActivity extends Activity {
             }
         }
         return best;
+    }
+
+    // ------------------------------------------------------------------ make installable (repack)
+
+    /// Where each runtime file the repackager adds comes from inside this launcher's own APK.
+    private static final String[][] REPACK_RUNTIME = {
+            {"lib/arm64-v8a/librbstub.so", ApkRepackager.STUB_KEY},
+            {"lib/arm64-v8a/librbguest.so", "lib/arm64-v8a/librbguest.so"},
+            {"assets/guest/libc.so", "assets/rb32sys/libc.so"},
+            {"assets/guest/libm.so", "assets/rb32sys/libm.so"},
+            {"assets/guest/libz.so", "assets/rb32sys/libz.so"},
+            {"assets/guest/libstdc++.so", "assets/rb32sys/libstdc++.so"},
+    };
+
+    private volatile boolean repacking_ = false;
+
+    /// "Make installable": rewrite the game for a 64-bit-only phone, sign it with the phone's repack key,
+    /// keep it (and its report) under getExternalFilesDir(null)/repack/, then offer it to the installer.
+    private void repackGame(final File apk, final boolean install) {
+        if (repacking_) {
+            Toast.makeText(this, "A repack is already running", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        repacking_ = true;
+        final String label = apk.getName().replaceAll("\\.apk$", "");
+        reportTitle_ = "make installable: " + label;
+        currentReport_ = "repacking " + apk.getName() + " ...";
+        show(Screen.REPORT);
+        new Thread(new Runnable() {
+            @Override public void run() {
+                final StringBuilder out = new StringBuilder();
+                File signed = null;
+                File txt = null;
+                try {
+                    File dir = new File(getExternalFilesDir(null), "repack");
+                    if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("could not create " + dir);
+                    signed = new File(dir, label + ".apk");
+                    txt = new File(dir, label + ".txt");
+                    File unsigned = new File(getCacheDir(), label + ".unsigned.apk");
+                    out.append("repack: ").append(apk.getName()).append(" (").append(apk.length())
+                            .append(" bytes)\n");
+                    java.util.Map<String, byte[]> runtime = readRepackRuntime(out);
+                    ApkRepackager.Result r = ApkRepackager.transform(apk, runtime, unsigned);
+                    out.append("package: ").append(r.packageName).append('\n');
+                    out.append("targetSdk: ").append(r.oldTargetSdk < 0 ? "absent" : String.valueOf(r.oldTargetSdk))
+                            .append(" -> ").append(r.newTargetSdk).append('\n');
+                    out.append("guest libs (assets/rb32/): ").append(r.guestLibs).append('\n');
+                    out.append("stubs (lib/arm64-v8a/): ").append(r.stubs).append('\n');
+                    for (String line : r.report) out.append("  ").append(line).append('\n');
+                    try {
+                        RepackSigner.sign(unsigned, signed);
+                    } finally {
+                        if (!unsigned.delete()) Log.w(TAG, "repack: could not delete " + unsigned);
+                    }
+                    out.append("signed: ").append(signed.getAbsolutePath()).append(" (").append(signed.length())
+                            .append(" bytes, key ").append(RepackSigner.ALIAS).append(", v1+v2+v3)\n");
+                    out.append("RESULT: repack OK — ").append(r.packageName).append('\n');
+                } catch (Throwable t) {
+                    String m = t.getMessage();
+                    if (t instanceof IOException && m != null && m.startsWith("refused:")) {
+                        out.append("RESULT: repack ").append(m).append('\n');
+                    } else {
+                        out.append("RESULT: repack FAILED — ").append(t.getClass().getName()).append(": ")
+                                .append(m).append('\n');
+                        Log.e(TAG, "repack failed", t);
+                    }
+                    if (signed != null && signed.exists() && !signed.delete())
+                        Log.w(TAG, "repack: could not delete " + signed);
+                    signed = null;
+                }
+                writeText(txt, out.toString());
+                final File toInstall = signed;
+                final File report = txt;
+                runOnUiThread(new Runnable() {
+                    @Override public void run() {
+                        repacking_ = false;
+                        saveAndShow("make installable: " + label, out.toString().trim());
+                        if (toInstall != null && install) {
+                            installRepacked(toInstall, report);
+                        } else if (toInstall != null) {
+                            Log.i(TAG, "install: skipped (-e install 0)");
+                            appendText(report, "install: skipped (-e install 0)\n");
+                        }
+                    }
+                });
+            }
+        }, "rb-repack").start();
+    }
+
+    /// Hands the signed APK to the installer; each status line goes to logcat, the report screen and the
+    /// `<label>.txt` kept next to the APK.
+    private void installRepacked(File apk, final File report) {
+        RepackInstaller.install(this, apk, new RepackInstaller.Callback() {
+            @Override public void onStatus(final String line, boolean done) {
+                Log.i(TAG, line);
+                appendText(report, line + "\n");
+                runOnUiThread(new Runnable() {
+                    @Override public void run() {
+                        currentReport_ = currentReport_ + "\n" + line;
+                        if (reportBody_ != null && screen_ == Screen.REPORT) reportBody_.setText(currentReport_);
+                    }
+                });
+            }
+        });
+    }
+
+    /// The stub, the engine and the guest libraries, read out of this launcher's own installed APK.
+    private java.util.Map<String, byte[]> readRepackRuntime(StringBuilder out) throws IOException {
+        java.util.Map<String, byte[]> files = new java.util.LinkedHashMap<>();
+        try (java.util.zip.ZipFile self = new java.util.zip.ZipFile(getApplicationInfo().sourceDir)) {
+            for (String[] m : REPACK_RUNTIME) {
+                ZipEntry e = self.getEntry(m[0]);
+                if (e == null) {
+                    // The stub and the engine are the repack; a guest library this build did not ship is
+                    // reported and left out (the runtime then names it when a game needs it).
+                    if (m[0].startsWith("lib/")) throw new IOException("this launcher's APK has no " + m[0]);
+                    out.append("runtime: ").append(m[0]).append(" not in this launcher build — not added\n");
+                    continue;
+                }
+                files.put(m[1], readAll(self.getInputStream(e)));
+            }
+        }
+        return files;
+    }
+
+    private static void writeText(File f, String s) {
+        if (f == null) return;
+        try (OutputStream o = new FileOutputStream(f)) {
+            o.write(s.getBytes("UTF-8"));
+        } catch (IOException e) {
+            Log.w(TAG, "could not write " + f + ": " + e);
+        }
+    }
+
+    private static void appendText(File f, String s) {
+        if (f == null) return;
+        try (OutputStream o = new FileOutputStream(f, true)) {
+            o.write(s.getBytes("UTF-8"));
+        } catch (IOException e) {
+            Log.w(TAG, "could not append to " + f + ": " + e);
+        }
     }
 
     /// The run waiting for the run screen's surface; taken (and cleared) by `surfaceCreated`.

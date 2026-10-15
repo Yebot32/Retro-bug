@@ -152,9 +152,24 @@ fi
 # The filter that drops javac's harmless "bootstrap class path" note still runs, but javac's own status is
 # captured before it and checked here. `set +e`/`set -e` around the capture because the pipeline below
 # legitimately exits non-zero when the filter matches nothing.
+#
+# apksig (the library behind `apksigner`) signs repackaged games on the phone (RepackSigner). It ships in
+# build-tools as `lib/apksigner.jar`, which also carries the apksigner CLI and a copy of org.conscrypt; only
+# `com/android/apksig/**` is taken, so no conscrypt class can shadow or clash with the platform's. The
+# filtered jar is javac's classpath and a d8 program input, so the classes end up in classes.dex.
+APKSIG_SRC="$BT/lib/apksigner.jar"
+[ -f "$APKSIG_SRC" ] || { echo "no $APKSIG_SRC (apksig for on-device signing)" >&2; exit 1; }
+mkdir -p "$OUT/apksig"
+(cd "$OUT/apksig" && unzip -q -o "$(to_host "$APKSIG_SRC")")
+APKSIG="$OUT/apksig.jar"
+(cd "$OUT/apksig" && jar -cf "$(to_host "$APKSIG")" com/android/apksig)
+[ -s "$APKSIG" ] || { echo "could not build $APKSIG from $APKSIG_SRC" >&2; exit 1; }
+JAVA_SRCS=()
+for s in "$SRC"/java/com/retrobug/launcher/*.java; do JAVA_SRCS+=("$(to_host "$s")"); done
 set +e
 javac_out="$(javac -nowarn -source 8 -target 8 -bootclasspath "$(to_host "$AJ")" \
-  -d "$(to_host "$OUT/classes")" "$(to_host "$SRC/java/com/retrobug/launcher/LauncherActivity.java")" 2>&1)"
+  -classpath "$(to_host "$APKSIG")" \
+  -d "$(to_host "$OUT/classes")" "${JAVA_SRCS[@]}" 2>&1)"
 javac_status=$?
 set -e
 printf '%s\n' "$javac_out" | grep -v "bootstrap class path" || true
@@ -162,8 +177,15 @@ if [ "$javac_status" -ne 0 ]; then
   echo "javac failed (exit $javac_status); stopping here rather than letting d8 report it as a dex error" >&2
   exit 1
 fi
-find "$OUT/classes" -name '*.class' -print0 |
-  xargs -0 "$BT/d8.bat" --lib "$(to_host "$AJ")" --min-api 26 --output "$(to_host "$OUT/dex")" >/dev/null
+# The launcher's classes go to d8 as one jar: d8.bat is a cmd script, and a growing list of .class paths
+# on its command line runs into cmd's 8191-character limit.
+(cd "$OUT/classes" && jar -cf "$(to_host "$OUT/launcher-classes.jar")" .)
+"$BT/d8.bat" --lib "$(to_host "$AJ")" --min-api 26 --output "$(to_host "$OUT/dex")" \
+  "$(to_host "$OUT/launcher-classes.jar")" "$(to_host "$APKSIG")" >/dev/null
+[ -s "$OUT/dex/classes.dex" ] || { echo "d8 produced no classes.dex" >&2; exit 1; }
+if [ -e "$OUT/dex/classes2.dex" ]; then
+  echo "d8 produced more than one dex; this script packages only classes.dex" >&2; exit 1
+fi
 
 # ---- package
 # `aapt2 link` takes *compiled* resources, so the icon tree is compiled first. Until the icon the launcher

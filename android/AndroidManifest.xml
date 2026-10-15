@@ -7,9 +7,11 @@
 
   Deliberately absent, and each absence is a decision rather than an omission:
 
-    - No permissions. Every one of them is a reason the process could be in a different SELinux domain or
-      carry a different seccomp state than the app RetroBug eventually ships, and the answers this launcher
-      exists to produce are about that domain.
+    - One permission only: REQUEST_INSTALL_PACKAGES, which "Make installable" needs to hand a repackaged
+      game to PackageInstaller. It is an app-op the user grants in "Install unknown apps", not a runtime
+      grant, and changes nothing about the process's SELinux domain or seccomp state. Every other
+      permission stays out: each is a reason the process could be in a different domain than the app
+      RetroBug eventually ships, and the answers this launcher exists to produce are about that domain.
     - No `android:extractNativeLibs`. `tools/build_launcher_apk.sh` adds `lib/` with plain `jar`, which
       deflates it, so the platform has to extract `librguest.so` before `System.loadLibrary` can find it
       — the same shape the app-domain probe installs in and is recorded as working on both devices.
@@ -29,6 +31,8 @@
     android:versionName="1">
 
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />
+
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
 
     <application android:label="RetroBug" android:icon="@mipmap/ic_launcher"
         android:debuggable="false">
