@@ -42,7 +42,7 @@ done
 mapfile -t SRCS < <(grep -L 'import android\.' "$ROOT"/android/java/com/retrobug/launcher/*.java)
 SRCS+=("$ROOT"/tools/java-tests/*.java)
 HOST_SRCS=(); for s in "${SRCS[@]}"; do HOST_SRCS+=("$(to_host "$s")"); done
-javac -nowarn -Xlint:-options -d "$(to_host "$OUT/classes")" "${HOST_SRCS[@]}"
+javac -encoding UTF-8 -nowarn -Xlint:-options -d "$(to_host "$OUT/classes")" "${HOST_SRCS[@]}"
 
 java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.AxmlEditorTest \
   "$(to_host "$OUT/fixtures")" "$(to_host "$OUT/scratch")" "$(to_host "$BT/aapt2.exe")"

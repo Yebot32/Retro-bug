@@ -167,7 +167,7 @@ APKSIG="$OUT/apksig.jar"
 JAVA_SRCS=()
 for s in "$SRC"/java/com/retrobug/launcher/*.java; do JAVA_SRCS+=("$(to_host "$s")"); done
 set +e
-javac_out="$(javac -nowarn -source 8 -target 8 -bootclasspath "$(to_host "$AJ")" \
+javac_out="$(javac -encoding UTF-8 -nowarn -source 8 -target 8 -bootclasspath "$(to_host "$AJ")" \
   -classpath "$(to_host "$APKSIG")" \
   -d "$(to_host "$OUT/classes")" "${JAVA_SRCS[@]}" 2>&1)"
 javac_status=$?

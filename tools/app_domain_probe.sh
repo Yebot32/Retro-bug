@@ -67,7 +67,7 @@ JAVAC=javac; D8="$BT/d8.bat"; AAPT2="$BT/aapt2.exe"; ZIPALIGN="$BT/zipalign.exe"
 for t in "$AAPT2" "$ZIPALIGN"; do [ -e "$t" ] || { echo "missing $t" >&2; exit 1; }; done
 command -v "$JAVAC" >/dev/null || { echo "no javac on PATH" >&2; exit 1; }
 
-"$JAVAC" -nowarn -source 8 -target 8 -bootclasspath "$(to_host "$AJ")" \
+"$JAVAC" -encoding UTF-8 -nowarn -source 8 -target 8 -bootclasspath "$(to_host "$AJ")" \
   -d "$(to_host "$OUT/classes")" "$(to_host "$SRC/ProbeActivity.java")" 2>&1 \
   | grep -v "bootstrap class path" || true
 find "$OUT/classes" -name '*.class' -print0 |
