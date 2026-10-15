@@ -1,5 +1,5 @@
 # device=SM-X710 serial=R52Y106BECZ abilist32=armeabi-v7a,armeabi sdk=36 libc_md5=9deefb3ed9a78a44d7161692b0984590
-# built from b146cd5-dirty 2026-10-15T21:36:55+04:00 pthread_fixture.c=2f5d2c213f2c9d33bff21efc88779c1504a67480 pthread_oracle.c=e426be05ba9bad31949933e76a326382a20f3b62
+# built from f3e347c-dirty 2026-10-15T21:52:29+04:00 pthread_fixture.c=74712a0766d5daf40f05b507bf4f8bdf3fa59aac pthread_oracle.c=e426be05ba9bad31949933e76a326382a20f3b62
 pt_create_join(8)=360
 pt_mutex_contend(2,100000)=200000
 pt_mutex_contend(4,2000)=8000

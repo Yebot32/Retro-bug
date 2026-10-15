@@ -388,7 +388,8 @@ class Monitor {
   [[nodiscard]] bool group_exited() const { return group_exited_.load(std::memory_order_acquire); }
   /// Why the process stopped (empty while it has not). Read after `group_exited()` is true.
   [[nodiscard]] std::string group_exit_reason() const;
-  /// Guest threads `clone` started that have not called `exit` yet (not counting the main thread).
+  /// Guest threads alive besides the main one: `clone`d threads that have not called `exit` yet, and adopted host
+  /// threads (`AllocateThreadId`) that have not been retired.
   [[nodiscard]] std::size_t live_threads() const { return live_tids_.size(); }
   /// A fresh tid for a guest thread the host made (an adopted host thread, M2 Task 5), counted live until
   /// `ReleaseThreadId`. From the same sequence as `clone`'s tids. GGL held.

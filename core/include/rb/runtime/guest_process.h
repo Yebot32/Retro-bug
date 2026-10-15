@@ -29,6 +29,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <thread>
 #include <optional>
 #include <string>
@@ -96,6 +97,9 @@ class GuestProcess {
   static constexpr unsigned kJniArenaBytes = 1u << 20;
 
   static std::unique_ptr<GuestProcess> Create(const GuestProcessOptions& options, std::string* err);
+  /// Stops every guest thread and frees the process. Preconditions: the caller does not hold this process's GGL,
+  /// and no host thread is inside a call into this process (an adopted host thread that is merely alive is fine:
+  /// it reads as unbound afterwards, and its exit runs nothing here).
   ~GuestProcess();
   GuestProcess(const GuestProcess&) = delete;
   GuestProcess& operator=(const GuestProcess&) = delete;
@@ -187,6 +191,12 @@ class GuestProcess {
   /// Adopted threads whose host thread has not exited yet, and adoptions ever made.
   [[nodiscard]] std::size_t adopted_threads() const;
   [[nodiscard]] std::size_t threads_adopted() const { return threads_adopted_.load(std::memory_order_relaxed); }
+  /// One named line per adopted thread whose exit did not go cleanly: a TLS-key destructor that faulted or was
+  /// refused part-way, an unlink that did not happen. The process carries on (copied under the GGL).
+  [[nodiscard]] std::vector<std::string> adoption_faults() const;
+  /// Thread mappings kept (leaked) because their `pthread_internal_t` could still be linked into `g_thread_list`:
+  /// unmapping a linked node would make the next list walk fault inside libc.
+  [[nodiscard]] std::size_t kept_mappings() const;
 
  private:
   GuestProcess() = default;
@@ -256,10 +266,16 @@ class GuestProcess {
   std::list<std::unique_ptr<GuestThread>> adopted_;
   std::atomic<std::size_t> threads_adopted_{0};
   struct Liveness {
-    std::mutex mu;  ///< taken before the GGL, never while holding it
+    /// Shared by exit hooks (concurrently: one adopted thread's destructors may wait on another's), exclusive in
+    /// the destructor. Taken before the GGL, never while holding it.
+    std::shared_mutex mu;
     GuestProcess* proc = nullptr;
   };
   std::shared_ptr<Liveness> alive_ = std::make_shared<Liveness>();
+  std::vector<std::string> adoption_faults_;  ///< GGL-protected
+  std::size_t kept_mappings_ = 0;            ///< GGL-protected
+  /// True when `thread` is (or may be: the walk failed or ran long) on libc's `g_thread_list`. GGL held.
+  bool MaybeLinked(GuestAddr thread);
   bool adoption_checked_ = false;
   std::string adoption_refusal_;
 };

@@ -351,6 +351,11 @@ class AbiContext : public exec::HostDispatch {
   /// than left to be inferred.
   Ret32 CallGuest(GuestAddr fn, const Args32& args, const Shorty& shorty, unsigned max_steps,
                   exec::RunResult* outcome, MachineState* exit_state = nullptr);
+  /// `CallGuest` that re-enters the callee each time a `turn_budget` runs out, until it returns, exits, faults or the
+  /// process exits (a thread's own unbounded work: never for a call the host must bound). `outcome` is the last
+  /// turn's.
+  Ret32 CallGuestToCompletion(GuestAddr fn, const Args32& args, const Shorty& shorty, unsigned turn_budget,
+                              exec::RunResult* outcome);
 
   /// The JNI-shaped entry point C09 will use: a shorty plus the values already converted. Kept next to
   /// `CallGuest` so there is one marshalling path, not one per caller.
@@ -391,6 +396,8 @@ class AbiContext : public exec::HostDispatch {
   bool RunKuserHelper(MachineState& state, std::uint32_t which, std::string* err);
   /// The guest thread a call from this host thread runs on (see `CallGuest`), or null with `why`.
   runtime::GuestThread* ThreadForThisHost(std::string* why);
+  Ret32 CallGuestImpl(GuestAddr fn, const Args32& args, const Shorty& shorty, unsigned max_steps,
+                      bool resume_on_budget, exec::RunResult* outcome, MachineState* exit_state);
   /// The calling host thread's guest thread when it belongs to this context, else null.
   runtime::GuestThread* BoundThreadOfMine();
 

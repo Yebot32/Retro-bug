@@ -384,6 +384,47 @@ __attribute__((visibility("default"))) int pt_key_destructor_count(void) {
   return n;
 }
 
+/* Exit-time failure modes of an adopted thread (M2 Task 5 fix round 1; engine lane only — on a device the
+ * faulting one is a SIGSEGV of the process). pt_slow_key_set(n): a value whose destructor spins n iterations
+ * (far past one guest call's budget for n = 1000000) and then counts itself; pt_fault_key_set(): a value whose
+ * destructor stores to address 0. */
+static pthread_key_t g_slow_key, g_fault_key;
+static pthread_once_t g_slow_once = PTHREAD_ONCE_INIT, g_fault_once = PTHREAD_ONCE_INIT;
+static volatile int g_slow_done;
+
+static void slow_dtor(void* v) {
+  for (volatile unsigned i = 0; i < (unsigned)(uintptr_t)v; ++i) {
+  }
+  pthread_mutex_lock(&g_adopt_mu);
+  ++g_slow_done;
+  pthread_mutex_unlock(&g_adopt_mu);
+}
+
+static void fault_dtor(void* v) {
+  (void)v;
+  *(volatile int*)(uintptr_t)v = 1;  // v is 0x10: an unmapped page, a store that faults
+}
+
+static void slow_key_init(void) { pthread_key_create(&g_slow_key, slow_dtor); }
+static void fault_key_init(void) { pthread_key_create(&g_fault_key, fault_dtor); }
+
+__attribute__((visibility("default"))) int pt_slow_key_set(int iters) {
+  if (pthread_once(&g_slow_once, slow_key_init) != 0) return -9;
+  return pthread_setspecific(g_slow_key, (void*)(intptr_t)iters) == 0 ? 0 : -7;
+}
+
+__attribute__((visibility("default"))) int pt_slow_dtor_count(void) {
+  pthread_mutex_lock(&g_adopt_mu);
+  const int n = g_slow_done;
+  pthread_mutex_unlock(&g_adopt_mu);
+  return n;
+}
+
+__attribute__((visibility("default"))) int pt_fault_key_set(void) {
+  if (pthread_once(&g_fault_once, fault_key_init) != 0) return -9;
+  return pthread_setspecific(g_fault_key, (void*)(intptr_t)0x10) == 0 ? 0 : -7;
+}
+
 /* ---- pt_exit_group_from_thread: one thread parks forever on a condvar, one spins forever with no syscall,
  * and a third calls _exit(code) (exit_group) after 20 ms, while the caller is parked in pthread_join on the
  * first. Never returns: the process ends with `code`, and every thread with it. Not part of the numeric

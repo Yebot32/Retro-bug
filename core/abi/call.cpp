@@ -302,6 +302,10 @@ runtime::GuestThread* AbiContext::ThreadForThisHost(std::string* why) {
       t->owner = this;
       return t;
     }
+    if (e.empty()) {
+      e = t == nullptr ? "the adopter returned no guest thread and gave no reason"
+                       : "the adopter returned a guest thread that is not bound to this host thread";
+    }
     if (why != nullptr) *why = "host thread not bound to a guest thread, and adopting it failed: " + e;
     return nullptr;
   }
@@ -435,6 +439,16 @@ bool AbiContext::RunKuserHelper(MachineState& state, std::uint32_t which, std::s
 Ret32 AbiContext::CallGuest(GuestAddr fn, const Args32& args, const Shorty& shorty,
                             unsigned max_steps, exec::RunResult* outcome,
                             MachineState* exit_state) {
+  return CallGuestImpl(fn, args, shorty, max_steps, false, outcome, exit_state);
+}
+
+Ret32 AbiContext::CallGuestToCompletion(GuestAddr fn, const Args32& args, const Shorty& shorty, unsigned turn_budget,
+                                        exec::RunResult* outcome) {
+  return CallGuestImpl(fn, args, shorty, turn_budget, true, outcome, nullptr);
+}
+
+Ret32 AbiContext::CallGuestImpl(GuestAddr fn, const Args32& args, const Shorty& shorty, unsigned max_steps,
+                                bool resume_on_budget, exec::RunResult* outcome, MachineState* exit_state) {
   std::string why;
   runtime::GuestThread* const thread = ThreadForThisHost(&why);
   if (thread == nullptr) {
@@ -477,7 +491,14 @@ Ret32 AbiContext::CallGuest(GuestAddr fn, const Args32& args, const Shorty& shor
     return ret;
   }
 
-  const exec::RunResult run = RunThread(*thread, max_steps);
+  exec::RunResult run = RunThread(*thread, max_steps);
+  // To completion (a thread's own work, e.g. its TLS-key destructors at exit): a turn that ran out of budget is
+  // re-entered from where it stopped, as a clone()d thread's `ThreadMain` re-enters `RunThread`, until the callee
+  // returns, exits, faults or the process exits.
+  while (resume_on_budget && run.reason == exec::StopReason::Budget &&
+         !(monitor_ != nullptr && monitor_->group_exited())) {
+    run = RunThread(*thread, max_steps);
+  }
   ret = ReturnValue(state, shorty);
   if (outcome != nullptr) *outcome = run;
   // Copied out before the restore below, which is the only reason this is a parameter rather than

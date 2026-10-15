@@ -218,13 +218,13 @@ std::optional<BionicLayout> VerifyBionicLayout(const mem::GuestMemory& mem, cons
 GuestProcess::~GuestProcess() {
   // Order matters (lock discipline, M2 Task 5): first stop the guest (sticky group exit, every futex waiter and
   // sleeper woken) so an adopted host thread's exit hook that is mid-way through guest destructors stops at its
-  // next check; then take `alive_`'s mutex (never held by anyone waiting for the GGL's holder) to cut every
+  // next check; then take `alive_`'s mutex exclusively (never held by anyone waiting for the GGL's holder) to cut every
   // later hook off; then join the clone()d threads. Adopted GuestThreads go with `adopted_`; their destructors
   // clear the binding cells of host threads still alive, which then read as unbound.
   if (monitor_ != nullptr) monitor_->RequestGroupExit("the guest process is being destroyed");
   futex_.Shutdown();
   {
-    std::lock_guard<std::mutex> lk(alive_->mu);
+    std::unique_lock<std::shared_mutex> lk(alive_->mu);  // waits out every exit hook in flight
     alive_->proc = nullptr;
   }
   StopThreads();
@@ -874,8 +874,10 @@ bool GuestProcess::CallOn(GuestThread& t, const char* fn, const abi::Args32& arg
   exec::Executor* const before = t.executor;
   t.executor = &engine(opts_.ctor_tier);  // this thread's choice only: the process default is not touched
   exec::RunResult rr{};
-  const abi::Ret32 ret =
-      abi_->CallGuest(s->addr | (s->thumb ? 1u : 0u), args, abi::Shorty::For("I"), kCallBudget, &rr);
+  // The thread's own work (its init, its key destructors at exit): re-entered at each turn's end like a clone()d
+  // thread's ThreadMain, never cut off by a single call budget (fix round 1).
+  const abi::Ret32 ret = abi_->CallGuestToCompletion(s->addr | (s->thumb ? 1u : 0u), args, abi::Shorty::For("I"),
+                                                     kThreadTurnBudget, &rr);
   t.executor = before;
   if (rr.reason != exec::StopReason::Returned) {
     if (err) *err = std::string{fn} + " did not return: " + ReasonName(rr.reason) + " " + rr.detail;
@@ -934,7 +936,19 @@ GuestThread* GuestProcess::AdoptCurrentHostThread(std::string* err) {
   const auto undo = [&](const std::string& why) {
     monitor_->ReleaseThreadId(t.tid);
     owned.reset();  // clears this host thread's binding cell, if it was bound
-    unmap();
+    // Only a struct that is certainly not on g_thread_list may lose its memory (fix round 1): a failed
+    // __pthread_internal_add may have linked it before it stopped, and a freed linked node makes the next list
+    // walk fault inside libc, under g_thread_list_lock.
+    if (MaybeLinked(thread)) {
+      const std::string kept = "adopting a host thread: " + why + " — and its pthread_internal_t at " + Hex(thread) +
+                               " may be on g_thread_list, so its " + Hex(size) + "-byte mapping at " + Hex(base) +
+                               " is kept (leaked), not freed";
+      adoption_faults_.push_back(kept);
+      ++kept_mappings_;
+      Log("threads: " + kept);
+    } else {
+      unmap();
+    }
     return refuse(why);
   };
   const std::uint32_t words[][2] = {
@@ -991,7 +1005,9 @@ GuestThread* GuestProcess::AdoptCurrentHostThread(std::string* err) {
   threads_adopted_.fetch_add(1, std::memory_order_relaxed);
   GuestThread* const raw = &t;
   AddHostThreadExitHook([alive = alive_, raw] {
-    std::lock_guard<std::mutex> lk(alive->mu);  // before the GGL, as the destructor takes it
+    // Shared: adopted exits run concurrently (one's destructors may wait on another's). Before the GGL; the
+    // destructor takes it exclusively, so no hook runs on a destroyed process.
+    std::shared_lock<std::shared_mutex> lk(alive->mu);
     if (alive->proc != nullptr) alive->proc->RetireAdopted(raw);
   });
   Log("threads: adopted a host thread as tid " + std::to_string(t.tid) + ": pthread_internal_t at " + Hex(thread) +
@@ -1000,34 +1016,73 @@ GuestThread* GuestProcess::AdoptCurrentHostThread(std::string* err) {
   return raw;
 }
 
+bool GuestProcess::MaybeLinked(GuestAddr thread) {
+  const auto head = libc_->FindLocalSymbol("g_thread_list");
+  std::uint32_t at = 0;
+  if (!head || !mem_->Read(*head, &at, 4)) return true;  // cannot tell: assume linked
+  for (unsigned n = 0; at != 0; ++n) {
+    if (at == thread || n >= 4096) return true;
+    if (!mem_->Read(at, &at, 4)) return true;
+  }
+  return false;
+}
+
 void GuestProcess::RetireAdopted(GuestThread* t) {
   Ggl::Held hold(abi_->ggl());
   const auto it = std::find_if(adopted_.begin(), adopted_.end(), [t](const auto& p) { return p.get() == t; });
   if (it == adopted_.end()) return;
-  std::string note = "threads: adopted tid " + std::to_string(t->tid) + " exited";
-  if (monitor_->group_exited()) {
+  const std::string who = "adopted tid " + std::to_string(t->tid) + " (pthread_internal_t " + Hex(t->pthread_struct) + ")";
+  std::string note = "threads: " + who + " exited";
+  std::string fault;  // a named failure of the guest-visible exit, reported in adoption_faults()
+  const bool live = !monitor_->group_exited();
+  if (!live) {
     note += " after the process stopped: no guest destructor ran";
   } else if (!BindCurrentHostThread(*t)) {
-    note += ": its guest thread is bound elsewhere, so its key destructors could not run";
+    fault = who + " exited while its guest thread was bound to another host thread: its TLS-key destructors did "
+                  "not run and it was not unlinked";
   } else {
-    // pthread_exit's guest-visible half: the TLS-key destructors, then the unlink. A destructor may block (a
-    // futex wait releases the GGL) or end the process; either way the host thread finishes its exit here.
+    // pthread_exit's guest-visible half: the TLS-key destructors (run to completion, re-entered across turns),
+    // then the unlink — attempted even when a destructor failed, so the list never keeps a node whose memory goes.
     std::string e;
     if (!CallOn(*t, "pthread_key_clean_all", {}, nullptr, &e)) {
-      note += "; pthread_key_clean_all: " + e;
-    } else if (!CallOn(*t, "__pthread_internal_remove", {abi::Value32::Ptr(t->pthread_struct)}, nullptr, &e)) {
-      note += "; __pthread_internal_remove: " + e;
-    } else {
-      note += ": key destructors ran, unlinked from g_thread_list";
+      fault = who + ": a TLS-key destructor did not complete — pthread_key_clean_all: " + e;
     }
+    if (!CallOn(*t, "__pthread_internal_remove", {abi::Value32::Ptr(t->pthread_struct)}, nullptr, &e)) {
+      fault += (fault.empty() ? who + ": " : "; ") + std::string{"__pthread_internal_remove: "} + e;
+    }
+    if (fault.empty()) note += ": key destructors ran, unlinked from g_thread_list";
   }
   monitor_->ReleaseThreadId(t->tid);
-  std::string e;
-  if (!mem_->Unmap(t->mapping, t->mapping_size, &e)) note += "; unmapping its mapping: " + e;
-  interp_->Invalidate(t->mapping, t->mapping + t->mapping_size);
-  if (jit_->ok()) jit_->Invalidate(t->mapping, t->mapping + t->mapping_size);
-  Log(note + "; its " + Hex(t->mapping_size) + "-byte mapping freed");
+  // Free the memory only when the struct is certainly off the list (or the process is over: no guest code runs
+  // again). A linked node must stay mapped, or the next list walk faults inside libc under g_thread_list_lock.
+  if (!monitor_->group_exited() && MaybeLinked(t->pthread_struct)) {  // re-read: a destructor may have exited it
+    fault += (fault.empty() ? who + ": " : "; ") + std::string{"still on g_thread_list, so its "} +
+             Hex(t->mapping_size) + "-byte mapping at " + Hex(t->mapping) + " is kept (leaked), not freed";
+    ++kept_mappings_;
+  } else {
+    std::string e;
+    if (!mem_->Unmap(t->mapping, t->mapping_size, &e)) note += "; unmapping its mapping: " + e;
+    interp_->Invalidate(t->mapping, t->mapping + t->mapping_size);
+    if (jit_->ok()) jit_->Invalidate(t->mapping, t->mapping + t->mapping_size);
+    note += "; its " + Hex(t->mapping_size) + "-byte mapping freed";
+  }
+  if (!fault.empty()) {
+    adoption_faults_.push_back(fault);
+    Log("threads: REFUSED/FAULTED exit: " + fault);
+  } else {
+    Log(note);
+  }
   adopted_.erase(it);  // the GuestThread's destructor clears this host thread's binding cell
+}
+
+std::vector<std::string> GuestProcess::adoption_faults() const {
+  Ggl::Held hold(const_cast<GuestProcess*>(this)->abi_->ggl());
+  return adoption_faults_;
+}
+
+std::size_t GuestProcess::kept_mappings() const {
+  Ggl::Held hold(const_cast<GuestProcess*>(this)->abi_->ggl());
+  return kept_mappings_;
 }
 
 std::size_t GuestProcess::adopted_threads() const {

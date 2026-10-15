@@ -1048,6 +1048,137 @@ void adopted_thread_outlives_process(int tier) {
   CHECK(unbound_after);
 }
 
+// ---- fix round 1: an adopted thread's exit that does not go cleanly never frees a node still on g_thread_list.
+
+bool PageMapped(runtime::GuestProcess& p, std::uint32_t at) {
+  runtime::Ggl::Held hold(p.ggl());
+  return p.memory().IsMapped(at & ~0xfffu);
+}
+
+std::string Joined(const std::vector<std::string>& v) {
+  std::string out;
+  for (const std::string& s : v) out += (out.empty() ? "" : " | ") + s;
+  return out;
+}
+
+/// After a messy exit the process still works: pthread_create/join (the oracle's own row) and a fresh adoption.
+void ProcessStillWorks(Proc& pr, int tier, const std::map<std::string, std::string>& oracle, const std::string& name,
+                       std::uint32_t old_self) {
+  const FixtureCall cj = CallFixture(pr, tier, "pt_create_join", {abi::Value32::S32(8)});
+  const auto want = oracle.find("pt_create_join(8)");
+  CHECK_CTX(cj.rr.reason == exec::StopReason::Returned && want != oracle.end() &&
+                std::to_string(cj.ret.i()) == want->second,
+            name + ": pt_create_join(8) afterwards = " + std::to_string(cj.ret.i()) + " " + cj.rr.detail);
+  int tid = 0;
+  std::uint32_t self = 0;
+  std::thread n([&] {
+    tid = CallFixture(pr, tier, "pt_self_tid", {}).ret.i();
+    self = CallFixture(pr, tier, "pt_self", {}).ret.w();
+  });
+  n.join();
+  (void)old_self;  // a freed mapping may be reused by this adoption: same address is fine once off the list
+  CHECK_CTX(tid > 0 && self != 0 && !Has(ThreadList(*pr.p), self),
+            name + ": a new adoption afterwards: tid " + std::to_string(tid) + " self " + Hex(self));
+}
+
+/// A TLS-key destructor that runs far past one guest call's 4M-step budget completes (the exit re-enters it),
+/// then the thread is unlinked and its mapping freed.
+void slow_key_destructor_completes(int tier) {
+  const std::string name = std::string{"slow_key_destructor_completes/"} + TierName(tier);
+  Watchdog wd(name, std::chrono::seconds(120));
+  Proc pr = BootPthreads(tier);
+  CHECK_CTX(pr.p != nullptr, pr.err);
+  if (!pr.p) return;
+  std::uint32_t self = 0;
+  int set = -1;
+  const auto t0 = Clock::now();
+  std::thread a([&] {
+    set = CallFixture(pr, tier, "pt_slow_key_set", {abi::Value32::S32(1000000)}).ret.i();
+    self = CallFixture(pr, tier, "pt_self", {}).ret.w();
+  });
+  a.join();
+  const double ms = Ms(t0, Clock::now());
+  const int done = CallFixture(pr, tier, "pt_slow_dtor_count", {}).ret.i();
+  std::fprintf(stderr, "#   %s: destructor count %d, exit took %.1f ms, faults: %s\n", name.c_str(), done, ms,
+               Joined(pr.p->adoption_faults()).c_str());
+  CHECK(set == 0);
+  CHECK_CTX(done == 1, name + ": pt_slow_dtor_count() = " + std::to_string(done));
+  CHECK_CTX(pr.p->adoption_faults().empty(), Joined(pr.p->adoption_faults()));
+  CHECK(!Has(ThreadList(*pr.p), self));
+  CHECK(!PageMapped(*pr.p, self));
+  CHECK(pr.p->kept_mappings() == 0u && pr.p->adopted_threads() == 0u);
+}
+
+/// A TLS-key destructor that faults: the exit is reported by name, the thread is still unlinked (so its mapping
+/// can go), and the process carries on.
+void faulting_key_destructor_is_named(int tier, const std::map<std::string, std::string>& oracle) {
+  const std::string name = std::string{"faulting_key_destructor_is_named/"} + TierName(tier);
+  Watchdog wd(name, std::chrono::seconds(60));
+  Proc pr = BootPthreads(tier);
+  CHECK_CTX(pr.p != nullptr, pr.err);
+  if (!pr.p) return;
+  std::uint32_t self = 0;
+  int set = -1;
+  std::thread a([&] {
+    set = CallFixture(pr, tier, "pt_fault_key_set", {}).ret.i();
+    self = CallFixture(pr, tier, "pt_self", {}).ret.w();
+  });
+  a.join();
+  const auto faults = pr.p->adoption_faults();
+  std::fprintf(stderr, "#   %s: %s\n", name.c_str(), Joined(faults).c_str());
+  CHECK(set == 0);
+  CHECK_CTX(faults.size() == 1u && faults[0].find("a TLS-key destructor did not complete") != std::string::npos &&
+                faults[0].find("pthread_key_clean_all") != std::string::npos,
+            Joined(faults));
+  CHECK_CTX(!Has(ThreadList(*pr.p), self), name + ": the struct is still on g_thread_list");
+  CHECK(!PageMapped(*pr.p, self));
+  CHECK(pr.p->kept_mappings() == 0u && pr.p->adopted_threads() == 0u);
+  CHECK(!pr.p->monitor().group_exited());
+  ProcessStillWorks(pr, tier, oracle, name, self);
+}
+
+/// An exit whose unlink cannot happen (here: the adopted GuestThread was handed to another live host thread, so
+/// the exiting one cannot run its guest code) keeps the mapping — the node is still linked — and names it; the
+/// list stays walkable, so thread creation and adoption still work.
+void unlinkable_exit_keeps_the_mapping(int tier, const std::map<std::string, std::string>& oracle) {
+  const std::string name = std::string{"unlinkable_exit_keeps_the_mapping/"} + TierName(tier);
+  Watchdog wd(name, std::chrono::seconds(60));
+  Proc pr = BootPthreads(tier);
+  CHECK_CTX(pr.p != nullptr, pr.err);
+  if (!pr.p) return;
+  Gate gate;
+  GuestThread* g = nullptr;
+  std::uint32_t self = 0;
+  bool h_bound = false;
+  std::thread a([&] {
+    self = CallFixture(pr, tier, "pt_self", {}).ret.w();
+    g = runtime::CurrentGuestThread();
+    runtime::UnbindCurrentHostThread();
+    gate.Set(1);
+    gate.Wait(2);  // exits while `h` holds its guest thread
+  });
+  std::thread h([&] {
+    gate.Wait(1);
+    h_bound = g != nullptr && runtime::BindCurrentHostThread(*g);
+    gate.Set(2);
+    gate.Wait(3);
+  });
+  CHECK(gate.Wait(2));
+  a.join();
+  gate.Set(3);
+  h.join();
+  const auto faults = pr.p->adoption_faults();
+  std::fprintf(stderr, "#   %s: %s\n", name.c_str(), Joined(faults).c_str());
+  CHECK(h_bound);
+  CHECK_CTX(faults.size() == 1u && faults[0].find("bound to another host thread") != std::string::npos &&
+                faults[0].find("is kept (leaked), not freed") != std::string::npos,
+            Joined(faults));
+  CHECK(Has(ThreadList(*pr.p), self));
+  CHECK(PageMapped(*pr.p, self));
+  CHECK(pr.p->kept_mappings() == 1u && pr.p->adopted_threads() == 0u);
+  ProcessStillWorks(pr, tier, oracle, name, self);
+}
+
 /// Adoption on a process that has exited is refused by name, not run.
 void adoption_after_exit_is_refused(int tier) {
   const std::string name = std::string{"adoption_after_exit_is_refused/"} + TierName(tier);
@@ -1106,6 +1237,9 @@ void guest_pthreads(int tier) {
   art_thread_is_adopted(tier, oracle);
   adopted_thread_outlives_process(tier);
   adoption_after_exit_is_refused(tier);
+  slow_key_destructor_completes(tier);
+  faulting_key_destructor_is_named(tier, oracle);
+  unlinkable_exit_keeps_the_mapping(tier, oracle);
 }
 
 }  // namespace
