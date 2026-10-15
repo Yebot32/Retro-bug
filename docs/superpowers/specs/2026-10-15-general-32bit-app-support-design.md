@@ -121,6 +121,7 @@ list the detected risky calls. Scheduled before M3's acceptance (Gumball needs i
    Angry Birds Go install on the OnePlus, open their real first activity, and report "constructors ran,
    JNI_OnLoad returned" from inside their own process.
    *Evidence*: both install on the OnePlus (min/target 24) and boot in their own process: Angry Birds Go 258 constructors, `JNI_OnLoad` returned, "startup finished with no fault", then the designed `UnsatisfiedLinkError` at `isDeviceAmazon`; Gumball 24 constructors, headless 1200 frames to the main menu, then a targetSdk-compat crash (implicit billing `bindService`) -> see shims component.
+   *Status, plainly*: neither game reaches its first activity yet. Angry Birds Go stops at the expected `UnsatisfiedLinkError` in `onCreate`; Gumball at the targetSdk-compat crash. The 64 MiB Inspect window (not the spec's 4 GiB) remains until M2.
 2. **M2 Multi-entry core.** Thread contexts, GGL, clone/futex/exit, adopted ART threads with synthesized
    guest pthreads. *Tests*: fixture rows (pthread create/join, mutex contention, condvar, TLS keys and
    destructors) on both tiers, expected values from the tablet running the same `.so` natively.

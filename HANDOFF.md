@@ -44,10 +44,10 @@ implicit `bindService` (`com.android.vending.billing.MarketBillingService.BIND`)
 Service Intent must be explicit` at targetSdk >= 21. Not an emulator fault. Needs a new "targetSdk compatibility
 shims" component (spec Architecture; scheduled before M3 acceptance, which needs Gumball to reach its activity).
 
-**Tablet note.** RetroBug's "Install unknown apps" permission is allowed on the tablet; the agent did not grant it.
+**Tablet note.** RetroBug's "Install unknown apps" permission is allowed on the tablet; the implementing agent did not toggle it, but whether the human did or an `adb install -r -g` granted it is unknown.
 Whether to revoke is the human's call. Native Angry Birds Go 1.8.7 on the tablet was untouched.
 
-**Next = M2** (multi-entry core: thread contexts, GGL, clone/futex/exit, adopted ART threads) per the spec.
+**Next = M2, and the targetSdk compatibility shims before M3's acceptance** (M2: multi-entry core: thread contexts, GGL, clone/futex/exit, adopted ART threads; per the spec).
 
 ## Where it stands (all verified on the tablet)
 
