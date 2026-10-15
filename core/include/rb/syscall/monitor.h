@@ -390,6 +390,11 @@ class Monitor {
   [[nodiscard]] std::string group_exit_reason() const;
   /// Guest threads `clone` started that have not called `exit` yet (not counting the main thread).
   [[nodiscard]] std::size_t live_threads() const { return live_tids_.size(); }
+  /// A fresh tid for a guest thread the host made (an adopted host thread, M2 Task 5), counted live until
+  /// `ReleaseThreadId`. From the same sequence as `clone`'s tids. GGL held.
+  std::int32_t AllocateThreadId();
+  /// The thread `tid` is gone (an adopted thread's teardown). GGL held.
+  void ReleaseThreadId(std::int32_t tid) { live_tids_.erase(tid); }
 
   /// Capture, dispatch, write the result back, for a single-threaded caller: a blocking call's wait runs in
   /// place (there is no lock to release), so the verdict returned is never `kBlocking`. `thread` is the
@@ -518,6 +523,7 @@ class Monitor {
   /// A host steady-clock deadline for a guest absolute time on `clock_id`.
   std::optional<runtime::FutexTable::Clock::time_point> DeadlineFor(std::int32_t clock_id, std::int64_t abs_nanos) const;
   /// The clone / exit / futex / sleep cases, split out of Classify.
+  std::int32_t NextTid();
   Outcome Clone(const Frame& f, exec::MachineState& state, runtime::GuestThread& th);
   Outcome ThreadExit(const Frame& f, runtime::GuestThread& th);
   Outcome Futex(const Frame& f);

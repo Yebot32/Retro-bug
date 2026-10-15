@@ -338,6 +338,52 @@ __attribute__((visibility("default"))) int pt_sleeps(void) {
   return ok + (ms >= 25 ? 10 : 0);
 }
 
+/* ---- M2 Task 5: adopted host (ART) threads. These run on whatever thread calls them — the engine lane calls
+ * them from host threads that never went through pthread_create (adopted on their first guest call), the
+ * native oracle from threads pthread_create made. pt_key_* share one key, created once, whose destructor counts
+ * the non-null values it was run for. */
+static pthread_key_t g_adopt_key;
+static pthread_once_t g_adopt_once = PTHREAD_ONCE_INIT;
+static int g_adopt_dtors;
+static pthread_mutex_t g_adopt_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static void adopt_dtor(void* v) {
+  (void)v;
+  pthread_mutex_lock(&g_adopt_mu);
+  ++g_adopt_dtors;
+  pthread_mutex_unlock(&g_adopt_mu);
+}
+
+static void adopt_key_init(void) { pthread_key_create(&g_adopt_key, adopt_dtor); }
+
+__attribute__((visibility("default"))) int pt_self_tid(void) { return gettid(); }
+
+__attribute__((visibility("default"))) unsigned pt_self(void) { return (unsigned)(uintptr_t)pthread_self(); }
+
+/* The address errno lives at for the calling thread, after a write/read round trip of `v` through it. */
+__attribute__((visibility("default"))) unsigned pt_errno_slot(int v) {
+  errno = v;
+  sched_yield();
+  return errno == v ? (unsigned)(uintptr_t)&errno : 0u;
+}
+
+__attribute__((visibility("default"))) int pt_key_set(int v) {
+  if (pthread_once(&g_adopt_once, adopt_key_init) != 0) return -9;
+  return pthread_setspecific(g_adopt_key, (void*)(intptr_t)v) == 0 ? 0 : -7;
+}
+
+__attribute__((visibility("default"))) int pt_key_get(void) {
+  if (pthread_once(&g_adopt_once, adopt_key_init) != 0) return -9;
+  return (int)(intptr_t)pthread_getspecific(g_adopt_key);
+}
+
+__attribute__((visibility("default"))) int pt_key_destructor_count(void) {
+  pthread_mutex_lock(&g_adopt_mu);
+  const int n = g_adopt_dtors;
+  pthread_mutex_unlock(&g_adopt_mu);
+  return n;
+}
+
 /* ---- pt_exit_group_from_thread: one thread parks forever on a condvar, one spins forever with no syscall,
  * and a third calls _exit(code) (exit_group) after 20 ms, while the caller is parked in pthread_join on the
  * first. Never returns: the process ends with `code`, and every thread with it. Not part of the numeric

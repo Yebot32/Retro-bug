@@ -215,7 +215,20 @@ std::optional<BionicLayout> VerifyBionicLayout(const mem::GuestMemory& mem, cons
 
 // ------------------------------------------------------------------------------------ GuestProcess
 
-GuestProcess::~GuestProcess() { StopThreads(); }
+GuestProcess::~GuestProcess() {
+  // Order matters (lock discipline, M2 Task 5): first stop the guest (sticky group exit, every futex waiter and
+  // sleeper woken) so an adopted host thread's exit hook that is mid-way through guest destructors stops at its
+  // next check; then take `alive_`'s mutex (never held by anyone waiting for the GGL's holder) to cut every
+  // later hook off; then join the clone()d threads. Adopted GuestThreads go with `adopted_`; their destructors
+  // clear the binding cells of host threads still alive, which then read as unbound.
+  if (monitor_ != nullptr) monitor_->RequestGroupExit("the guest process is being destroyed");
+  futex_.Shutdown();
+  {
+    std::lock_guard<std::mutex> lk(alive_->mu);
+    alive_->proc = nullptr;
+  }
+  StopThreads();
+}
 
 void GuestProcess::Log(const std::string& line) const {
   if (opts_.log) opts_.log(line);
@@ -236,6 +249,7 @@ std::unique_ptr<GuestProcess> GuestProcess::Create(const GuestProcessOptions& op
 
   std::unique_ptr<GuestProcess> p{new GuestProcess()};
   p->opts_ = options;
+  p->alive_->proc = p.get();
   mem::AddressModel model;
   model.kind = options.biased ? mem::AddressModel::kBiased : mem::AddressModel::kFlatIdentity;
   model.host_page_shift = HostPageShift();
@@ -278,6 +292,8 @@ std::unique_ptr<GuestProcess> GuestProcess::Create(const GuestProcessOptions& op
   {
     GuestProcess* owner = p.get();
     p->monitor_->set_thread_spawner([owner](std::unique_ptr<GuestThread> t) { return owner->Spawn(std::move(t)); });
+    // Adopted ART threads (Task 5): a host thread with no binding that calls in gets a guest thread of its own.
+    p->abi_->set_adopter([owner](std::string* why) { return owner->AdoptCurrentHostThread(why); });
   }
 
   // The JNIEnv maps its own table and arena from a page-aligned base; a free run is found for it now,
@@ -429,7 +445,9 @@ bool GuestProcess::LoadScope(const std::vector<std::uint8_t>& libc, const std::v
   // call this process makes on its behalf (IFUNC resolvers, the main-thread setup, constructors, and the
   // caller's own later calls) runs there; another host thread must be bound to its own GuestThread (or, for
   // a caller that boots on one thread and continues on another, rebind the main thread under its own lock).
-  runtime::BindCurrentHostThread(abi_->main_thread());
+  if (!runtime::BindCurrentHostThread(abi_->main_thread())) {
+    return fail("the main guest thread is bound to another live host thread");
+  }
   // Everything below writes guest memory and the module list, which the GGL protects (Task 3 ruling iii).
   Ggl::Held hold(abi_->ggl());
 
@@ -689,7 +707,12 @@ std::string GuestProcess::Spawn(std::unique_ptr<GuestThread> t) {
 
 void GuestProcess::ThreadMain(HostThread* rec) {
   GuestThread& t = *rec->guest;
-  BindCurrentHostThread(t);
+  if (!BindCurrentHostThread(t)) {  // a fresh GuestThread: cannot be held elsewhere
+    std::lock_guard<std::mutex> lk(threads_mu_);
+    thread_faults_.push_back("guest thread tid " + std::to_string(t.tid) + " could not be bound to its host thread");
+    rec->done.store(true, std::memory_order_release);
+    return;
+  }
   exec::RunResult rr{};
   // Re-entered while the turn's budget (or the per-turn syscall cap) runs out: a guest thread runs until it
   // calls `exit`, stops with the process, or faults.
@@ -774,6 +797,242 @@ void GuestProcess::StopThreads() {
       if (r->host.joinable()) r->host.join();
     }
   }
+}
+
+// ------------------------------------------------------------------------------------ adopted threads (Task 5)
+//
+// An ART thread (any host thread with no binding) entering guest code for the first time gets what bionic's
+// pthread_create would have built for it, so `pthread_self()`, `errno`, `gettid()` and the TLS keys work on it:
+// a thread mapping shaped as `__allocate_thread_mapping(1 MiB, PTHREAD_GUARD_SIZE)` shapes one, the
+// `pthread_internal_t` carved just below the static TLS (pthread_create's `sub.w r0, r0, #0x2c8`), and libc's own
+// init functions run on it. Detached: an ART thread is never joined, and at its exit the host does the part of
+// `pthread_exit` that matters to the guest (key destructors, unlink, unmap).
+
+namespace {
+
+// [image] the pthread_attr_t inside pthread_internal_t (+0x10): flags +0, stack_base +4, stack_size +8,
+// guard_size +0xc (the facts below assert each where libc's own code uses it).
+constexpr std::uint32_t kThAttrStackBase = 0x14, kThAttrStackSize = 0x18, kThAttrGuardSize = 0x1c;
+constexpr std::uint32_t kPthreadAttrFlagDetached = 0x1;  // [image] __init_thread: bit 0 -> join_state 3
+constexpr std::uint32_t kThJoinState = 0x28;
+constexpr std::uint32_t kThreadDetached = 3;  // [image] THREAD_DETACHED
+
+const Fact kAdoptionFacts[] = {
+    {"__init_thread", {0x07c2}, "__init_thread tests attr.flags bit 0, PTHREAD_ATTR_FLAG_DETACHED (`lsls r2, r0, #0x1f`)"},
+    {"__init_thread", {0x2203}, "__init_thread's THREAD_DETACHED is 3 (`movne r2, #0x3`)"},
+    {"__init_thread", {0x62a2}, "pthread_internal_t::join_state at +0x28 (`str r2, [r4, #0x28]`)"},
+    {"__init_thread", {0xf011, 0x0f0c}, "__init_thread makes no scheduler call unless attr.flags bits 2/3 ... (`tst.w r1, #0xc`)"},
+    {"__init_thread", {0x6a20}, "... or attr.sched_policy (+0x20) is non-zero (`ldreq r0, [r4, #0x20]`)"},
+    {"pthread_attr_setstack", {0xe9cc, 0x1201}, "pthread_attr_t::stack_base/stack_size at +4/+8 (`strdeq r1, r2, [r12, #4]`)"},
+    {"pthread_attr_getguardsize", {0x68c0}, "pthread_attr_t::guard_size at +0xc (`ldr r0, [r0, #0xc]`)"},
+    {"pthread_getattr_np", {0xf100, 0x0110}, "pthread_getattr_np copies the attr from +0x10"},
+    {"pthread_getattr_np", {0x6885}, "pthread_getattr_np's main-thread test reads tid (+0x8) against getpid(): an adopted tid != pid is not main"},
+    {"__init_tcb_stack_guard", {0x6201}, "__init_tcb_stack_guard stores the guard at bionic_tcb + 0x20 (`str r1, [r0, #0x20]`)"},
+    {"pthread_key_clean_all", {0xee1d, 0x0f70, 0xf850, 0x4c04}, "pthread_key_clean_all reads the key data from bionic_tls (TP - 4)"},
+    {"__pthread_internal_remove", {0xe9d4, 0x0100}, "__pthread_internal_remove unlinks through next/prev at +0x0/+0x4"},
+};
+
+}  // namespace
+
+std::string GuestProcess::AdoptionFacts() {
+  if (adoption_checked_) return adoption_refusal_;
+  adoption_checked_ = true;
+  for (const char* fn : {"__init_tcb", "__init_tcb_dtv", "__init_tcb_stack_guard", "__init_thread",
+                         "__pthread_internal_add", "__pthread_internal_remove", "pthread_key_clean_all"}) {
+    if (libc_->FindLocalSymbolEntry(fn) == nullptr) {
+      adoption_refusal_ = std::string{fn} + " is not in libc.so's .symtab (an adopted thread is built and torn down "
+                                            "by libc's own code, and this one cannot be found)";
+      return adoption_refusal_;
+    }
+  }
+  for (const Fact& f : kAdoptionFacts) {
+    const loader::LocalSymbol* fn = libc_->FindLocalSymbolEntry(f.fn);
+    if (fn == nullptr) {
+      adoption_refusal_ = std::string{f.fn} + " is not in libc.so's .symtab (needed for: " + f.says + ")";
+      return adoption_refusal_;
+    }
+    if (!Contains(*mem_, *fn, f.code)) {
+      adoption_refusal_ = "bionic layout mismatch: " + std::string{f.says} + " — not found in " + f.fn + " at " +
+                          Hex(fn->addr);
+      return adoption_refusal_;
+    }
+  }
+  const loader::LocalSymbol* lock = libc_->FindLocalSymbolEntry("g_thread_list_lock");
+  if (lock == nullptr || lock->is_function || lock->size != 0x28) {
+    adoption_refusal_ = "g_thread_list_lock is not a 0x28-byte pthread_rwlock_t in libc.so's .symtab";
+  }
+  return adoption_refusal_;
+}
+
+bool GuestProcess::CallOn(GuestThread& t, const char* fn, const abi::Args32& args, std::uint32_t* r0,
+                          std::string* err) {
+  const loader::LocalSymbol* s = libc_->FindLocalSymbolEntry(fn);
+  if (s == nullptr) {
+    if (err) *err = std::string{fn} + " is not in libc.so's .symtab";
+    return false;
+  }
+  exec::Executor* const before = t.executor;
+  t.executor = &engine(opts_.ctor_tier);  // this thread's choice only: the process default is not touched
+  exec::RunResult rr{};
+  const abi::Ret32 ret =
+      abi_->CallGuest(s->addr | (s->thumb ? 1u : 0u), args, abi::Shorty::For("I"), kCallBudget, &rr);
+  t.executor = before;
+  if (rr.reason != exec::StopReason::Returned) {
+    if (err) *err = std::string{fn} + " did not return: " + ReasonName(rr.reason) + " " + rr.detail;
+    return false;
+  }
+  if (r0 != nullptr) *r0 = ret.w();
+  return true;
+}
+
+GuestThread* GuestProcess::AdoptCurrentHostThread(std::string* err) {
+  Ggl::Held hold(abi_->ggl());
+  const auto refuse = [&](const std::string& why) -> GuestThread* {
+    if (err) *err = "adopting a host thread: " + why;
+    return nullptr;
+  };
+  if (!scope_loaded_) return refuse("the scope is not loaded (libc's thread code is not there yet)");
+  if (monitor_->group_exited()) return refuse("the guest process has exited (" + monitor_->group_exit_reason() + ")");
+  if (const std::string why = AdoptionFacts(); !why.empty()) return refuse(why);
+
+  // g_thread_list_lock (a pthread_rwlock_t; its state word at +0 is 0 when nobody holds it): with the GGL held no
+  // guest code runs, so a non-zero state is a holder parked mid-update — linking now would race it.
+  const GuestAddr list_lock = *libc_->FindLocalSymbol("g_thread_list_lock");
+  std::uint32_t lock_state = 0xffff'ffffu;
+  if (!mem_->Read(list_lock, &lock_state, 4)) return refuse("g_thread_list_lock is unreadable");
+  if (lock_state != 0) {
+    return refuse("g_thread_list_lock is held (state " + Hex(lock_state) +
+                  ") by a guest thread; the thread list cannot be joined now");
+  }
+
+  const BionicLayout& l = layout_;
+  // __allocate_thread_mapping(stack, guard): guard page, stack, static TLS, 0x2000 scratch, top guard page.
+  const std::uint32_t size =
+      RoundUp(l.static_tls_size + kAdoptedStackBytes + kPthreadGuard + kMappingTop, mem::kGuestPage);
+  const GuestAddr base = FindFree(size);
+  std::string e;
+  if (base == 0) return refuse("no free run of " + Hex(size) + " bytes for the thread mapping");
+  const auto unmap = [&] { mem_->Unmap(base, size, nullptr); };
+  if (!mem_->Map(base, kPthreadGuard, mem::kNone, &e) ||
+      !mem_->Map(base + kPthreadGuard, size - kPthreadGuard - 0x1000u, mem::kRead | mem::kWrite, &e) ||
+      !mem_->Map(base + size - 0x1000u, 0x1000u, mem::kNone, &e)) {
+    unmap();
+    return refuse("mapping the " + Hex(size) + "-byte thread mapping at " + Hex(base) + ": " + e);
+  }
+  const GuestAddr scratch = base + size - kMappingTop;
+  const GuestAddr static_tls = scratch - l.static_tls_size;
+  const GuestAddr tcb = static_tls + l.offset_bionic_tcb;
+  const GuestAddr bionic_tls = static_tls + l.offset_bionic_tls;
+  // pthread_create carves the struct off the stack top, 16-aligned; the stack grows down from it.
+  const GuestAddr thread = (static_tls - l.thread_size) & ~0xfu;
+  const GuestAddr stack_base = base + kPthreadGuard;
+  const GuestAddr stack_top = thread;
+
+  auto owned = std::make_unique<GuestThread>();
+  GuestThread& t = *owned;
+  t.tid = monitor_->AllocateThreadId();
+  const auto undo = [&](const std::string& why) {
+    monitor_->ReleaseThreadId(t.tid);
+    owned.reset();  // clears this host thread's binding cell, if it was bound
+    unmap();
+    return refuse(why);
+  };
+  const std::uint32_t words[][2] = {
+      {kThTid, static_cast<std::uint32_t>(t.tid)},
+      {kThCachedPid, static_cast<std::uint32_t>(kPid)},
+      {kThAttrFlags, kPthreadAttrFlagDetached},
+      {kThAttrStackBase, stack_base},
+      {kThAttrStackSize, stack_top - stack_base},
+      {kThAttrGuardSize, kPthreadGuard},
+      {kThMmapBase, base},
+      {kThMmapSize, size},
+      {kThMmapBaseUnguarded, base + kPthreadGuard},
+      {kThMmapSizeUnguarded, size - kPthreadGuard - 0x1000u},
+      {kThBionicTls, bionic_tls},
+      {kThBionicTcb, tcb},
+  };
+  for (const auto& w : words) {
+    if (!mem_->Write(thread + w[0], &w[1], 4)) return undo("writing pthread_internal_t + " + Hex(w[0]));
+  }
+  if (!mem_->Write(bionic_tls + kBtTempBuffers, &scratch, 4) || !mem_->Write(tcb + kTcbBionicTls, &bionic_tls, 4)) {
+    return undo("writing bionic_tls + 0x414 / the tcb's bionic_tls slot");
+  }
+
+  t.state.r[13] = stack_top;
+  t.state.tp = tcb + l.tp_offset_in_tcb;
+  t.state.pc = kReturnAddress;
+  t.state.r[15] = kReturnAddress;
+  t.state.mode = isa::Mode::Thumb;
+  t.stack_lo = stack_base;
+  t.stack_hi = stack_top;
+  t.pthread_struct = thread;
+  t.adopted = true;
+  t.mapping = base;
+  t.mapping_size = size;
+  t.owner = abi_.get();
+  if (!BindCurrentHostThread(t)) return undo("the new guest thread could not be bound to this host thread");
+
+  // libc's own code fills the rest, on the new thread (its TP and stack), exactly as pthread_create does.
+  std::uint32_t r0 = 0;
+  if (!CallOn(t, "__init_tcb", {abi::Value32::Ptr(tcb), abi::Value32::Ptr(thread)}, nullptr, &e) ||
+      !CallOn(t, "__init_tcb_dtv", {abi::Value32::Ptr(tcb)}, nullptr, &e) ||
+      !CallOn(t, "__init_tcb_stack_guard", {abi::Value32::Ptr(tcb)}, nullptr, &e)) {
+    return undo(e);
+  }
+  if (!CallOn(t, "__init_thread", {abi::Value32::Ptr(thread)}, &r0, &e)) return undo(e);
+  if (r0 != 0) return undo("__init_thread returned " + std::to_string(static_cast<std::int32_t>(r0)));
+  std::uint32_t join_state = 0;
+  if (!mem_->Read(thread + kThJoinState, &join_state, 4) || join_state != kThreadDetached) {
+    return undo("__init_thread left join_state " + Hex(join_state) + ", not THREAD_DETACHED");
+  }
+  if (!CallOn(t, "__pthread_internal_add", {abi::Value32::Ptr(thread)}, nullptr, &e)) return undo(e);
+
+  adopted_.push_back(std::move(owned));
+  threads_adopted_.fetch_add(1, std::memory_order_relaxed);
+  GuestThread* const raw = &t;
+  AddHostThreadExitHook([alive = alive_, raw] {
+    std::lock_guard<std::mutex> lk(alive->mu);  // before the GGL, as the destructor takes it
+    if (alive->proc != nullptr) alive->proc->RetireAdopted(raw);
+  });
+  Log("threads: adopted a host thread as tid " + std::to_string(t.tid) + ": pthread_internal_t at " + Hex(thread) +
+      ", TP " + Hex(t.state.tp) + ", stack " + Hex(stack_base) + ".." + Hex(stack_top) + " in a " + Hex(size) +
+      "-byte mapping at " + Hex(base) + "; detached, linked into g_thread_list");
+  return raw;
+}
+
+void GuestProcess::RetireAdopted(GuestThread* t) {
+  Ggl::Held hold(abi_->ggl());
+  const auto it = std::find_if(adopted_.begin(), adopted_.end(), [t](const auto& p) { return p.get() == t; });
+  if (it == adopted_.end()) return;
+  std::string note = "threads: adopted tid " + std::to_string(t->tid) + " exited";
+  if (monitor_->group_exited()) {
+    note += " after the process stopped: no guest destructor ran";
+  } else if (!BindCurrentHostThread(*t)) {
+    note += ": its guest thread is bound elsewhere, so its key destructors could not run";
+  } else {
+    // pthread_exit's guest-visible half: the TLS-key destructors, then the unlink. A destructor may block (a
+    // futex wait releases the GGL) or end the process; either way the host thread finishes its exit here.
+    std::string e;
+    if (!CallOn(*t, "pthread_key_clean_all", {}, nullptr, &e)) {
+      note += "; pthread_key_clean_all: " + e;
+    } else if (!CallOn(*t, "__pthread_internal_remove", {abi::Value32::Ptr(t->pthread_struct)}, nullptr, &e)) {
+      note += "; __pthread_internal_remove: " + e;
+    } else {
+      note += ": key destructors ran, unlinked from g_thread_list";
+    }
+  }
+  monitor_->ReleaseThreadId(t->tid);
+  std::string e;
+  if (!mem_->Unmap(t->mapping, t->mapping_size, &e)) note += "; unmapping its mapping: " + e;
+  interp_->Invalidate(t->mapping, t->mapping + t->mapping_size);
+  if (jit_->ok()) jit_->Invalidate(t->mapping, t->mapping + t->mapping_size);
+  Log(note + "; its " + Hex(t->mapping_size) + "-byte mapping freed");
+  adopted_.erase(it);  // the GuestThread's destructor clears this host thread's binding cell
+}
+
+std::size_t GuestProcess::adopted_threads() const {
+  Ggl::Held hold(const_cast<GuestProcess*>(this)->abi_->ggl());
+  return adopted_.size();
 }
 
 }  // namespace rb::runtime

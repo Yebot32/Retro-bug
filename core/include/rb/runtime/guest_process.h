@@ -170,6 +170,24 @@ class GuestProcess {
   /// The budget one `RunThread` turn of a `clone`d thread gets (it is re-entered until the thread exits).
   static constexpr unsigned kThreadTurnBudget = 1u << 30;
 
+  // ---- adopted host threads (M2 Task 5)
+  /// The stack an adopted thread gets (plus a guard page below it), as pthread_create's default.
+  static constexpr std::uint32_t kAdoptedStackBytes = 1u << 20;
+  /// Gives the calling host thread (an ART thread entering guest code for the first time) a guest thread of its
+  /// own, built the way bionic's pthread_create builds one: a thread mapping (guard, 1 MiB stack, static TLS)
+  /// in the window, a `pthread_internal_t` + tcb + `bionic_tls` in the `BionicLayout` (detached: nothing joins an
+  /// ART thread), filled by libc's own `__init_tcb`, `__init_tcb_dtv`, `__init_tcb_stack_guard` and
+  /// `__init_thread`, linked into `g_thread_list` by `__pthread_internal_add`, and a fresh tid from the monitor.
+  /// Returns it bound to the calling host thread. When that host thread exits, its guest TLS-key destructors run
+  /// (libc's `pthread_key_clean_all`), the struct is unlinked (`__pthread_internal_remove`) and the mapping is
+  /// freed. Null with a named `err` (scope not loaded, process exited, a libc internal or layout fact missing,
+  /// `g_thread_list_lock` held, no room). Takes the GGL. The bridge calls it (`AbiContext::set_adopter`) for any
+  /// unbound host thread; calling it directly on an already-bound host thread adopts it anew.
+  GuestThread* AdoptCurrentHostThread(std::string* err);
+  /// Adopted threads whose host thread has not exited yet, and adoptions ever made.
+  [[nodiscard]] std::size_t adopted_threads() const;
+  [[nodiscard]] std::size_t threads_adopted() const { return threads_adopted_.load(std::memory_order_relaxed); }
+
  private:
   GuestProcess() = default;
   /// The monitor's `ThreadSpawner`: adopts `t` and starts its host thread (called with the GGL held).
@@ -180,6 +198,12 @@ class GuestProcess {
     std::atomic<bool> done{false};
   };
   void ThreadMain(HostThread* rec);
+  /// An adopted thread's host thread exited (its exit hook, GGL not held): guest key destructors, unlink, free.
+  void RetireAdopted(GuestThread* t);
+  /// Checks (once) the libc internals and layout facts adoption relies on; empty when they hold.
+  std::string AdoptionFacts();
+  /// Runs libc-internal `fn` on `t` (bound here, GGL held) on the constructor tier; false with `err`.
+  bool CallOn(GuestThread& t, const char* fn, const abi::Args32& args, std::uint32_t* r0, std::string* err);
   /// Joins and drops records whose host thread finished. `threads_mu_` held.
   void ReapLocked();
   /// Stops every guest thread (process teardown) and joins their host threads. Never with the GGL held.
@@ -227,6 +251,17 @@ class GuestProcess {
   std::list<std::unique_ptr<HostThread>> threads_;
   std::vector<std::string> thread_faults_;
   std::atomic<std::size_t> threads_started_{0};
+  /// Adopted threads (GGL-protected). Their host threads' exit hooks reach this process through `alive_`, which
+  /// the destructor clears (under its mutex, after the group exit) so a hook never runs on a destroyed process.
+  std::list<std::unique_ptr<GuestThread>> adopted_;
+  std::atomic<std::size_t> threads_adopted_{0};
+  struct Liveness {
+    std::mutex mu;  ///< taken before the GGL, never while holding it
+    GuestProcess* proc = nullptr;
+  };
+  std::shared_ptr<Liveness> alive_ = std::make_shared<Liveness>();
+  bool adoption_checked_ = false;
+  std::string adoption_refusal_;
 };
 
 }  // namespace rb::runtime

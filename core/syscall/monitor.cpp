@@ -1397,6 +1397,17 @@ Outcome Monitor::Sleep(const std::string& what, std::int64_t nanos) {
   return o;
 }
 
+std::int32_t Monitor::NextTid() {
+  if (next_tid_ == 0) next_tid_ = main_->tid + 1;
+  return next_tid_++;
+}
+
+std::int32_t Monitor::AllocateThreadId() {
+  const std::int32_t tid = NextTid();
+  live_tids_.insert(tid);
+  return tid;
+}
+
 Outcome Monitor::Clone(const Frame& f, exec::MachineState& state, runtime::GuestThread& th) {
   const std::uint32_t flags = f.arg[0];
   const std::string call = "clone(flags=0x" + Hex(flags) + ", stack=0x" + Hex(f.arg[1]) + ", ptid=0x" +
@@ -1422,8 +1433,7 @@ Outcome Monitor::Clone(const Frame& f, exec::MachineState& state, runtime::Guest
   if (f.arg[1] == 0) {
     return Outcome::Answered(err::kEinval, call + " = -EINVAL (-22): a CLONE_VM thread needs its own stack");
   }
-  if (next_tid_ == 0) next_tid_ = main_->tid + 1;
-  const std::int32_t tid = next_tid_++;
+  const std::int32_t tid = NextTid();
   // CLONE_PARENT_SETTID: the parent's word holds the tid before either thread runs again.
   if (!memory_->Write(f.arg[2], &tid, 4)) {
     return Outcome::Answered(err::kEfault, call + " = -EFAULT (-14): the parent-tid word is not writable");

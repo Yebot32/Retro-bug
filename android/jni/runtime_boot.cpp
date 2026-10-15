@@ -379,10 +379,9 @@ bool BootOne(Runtime& rt, const std::string& apk, const std::string& lib, std::s
     Line(out, "scope: reused — booted by an earlier rb_runtime_boot in this process (" +
                   std::to_string(rt.proc->constructors_run()) + " constructors run so far); " + lib +
                   " loads against it");
-    // The main guest thread runs every boot's guest work (constructors, JNI_OnLoad). A later boot can arrive
-    // on a different Java thread (each System.loadLibrary runs on its caller's thread); boots are serialized
-    // by g_mu, so handing the main thread to this one is safe (Task 5 adopts other threads properly).
-    rb::runtime::BindCurrentHostThread(rt.proc->main_guest_thread());
+    // A later boot can arrive on a different Java thread (each System.loadLibrary runs on its caller's thread).
+    // The main guest thread stays with the host thread that booted the scope (M2 Task 5 ruling a): this one
+    // is adopted on its first guest call (its own pthread, stack and TLS), as on a device.
   }
   GuestProcess& p = *rt.proc;
   std::set<std::string> in_progress;

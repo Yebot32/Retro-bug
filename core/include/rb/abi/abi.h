@@ -50,6 +50,7 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -301,19 +302,27 @@ class AbiContext : public exec::HostDispatch {
   /// the host never answered is the same silent-ignore mistake in a place where the guest is now holding
   /// a return value that was never produced. Attaching hands the monitor this context's main thread.
   void set_monitor(syscall::Monitor* monitor);
+
+  /// Makes a guest thread for a host thread that calls in with no binding of this context's (M2 Task 5): returns
+  /// it already bound to the calling host thread, or null with `why`. Called without the GGL (it takes it). Set
+  /// once, at setup, before any host thread calls in.
+  using Adopter = std::function<runtime::GuestThread*(std::string* why)>;
+  void set_adopter(Adopter adopter) { adopter_ = std::move(adopter); }
   [[nodiscard]] syscall::Monitor* monitor() const { return monitor_; }
 
   /// Set when a call ended in `StopReason::Exited`; the status the guest passed to `exit_group`.
   [[nodiscard]] std::int32_t exit_status() const { return exit_status_; }
 
   /// Makes host function `slot` callable by the guest. Re-binding replaces, which is what lets a
-  /// profile override a default rather than needing a second table.
+  /// profile override a default rather than needing a second table. Takes the GGL (the table is GGL-protected,
+  /// and a slot running with the lock released keeps its own reference to the entry it runs), so it is safe
+  /// after guest threads exist (M2 Task 5 ruling e).
   /// The default is `kHoldsGgl`, the safe one: a slot that releases the lock must say so (`kReleasesGgl`), because
   /// its host code then must not touch guest memory or any GGL-protected state (M2 Task 4 fix round 1).
   void Bind(std::uint32_t slot, HostFn fn, SlotLock lock = SlotLock::kHoldsGgl);
   /// Changes how an already-bound slot treats the GGL (no-op for an unbound slot).
   void SetSlotLock(std::uint32_t slot, SlotLock lock);
-  [[nodiscard]] bool IsBound(std::uint32_t slot) const { return bound_.count(slot) != 0; }
+  [[nodiscard]] bool IsBound(std::uint32_t slot) const;
 
   /// The guest address a table entry must hold for host function `slot`. Slots are laid out
   /// contiguously from `slot_base`, which is what lets a JNI table be filled by arithmetic — and why
@@ -327,10 +336,12 @@ class AbiContext : public exec::HostDispatch {
   /// `max_steps` bounds the whole call, host calls included, so a guest loop that never returns cannot
   /// take the host with it.
   ///
-  /// It runs on the calling host thread's `GuestThread` (`runtime::CurrentGuestThread()`). A host thread
-  /// with no binding gets this context's main thread when that is not bound to another host thread (the
-  /// first caller claims it); otherwise the call is refused by name (`StopReason::Internal`, "host thread
-  /// not bound to a guest thread; adoption arrives in Task 5"). The GGL is acquired unless already held.
+  /// It runs on the calling host thread's `GuestThread` (`runtime::CurrentGuestThread()`). A host thread with
+  /// no binding of this context's is *adopted* when an adopter is installed (`set_adopter`; `GuestProcess`
+  /// installs one, M2 Task 5): it gets a guest thread of its own, never the main one. With no adopter (a bare
+  /// single-threaded bridge) it gets the main thread when no live host thread holds that (the first caller
+  /// claims it); otherwise the call is refused by name (`StopReason::Internal`, "host thread not bound to a
+  /// guest thread"). The GGL is acquired unless already held.
   ///
   /// `exit_state` is optional and exists because without it there is no way to ask the question: the
   /// bridge restores the caller's registers on the way out — correctly, since a nested call's caller is
@@ -373,6 +384,9 @@ class AbiContext : public exec::HostDispatch {
     HostFn fn;
     SlotLock lock = SlotLock::kHoldsGgl;
   };
+  /// Entries are immutable once published: `Bind`/`SetSlotLock` replace the pointer under the GGL, and a call
+  /// in flight (possibly with the GGL released) holds its own reference.
+  using SlotRef = std::shared_ptr<const Slot>;
   /// One kuser helper's semantics on `state` (index: 0 cmpxchg64, 1 barrier, 2 cmpxchg, 3 get_tls).
   bool RunKuserHelper(MachineState& state, std::uint32_t which, std::string* err);
   /// The guest thread a call from this host thread runs on (see `CallGuest`), or null with `why`.
@@ -381,10 +395,12 @@ class AbiContext : public exec::HostDispatch {
   runtime::GuestThread* BoundThreadOfMine();
 
   mem::GuestMemory& memory_;
-  exec::Executor* executor_ = nullptr;
+  /// The default tier, for threads that never chose: atomic, since any host thread may set it (ruling e).
+  std::atomic<exec::Executor*> executor_{nullptr};
   syscall::Monitor* monitor_ = nullptr;
+  Adopter adopter_;
   std::int32_t exit_status_ = 0;
-  std::unordered_map<std::uint32_t, Slot> bound_;
+  std::unordered_map<std::uint32_t, SlotRef> bound_;  ///< GGL-protected
   runtime::Ggl ggl_;
   runtime::GuestThread main_;
   std::atomic<std::uint64_t> slices_{0};

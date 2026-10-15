@@ -9,10 +9,12 @@
  * `set_robust_list`'s head, the signal mask and the `PR_SET_NAME` name. The process-wide state (memory,
  * executors, the host-entry table, the monitor's fd table and allocator) stays where it was.
  *
- * A host thread runs guest code on the `GuestThread` it is bound to (`BindCurrentHostThread`); the binding is
- * a `thread_local` pointer (`CurrentGuestThread`). One guest thread runs on one host thread at a time:
- * binding a `GuestThread` to a second host thread takes it from the first (whose binding then reads as
- * absent).
+ * A host thread runs guest code on the `GuestThread` it is bound to (`BindCurrentHostThread`; read back with
+ * `CurrentGuestThread`). One guest thread runs on one host thread at a time, and a binding is never stolen:
+ * binding a `GuestThread` that another live host thread holds is refused (M2 Task 5 ruling b). A binding ends
+ * when its host thread rebinds or unbinds, when its host thread exits (a host `pthread_key` destructor releases
+ * it, so a dead host thread never blocks a later binding — ruling d), or when the `GuestThread` is destroyed
+ * (the shared binding cell is cleared, so no host thread can reach a destroyed context — ruling c).
  *
  * This header and `guest_thread.cpp` sit *below* the bridge and the monitor (library `rb_guest_thread`,
  * depending on `rb_exec` only), because both of them read a thread's fields; `GuestProcess` composes them.
@@ -22,6 +24,8 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <functional>
+#include <memory>
 #include <thread>
 
 #include "rb/exec/machine_state.h"
@@ -33,11 +37,12 @@ class Executor;
 namespace rb::runtime {
 
 using exec::GuestAddr;
+struct HostBinding;
 
 struct GuestThread {
   GuestThread() = default;
-  /// Clears this host thread's binding when it points here, so a destroyed context cannot be reached
-  /// through a stale pointer from the thread that destroyed it.
+  /// Clears the binding cell shared with the host thread bound here (whichever host thread that is), so a
+  /// destroyed context cannot be reached through any host thread's binding.
   ~GuestThread();
   GuestThread(const GuestThread&) = delete;
   GuestThread& operator=(const GuestThread&) = delete;
@@ -51,7 +56,10 @@ struct GuestThread {
   std::uint64_t signal_mask = 0;  ///< rt_sigprocmask (the arm32 kernel's 8-byte sigset)
   std::array<char, 16> name{};    ///< prctl(PR_SET_NAME), TASK_COMM_LEN bytes
   GuestAddr pthread_struct = 0;   ///< this thread's bionic `pthread_internal_t`, when there is one
-  bool adopted = false;           ///< a host thread that entered guest code first (Task 5)
+  bool adopted = false;           ///< a host thread that entered guest code with no binding (Task 5)
+  /// For an adopted thread: its synthesized thread mapping (stack, guard pages, static TLS), freed at exit.
+  GuestAddr mapping = 0;
+  std::uint32_t mapping_size = 0;
 
   // ---- bridge bookkeeping (not guest-visible)
   /// The tier this thread's guest calls run on, set by `AbiContext::set_executor` from the bound host
@@ -63,19 +71,29 @@ struct GuestThread {
   const void* owner = nullptr;
   /// The host thread this guest thread is bound to (default id = none).
   std::atomic<std::thread::id> host{};
+
+ private:
+  friend bool BindCurrentHostThread(GuestThread&);
+  std::shared_ptr<HostBinding> binding_;  ///< the cell shared with the bound host thread (see the .cpp)
 };
 
 /// The guest thread the calling host thread is bound to, or null.
 GuestThread* CurrentGuestThread();
 
 /// Binds the calling host thread to `t` (and `t` to it): guest calls made from this host thread run on `t`'s
-/// registers and per-thread kernel state. Rebinding replaces the previous binding.
-void BindCurrentHostThread(GuestThread& t);
+/// registers and per-thread kernel state. The host thread's previous binding (to another GuestThread) is
+/// released. False, changing nothing, when `t` is bound to another live host thread.
+[[nodiscard]] bool BindCurrentHostThread(GuestThread& t);
 
 /// Drops the calling host thread's binding (its `GuestThread`, if still bound here, then has no host thread).
 void UnbindCurrentHostThread();
 
 /// True when `t` is bound to the calling host thread (both directions agree).
 bool BoundHere(const GuestThread& t);
+
+/// Runs `hook` on the calling host thread when it exits (from a host `pthread_key` destructor, before its binding
+/// is released), after the hooks added before it. Each hook runs once. The hook
+/// must tolerate running after whatever it refers to is gone (capture a liveness token, not a raw owner).
+void AddHostThreadExitHook(std::function<void()> hook);
 
 }  // namespace rb::runtime

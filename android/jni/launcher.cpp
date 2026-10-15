@@ -2046,8 +2046,17 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
             last_scene = now_scene;
           }
           if (f < 3 || f % 200 == 0) {
+            // The texture list and the GL counters are filled by the game's host methods under the GGL, and
+            // cloned game threads may be running now: read them under it (M2 Task 5 ruling f).
+            unsigned gl_now = 0;
+            std::size_t tex_now = 0;
+            {
+              rb::runtime::Ggl::Held g(ctx.ggl());
+              gl_now = gl_total() - g1;
+              tex_now = textures.size();
+            }
             Say(&out, "gumball: frame %u — jniRun steps=%u, %u GL call(s) this frame, %zu texture(s) so far",
-                f, run_o.steps, gl_total() - g1, textures.size());
+                f, run_o.steps, gl_now, tex_now);
           }
         }
         // The report from here on reads run state the GGL protects (monitor tables, JniEnv records, GL counters,

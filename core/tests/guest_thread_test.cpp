@@ -222,7 +222,10 @@ struct CallOut {
 /// A host thread bound to `t` that makes one guest call.
 std::thread Worker(Rig& r, GuestThread& t, exec::GuestAddr fn, abi::Args32 args, unsigned budget, CallOut& out) {
   return std::thread([&r, &t, fn, args, budget, &out] {
-    runtime::BindCurrentHostThread(t);
+    if (!runtime::BindCurrentHostThread(t)) {
+      std::fprintf(stderr, "FATAL: a fresh GuestThread could not be bound (line %d)\n", __LINE__);
+      std::abort();
+    }
     out.start = Clock::now();
     out.ret = r.abi->CallGuest(fn, args, abi::Shorty::For("I"), budget, &out.rr);
     out.end = Clock::now();
@@ -270,7 +273,10 @@ void SharedCounterRow(int tier, const char* row, exec::GuestAddr blob, exec::Gue
   const abi::Args32 args{abi::Value32::Ptr(word), abi::Value32::U32(per_thread)};
   const auto worker = [&](GuestThread& t, CallOut& out) {
     return std::thread([&, args] {
-      runtime::BindCurrentHostThread(t);
+      if (!runtime::BindCurrentHostThread(t)) {
+        std::fprintf(stderr, "FATAL: a fresh GuestThread could not be bound (line %d)\n", __LINE__);
+        std::abort();
+      }
       ready.fetch_add(1);
       while (ready.load() < 2) std::this_thread::yield();
       out.start = Clock::now();
@@ -386,7 +392,10 @@ void ggl_is_released_in_host_calls(int tier) {
     CHECK_CTX(cv.wait_for(lk, std::chrono::seconds(5), [&] { return in_slot; }), name + ": A never reached the slot");
   }
   std::thread tb([&] {
-    runtime::BindCurrentHostThread(b);
+    if (!runtime::BindCurrentHostThread(b)) {
+      std::fprintf(stderr, "FATAL: a fresh GuestThread could not be bound (line %d)\n", __LINE__);
+      std::abort();
+    }
     cb.start = Clock::now();
     cb.ret = r.abi->CallGuest(kTen, {}, abi::Shorty::For("I"), 1000, &cb.rr);
     cb.end = Clock::now();
@@ -456,8 +465,9 @@ void monitor_blocking_verdict(void) {
   CHECK(std::string{syscall::Name(syscall::Verdict::kBlocking)} == "blocking");
 }
 
-/// Ruling 1: a host thread with no binding, on a context whose main thread is bound elsewhere, is refused
-/// by name — never silently run on somebody else's registers.
+/// A bare bridge (no adopter: only a `GuestProcess` adopts): a host thread with no binding, on a context whose
+/// main thread another live host thread holds, is refused by name — never silently run on somebody else's
+/// registers. (With a `GuestProcess` the same host thread is adopted instead: `art_thread_is_adopted`.)
 void unbound_host_thread_is_refused(int tier) {
   const std::string name = std::string{"unbound_host_thread_is_refused/"} + TierName(tier);
   Watchdog wd(name, std::chrono::seconds(30));
@@ -474,9 +484,78 @@ void unbound_host_thread_is_refused(int tier) {
   });
   t.join();
   CHECK_CTX(c.rr.reason == exec::StopReason::Internal &&
-                c.rr.detail.find("host thread not bound to a guest thread; adoption arrives in Task 5") !=
+                c.rr.detail.find("host thread not bound to a guest thread (this bridge has no adopter") !=
                     std::string::npos,
             Why(c));
+}
+
+// ------------------------------------------------------------------------------------ M2 Task 5: bindings
+//
+// The controller's rulings on the binding itself: (b) a GuestThread bound to another live host thread is never
+// stolen; (d) a host thread's exit releases its binding, so a dead host thread never blocks a later one; (c) a
+// GuestThread destroyed while a host thread is bound to it leaves that host thread unbound, not dangling.
+
+/// A start/stop gate for a helper host thread.
+struct Gate {
+  std::mutex mu;
+  std::condition_variable cv;
+  int stage = 0;
+  void Set(int s) {
+    {
+      std::lock_guard<std::mutex> lk(mu);
+      stage = s;
+    }
+    cv.notify_all();
+  }
+  bool Wait(int s) {
+    std::unique_lock<std::mutex> lk(mu);
+    return cv.wait_for(lk, std::chrono::seconds(10), [&] { return stage >= s; });
+  }
+};
+
+void bind_refuses_a_live_owner_and_frees_a_dead_one(void) {
+  Watchdog wd("bind_refuses_a_live_owner_and_frees_a_dead_one", std::chrono::seconds(30));
+  GuestThread g;
+  Gate gate;
+  bool bound_there = false;
+  std::thread x([&] {
+    bound_there = runtime::BindCurrentHostThread(g);
+    gate.Set(1);
+    gate.Wait(2);  // stays alive (and bound) until the main thread has tried
+  });
+  CHECK(gate.Wait(1));
+  CHECK(bound_there);
+  // (b): bound to a live host thread -> refused, and nothing changed on either side.
+  CHECK(!runtime::BindCurrentHostThread(g));
+  CHECK(runtime::CurrentGuestThread() != &g);
+  CHECK(g.host.load() != std::this_thread::get_id());
+  gate.Set(2);
+  x.join();
+  // (d): that host thread exited; its binding went with it, so this one can take the GuestThread.
+  CHECK(g.host.load() == std::thread::id{});
+  CHECK(runtime::BindCurrentHostThread(g));
+  CHECK(runtime::BoundHere(g));
+  runtime::UnbindCurrentHostThread();
+  CHECK(runtime::CurrentGuestThread() == nullptr);
+}
+
+void destroyed_guest_thread_leaves_no_dangling_binding(void) {
+  Watchdog wd("destroyed_guest_thread_leaves_no_dangling_binding", std::chrono::seconds(30));
+  auto g = std::make_unique<GuestThread>();
+  Gate gate;
+  bool before = false, after_is_null = false;
+  std::thread x([&] {
+    before = runtime::BindCurrentHostThread(*g) && runtime::CurrentGuestThread() == g.get();
+    gate.Set(1);
+    gate.Wait(2);
+    after_is_null = runtime::CurrentGuestThread() == nullptr;  // (c): reads as unbound, not a freed pointer
+  });
+  CHECK(gate.Wait(1));
+  g.reset();  // destroyed on this thread while `x` is bound to it
+  gate.Set(2);
+  x.join();
+  CHECK(before);
+  CHECK(after_is_null);
 }
 
 /// Each guest thread answers `gettid` with its own tid; the main thread with the monitor's.
@@ -819,6 +898,176 @@ void clone_storm_then_exit_group(int tier, const std::map<std::string, std::stri
   }
 }
 
+// ------------------------------------------------------------------------------------ M2 Task 5: adopted threads
+//
+// A host thread that never went through guest pthread_create (an ART thread) calling into guest code: the
+// process adopts it (its own pthread_internal_t, stack, TLS and tid, linked into g_thread_list), and its guest
+// TLS-key destructors run when the host thread exits. The composite matches the native oracle's
+// `adopted_thread_keys()`, where the same fixture calls run on threads the device's pthread_create made.
+
+/// The `pthread_internal_t`s on libc's `g_thread_list`, head first (at most 64).
+std::vector<std::uint32_t> ThreadList(runtime::GuestProcess& p) {
+  std::vector<std::uint32_t> out;
+  runtime::Ggl::Held hold(p.ggl());
+  const auto head = p.libc()->FindLocalSymbol("g_thread_list");
+  std::uint32_t at = 0;
+  if (!head || !p.memory().Read(*head, &at, 4)) return out;
+  while (at != 0 && out.size() < 64) {
+    out.push_back(at);
+    if (!p.memory().Read(at, &at, 4)) break;
+  }
+  return out;
+}
+
+bool Has(const std::vector<std::uint32_t>& v, std::uint32_t x) { return std::find(v.begin(), v.end(), x) != v.end(); }
+
+struct Adopted {
+  int tid = 0, key_get = -1, b_tid = 0, b_key_get = -1;
+  std::uint32_t self = 0, b_self = 0, errno_slot = 0, struct_tid = 0;
+  bool bound = false, adopted = false, struct_matches = false, in_list = false, b_in_list = false;
+  std::size_t adopted_while_b_alive = 0, adopted_after_b = 0;
+  std::string why;
+};
+
+void art_thread_is_adopted(int tier, const std::map<std::string, std::string>& oracle) {
+  const std::string name = std::string{"art_thread_is_adopted/"} + TierName(tier);
+  Watchdog wd(name, std::chrono::seconds(60));
+  Proc pr = BootPthreads(tier);
+  CHECK_CTX(pr.p != nullptr, pr.err);
+  if (!pr.p) return;
+  using V = abi::Value32;
+  // The main thread (the host thread that ran LoadScope) calls first and returns.
+  const FixtureCall mt = CallFixture(pr, tier, "pt_self_tid", {});
+  const FixtureCall ms = CallFixture(pr, tier, "pt_self", {});
+  CHECK_CTX(mt.rr.reason == exec::StopReason::Returned && mt.ret.i() == runtime::GuestProcess::kMainTid, mt.rr.detail);
+  CHECK(ms.ret.w() == pr.p->main_thread());
+  CHECK(runtime::BoundHere(pr.p->main_guest_thread()));
+
+  Adopted a;
+  std::thread ta([&] {
+    // Ruling a: a second host thread, after main returned, is adopted — never given the main thread.
+    const FixtureCall t = CallFixture(pr, tier, "pt_self_tid", {});
+    if (t.rr.reason != exec::StopReason::Returned) a.why = "pt_self_tid: " + t.rr.detail;
+    a.tid = t.ret.i();
+    GuestThread* g = runtime::CurrentGuestThread();
+    a.bound = g != nullptr && runtime::BoundHere(*g) && g != &pr.p->main_guest_thread();
+    a.adopted = g != nullptr && g->adopted && g->tid == a.tid;
+    a.self = CallFixture(pr, tier, "pt_self", {}).ret.w();
+    a.struct_matches = g != nullptr && g->pthread_struct == a.self;
+    {
+      runtime::Ggl::Held hold(pr.p->ggl());
+      pr.p->memory().Read(a.self + 0x8u, &a.struct_tid, 4);
+    }
+    a.errno_slot = CallFixture(pr, tier, "pt_errno_slot", {V::S32(1234)}).ret.w();
+    a.in_list = Has(ThreadList(*pr.p), a.self);
+    const FixtureCall set = CallFixture(pr, tier, "pt_key_set", {V::S32(7)});
+    if (set.ret.i() != 0) a.why += " pt_key_set(7) = " + std::to_string(set.ret.i()) + " " + set.rr.detail;
+    a.key_get = CallFixture(pr, tier, "pt_key_get", {}).ret.i();
+    // A second adopted thread while this one is alive (and holds its value): its own key slot reads 0.
+    std::thread tb([&] {
+      a.b_key_get = CallFixture(pr, tier, "pt_key_get", {}).ret.i();
+      a.b_tid = CallFixture(pr, tier, "pt_self_tid", {}).ret.i();
+      a.b_self = CallFixture(pr, tier, "pt_self", {}).ret.w();
+      a.b_in_list = Has(ThreadList(*pr.p), a.b_self);
+      a.adopted_while_b_alive = pr.p->adopted_threads();
+    });
+    tb.join();
+    a.adopted_after_b = pr.p->adopted_threads();  // b's host thread exited: retired before join returned
+  });
+  ta.join();
+
+  const int dtors = CallFixture(pr, tier, "pt_key_destructor_count", {}).ret.i();
+  const auto list = ThreadList(*pr.p);
+  bool a_mapped = true;
+  {
+    runtime::Ggl::Held hold(pr.p->ggl());
+    a_mapped = pr.p->memory().IsMapped(a.self & ~0xfffu);
+  }
+  std::fprintf(stderr, "#   %s: main tid %d self 0x%x; A tid %d self 0x%x errno@0x%x key %d; B tid %d self 0x%x key %d; "
+                       "%d destructor call(s); %zu adoptions; g_thread_list %zu long%s%s\n",
+               name.c_str(), mt.ret.i(), ms.ret.w(), a.tid, a.self, a.errno_slot, a.key_get, a.b_tid, a.b_self,
+               a.b_key_get, dtors, pr.p->threads_adopted(), list.size(), a.why.empty() ? "" : " — ", a.why.c_str());
+  CHECK_CTX(a.why.empty(), a.why);
+  CHECK_CTX(a.tid != 0 && a.tid != mt.ret.i(), "adopted tid " + std::to_string(a.tid));
+  CHECK_CTX(a.self != 0 && a.self != ms.ret.w(), "adopted pthread_self " + Hex(a.self));
+  CHECK(a.bound);
+  CHECK(a.adopted);
+  CHECK(a.struct_matches);
+  CHECK_CTX(a.struct_tid == static_cast<std::uint32_t>(a.tid), "struct tid " + std::to_string(a.struct_tid));
+  CHECK_CTX(a.errno_slot == a.self + 0x29cu, "errno at " + Hex(a.errno_slot) + ", struct " + Hex(a.self));
+  CHECK(a.in_list);
+  CHECK_CTX(a.key_get == 7, "pt_key_get on A = " + std::to_string(a.key_get));
+  CHECK_CTX(a.b_key_get == 0, "pt_key_get on B = " + std::to_string(a.b_key_get));
+  CHECK(a.b_tid != 0 && a.b_tid != a.tid && a.b_tid != mt.ret.i());
+  CHECK(a.b_self != 0 && a.b_self != a.self && a.b_in_list);
+  CHECK_CTX(a.adopted_while_b_alive == 2u && a.adopted_after_b == 1u,
+            std::to_string(a.adopted_while_b_alive) + " / " + std::to_string(a.adopted_after_b));
+  CHECK_CTX(dtors == 1, "pt_key_destructor_count() = " + std::to_string(dtors));
+  CHECK(!Has(list, a.self) && !Has(list, a.b_self) && Has(list, pr.p->main_thread()));
+  CHECK(pr.p->adopted_threads() == 0u && pr.p->threads_adopted() == 2u);
+  CHECK(pr.p->monitor().live_threads() == 0u);
+  CHECK_CTX(!a_mapped, "the adopted thread's mapping is still mapped after its host thread exited");
+  CHECK(runtime::BoundHere(pr.p->main_guest_thread()));  // main never moved off the LoadScope thread
+  // The native oracle composes the same five facts.
+  const int composite = (a.tid != 0 && a.tid != mt.ret.i() ? 1 : 0) + (a.self != ms.ret.w() ? 10 : 0) +
+                        (a.key_get == 7 ? 100 : 0) + (a.b_key_get == 0 ? 1000 : 0) + (dtors == 1 ? 10000 : 0);
+  const auto want = oracle.find("adopted_thread_keys()");
+  CHECK_CTX(want != oracle.end() && std::to_string(composite) == want->second,
+            name + " composite " + std::to_string(composite) + ", the device says " +
+                (want == oracle.end() ? std::string{"(no row)"} : want->second));
+  CHECK(pr.p->ggl().misuses() == 0u);
+}
+
+/// An adopted host thread that outlives its process: destroying the process leaves the host thread unbound
+/// (ruling c — its GuestThread is gone, and its binding reads as absent rather than dangling), and the host
+/// thread's later exit runs no teardown on the destroyed process.
+void adopted_thread_outlives_process(int tier) {
+  const std::string name = std::string{"adopted_thread_outlives_process/"} + TierName(tier);
+  Watchdog wd(name, std::chrono::seconds(60));
+  Proc pr = BootPthreads(tier);
+  CHECK_CTX(pr.p != nullptr, pr.err);
+  if (!pr.p) return;
+  Gate gate;
+  int tid = 0;
+  bool bound = false, unbound_after = false;
+  std::thread c([&] {
+    tid = CallFixture(pr, tier, "pt_key_set", {abi::Value32::S32(9)}).ret.i() == 0
+              ? CallFixture(pr, tier, "pt_self_tid", {}).ret.i()
+              : -1;
+    bound = runtime::CurrentGuestThread() != nullptr;
+    gate.Set(1);
+    gate.Wait(2);
+    unbound_after = runtime::CurrentGuestThread() == nullptr;
+  });
+  CHECK(gate.Wait(1));
+  CHECK(pr.p->adopted_threads() == 1u);
+  pr.p.reset();  // the adopted host thread is still alive and bound
+  gate.Set(2);
+  c.join();  // its exit hook finds the process gone: nothing runs
+  CHECK_CTX(tid > 0 && bound, name + ": tid " + std::to_string(tid));
+  CHECK(unbound_after);
+}
+
+/// Adoption on a process that has exited is refused by name, not run.
+void adoption_after_exit_is_refused(int tier) {
+  const std::string name = std::string{"adoption_after_exit_is_refused/"} + TierName(tier);
+  Watchdog wd(name, std::chrono::seconds(30));
+  Proc pr = BootPthreads(tier);
+  CHECK_CTX(pr.p != nullptr, pr.err);
+  if (!pr.p) return;
+  {
+    runtime::Ggl::Held hold(pr.p->ggl());
+    pr.p->monitor().RequestGroupExit("the test ended the process");
+  }
+  FixtureCall c;
+  std::thread t([&] { c = CallFixture(pr, tier, "pt_self_tid", {}); });
+  t.join();
+  CHECK_CTX(c.rr.reason == exec::StopReason::Internal &&
+                c.rr.detail.find("adopting a host thread: the guest process has exited") != std::string::npos,
+            c.rr.detail);
+  CHECK(pr.p->threads_adopted() == 0u);
+}
+
 void guest_pthreads(int tier) {
   const auto oracle = Oracle();
   CHECK_CTX(!oracle.empty(), std::string{"no oracle rows at "} + RB_PTHREAD_ORACLE_PATH);
@@ -854,6 +1103,9 @@ void guest_pthreads(int tier) {
   }
   exit_group_stops_every_thread(tier, oracle);
   clone_storm_then_exit_group(tier, oracle);
+  art_thread_is_adopted(tier, oracle);
+  adopted_thread_outlives_process(tier);
+  adoption_after_exit_is_refused(tier);
 }
 
 }  // namespace
@@ -861,6 +1113,8 @@ void guest_pthreads(int tier) {
 int main() {
   monitor_blocking_verdict();
   ggl_handoff_latency();
+  bind_refuses_a_live_owner_and_frees_a_dead_one();
+  destroyed_guest_thread_leaves_no_dangling_binding();
   for (int tier : {1, 2}) {
     two_host_threads_share_one_process(tier);
     kuser_cmpxchg_shared_by_two_threads(tier);

@@ -293,20 +293,28 @@ runtime::GuestThread* AbiContext::ThreadForThisHost(std::string* why) {
     t->owner = this;  // only the bound host thread writes it, and only before its first call here
     return t;
   }
-  // No binding of ours on this host thread. The main thread goes to the first host thread that asks (every
-  // single-threaded caller — a bare rig, the launcher's `Launch` — never binds explicitly), or back to the
-  // host thread that already has it after it used another context; `GuestProcess` binds it explicitly to
-  // the thread that ran `LoadScope`. Claimed with a compare-exchange, so two unbound host threads cannot
-  // both get it.
-  const std::thread::id me = std::this_thread::get_id();
-  std::thread::id holder{};
-  if (main_.host.compare_exchange_strong(holder, me, std::memory_order_acq_rel) || holder == me) {
-    runtime::BindCurrentHostThread(main_);
+  // No binding of ours on this host thread. With an adopter (a `GuestProcess`), the host thread gets a guest
+  // thread of its own — the main one belongs only to the host thread that ran `LoadScope` (M2 Task 5 ruling a).
+  if (adopter_) {
+    std::string e;
+    runtime::GuestThread* t = adopter_(&e);
+    if (t != nullptr && runtime::BoundHere(*t)) {
+      t->owner = this;
+      return t;
+    }
+    if (why != nullptr) *why = "host thread not bound to a guest thread, and adopting it failed: " + e;
+    return nullptr;
+  }
+  // A bare bridge (no adopter: a single-threaded rig): the main thread goes to the first host thread that asks,
+  // or back to the one that holds it. `BindCurrentHostThread` refuses a main thread another live host thread
+  // holds, so two unbound host threads cannot both get it; a holder that exited has released it.
+  if (runtime::BindCurrentHostThread(main_)) {
+    main_.owner = this;
     return &main_;
   }
   if (why != nullptr) {
-    *why = "host thread not bound to a guest thread; adoption arrives in Task 5 (this process's main guest "
-           "thread is bound to another host thread, and this one was given no GuestThread)";
+    *why = "host thread not bound to a guest thread (this bridge has no adopter, and its main guest thread is "
+           "bound to another live host thread)";
   }
   return nullptr;
 }
@@ -317,13 +325,13 @@ MachineState& AbiContext::state() {
 }
 
 void AbiContext::set_executor(exec::Executor& executor) {
-  executor_ = &executor;
+  executor_.store(&executor, std::memory_order_release);
   if (runtime::GuestThread* t = BoundThreadOfMine()) t->executor = &executor;
 }
 
 exec::Executor& AbiContext::executor() const {
   runtime::GuestThread* t = const_cast<AbiContext*>(this)->BoundThreadOfMine();
-  return (t != nullptr && t->executor != nullptr) ? *t->executor : *executor_;
+  return (t != nullptr && t->executor != nullptr) ? *t->executor : *executor_.load(std::memory_order_acquire);
 }
 
 void AbiContext::set_monitor(syscall::Monitor* monitor) {
@@ -338,12 +346,20 @@ void AbiContext::Bind(std::uint32_t slot, HostFn fn, SlotLock lock) {
   // this slot, so the binding is dropped rather than aliased onto somebody else's. Callers that need
   // to know ask with `IsBound`.
   if (slot >= kMaxSlots) return;
-  bound_[slot] = Slot{std::move(fn), lock};
+  auto entry = std::make_shared<const Slot>(Slot{std::move(fn), lock});
+  runtime::Ggl::Held hold(ggl_);
+  bound_[slot] = std::move(entry);
 }
 
 void AbiContext::SetSlotLock(std::uint32_t slot, SlotLock lock) {
+  runtime::Ggl::Held hold(ggl_);
   const auto it = bound_.find(slot);
-  if (it != bound_.end()) it->second.lock = lock;
+  if (it != bound_.end()) it->second = std::make_shared<const Slot>(Slot{it->second->fn, lock});
+}
+
+bool AbiContext::IsBound(std::uint32_t slot) const {
+  runtime::Ggl::Held hold(const_cast<runtime::Ggl&>(ggl_));
+  return bound_.count(slot) != 0;
 }
 
 bool AbiContext::IsHostEntry(GuestAddr pc, std::uint32_t* slot) const {
@@ -423,7 +439,7 @@ Ret32 AbiContext::CallGuest(GuestAddr fn, const Args32& args, const Shorty& shor
   runtime::GuestThread* const thread = ThreadForThisHost(&why);
   if (thread == nullptr) {
     // Refused by name rather than run on somebody else's registers: a host thread that is not a guest
-    // thread has no stack, no tid and no TLS of its own here (Task 5 adopts such threads).
+    // thread has no stack, no tid and no TLS of its own here (and it could not be adopted).
     if (outcome != nullptr) {
       *outcome = exec::RunResult{};
       outcome->reason = exec::StopReason::Internal;
@@ -474,7 +490,8 @@ Ret32 AbiContext::CallGuest(GuestAddr fn, const Args32& args, const Shorty& shor
 exec::RunResult AbiContext::RunThread(runtime::GuestThread& thread, unsigned budget) {
   runtime::Ggl::Held hold(ggl_);
   MachineState& state = thread.state;
-  exec::Executor* const engine = thread.executor != nullptr ? thread.executor : executor_;
+  exec::Executor* const engine =
+      thread.executor != nullptr ? thread.executor : executor_.load(std::memory_order_acquire);
   exec::RunResult run{};
   if (engine == nullptr) {
     run.reason = exec::StopReason::Internal;
@@ -594,27 +611,28 @@ exec::RunResult AbiContext::RunThread(runtime::GuestThread& thread, unsigned bud
       state.r[15] = state.pc;
       continue;
     }
-    const auto slot = bound_.find(run.host_slot);
+    SlotRef slot;  // our own reference: a `Bind` while this slot runs (GGL released) replaces, never frees, it
+    if (const auto it = bound_.find(run.host_slot); it != bound_.end()) slot = it->second;
     bool ok = false;
-    if (slot != bound_.end()) {
-      if (slot->second.lock == SlotLock::kHoldsGgl) {
-        ok = slot->second.fn(state, &herr);
+    if (slot) {
+      if (slot->lock == SlotLock::kHoldsGgl) {
+        ok = slot->fn(state, &herr);
       } else {
         // The rule for host code: it may block (a GL driver, a host condition variable, a nested guest
         // call that itself waits), so other guest threads must be able to run while it does. A nested
         // `CallGuest` it makes re-acquires the lock to run guest code (and itself releases it at slices,
         // host slots and blocking syscalls, like any call).
         runtime::Ggl::Released off(ggl_);
-        ok = slot->second.fn(state, &herr);
+        ok = slot->fn(state, &herr);
       }
-      if (slot->second.lock != SlotLock::kHoldsGgl) held = 0;
+      if (slot->lock != SlotLock::kHoldsGgl) held = 0;
       // Re-acquired after a released slot, or after a held slot whose nested guest call released it inside.
       if (group_stop()) break;
     }
     if (!ok) {
       run.reason = exec::StopReason::Fault;
       run.detail = "host call at slot " + std::to_string(run.host_slot) +
-                   (slot == bound_.end() ? " is not bound" : "") +
+                   (!slot ? " is not bound" : "") +
                    (herr.empty() ? "" : ": " + herr);
       break;
     }
