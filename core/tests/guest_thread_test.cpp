@@ -1150,6 +1150,7 @@ void unlinkable_exit_keeps_the_mapping(int tier, const std::map<std::string, std
   GuestThread* g = nullptr;
   std::uint32_t self = 0;
   bool h_bound = false;
+  bool h_still_bound = false;  // after `a` retired: `h`'s GuestThread was not freed under it
   std::thread a([&] {
     self = CallFixture(pr, tier, "pt_self", {}).ret.w();
     g = runtime::CurrentGuestThread();
@@ -1162,6 +1163,7 @@ void unlinkable_exit_keeps_the_mapping(int tier, const std::map<std::string, std
     h_bound = g != nullptr && runtime::BindCurrentHostThread(*g);
     gate.Set(2);
     gate.Wait(3);
+    h_still_bound = runtime::CurrentGuestThread() == g && g->tid != 0;
   });
   CHECK(gate.Wait(2));
   a.join();
@@ -1170,6 +1172,7 @@ void unlinkable_exit_keeps_the_mapping(int tier, const std::map<std::string, std
   const auto faults = pr.p->adoption_faults();
   std::fprintf(stderr, "#   %s: %s\n", name.c_str(), Joined(faults).c_str());
   CHECK(h_bound);
+  CHECK(h_still_bound);
   CHECK_CTX(faults.size() == 1u && faults[0].find("bound to another host thread") != std::string::npos &&
                 faults[0].find("is kept (leaked), not freed") != std::string::npos,
             Joined(faults));

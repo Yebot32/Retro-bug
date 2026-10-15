@@ -193,6 +193,13 @@ adb push "$(to_host "$PTHREAD_FIXTURE")" /data/local/tmp/libpthread_fixture.so >
 adb push "$(to_host "$ROOT/tests/corpus/oracle-pthread.txt")" /data/local/tmp/oracle-pthread.txt >/dev/null
 adb push "$(to_host "$FIXTURE_STRIPPED")" /data/local/tmp/librb_fixture_stripped.so >/dev/null
 adb push "$(to_host "$DEVICE_LIBC")" /data/local/tmp/rb_device_libc.so >/dev/null
+# libc's own DT_NEEDED, from the same 32-bit system (optional: a 32-bit-capable device has them in /system/lib;
+# a 64-bit-only one needs them pushed — adb pull /system/lib/{libdl,ld-android}.so build/device-libs/).
+for dep in libdl.so ld-android.so; do
+  if [ -s "$ROOT/build/device-libs/$dep" ]; then
+    adb push "$(to_host "$ROOT/build/device-libs/$dep")" "/data/local/tmp/rb_device_$dep" >/dev/null
+  fi
+done
 adb push "$(to_host "$GUEST_LIBM")" /data/local/tmp/libm.so >/dev/null
 adb push "$(to_host "$GUEST_LIBZ")" /data/local/tmp/libz.so >/dev/null
 if [ -s "$GUEST_APK" ]; then adb push "$(to_host "$GUEST_APK")" /data/local/tmp/rb_guestprobe.apk >/dev/null; fi

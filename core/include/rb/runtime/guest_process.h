@@ -264,6 +264,9 @@ class GuestProcess {
   /// Adopted threads (GGL-protected). Their host threads' exit hooks reach this process through `alive_`, which
   /// the destructor clears (under its mutex, after the group exit) so a hook never runs on a destroyed process.
   std::list<std::unique_ptr<GuestThread>> adopted_;
+  /// Adopted GuestThreads whose host thread exited while another live host thread had them bound: that thread may
+  /// still be running them with the GGL released, so they stay allocated until the process goes (GGL-protected).
+  std::list<std::unique_ptr<GuestThread>> stranded_;
   std::atomic<std::size_t> threads_adopted_{0};
   struct Liveness {
     /// Shared by exit hooks (concurrently: one adopted thread's destructors may wait on another's), exclusive in

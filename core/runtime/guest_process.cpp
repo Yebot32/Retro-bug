@@ -1035,9 +1035,11 @@ void GuestProcess::RetireAdopted(GuestThread* t) {
   std::string note = "threads: " + who + " exited";
   std::string fault;  // a named failure of the guest-visible exit, reported in adoption_faults()
   const bool live = !monitor_->group_exited();
+  bool bound_elsewhere = false;
   if (!live) {
     note += " after the process stopped: no guest destructor ran";
   } else if (!BindCurrentHostThread(*t)) {
+    bound_elsewhere = true;
     fault = who + " exited while its guest thread was bound to another host thread: its TLS-key destructors did "
                   "not run and it was not unlinked";
   } else {
@@ -1072,7 +1074,14 @@ void GuestProcess::RetireAdopted(GuestThread* t) {
   } else {
     Log(note);
   }
-  adopted_.erase(it);  // the GuestThread's destructor clears this host thread's binding cell
+  if (bound_elsewhere || !live) {
+    // Another live host thread may hold it (perhaps inside RunThread with the GGL released, or still unwinding
+    // after the group exit): freeing it here would leave that thread a dangling GuestThread. Keep it until the
+    // process goes.
+    stranded_.splice(stranded_.end(), adopted_, it);
+  } else {
+    adopted_.erase(it);  // the GuestThread's destructor clears this host thread's binding cell
+  }
 }
 
 std::vector<std::string> GuestProcess::adoption_faults() const {

@@ -606,6 +606,26 @@ void the_bridge_leaves_the_guest_stack_where_it_found_it() {
             "SP left at " + Hex(rig.abi_ctx->state().r[13]) + " by a completed call");
 }
 
+/// A call run to completion is re-entered at each turn's end instead of being cut off by the budget: with a
+/// 1000-step turn, fib(12) (which needs far more) still returns 144 and leaves SP where it found it, while
+/// the same budget on a plain call stops it.
+void a_call_to_completion_is_re_entered_across_turns() {
+  Rig rig = build(true);
+  if (!rig.ok) return;
+  const auto fib = rig.mod->FindExport("Java_com_retrobug_fixture_MainActivity_fib");
+  if (!fib) return;
+  const abi::Args32 args{abi::Value32::Ptr(0), abi::Value32::Ptr(0), abi::Value32::S32(12)};
+  exec::RunResult cut{};
+  rig.abi_ctx->CallGuest(fib->tagged(), args, abi::Shorty::For("IILLI"), 1000, &cut);
+  CHECK_CTX(cut.reason == exec::StopReason::Budget, std::string{"a 1000-step plain call stopped: "} + cut.detail);
+  exec::RunResult outcome{};
+  const auto ret = rig.abi_ctx->CallGuestToCompletion(fib->tagged(), args, abi::Shorty::For("IILLI"), 1000, &outcome);
+  CHECK_CTX(outcome.reason == exec::StopReason::Returned, outcome.detail);
+  CHECK_CTX(ret.i() == 144, "fib(12) = " + std::to_string(ret.i()));
+  CHECK_CTX(rig.abi_ctx->state().r[13] == kStackTop,
+            "SP left at " + Hex(rig.abi_ctx->state().r[13]) + " by a completed call");
+}
+
 /// The loop from the other side: a guest that makes a syscall during a JNI call, with the monitor behind
 /// it. The value asserted is 4243 rather than 4242 because the guest adds one to whatever came back — so
 /// the test proves the answer reached the guest's own arithmetic, not merely that the host noticed the
@@ -707,6 +727,7 @@ int main() {
   the_kuser_helpers_answer_like_the_kernel();
   guest_functions_called_through_the_bridge_match_hardware();
   the_bridge_leaves_the_guest_stack_where_it_found_it();
+  a_call_to_completion_is_re_entered_across_turns();
   a_guest_syscall_in_a_jni_call_is_answered();
   exit_group_stops_the_call();
 
