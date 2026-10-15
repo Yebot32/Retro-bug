@@ -26,7 +26,9 @@
  */
 #include <unistd.h>
 
+#include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -429,6 +431,40 @@ void find_local_symbol(const Images& im) {
   }
 }
 
+/// A trivial guest call through GuestProcess's bridge costs microseconds on Tier J, booted or not: 1000
+/// calls of a planted `bx lr` and 200 of libc's `getpid` each under a generous bound. Guards the per-call
+/// path against a regression that would make a boot of hundreds of constructors (Angry Birds Go: 258)
+/// slow enough to ANR. Measured on R52Y106BECZ (shell): 0.8 ms and 3 ms; an app process whose screen is
+/// off runs several times slower (background cpuset), which the bound leaves room for.
+void trivial_tier_j_calls_are_fast(const Images& im) {
+  Booted b = Boot(2, im.libc, im.libm, im.libz);
+  CHECK_CTX(b.p != nullptr, b.err);
+  if (!b.p) return;
+  GuestProcess& p = *b.p;
+  std::string e;
+  const std::uint32_t at = p.MapFree(0x1000, mem::kRead | mem::kWrite, &e);
+  const std::uint32_t bx = 0xe12f'ff1eu;  // bx lr
+  CHECK_CTX(at != 0 && p.memory().Write(at, &bx, 4) && p.memory().Protect(at, 0x1000, mem::kRead | mem::kExec, &e), e);
+  p.abi().set_executor(p.engine(2));
+  const auto t0 = std::chrono::steady_clock::now();
+  bool all = true;
+  for (int i = 0; i < 1000 && all; ++i) {
+    exec::RunResult rr{};
+    p.abi().CallGuest(at, {}, abi::Shorty::For("V"), 1000, &rr);
+    all = rr.reason == exec::StopReason::Returned;
+  }
+  const double bx_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  CHECK(all);
+  const auto t1 = std::chrono::steady_clock::now();
+  Call c;
+  for (int i = 0; i < 200; ++i) c = CallLibc(p, 2, "getpid", {}, "I");
+  const double pid_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count();
+  CHECK_CTX(c.ok && c.r0 == static_cast<std::uint32_t>(GuestProcess::kPid), c.why);
+  std::fprintf(stderr, "# Tier J: 1000 trivial calls %.1f ms, 200 getpid %.1f ms\n", bx_ms, pid_ms);
+  CHECK_CTX(bx_ms < 1000.0, "1000 trivial Tier J calls took " + std::to_string(bx_ms) + " ms (bound 1000)");
+  CHECK_CTX(pid_ms < 1000.0, "200 getpid calls on Tier J took " + std::to_string(pid_ms) + " ms (bound 1000)");
+}
+
 }  // namespace
 
 int main() {
@@ -441,6 +477,7 @@ int main() {
     }
     a_different_libc_layout_is_refused_by_name(im);
     find_local_symbol(im);
+    trivial_tier_j_calls_are_fast(im);
   }
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;
