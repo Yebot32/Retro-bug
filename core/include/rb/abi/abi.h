@@ -230,8 +230,8 @@ using HostFn = std::function<bool(MachineState&, std::string* err)>;
  * **Threads (M2).** Registers and per-thread kernel state live in a `runtime::GuestThread`; a host thread
  * runs guest code on the one it is bound to (`runtime::BindCurrentHostThread`). The bridge owns the process's
  * main `GuestThread` and its Global Guest Lock (`runtime::Ggl`): `CallGuest` holds the lock while guest
- * code runs and releases it at every slice boundary (`kSliceSteps`), around host-slot calls (unless the slot
- * is an engine service bound with `SlotLock::kHoldsGgl`) and around a blocking syscall's wait. The executors
+ * code runs and releases it at every slice boundary (`kSliceSteps`), around host-slot calls bound
+ * `SlotLock::kReleasesGgl` (the default is to hold it) and around a blocking syscall's wait. The executors
  * are shared by every thread — they are stateless between `Run` calls — and so is the host-entry table:
  * `Bind` belongs to setup, before more than one host thread calls in.
  */
@@ -271,10 +271,12 @@ class AbiContext : public exec::HostDispatch {
   /// cannot starve the others (spec: Runtime, GGL).
   static constexpr unsigned kSliceSteps = 200'000u;
 
-  /// Whether a host slot runs with the GGL released (the default, and the rule: host code may block, and
-  /// other guest threads must run meanwhile) or held. `kHoldsGgl` is for the engine's own services — the
-  /// JNIEnv table and the dynamic-linker slots — which mutate process state the GGL protects and never wait
-  /// on another guest thread. What is held is exactly the slot's own host code: the GGL is not released
+  /// Whether a host slot runs with the GGL held (the default since M2 Task 4's fix round: the safe choice) or
+  /// released. `kReleasesGgl` is for host code that may block on something other than a guest thread and
+  /// touches no guest memory and no GGL-protected state while it runs — marshal in and out before and after,
+  /// with the lock held. Held slots (the JNIEnv table, the dynamic-linker and log slots, the launcher's GL
+  /// forwarding, whose driver reads guest memory) never wait on another guest thread. What is held is exactly
+  /// the slot's own host code: the GGL is not released
   /// between the slot's entry and its return. A nested guest call such a slot makes (a host method calling
   /// back into the guest) does *not* keep the lock throughout: its `RunThread` releases it at every slice
   /// boundary, around every `kReleasesGgl` host slot and around every blocking syscall, exactly as a
@@ -306,7 +308,9 @@ class AbiContext : public exec::HostDispatch {
 
   /// Makes host function `slot` callable by the guest. Re-binding replaces, which is what lets a
   /// profile override a default rather than needing a second table.
-  void Bind(std::uint32_t slot, HostFn fn, SlotLock lock = SlotLock::kReleasesGgl);
+  /// The default is `kHoldsGgl`, the safe one: a slot that releases the lock must say so (`kReleasesGgl`), because
+  /// its host code then must not touch guest memory or any GGL-protected state (M2 Task 4 fix round 1).
+  void Bind(std::uint32_t slot, HostFn fn, SlotLock lock = SlotLock::kHoldsGgl);
   /// Changes how an already-bound slot treats the GGL (no-op for an unbound slot).
   void SetSlotLock(std::uint32_t slot, SlotLock lock);
   [[nodiscard]] bool IsBound(std::uint32_t slot) const { return bound_.count(slot) != 0; }
@@ -367,7 +371,7 @@ class AbiContext : public exec::HostDispatch {
  private:
   struct Slot {
     HostFn fn;
-    SlotLock lock = SlotLock::kReleasesGgl;
+    SlotLock lock = SlotLock::kHoldsGgl;
   };
   /// One kuser helper's semantics on `state` (index: 0 cmpxchg64, 1 barrier, 2 cmpxchg, 3 get_tls).
   bool RunKuserHelper(MachineState& state, std::uint32_t which, std::string* err);

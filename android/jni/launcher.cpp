@@ -1384,6 +1384,7 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
   // takes a `const char*`, so the note is built as a string first: a ternary mixing `""` with a
   // concatenation hands the variadic call a `std::string` and clang refuses it.
   const auto say_trapped = [&]() {
+    rb::runtime::Ggl::Held g(ctx.ggl());  // unanswered-import and trap state are GGL-protected
     // The scope's own unanswered imports first, and before the early return below: a *constructor* can
     // be their first caller (2026-10-09: libc's `netdClientInitImpl` called `dlopen`'s trapped slot),
     // and the shipping case has the app's list empty — an earlier revision of this block sat after the
@@ -1428,8 +1429,14 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
 
   /// The dl* set's tally and the game's own log, in its own words — both `HostSlots`' (host_slots.h).
   const auto say_line = [&out](const std::string& s) { Say(&out, "%s", s.c_str()); };
-  const auto say_dl = [&]() { slots.ReportDl(say_line, kUnresolved); };
-  const auto say_guest_log = [&]() { slots.ReportLog(say_line); };
+  const auto say_dl = [&]() {
+    rb::runtime::Ggl::Held g(ctx.ggl());  // dl slot counters are written under the GGL
+    slots.ReportDl(say_line, kUnresolved);
+  };
+  const auto say_guest_log = [&]() {
+    rb::runtime::Ggl::Held g(ctx.ggl());  // the log record is written by the log slot under the GGL
+    slots.ReportLog(say_line);
+  };
 
   /**
    * One place that writes the GL tally, at every exit, for the same reason `say_trapped` exists.
@@ -1443,6 +1450,7 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
   /// What the game asked its Java side for: each host method's tally, then every readFile request with
   /// the APK entry that answered it or the reason it came back null.
   const auto say_java = [&]() {
+    rb::runtime::Ggl::Held g(ctx.ggl());  // JniEnv records are GGL-protected
     if (!renderer_bound) return;
     for (const auto& u : jni.host_method_uses()) {
       Say(&out, "java: %s.%s%s called x%u (%u refused)", u.cls.c_str(), u.name.c_str(), u.sig.c_str(),
@@ -1478,6 +1486,7 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
   };
 
   const auto say_gl = [&]() {
+    rb::runtime::Ggl::Held g(ctx.ggl());  // GL counters/failures are updated by GL slots under the GGL
     if (gl_calls.empty()) {
       Say(&out, "gl: no gl* import was asked of the host in this run, so the host-answered GL set is empty"
                 " (nothing was answered with GL semantics, and nothing needed to be)");
@@ -1533,6 +1542,7 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
   /// what the guest asked the OS for is the next thing a reader needs, and a run that stopped before any
   /// guest code ran has to say that rather than print an empty line.
   const auto say_syscalls = [&]() {
+    rb::runtime::Ggl::Held g(ctx.ggl());  // monitor tables are GGL-protected; cloned game threads may run
     const std::string tally = monitor.TallyText();
     if (tally.empty()) {
       Say(&out, "syscalls: none were made — the run stopped before guest code asked the OS for anything");
@@ -1877,6 +1887,7 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
             renderer_bound ? "" : (" — binding FAILED: " + cerr).c_str());
 
         const auto gl_total = [&]() {
+          rb::runtime::Ggl::Held g(ctx.ggl());  // the GL slots update these counters under the GGL
           unsigned n = 0;
           for (const GlEntry& g : gl_calls) n += g.calls;
           return n;
@@ -2039,6 +2050,9 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
                 f, run_o.steps, gl_total() - g1, textures.size());
           }
         }
+        // The report from here on reads run state the GGL protects (monitor tables, JniEnv records, GL counters,
+        // texture asks the game's host methods fill) while cloned game threads may still run: hold it to the end.
+        rb::runtime::Ggl::Held report_lock(ctx.ggl());
         unsigned dropped = 0;
         {
           std::lock_guard<std::mutex> lock(g_touch_mu);

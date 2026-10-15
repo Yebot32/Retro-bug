@@ -474,15 +474,31 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
     }
 
     case nr::kMadvise: {
-      // madvise(addr, len, advice). MADV_DONTNEED (4) drops the pages: a later read sees zeros, which is
-      // what an allocator returning memory relies on, so writable pages in the range are zero-filled.
-      // Every other advice is a hint a kernel may ignore: 0.
+      // madvise(addr, len, advice). MADV_DONTNEED (4) drops the pages: a later read sees zeros, which is what an
+      // allocator returning memory relies on — for read-only private pages too (kernel semantics), so a page
+      // without write access is opened for the zero-fill and put back. Executable pages are the exception: no
+      // guest page here records whether it came from a file, and a device would re-read a file-backed code page
+      // rather than zero it, so they are left as they are (and the note counts them). The hints a kernel may
+      // ignore answer 0; MADV_REMOVE (9) needs a shared mapping this build never makes (the kernel's EINVAL for
+      // a private one); any advice the kernel does not know is EINVAL, by number.
       const std::uint32_t at = f.arg[0];
       const std::uint32_t len = f.arg[1];
       const std::uint32_t advice = f.arg[2];
       const std::string call = "madvise(0x" + Hex(at) + ", " + std::to_string(len) + ", " + std::to_string(advice) + ")";
-      if ((at & (mem::kGuestPage - 1u)) != 0) return Outcome::Answered(err::kEinval, call + " = -EINVAL (-22)");
-      if (advice != 4u || len == 0) return Outcome::Emulated(0, call + " -> 0 (advice accepted, no effect)");
+      if ((at & (mem::kGuestPage - 1u)) != 0) {
+        return Outcome::Answered(err::kEinval, call + " = -EINVAL (-22): the address is not page-aligned");
+      }
+      const bool hint = advice <= 3u /* NORMAL RANDOM SEQUENTIAL WILLNEED */ || advice == 8u /* FREE */ ||
+                        (advice >= 10u && advice <= 21u) /* DONTFORK..PAGEOUT */;
+      if (advice == 9u) {
+        return Outcome::Answered(err::kEinval, call + " = -EINVAL (-22): MADV_REMOVE needs a shared mapping, and "
+                                                      "this build makes none (the kernel's answer for a private one)");
+      }
+      if (advice != 4u && !hint) {
+        return Outcome::Answered(err::kEinval, call + " = -EINVAL (-22): advice " + std::to_string(advice) +
+                                                   " is not one the kernel knows");
+      }
+      if (hint || len == 0) return Outcome::Emulated(0, call + " -> 0 (a hint: accepted, no effect)");
       if (memory_ == nullptr) {
         return Outcome::Refused(err::kEnosys, "madvise: no guest memory is attached to this monitor");
       }
@@ -496,16 +512,25 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
       }
       for (std::uint64_t pg = at; pg < end; pg += mem::kGuestPage) {
         const auto p = static_cast<std::uint32_t>(pg);
-        const std::uint32_t n = mem::kGuestPage;  // DONTNEED drops whole pages (len is rounded up)
-        if ((memory_->ProtAt(p) & mem::kWrite) != 0 && memory_->Write(p, kZero, n)) {
-          ++zeroed;
-        } else {
+        const unsigned prot = memory_->ProtAt(p);
+        if ((prot & mem::kExec) != 0) {
           ++kept;
+          continue;
         }
+        // DONTNEED drops whole pages (len is rounded up).
+        if ((prot & mem::kWrite) != 0) {
+          if (memory_->Write(p, kZero, mem::kGuestPage)) ++zeroed; else ++kept;
+          continue;
+        }
+        std::string perr;
+        const bool ok = memory_->Protect(p, mem::kGuestPage, prot | mem::kWrite, &perr) &&
+                        memory_->Write(p, kZero, mem::kGuestPage);
+        memory_->Protect(p, mem::kGuestPage, prot, &perr);
+        if (ok) ++zeroed; else ++kept;
       }
       return Outcome::Emulated(0, call + " -> 0: MADV_DONTNEED zero-filled " + std::to_string(zeroed) +
                                       " page(s)" + (kept != 0 ? "; " + std::to_string(kept) +
-                                                                     " not writable here, left as they were"
+                                                                     " executable page(s) left as they were"
                                                               : std::string{}));
     }
 
@@ -1386,6 +1411,12 @@ Outcome Monitor::Clone(const Frame& f, exec::MachineState& state, runtime::Guest
   if (!spawner_) {
     return Outcome::Refused(err::kEnosys, call + ": no thread spawner is installed on this monitor, so it "
                                                  "cannot run a second guest thread");
+  }
+  if (group_exited()) {
+    // The process is exiting (exit_group, a fatal thread fault, or teardown): no new thread may start, or it
+    // would outlive the process it belongs to.
+    return Outcome::Answered(err::kEagain, call + " = -EAGAIN (-11): the process is exiting (" + group_exit_reason() +
+                                               "); no new thread starts");
   }
   if (memory_ == nullptr) return Outcome::Refused(err::kEnosys, call + ": no guest memory is attached");
   if (f.arg[1] == 0) {

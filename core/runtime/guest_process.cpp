@@ -671,6 +671,7 @@ bool GuestProcess::RunConstructors(std::string* failed) {
 std::string GuestProcess::Spawn(std::unique_ptr<GuestThread> t) {
   // Called by the monitor's `clone` with the GGL held: the new host thread binds its GuestThread and then
   // waits for the GGL, so it runs no guest code before the parent's clone has returned and released it.
+  if (monitor_->group_exited()) return "the process is exiting; no new thread starts";
   std::lock_guard<std::mutex> lk(threads_mu_);
   ReapLocked();
   auto rec = std::make_unique<HostThread>();
@@ -697,7 +698,10 @@ void GuestProcess::ThreadMain(HostThread* rec) {
     if (rr.reason == exec::StopReason::Budget && !monitor_->group_exited()) continue;
     break;
   }
-  if (rr.reason != exec::StopReason::Exited) {
+  // Budget while the process is exiting is a clean stop (the turn ended as the group exit landed), not a fault.
+  const bool clean = rr.reason == exec::StopReason::Exited ||
+                     (rr.reason == exec::StopReason::Budget && monitor_->group_exited());
+  if (!clean) {
     // A fault or a refusal that stopped a guest thread ends the process, as a fatal signal in one thread
     // does on a device — the other threads must not carry on around a dead one (a joiner would wait forever).
     const std::string why = "guest thread tid " + std::to_string(t.tid) + " stopped: " + ReasonName(rr.reason) +
@@ -753,15 +757,22 @@ void GuestProcess::StopThreads() {
   // joined. The caller does not hold the GGL (it is a destructor), so they can take it to reach that check.
   if (monitor_ != nullptr) monitor_->RequestGroupExit("the guest process is being destroyed");
   futex_.Shutdown();
-  // A barrier: a `clone` that was mid-way (GGL held) has finished adding its thread before the list is taken.
-  if (abi_ != nullptr) Ggl::Held barrier(abi_->ggl());
-  std::list<std::unique_ptr<HostThread>> all;
-  {
-    std::lock_guard<std::mutex> lk(threads_mu_);
-    all.swap(threads_);
-  }
-  for (auto& r : all) {
-    if (r->host.joinable()) r->host.join();
+  // Take the list under the GGL (so a `clone` that was mid-way has finished adding its thread), join outside it,
+  // and repeat until the list is still empty when looked at under the GGL. `Spawn` and `Monitor::Clone` refuse
+  // once the group exited, so this ends; the loop is what makes "no thread outlives the process" not depend on
+  // that ordering argument alone.
+  for (;;) {
+    std::list<std::unique_ptr<HostThread>> all;
+    {
+      std::unique_ptr<Ggl::Held> barrier;
+      if (abi_ != nullptr) barrier = std::make_unique<Ggl::Held>(abi_->ggl());
+      std::lock_guard<std::mutex> lk(threads_mu_);
+      all.swap(threads_);
+    }
+    if (all.empty()) break;
+    for (auto& r : all) {
+      if (r->host.joinable()) r->host.join();
+    }
   }
 }
 

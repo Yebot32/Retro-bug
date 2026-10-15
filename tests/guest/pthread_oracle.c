@@ -23,10 +23,12 @@ int pt_errno_per_thread(void);
 int pt_timeouts(void);
 int pt_sleeps(void);
 int pt_exit_group_from_thread(int code);
+int pt_clone_storm_exit(int code);
 
 int main(int argc, char** argv) {
   // `exit_group <code>`: the process must end with <code> from another thread (the script records rc).
   if (argc == 3 && strcmp(argv[1], "exit_group") == 0) return pt_exit_group_from_thread(atoi(argv[2]));
+  if (argc == 3 && strcmp(argv[1], "clone_storm") == 0) return pt_clone_storm_exit(atoi(argv[2]));
   printf("pt_create_join(8)=%d\n", pt_create_join(8));
   printf("pt_mutex_contend(2,100000)=%d\n", pt_mutex_contend(2, 100000));
   printf("pt_mutex_contend(4,2000)=%d\n", pt_mutex_contend(4, 2000));

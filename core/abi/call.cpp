@@ -483,16 +483,21 @@ exec::RunResult AbiContext::RunThread(runtime::GuestThread& thread, unsigned bud
   }
   unsigned remaining = budget;
   unsigned held = 0;  ///< progress under the current hold of the GGL (Tier I: IR steps) — the slice clock
+  // Checked after every (re-)acquisition of the GGL — the loop top, which every slice boundary returns to, and
+  // right after a blocking wait or a released host slot — before any guest work, write-back or dispatch (M2
+  // Task 4 fix round 1).
+  const auto group_stop = [&] {
+    if (monitor_ == nullptr || !monitor_->group_exited()) return false;
+    run.reason = exec::StopReason::Exited;
+    run.detail = "the guest process exited (" + monitor_->group_exit_reason() + "); this thread stopped with it";
+    return true;
+  };
   unsigned syscalls = 0;
   for (;;) {
     // `exit_group` on another thread (or a fatal fault in one, or the process's teardown) ends this one too: it
     // stops here, at its next slice boundary, syscall or host call, instead of running guest code in a process
     // that has finished (Review Focus: no host thread is left running guest code).
-    if (monitor_ != nullptr && monitor_->group_exited()) {
-      run.reason = exec::StopReason::Exited;
-      run.detail = "the guest process exited (" + monitor_->group_exit_reason() + "); this thread stopped with it";
-      break;
-    }
+    if (group_stop()) break;
     if (held >= kSliceSteps) {
       // The slice boundary: hand the GGL to the longest waiter (the lock is a FIFO ticket lock, so this
       // thread queues behind it), then carry on. State is consistent here — the executor stopped on a
@@ -505,6 +510,7 @@ exec::RunResult AbiContext::RunThread(runtime::GuestThread& thread, unsigned bud
         std::this_thread::yield();
       }
       held = 0;
+      continue;  // re-acquired: back to the top, which re-checks for a group exit before any guest work
     }
     const unsigned slice = std::min(remaining, kSliceSteps - held);
     run = engine->Run(state, slice);
@@ -549,6 +555,7 @@ exec::RunResult AbiContext::RunThread(runtime::GuestThread& thread, unsigned bud
                            : syscall::Outcome::Refused(syscall::err::kEnosys, "a blocking answer with no wait");
         }
         held = 0;
+        if (group_stop()) break;  // re-acquired after the wait: no write-back, no guest work in an exited process
         o = monitor_->Finish(state, std::move(waited));
       }
       if (o.verdict == syscall::Verdict::kExit) {
@@ -601,6 +608,8 @@ exec::RunResult AbiContext::RunThread(runtime::GuestThread& thread, unsigned bud
         ok = slot->second.fn(state, &herr);
       }
       if (slot->second.lock != SlotLock::kHoldsGgl) held = 0;
+      // Re-acquired after a released slot, or after a held slot whose nested guest call released it inside.
+      if (group_stop()) break;
     }
     if (!ok) {
       run.reason = exec::StopReason::Fault;

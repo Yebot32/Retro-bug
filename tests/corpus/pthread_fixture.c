@@ -287,6 +287,10 @@ static struct timespec in_ms(clockid_t clock, int ms) {
   return ts;
 }
 
+static long long ms_between(const struct timespec* a, const struct timespec* b) {
+  return (long long)(b->tv_sec - a->tv_sec) * 1000 + (b->tv_nsec - a->tv_nsec) / 1000000;
+}
+
 static void* timedlocker(void* arg) {
   (void)arg;
   const struct timespec ts = in_ms(CLOCK_REALTIME, 50);
@@ -296,16 +300,22 @@ static void* timedlocker(void* arg) {
 }
 
 __attribute__((visibility("default"))) int pt_timeouts(void) {
+  struct timespec m0, m1, m2;
+  clock_gettime(CLOCK_MONOTONIC, &m0);
   pthread_mutex_lock(&g_to_mu);
   const struct timespec ts = in_ms(CLOCK_REALTIME, 50);
   const int rc1 = pthread_cond_timedwait(&g_to_cv, &g_to_mu, &ts);
   pthread_mutex_unlock(&g_to_mu);
+  clock_gettime(CLOCK_MONOTONIC, &m1);
   pthread_mutex_lock(&g_to_held);
   pthread_t t;
   if (pthread_create(&t, 0, timedlocker, 0) != 0) return -2;
   void* r = 0;
   if (pthread_join(t, &r) != 0) return -3;
   pthread_mutex_unlock(&g_to_held);
+  clock_gettime(CLOCK_MONOTONIC, &m2);
+  // Each wait really waited (most of) its 50 ms: a timeout answered early would pass the return codes alone.
+  if (ms_between(&m0, &m1) < 45 || ms_between(&m1, &m2) < 45) return -11;
   return rc1 * 1000 + (int)(intptr_t)r;
 }
 
@@ -355,11 +365,52 @@ static void* exit_soon(void* arg) {
   return 0;
 }
 
+static void* exit_soon_ms(void* arg) {
+  usleep(300000);  // long enough for the emulator's cloner to be well into its loop (JIT warm-up included)
+  _exit((int)(intptr_t)arg);
+  return 0;
+}
+
 __attribute__((visibility("default"))) int pt_exit_group_from_thread(int code) {
   pthread_t a, b, c;
   if (pthread_create(&a, 0, parked_forever, 0) != 0) return -2;
   if (pthread_create(&b, 0, spin_forever, 0) != 0) return -2;
   if (pthread_create(&c, 0, exit_soon, (void*)(intptr_t)code) != 0) return -2;
   pthread_join(a, 0);
+  return -1;
+}
+
+/* ---- pt_clone_storm_exit: one thread creates detached threads in a tight loop, counting each successful
+ * pthread_create in `pt_storm_clones` (exported, so the engine lane reads it from guest memory after the
+ * process ended); another calls _exit(code) after 300 ms; the caller is parked in pthread_join on the cloner.
+ * Never returns. The lane checks that the count stops changing the moment the process exits (no guest work and
+ * no successful clone after exit_group) and that no host thread outlives the process. */
+__attribute__((visibility("default"))) volatile int pt_storm_clones;
+
+static void* storm_child(void* arg) {
+  (void)arg;
+  return 0;
+}
+
+static void* storm_cloner(void* arg) {
+  (void)arg;
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+  pthread_attr_setstacksize(&attr, 64 * 1024);
+  for (;;) {
+    pthread_t t;
+    if (pthread_create(&t, &attr, storm_child, 0) == 0) ++pt_storm_clones;
+    sched_yield();  // lets the detached children run and tear down, so clones keep succeeding up to the exit
+  }
+  return 0;
+}
+
+__attribute__((visibility("default"))) int pt_clone_storm_exit(int code) {
+  pt_storm_clones = 0;
+  pthread_t cloner, exiter;
+  if (pthread_create(&cloner, 0, storm_cloner, 0) != 0) return -2;
+  if (pthread_create(&exiter, 0, exit_soon_ms, (void*)(intptr_t)code) != 0) return -2;
+  pthread_join(cloner, 0);
   return -1;
 }

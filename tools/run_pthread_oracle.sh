@@ -63,10 +63,17 @@ esac
 {
   echo "# device=$model serial=$SERIAL abilist32=$abilist32 sdk=$(adb shell getprop ro.build.version.sdk | tr -d '\r')" \
        "libc_md5=$(adb shell md5sum /system/lib/libc.so | awk '{print $1}' | tr -d '\r')"
-  echo "# built from $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo 'uncommitted tree') $(date -Is)"
+  # Provenance: the tree the binaries were built from (dirty if uncommitted changes were in it) and the exact
+  # fixture and driver sources, so a header can be checked against the committed files (`git hash-object`).
+  echo "# built from $(git -C "$ROOT" describe --always --dirty 2>/dev/null || echo 'no git') $(date -Is)" \
+       "pthread_fixture.c=$(git -C "$ROOT" hash-object tests/corpus/pthread_fixture.c)" \
+       "pthread_oracle.c=$(git -C "$ROOT" hash-object tests/guest/pthread_oracle.c)"
   echo "$rows" | grep -v '^rc='
   # The process-ending row: exit_group from a thread while the caller is parked in pthread_join.
   eg="$(adb shell "LD_LIBRARY_PATH=$DIR $DIR/pthread_oracle exit_group 7; echo rc=\$?" | tr -d '\r' | sed -n 's/^rc=//p')"
   echo "pt_exit_group_from_thread(7):rc=$eg"
+  # exit_group while another thread creates threads in a tight loop: the process still ends with the status.
+  cs="$(adb shell "LD_LIBRARY_PATH=$DIR $DIR/pthread_oracle clone_storm 9; echo rc=\$?" | tr -d '\r' | sed -n 's/^rc=//p')"
+  echo "pt_clone_storm_exit(9):rc=$cs"
 } > "$OUT"
 cat "$OUT"

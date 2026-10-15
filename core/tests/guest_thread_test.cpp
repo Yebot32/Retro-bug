@@ -375,7 +375,7 @@ void ggl_is_released_in_host_calls(int tier) {
     }
     s.r[0] = 0x55;
     return true;
-  });
+  }, abi::AbiContext::SlotLock::kReleasesGgl);
   GuestThread a, b;
   Prepare(a, 1, 6001);
   Prepare(b, 2, 6002);
@@ -774,6 +774,51 @@ void exit_group_stops_every_thread(int tier, const std::map<std::string, std::st
   CHECK(pr.p->monitor().group_exited());
 }
 
+/// Fix round 1: `exit_group` while another guest thread `clone`s in a tight loop, repeated on fresh processes.
+/// After the process exits no guest instruction may run and no clone may succeed: the cloner's success counter
+/// (`pt_storm_clones`, read from guest memory) must not move after the call returns `Exited`; every host thread
+/// must finish; destroying the process must join them all (a thread left in the list, or one started after
+/// teardown took the list, would be `std::terminate` or a run on a freed bridge).
+void clone_storm_then_exit_group(int tier, const std::map<std::string, std::string>& oracle) {
+  const std::string row = "pt_clone_storm_exit(9)";
+  const auto want = oracle.find(row);
+  CHECK_CTX(want != oracle.end(), "no row " + row + " in the oracle");
+  constexpr int kRounds = 5;
+  for (int round = 0; round < kRounds; ++round) {
+    const std::string name = row + "/" + TierName(tier) + "#" + std::to_string(round);
+    Watchdog wd(name, std::chrono::seconds(20));
+    Proc pr = BootPthreads(tier);
+    CHECK_CTX(pr.p != nullptr, pr.err);
+    if (!pr.p) return;
+    const auto counter = pr.fixture->FindExport("pt_storm_clones");
+    CHECK_CTX(counter.has_value(), "the fixture exports no pt_storm_clones");
+    if (!counter) return;
+    const FixtureCall c = CallFixture(pr, tier, "pt_clone_storm_exit", {abi::Value32::S32(9)});
+    std::uint32_t at_exit = 0xdead'dead, later = 0xdead'dead;
+    pr.p->memory().Read(counter->addr, &at_exit, 4);  // main has stopped: no guest thread holds the GGL now
+    const bool all_done = pr.p->WaitForThreads(std::chrono::milliseconds(3000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    pr.p->memory().Read(counter->addr, &later, 4);
+    std::fprintf(stderr, "#   %s: reason %d status %d (oracle rc %s), %u clone(s) before exit, %zu thread(s) started, "
+                         "%.1f ms\n",
+                 name.c_str(), static_cast<int>(c.rr.reason), pr.p->abi().exit_status(),
+                 want == oracle.end() ? "?" : want->second.c_str(), at_exit, pr.p->threads_started(), c.ms);
+    if (std::getenv("RB_STORM_DEBUG") != nullptr) {
+      std::fprintf(stderr, "#     tally: %s\n", pr.p->monitor().TallyText().c_str());
+      for (const std::string& n : pr.p->monitor().notes()) std::fprintf(stderr, "#     note: %s\n", n.c_str());
+    }
+    CHECK_CTX(c.rr.reason == exec::StopReason::Exited, name + ": " + c.rr.detail);
+    CHECK_CTX(want != oracle.end() && std::to_string(pr.p->abi().exit_status()) == want->second,
+              name + ": status " + std::to_string(pr.p->abi().exit_status()));
+    CHECK_CTX(at_exit > 0u && at_exit != 0xdead'dead, name + ": no clone succeeded before the exit, so the race was not exercised");
+    CHECK_CTX(at_exit == later, name + ": the clone counter moved after exit_group (" + std::to_string(at_exit) +
+                                    " -> " + std::to_string(later) + "): guest code ran in an exited process");
+    CHECK_CTX(all_done, name + ": " + std::to_string(pr.p->running_threads()) + " host thread(s) outlived the process");
+    CHECK_CTX(pr.p->thread_faults().empty(), name + ": " + Faults(*pr.p));
+    pr.p.reset();  // joins whatever is left; a thread outside the list would terminate the lane here
+  }
+}
+
 void guest_pthreads(int tier) {
   const auto oracle = Oracle();
   CHECK_CTX(!oracle.empty(), std::string{"no oracle rows at "} + RB_PTHREAD_ORACLE_PATH);
@@ -808,6 +853,7 @@ void guest_pthreads(int tier) {
     pr.p.reset();
   }
   exit_group_stops_every_thread(tier, oracle);
+  clone_storm_then_exit_group(tier, oracle);
 }
 
 }  // namespace
