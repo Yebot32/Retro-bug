@@ -140,6 +140,30 @@ std::optional<CodeAddress> GuestModule::FindExport(const std::string& name) cons
   return std::nullopt;
 }
 
+const LocalSymbol* GuestModule::FindLocalSymbolEntry(const std::string& name) const {
+  if (!local_symbols || name.empty()) return nullptr;
+  // Two stages, each refusing ambiguity: an exact spelling first, then the mangled identifier. A name that
+  // two different addresses answer (two files' `static` helpers of one name) is not something to guess at.
+  for (const bool by_ident : {false, true}) {
+    const LocalSymbol* hit = nullptr;
+    bool ambiguous = false;
+    for (const LocalSymbol& s : *local_symbols) {
+      if ((by_ident ? s.ident : s.name) != name) continue;
+      if (hit != nullptr && hit->addr != s.addr) ambiguous = true;
+      hit = hit == nullptr ? &s : hit;
+    }
+    if (ambiguous) return nullptr;
+    if (hit != nullptr) return hit;
+  }
+  return nullptr;
+}
+
+std::optional<std::uint32_t> GuestModule::FindLocalSymbol(const std::string& name) const {
+  const LocalSymbol* s = FindLocalSymbolEntry(name);
+  if (s == nullptr) return std::nullopt;
+  return s->addr;
+}
+
 std::vector<std::string> GuestModule::ExportNames() const {
   std::vector<std::string> out;
   out.reserve(exports.size());
@@ -866,6 +890,60 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
           mod.exports.push_back(out);
         }
       }
+    }
+  }
+
+  // ---- the full `.symtab`, when the image kept one. Read from the file through the section headers —
+  // it is not in any PT_LOAD, so guest memory never holds it — and only defined, named FUNC/OBJECT/NOTYPE
+  // entries are kept. Every bound is checked against the file; a table that does not fit is skipped
+  // (the module simply has no local symbols), because it is diagnostic data and not part of loading.
+  if (h->e_shoff != 0 && h->e_shnum != 0 && h->e_shentsize >= sizeof(Shdr32) &&
+      h->e_shoff + static_cast<std::uint64_t>(h->e_shnum) * h->e_shentsize <= img.size) {
+    const auto shdr = [&](std::uint32_t i) {
+      return img.At<Shdr32>(h->e_shoff + static_cast<std::size_t>(i) * h->e_shentsize);
+    };
+    for (std::uint16_t i = 0; i < h->e_shnum; ++i) {
+      const Shdr32* s = shdr(i);
+      if (s == nullptr || s->sh_type != SHT_SYMTAB || s->sh_link >= h->e_shnum) continue;
+      const Shdr32* str = shdr(s->sh_link);
+      if (str == nullptr || s->sh_offset + static_cast<std::uint64_t>(s->sh_size) > img.size ||
+          str->sh_offset + static_cast<std::uint64_t>(str->sh_size) > img.size) {
+        break;
+      }
+      auto table = std::make_shared<std::vector<LocalSymbol>>();
+      const std::size_t n = s->sh_size / sizeof(Sym32);
+      table->reserve(n);
+      for (std::size_t k = 1; k < n; ++k) {
+        const auto* sym = img.At<Sym32>(s->sh_offset + k * sizeof(Sym32));
+        if (sym == nullptr || sym->st_shndx == SHN_UNDEF || sym->st_name >= str->sh_size) continue;
+        const std::uint8_t type = ELF32_ST_TYPE(sym->st_info);
+        if (type != STT_FUNC && type != STT_OBJECT && type != 0 /* NOTYPE */) continue;
+        const char* p = img.CStr(str->sh_offset + sym->st_name);
+        const std::size_t room = str->sh_size - sym->st_name;
+        const std::string name(p, strnlen(p, room));
+        if (name.empty() || name[0] == '$') continue;  // `$a`/`$t`/`$d` mapping symbols, not names
+        LocalSymbol out;
+        out.name = name;
+        out.is_function = type == STT_FUNC;
+        out.thumb = out.is_function && (sym->st_value & 1u) != 0;
+        const std::uint32_t v = sym->st_shndx == SHN_ABS ? sym->st_value : base + sym->st_value;
+        out.addr = out.is_function ? (v & ~1u) : v;
+        out.size = sym->st_size;
+        // `_Z[L]<len><ident>`: the source name of a mangled plain (non-nested) symbol.
+        if (name.size() > 3 && name[0] == '_' && name[1] == 'Z') {
+          std::size_t at = 2;
+          if (name[at] == 'L') ++at;
+          std::size_t len = 0;
+          const std::size_t digits = at;
+          while (at < name.size() && name[at] >= '0' && name[at] <= '9' && len <= name.size()) {
+            len = len * 10 + static_cast<std::size_t>(name[at++] - '0');
+          }
+          if (at > digits && len != 0 && at + len <= name.size()) out.ident = name.substr(at, len);
+        }
+        table->push_back(std::move(out));
+      }
+      mod.local_symbols = std::move(table);
+      break;
     }
   }
 

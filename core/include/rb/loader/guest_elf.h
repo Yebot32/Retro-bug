@@ -101,6 +101,18 @@ struct IfuncSlot {
   std::uint32_t implementation = 0;
 };
 
+/// One defined entry of a module's `.symtab` (the non-allocated, full symbol table a linked image keeps
+/// unless it is stripped): locals included, which `.dynsym` never has.
+struct LocalSymbol {
+  std::string name;   ///< exactly as `.strtab` spells it, e.g. `_ZL13g_thread_list`
+  /// For a plain-or-`_Z[L]<len><ident>`-mangled name, `<ident>` (`g_thread_list`); otherwise empty.
+  std::string ident;
+  std::uint32_t addr = 0;  ///< st_value biased by the load base, bit 0 (the Thumb tag) cleared
+  std::uint32_t size = 0;
+  bool is_function = false;
+  bool thumb = false;  ///< is_function and st_value bit 0 set
+};
+
 /// The linker-facing facts about one loaded module.
 struct GuestModule {
   std::string path;
@@ -163,6 +175,27 @@ struct GuestModule {
   /// defined by this module.
   std::optional<CodeAddress> FindExport(const std::string& name) const;
   std::vector<std::string> ExportNames() const;
+
+  /**
+   * A defined `.symtab` symbol's guest address (load base applied, Thumb bit cleared), or nullopt.
+   *
+   * This is how libc *internals* are found by name rather than by fixed address — `g_thread_list`,
+   * `__start_thread`, `__init_static_tls` are local symbols `.dynsym` does not carry. The table is read
+   * from the section headers at load time; an image without section headers or without a `.symtab`
+   * (stripped) answers nullopt for every name.
+   *
+   * `name` matches a symbol spelled exactly so first; failing that, the identifier of an Itanium-mangled
+   * plain name (`_Z[L]<len><ident>...`, so `g_thread_list` finds `_ZL13g_thread_list` and
+   * `__libc_preinit_impl` finds `_ZL19__libc_preinit_implv.__uniq.<n>`). A name that matches more than one
+   * distinct address at the same stage is ambiguous and answers nullopt rather than picking one.
+   */
+  std::optional<std::uint32_t> FindLocalSymbol(const std::string& name) const;
+  /// The same lookup, with the symbol's size and kind.
+  const LocalSymbol* FindLocalSymbolEntry(const std::string& name) const;
+
+  /// The `.symtab` entries, shared between copies of this module (the table of a real libc is ~11,000
+  /// names). Null when the image has none.
+  std::shared_ptr<const std::vector<LocalSymbol>> local_symbols;
 };
 
 /// Supplies guest addresses for symbols the module imports. Returning nullopt means "unresolved":

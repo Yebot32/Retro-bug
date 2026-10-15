@@ -308,6 +308,12 @@ class Monitor {
   /// Overrides the host-entropy default.
   void set_random(RandomSource random) { random_ = std::move(random); }
 
+  /// `set_tid_address` state for a thread whose call the guest never made: bionic's linker calls
+  /// `set_tid_address(&main_thread.tid)` before libc runs, so a process that plays the linker's part
+  /// records the same pointer here. Read back by whatever will clear it and wake a joiner on exit.
+  void set_clear_child_tid(std::uint32_t at) { clear_child_tid_ = at; }
+  [[nodiscard]] std::uint32_t clear_child_tid() const { return clear_child_tid_; }
+
   /// Capture, dispatch, write the result back. This is what an executor's `Syscall` stop hands to.
   Outcome Handle(exec::MachineState& state, std::uint32_t svc_imm);
 

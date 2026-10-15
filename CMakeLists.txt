@@ -75,7 +75,7 @@ if(RB_BUILD_LAUNCHER)
   # through. `-llog` for the two milestone lines that outlive a native crash; `-lz` (the NDK's system
   # zlib) inflates the guest APK's deflated assets for the class model's `readFile`. Static-lib link order is
   # CMake's business here, not ours: these are all CMake targets with PUBLIC dependencies.
-  target_link_libraries(rbguest PRIVATE rb_linker rb_loader rb_exec rb_abi rb_mem -llog -lz -lEGL -landroid)
+  target_link_libraries(rbguest PRIVATE rb_runtime rb_linker rb_loader rb_exec rb_abi rb_mem -llog -lz -lEGL -landroid)
   # The APK is `arm64-v8a` — RetroBug is the host — and the guest is `armeabi-v7a` *bytes*, never a
   # library this process asks the system loader for. Nothing here restricts the ABI, so an
   # `-DANDROID_ABI=x86_64` configure of this target builds and does not run: the emulator cannot execute

@@ -106,3 +106,7 @@ target_link_libraries(rb_core INTERFACE rb_mem rb_loader rb_linker rb_isa rb_exe
 if(DEFINED RB_COMPAT_INCLUDE_DIR)
   target_include_directories(rb_core INTERFACE "${RB_COMPAT_INCLUDE_DIR}")
 endif()
+
+# rb::runtime (M2) composes the components above; it lives in its own directory because it is the one
+# layer allowed to depend on all of them.
+add_subdirectory(runtime)

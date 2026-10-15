@@ -42,7 +42,7 @@ ADB="$SDK/platform-tools/adb.exe"
 
 # One list for build, push and run: a suite that is missing here silently does not execute, which is
 # the least useful kind of green.
-SUITES="rb_interval_compat_tests rb_variant_compat_tests rb_guest_memory_tests rb_guest_elf_tests rb_linker_tests rb_isa_front_end_tests rb_exec_census_tests rb_exec_interp_tests rb_abi_call_tests rb_abi_jni_tests rb_exec_tier_diff_tests rb_diag_tests rb_syscall_monitor_tests rb_codecache_tests rb_profile_tests dynarmic_tests"
+SUITES="rb_interval_compat_tests rb_variant_compat_tests rb_guest_memory_tests rb_guest_elf_tests rb_linker_tests rb_isa_front_end_tests rb_exec_census_tests rb_exec_interp_tests rb_abi_call_tests rb_abi_jni_tests rb_exec_tier_diff_tests rb_diag_tests rb_syscall_monitor_tests rb_codecache_tests rb_profile_tests rb_guest_process_tests dynarmic_tests"
 # Lanes that are red on purpose because every failure names a real gap (a Tier I refusal, an unlinked
 # loader step), so they cannot gate a green run. They are still built and run here: before this list
 # existed they were in no build at all, which let a stale binary report the same failure count for hours
@@ -63,6 +63,27 @@ FIXTURE="$BUILD/librb_fixture.so"
 "$TC/bin/clang.exe" --target=armv7-none-linux-androideabi26 --sysroot="$TC/sysroot" \
   -mthumb -mfloat-abi=softfp -mfpu=neon -fPIC -shared -Os \
   -o "$FIXTURE" "$ROOT/tests/corpus/fixture_jni.c" -llog
+# The same image without a `.symtab`, for `GuestModule::FindLocalSymbol`'s "nothing to read" case: the
+# fixture as linked carries one, so the stripped copy is made here rather than assumed.
+FIXTURE_STRIPPED="$BUILD/librb_fixture_stripped.so"
+"$TC/bin/llvm-strip.exe" --strip-all -o "$FIXTURE_STRIPPED" "$FIXTURE"
+
+# The guest images the libc/process lanes boot. None is made here: the device's own bionic is pulled off a
+# 32-bit-capable phone (`build/device-libs/`, not in git) and libm/libz come from tools/build-guest-libs.sh.
+# These pushes used to be manual (a stale or missing copy on the device was a lane failing for a reason
+# the tree could not see); a missing input is now a refusal that names the command that makes it.
+DEVICE_LIBC="$ROOT/build/device-libs/libc.so"
+DEVICE_LIBSTDCXX="$ROOT/build/device-libs/libstdc++.so"
+GUEST_LIBM="$ROOT/build/guest-libs/libm.so"
+GUEST_LIBZ="$ROOT/build/guest-libs/libz.so"
+GUEST_APK="$ROOT/build/guest-apk/rb_guestprobe.apk"
+for spec in "$DEVICE_LIBC|adb pull /system/lib/libc.so build/device-libs/libc.so (from a 32-bit-capable device)" \
+            "$DEVICE_LIBSTDCXX|adb pull /system/lib/libstdc++.so build/device-libs/libstdc++.so" \
+            "$GUEST_LIBM|bash tools/build-guest-libs.sh libm" "$GUEST_LIBZ|bash tools/build-guest-libs.sh libz" \
+            "$GUEST_APK|bash tools/build-guest-apk.sh"; do
+  in="${spec%%|*}"
+  [ -s "$in" ] || { echo "missing $in — this script does not create it. Run: ${spec##*|}" >&2; exit 1; }
+done
 
 # C06's fixture: two libraries with a real DT_NEEDED edge and a constructor each, built `-nostdlib` so
 # the chain under test is two modules and not libc wearing a hat. `-Wl,-soname` is what makes the
@@ -148,6 +169,12 @@ adb push "$(to_host "$IFLEAF")" /data/local/tmp/librbifuncleaf.so >/dev/null
 adb push "$(to_host "$IFUSER")" /data/local/tmp/librbifuncuser.so >/dev/null
 adb push "$(to_host "$IFLIBC")" /data/local/tmp/librbifunclibc.so >/dev/null
 adb push "$(to_host "$WEAK")" /data/local/tmp/librbweak.so >/dev/null
+adb push "$(to_host "$FIXTURE_STRIPPED")" /data/local/tmp/librb_fixture_stripped.so >/dev/null
+adb push "$(to_host "$DEVICE_LIBC")" /data/local/tmp/rb_device_libc.so >/dev/null
+adb push "$(to_host "$DEVICE_LIBSTDCXX")" /data/local/tmp/rb_device_libstdcxx.so >/dev/null
+adb push "$(to_host "$GUEST_LIBM")" /data/local/tmp/libm.so >/dev/null
+adb push "$(to_host "$GUEST_LIBZ")" /data/local/tmp/libz.so >/dev/null
+adb push "$(to_host "$GUEST_APK")" /data/local/tmp/rb_guestprobe.apk >/dev/null
 for t in $SUITES $ADVISORY; do
   src="$BUILD/core/tests/$t"
   [ -f "$src" ] || src="$BUILD/external/dynarmic/tests/$t"

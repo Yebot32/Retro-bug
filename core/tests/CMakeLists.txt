@@ -107,3 +107,16 @@ target_compile_definitions(rb_guest_libc_tests PRIVATE
   RB_DEVICE_LIBC_PATH="/data/local/tmp/rb_device_libc.so"
   RB_IFUNC_LIBC_USER_PATH="/data/local/tmp/librbifunclibc.so"
   RB_GUEST_APK_PATH="/data/local/tmp/rb_guestprobe.apk")
+
+# M2's persistent guest process: the device's own libc booted with constructors, the shared-globals page,
+# the auxv, the static-TLS layout and bionic's real main thread (`rb::runtime::GuestProcess`). Gating: every
+# row is a fact of the tablet's libc and its own native main thread. The images are pushed by
+# tools/run_engine_tests.sh (build/device-libs/libc.so, build/guest-libs/{libm,libz}.so).
+add_executable(rb_guest_process_tests guest_process_test.cpp)
+target_link_libraries(rb_guest_process_tests PRIVATE rb_runtime)
+target_compile_definitions(rb_guest_process_tests PRIVATE
+  RB_DEVICE_LIBC_PATH="/data/local/tmp/rb_device_libc.so"
+  RB_GUEST_LIBM_PATH="/data/local/tmp/libm.so"
+  RB_GUEST_LIBZ_PATH="/data/local/tmp/libz.so"
+  RB_FIXTURE_PATH="/data/local/tmp/librb_fixture.so"
+  RB_STRIPPED_FIXTURE_PATH="/data/local/tmp/librb_fixture_stripped.so")
