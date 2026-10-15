@@ -35,7 +35,10 @@ final class RepackInstaller {
     private static final String ACTION = "com.retrobug.launcher.REPACK_INSTALL_STATUS";
 
     interface Callback {
-        /** One line of progress or the final verdict; `done` is true on the last call. */
+        /**
+         * One line of progress or the final verdict; `done` is true on the last call. Called from the main
+         * thread or from the install worker thread, so implementations post their UI work themselves.
+         */
         void onStatus(String line, boolean done);
     }
 
@@ -60,8 +63,17 @@ final class RepackInstaller {
             return;
         }
 
+        // The session work — create, a ~50 MB write, fsync, commit — is disk and binder I/O, so it runs on its
+        // own thread. Only the confirmation activity starts on the main thread (the receiver runs there).
+        final File target = apk;
+        new Thread(new Runnable() {
+            @Override public void run() { commitSession(app, target, cb); }
+        }, "rb-install").start();
+    }
+
+    private static void commitSession(final Context app, File apk, final Callback cb) {
         PackageInstaller pi = app.getPackageManager().getPackageInstaller();
-        final int sessionId;
+        int sessionId = -1;
         PackageInstaller.Session session = null;
         try {
             PackageInstaller.SessionParams params =
@@ -76,7 +88,16 @@ final class RepackInstaller {
                 session.fsync(out);
             }
         } catch (IOException | RuntimeException e) {
-            if (session != null) session.abandon();
+            // A created session that could not be opened is still owned by this app until abandoned by id.
+            if (session != null) {
+                abandonQuietly(session);
+            } else if (sessionId >= 0) {
+                try {
+                    pi.abandonSession(sessionId);
+                } catch (RuntimeException ignored) {
+                    // Nothing more to release.
+                }
+            }
             cb.onStatus("install: could not write the session: " + e, true);
             return;
         }
@@ -87,15 +108,18 @@ final class RepackInstaller {
                 int status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, Integer.MIN_VALUE);
                 String message = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE);
                 if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
-                    cb.onStatus("install: status=" + status + " (PENDING_USER_ACTION) — confirm on screen", false);
                     Intent confirm = intent.getParcelableExtra(Intent.EXTRA_INTENT);
-                    if (confirm != null) {
-                        confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                        try {
-                            app.startActivity(confirm);
-                        } catch (RuntimeException e) {
-                            cb.onStatus("install: could not show the confirmation: " + e, false);
-                        }
+                    if (confirm == null) {
+                        cb.onStatus("install: status=" + status + " (PENDING_USER_ACTION) but the installer sent"
+                                + " no confirmation intent (EXTRA_INTENT is null); nothing to show", false);
+                        return;
+                    }
+                    cb.onStatus("install: status=" + status + " (PENDING_USER_ACTION) — confirm on screen", false);
+                    confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    try {
+                        app.startActivity(confirm);
+                    } catch (RuntimeException e) {
+                        cb.onStatus("install: could not show the confirmation: " + e, false);
                     }
                     return;
                 }
@@ -110,6 +134,7 @@ final class RepackInstaller {
             }
         };
         IntentFilter filter = new IntentFilter(action);
+        // No Handler given: onReceive runs on the main thread, where starting the confirmation belongs.
         if (Build.VERSION.SDK_INT >= 33) {
             app.registerReceiver(receiver, filter, RECEIVER_NOT_EXPORTED);
         } else {
@@ -124,11 +149,23 @@ final class RepackInstaller {
             session.commit(pending.getIntentSender());
             cb.onStatus("install: session " + sessionId + " committed", false);
         } catch (RuntimeException e) {
-            app.unregisterReceiver(receiver);
-            session.abandon();
+            try {
+                app.unregisterReceiver(receiver);
+            } catch (IllegalArgumentException ignored) {
+                // Already gone.
+            }
+            abandonQuietly(session);
             cb.onStatus("install: commit failed: " + e, true);
         } finally {
             session.close();
+        }
+    }
+
+    private static void abandonQuietly(PackageInstaller.Session session) {
+        try {
+            session.abandon();
+        } catch (RuntimeException ignored) {
+            // Nothing more to release.
         }
     }
 }

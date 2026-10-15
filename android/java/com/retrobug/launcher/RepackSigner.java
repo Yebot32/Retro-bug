@@ -27,7 +27,8 @@ import javax.security.auth.x500.X500Principal;
  * same certificate. A key per run would turn every repack into "uninstall first, losing the save".
  *
  * apksig (the library behind `apksigner`, shipped inside this APK's dex) does the signing with v1, v2 and
- * v3; it also aligns STORED entries while it writes, so the unsigned input need not be zip-aligned.
+ * v3 for minSdk 24 (the floor ApkRepackager raises minSdkVersion to); it also aligns STORED entries
+ * while it writes, so the unsigned input need not be zip-aligned.
  */
 final class RepackSigner {
     private RepackSigner() {}
@@ -35,7 +36,12 @@ final class RepackSigner {
     static final String ALIAS = "retrobug-repack";
     private static final String KEYSTORE = "AndroidKeyStore";
 
-    static void sign(File unsigned, File signed) throws Exception {
+    /**
+     * Synchronized on the class: key lookup-or-create and signing run as one unit, so two concurrent repacks
+     * can never both see the alias missing and generate it twice (the second key would make the first
+     * repack's output un-updatable by every later one).
+     */
+    static synchronized void sign(File unsigned, File signed) throws Exception {
         KeyStore ks = KeyStore.getInstance(KEYSTORE);
         ks.load(null);
         if (!ks.containsAlias(ALIAS)) create();
@@ -53,7 +59,7 @@ final class RepackSigner {
                 .setV1SigningEnabled(true)
                 .setV2SigningEnabled(true)
                 .setV3SigningEnabled(true)
-                .setMinSdkVersion(26)
+                .setMinSdkVersion(ApkRepackager.MIN_SDK_FLOOR)   // the output's manifest declares at least this
                 .setCreatedBy("RetroBug")
                 .build()
                 .sign();

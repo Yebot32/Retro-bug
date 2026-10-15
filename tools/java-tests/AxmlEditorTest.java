@@ -5,7 +5,7 @@
 // XML under tests/corpus/manifests, so the bytes under test are what the real toolchain emits, not
 // something this file hand-assembled to agree with the parser.
 //
-// args: <fixture dir holding min_only.apk, target22.apk> <scratch dir> <aapt2 path>
+// args: <fixture dir holding min_only, target22, target_only, no_uses_sdk .apk> <scratch dir> <aapt2 path>
 package com.retrobug.launcher;
 
 import java.io.File;
@@ -80,6 +80,55 @@ public class AxmlEditorTest {
         check(b.contains("package: name='com.retrobug.fixture'"), tag + ": badging reports package: " + b);
         if (expectMin != null) check(b.contains("minSdkVersion:'" + expectMin + "'"), tag + ": badging keeps minSdk: " + b);
         check(poolIsUtf8(edited) == poolIsUtf8(manifest), tag + ": pool encoding preserved by the edit");
+    }
+
+    /** Edit {@code manifest} to minSdk 24 and judge it: parser, attribute order, pool encoding, aapt2. */
+    static void editMinAndJudge(String base, byte[] manifest, String tag, Integer expectTarget) throws Exception {
+        AxmlEditor e = AxmlEditor.parse(manifest);
+        e.setMinSdk(24);
+        byte[] edited = e.toBytes();
+        AxmlEditor r = AxmlEditor.parse(edited);
+        check(Integer.valueOf(24).equals(r.minSdk()), tag + ": minSdk re-parses: " + r.minSdk());
+        check(java.util.Objects.equals(expectTarget, r.targetSdk()), tag + ": targetSdk is " + expectTarget + ": " + r.targetSdk());
+        check("com.retrobug.fixture".equals(r.packageName()), tag + ": packageName survives: " + r.packageName());
+        java.util.List<String> names = r.attrNames("uses-sdk");
+        if (expectTarget != null)
+            check(names.equals(java.util.Arrays.asList("minSdkVersion", "targetSdkVersion")),
+                    tag + ": uses-sdk attributes sorted by id (min 0x0101020c before target 0x01010270): " + names);
+        String b = badging(base, edited, tag);
+        check(b.contains("minSdkVersion:'24'"), tag + ": badging reports minSdkVersion 24: " + b);
+        check(b.contains("package: name='com.retrobug.fixture'"), tag + ": badging reports package: " + b);
+        if (expectTarget != null) check(b.contains("targetSdkVersion:'" + expectTarget + "'"), tag + ": badging keeps targetSdk: " + b);
+        check(poolIsUtf8(edited) == poolIsUtf8(manifest), tag + ": pool encoding preserved by the min edit");
+    }
+
+    static void minSdkEdits() throws Exception {
+        byte[] minOnly = fixture("min_only"), targetOnly = fixture("target_only"), none = fixture("no_uses_sdk");
+        check(AxmlEditor.parse(targetOnly).minSdk() == null && Integer.valueOf(22).equals(AxmlEditor.parse(targetOnly).targetSdk()),
+                "target_only fixture: no minSdk, targetSdk 22");
+        check(!poolIsUtf8(targetOnly), "target_only fixture carries a UTF-16 pool");
+        // rewrite in place: same length
+        AxmlEditor rw = AxmlEditor.parse(minOnly);
+        rw.setMinSdk(24);
+        check(rw.toBytes().length == minOnly.length, "min rewrite in place keeps length");
+        editMinAndJudge("min_only", minOnly, "min-utf16-rewrite", null);
+        editMinAndJudge("target22", fixture("target22"), "min-utf16-rewrite-with-target", 22);
+        editMinAndJudge("target_only", targetOnly, "min-utf16-insert", 22);
+        editMinAndJudge("no_uses_sdk", none, "min-utf16-create", null);
+        editMinAndJudge("min_only", toUtf8Pool(minOnly), "min-utf8-rewrite", null);
+        editMinAndJudge("target_only", toUtf8Pool(targetOnly), "min-utf8-insert", 22);
+        editMinAndJudge("no_uses_sdk", toUtf8Pool(none), "min-utf8-create", null);
+        // What the repackager does to a manifest with no <uses-sdk>: create via min, then add target.
+        for (byte[] m : new byte[][] {none, toUtf8Pool(none)}) {
+            AxmlEditor e = AxmlEditor.parse(m);
+            e.setMinSdk(24);
+            e.setTargetSdk(24);
+            byte[] out = e.toBytes();
+            check(AxmlEditor.parse(out).attrNames("uses-sdk").equals(java.util.Arrays.asList("minSdkVersion", "targetSdkVersion")),
+                    "min then target on a created uses-sdk stays id-sorted: " + AxmlEditor.parse(out).attrNames("uses-sdk"));
+            String b = badging("no_uses_sdk", out, "min-then-target-" + (poolIsUtf8(m) ? "utf8" : "utf16"));
+            check(b.contains("minSdkVersion:'24'") && b.contains("targetSdkVersion:'24'"), "min+target both 24 in badging: " + b);
+        }
     }
 
     static void insertTargetSdk() throws Exception { editAndJudge("min_only", fixture("min_only"), "insert", 8); }
@@ -230,6 +279,7 @@ public class AxmlEditorTest {
         minOnlyReadsBack();
         insertTargetSdk();
         createUsesSdk();
+        minSdkEdits();
         poolEncodings();
         refusesTruncation();
         refusesLyingFields();

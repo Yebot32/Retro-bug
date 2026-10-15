@@ -175,7 +175,36 @@ public class ApkRepackagerTest {
         AxmlEditor e = AxmlEditor.parse(readAll(out).get("AndroidManifest.xml"));
         check(Integer.valueOf(24).equals(e.targetSdk()), "targetSdk 24: " + e.targetSdk());
         check(r.oldTargetSdk == -1 && r.newTargetSdk == 24, "old/new: " + r.oldTargetSdk + "/" + r.newTargetSdk);
-        check(Integer.valueOf(8).equals(e.minSdk()), "minSdk untouched");
+        check(Integer.valueOf(24).equals(e.minSdk()), "minSdk raised 8 -> 24: " + e.minSdk());
+        check(r.oldMinSdk == 8 && r.newMinSdk == 24, "min old/new: " + r.oldMinSdk + "/" + r.newMinSdk);
+        check(reportHas(r, "minSdk 8", "-> 24"), "report names the minSdk raise: " + r.report);
+    }
+
+    static void raisesAbsentMin() throws IOException {
+        Map<String, byte[]> x = new LinkedHashMap<>();
+        x.put("lib/armeabi-v7a/libfoo.so", b("V7A"));
+        File in = build("no_uses_sdk", null, "nomin", x);
+        File out = new File(scratch, "nomin.out.apk");
+        ApkRepackager.Result r = ApkRepackager.transform(in, runtime(), out);
+        AxmlEditor e = AxmlEditor.parse(readAll(out).get("AndroidManifest.xml"));
+        check(r.oldMinSdk == -1 && r.newMinSdk == 24, "absent min -> 24: " + r.oldMinSdk + "/" + r.newMinSdk);
+        check(Integer.valueOf(24).equals(e.minSdk()) && Integer.valueOf(24).equals(e.targetSdk()),
+                "manifest min/target 24/24: " + e.minSdk() + "/" + e.targetSdk());
+        check(reportHas(r, "minSdk absent", "-> 24"), "report names absent min raised: " + r.report);
+    }
+
+    static void neverLowersMin() throws IOException {
+        AxmlEditor ed = AxmlEditor.parse(AxmlEditorTest.manifestOf(new File(fixtures, "min_only.apk")));
+        ed.setMinSdk(28);
+        File in = build("min_only", ed.toBytes(), "min28", fullExtras());
+        File out = new File(scratch, "min28.out.apk");
+        ApkRepackager.Result r = ApkRepackager.transform(in, runtime(), out);
+        AxmlEditor e = AxmlEditor.parse(readAll(out).get("AndroidManifest.xml"));
+        check(r.oldMinSdk == 28 && r.newMinSdk == 28, "min 28 stays 28: " + r.oldMinSdk + "/" + r.newMinSdk);
+        check(Integer.valueOf(28).equals(e.minSdk()), "manifest minSdk still 28: " + e.minSdk());
+        // targetSdk absent means = minSdk (28): writing the floor 24 would lower it.
+        check(e.targetSdk() == null && r.newTargetSdk == 28, "absent target not lowered: " + e.targetSdk() + "/" + r.newTargetSdk);
+        check(reportHas(r, "minSdk 28", "unchanged"), "report says min left unchanged: " + r.report);
     }
 
     static void raisesTarget22() throws IOException {
@@ -239,6 +268,8 @@ public class ApkRepackagerTest {
         movesV7aAndStubs();
         reportsDroppedAndUnstubbed();
         bumpsTarget();
+        raisesAbsentMin();
+        neverLowersMin();
         raisesTarget22();
         neverLowersTarget();
         armeabiOnlyWorks();

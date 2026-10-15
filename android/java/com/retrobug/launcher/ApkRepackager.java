@@ -32,6 +32,8 @@ final class ApkRepackager {
 
     /** Lowest targetSdk the platform will install without a "built for an older Android" block. */
     static final int INSTALL_FLOOR_SDK = 24;
+    /** minSdk the output declares at least (never lowered); RepackSigner signs for the same level. */
+    static final int MIN_SDK_FLOOR = 24;
     static final String STUB_KEY = "stub";
 
     private static final String V7A = "lib/armeabi-v7a/";
@@ -44,6 +46,8 @@ final class ApkRepackager {
         String packageName;
         int oldTargetSdk = -1;   // -1: the manifest declared none
         int newTargetSdk;
+        int oldMinSdk = -1;      // -1: the manifest declared none (the platform reads that as 1)
+        int newMinSdk;
         List<String> guestLibs = new ArrayList<>();
         List<String> stubs = new ArrayList<>();
         List<String> report = new ArrayList<>();
@@ -90,17 +94,40 @@ final class ApkRepackager {
             // redundant (and dropped) when a v7a directory supplies the real set.
             String guestDir = hasV7a ? V7A : ARM;
 
+            // minSdk is raised to the same floor: the output only ever runs on a 64-bit device (the stubs are
+            // arm64), and a declared minSdk below 18 makes the v1 signature's SHA-256 digest "unsupported" to
+            // `apksigner verify`, which checks v1 down to the manifest's minSdk.
+            boolean edited = false;
+            Integer oldMin = ed.minSdk();
+            r.oldMinSdk = oldMin == null ? -1 : oldMin;
+            if (oldMin != null && oldMin >= MIN_SDK_FLOOR) {
+                r.newMinSdk = oldMin;    // never lowered
+                r.report.add("minSdk " + oldMin + " already >= " + MIN_SDK_FLOOR + ", left unchanged");
+            } else {
+                ed.setMinSdk(MIN_SDK_FLOOR);
+                edited = true;
+                r.newMinSdk = MIN_SDK_FLOOR;
+                r.report.add("minSdk " + (oldMin == null ? "absent" : oldMin) + " -> " + MIN_SDK_FLOOR);
+            }
+
             Integer oldT = ed.targetSdk();
             r.oldTargetSdk = oldT == null ? -1 : oldT;
-            if (oldT != null && oldT >= INSTALL_FLOOR_SDK) {
-                r.newTargetSdk = oldT;   // raise only to the floor, never lower
-                r.report.add("targetSdk " + oldT + " already >= " + INSTALL_FLOOR_SDK + ", left unchanged");
+            // Never below the install floor nor below the (new) minSdk; never lowered.
+            int floorT = Math.max(INSTALL_FLOOR_SDK, r.newMinSdk);
+            if (oldT == null && oldMin != null && oldMin >= floorT) {
+                // An absent targetSdk means "= minSdk"; writing the floor here would lower it.
+                r.newTargetSdk = oldMin;
+                r.report.add("targetSdk absent (defaults to minSdk " + oldMin + "), left unchanged");
+            } else if (oldT != null && oldT >= floorT) {
+                r.newTargetSdk = oldT;
+                r.report.add("targetSdk " + oldT + " already >= " + floorT + ", left unchanged");
             } else {
-                ed.setTargetSdk(INSTALL_FLOOR_SDK);
-                manifest = ed.toBytes();
-                r.newTargetSdk = INSTALL_FLOOR_SDK;
-                r.report.add("targetSdk " + (oldT == null ? "absent" : oldT) + " -> " + INSTALL_FLOOR_SDK);
+                ed.setTargetSdk(floorT);
+                edited = true;
+                r.newTargetSdk = floorT;
+                r.report.add("targetSdk " + (oldT == null ? "absent" : oldT) + " -> " + floorT);
             }
+            if (edited) manifest = ed.toBytes();
 
             List<ZipEntry> guest = new ArrayList<>();
             List<String> sigDropped = new ArrayList<>();

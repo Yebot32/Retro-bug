@@ -687,6 +687,8 @@ public class LauncherActivity extends Activity {
                     java.util.Map<String, byte[]> runtime = readRepackRuntime(out);
                     ApkRepackager.Result r = ApkRepackager.transform(apk, runtime, unsigned);
                     out.append("package: ").append(r.packageName).append('\n');
+                    out.append("minSdk: ").append(r.oldMinSdk < 0 ? "absent" : String.valueOf(r.oldMinSdk))
+                            .append(" -> ").append(r.newMinSdk).append('\n');
                     out.append("targetSdk: ").append(r.oldTargetSdk < 0 ? "absent" : String.valueOf(r.oldTargetSdk))
                             .append(" -> ").append(r.newTargetSdk).append('\n');
                     out.append("guest libs (assets/rb32/): ").append(r.guestLibs).append('\n');
@@ -777,7 +779,8 @@ public class LauncherActivity extends Activity {
         }
     }
 
-    private static void appendText(File f, String s) {
+    /// Synchronized: install status lines arrive from the install worker and from the main thread.
+    private static synchronized void appendText(File f, String s) {
         if (f == null) return;
         try (OutputStream o = new FileOutputStream(f, true)) {
             o.write(s.getBytes("UTF-8"));

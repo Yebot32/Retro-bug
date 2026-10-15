@@ -41,6 +41,7 @@ final class AxmlEditor {
     private static final int ATTR_SIZE = 20;
     private static final int NODE_HEADER = 16;
 
+    private static final int ATTR_MIN_SDK_VERSION = 0x0101020c;
     private static final int ATTR_TARGET_SDK_VERSION = 0x01010270;
     private static final String ANDROID_NS = "http://schemas.android.com/apk/res/android";
 
@@ -249,6 +250,16 @@ final class AxmlEditor {
 
     Integer targetSdk() { return intAttr("uses-sdk", "targetSdkVersion"); }
 
+    /** Attribute names of the first {@code element}, in file order (tests check the resource-id ordering). */
+    List<String> attrNames(String element) {
+        List<String> out = new ArrayList<>();
+        int n = findElement(element);
+        if (n < 0) return out;
+        byte[] c = nodes.get(n);
+        for (int i = 0; i < attrCount(c); i++) out.add(str(s32(c, attrOff(c, i) + 4)));
+        return out;
+    }
+
     Boolean extractNativeLibs() {
         Integer v = intAttr("application", "extractNativeLibs");
         return v == null ? null : v != 0;
@@ -256,10 +267,15 @@ final class AxmlEditor {
 
     // ---------------------------------------------------------------- editing
 
-    void setTargetSdk(int value) throws IOException {
+    void setTargetSdk(int value) throws IOException { setUsesSdk("targetSdkVersion", ATTR_TARGET_SDK_VERSION, value); }
+
+    void setMinSdk(int value) throws IOException { setUsesSdk("minSdkVersion", ATTR_MIN_SDK_VERSION, value); }
+
+    /** Sets an int attribute of {@code <uses-sdk>}: rewritten in place, inserted, or with a new element. */
+    private void setUsesSdk(String attr, int resId, int value) throws IOException {
         int us = findElement("uses-sdk");
         if (us >= 0) {
-            int a = findAttr(nodes.get(us), "targetSdkVersion");
+            int a = findAttr(nodes.get(us), attr);
             if (a >= 0) {                       // already there: rewrite the typed value, nothing else moves
                 byte[] c = nodes.get(us);
                 putTyped(c, a, value);
@@ -268,11 +284,11 @@ final class AxmlEditor {
         }
         int manifest = findElement("manifest");
         if (manifest < 0) throw new IOException("manifest has no <manifest> element");
-        int nameIdx = ensureTargetSdkName();
+        int nameIdx = ensureAttrName(attr, resId);
         int androidNs = indexOf(ANDROID_NS);
-        if (androidNs < 0) throw new IOException("manifest declares no android namespace to attach targetSdkVersion to");
+        if (androidNs < 0) throw new IOException("manifest declares no android namespace to attach " + attr + " to");
         if (us >= 0) {
-            nodes.set(us, withAttribute(nodes.get(us), androidNs, nameIdx, value));
+            nodes.set(us, withAttribute(nodes.get(us), androidNs, nameIdx, resId, value));
             return;
         }
         // No <uses-sdk> at all: give <manifest> one as its first child.
@@ -289,7 +305,7 @@ final class AxmlEditor {
         put32(end, 8, line); put32(end, 12, -1);
         put32(end, NODE_HEADER, -1); put32(end, NODE_HEADER + 4, tag);
         nodes.add(manifest + 1, end);
-        nodes.add(manifest + 1, withAttribute(start, androidNs, nameIdx, value));
+        nodes.add(manifest + 1, withAttribute(start, androidNs, nameIdx, resId, value));
     }
 
     private static void putTyped(byte[] c, int a, int value) {
@@ -301,31 +317,32 @@ final class AxmlEditor {
     }
 
     /**
-     * Pool index of the {@code targetSdkVersion} attribute name. Added at index == resource-map length when
-     * missing, because the map pairs ids with the first N strings by position; every later reference shifts.
+     * Pool index of the attribute name {@code name} (resource id {@code resId}). Added at index ==
+     * resource-map length when missing, because the map pairs ids with the first N strings by position;
+     * every later reference shifts.
      */
-    private int ensureTargetSdkName() {
+    private int ensureAttrName(String name, int resId) {
         if (resIds == null) resIds = new int[0];
-        for (int i = 0; i < resIds.length; i++) if (resIds[i] == ATTR_TARGET_SDK_VERSION) return i;
+        for (int i = 0; i < resIds.length; i++) if (resIds[i] == resId) return i;
         int at = resIds.length;
-        strings.add(at, "targetSdkVersion");
+        strings.add(at, name);
         poolDirty = true;
         for (byte[] c : nodes) shiftStringRefs(c, at);
         int[] grown = new int[at + 1];
         System.arraycopy(resIds, 0, grown, 0, at);
-        grown[at] = ATTR_TARGET_SDK_VERSION;
+        grown[at] = resId;
         resIds = grown;
         return at;
     }
 
     /** A copy of START_ELEMENT {@code c} with one int attribute added in resource-id order. */
-    private byte[] withAttribute(byte[] c, int ns, int name, int value) throws IOException {
+    private byte[] withAttribute(byte[] c, int ns, int name, int resId, int value) throws IOException {
         if (u16(c, NODE_HEADER + 10) != ATTR_SIZE) throw new IOException("unexpected attribute size " + u16(c, NODE_HEADER + 10));
         int n = attrCount(c), at = n;
         // aapt2 keeps attributes sorted by resource id; names without an id sort after all that have one.
         for (int i = 0; i < n; i++) {
             int nm = s32(c, attrOff(c, i) + 4);
-            if (nm >= 0 && nm < resIds.length && resIds[nm] > ATTR_TARGET_SDK_VERSION || nm >= resIds.length) { at = i; break; }
+            if (nm >= 0 && nm < resIds.length && resIds[nm] > resId || nm >= resIds.length) { at = i; break; }
         }
         int base = attrOff(c, 0), ins = base + at * ATTR_SIZE;
         byte[] out = new byte[c.length + ATTR_SIZE];
