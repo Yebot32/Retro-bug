@@ -4,9 +4,11 @@
 #include "rb/syscall/monitor.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <ctime>
 #include <random>
+#include <thread>
 
 #include "rb/mem/guest_memory.h"
 
@@ -149,6 +151,7 @@ const char* Name(Verdict v) {
     case Verdict::kUnsupported: return "unsupported";
     case Verdict::kExit: return "exit";
     case Verdict::kForward: return "forward";
+    case Verdict::kBlocking: return "blocking";
   }
   return "unknown";
 }
@@ -177,6 +180,8 @@ const char* Name(std::uint32_t number) {
     case nr::kFcntl64: return "fcntl64";
     case nr::kGettid: return "gettid";
     case nr::kFutex: return "futex";
+    case nr::kSchedYield: return "sched_yield";
+    case nr::kNanosleep: return "nanosleep";
     case nr::kExitGroup: return "exit_group";
     case nr::kSetTidAddress: return "set_tid_address";
     case nr::kClockGettime: return "clock_gettime";
@@ -355,7 +360,8 @@ std::uint32_t Monitor::FindFreeRun(std::uint32_t hint, std::uint32_t size) const
   return 0;
 }
 
-Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
+Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::GuestThread* thread) {
+  runtime::GuestThread& th = thread != nullptr ? *thread : *main_;
   switch (f.number) {
     case nr::kGetpid:
     case nr::kGettid: {
@@ -366,8 +372,50 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
         return Outcome::Refused(err::kEnosys,
                                 "getpid/gettid before the launcher set this instance's ids");
       }
-      const std::int32_t id = f.number == nr::kGetpid ? pid_ : tid_;
+      if (f.number == nr::kGettid && th.tid == 0) {
+        return Outcome::Refused(err::kEnosys, "gettid on a guest thread that was given no tid");
+      }
+      const std::int32_t id = f.number == nr::kGetpid ? pid_ : th.tid;
       return Outcome::Emulated(id, "per-instance id supplied by the launcher");
+    }
+
+    case nr::kSchedYield: {
+      // Blocking in the GGL's sense: the point of the call is to let another thread run, so the yield
+      // happens with the lock released (`Verdict::kBlocking`; the bridge runs `block` unlocked).
+      Outcome o{Verdict::kBlocking, 0, "sched_yield() -> 0, yielded with the GGL released", {}};
+      o.block = [] {
+        std::this_thread::yield();
+        return Outcome::Emulated(0, "sched_yield() -> 0, yielded with the GGL released");
+      };
+      return o;
+    }
+
+    case nr::kNanosleep: {
+      // nanosleep(req, rem) with the arm32 kernel's 32-bit `struct timespec` {tv_sec, tv_nsec}. The request
+      // is read and validated here, under the GGL; only the sleep itself runs unlocked. No signal is ever
+      // delivered by this build, so the sleep is never interrupted and `rem` is never written.
+      if (memory_ == nullptr) {
+        return Outcome::Refused(err::kEnosys, "nanosleep: no guest memory is attached to this monitor");
+      }
+      std::int32_t req[2] = {};
+      if (!memory_->Read(f.arg[0], req, sizeof req)) {
+        return Outcome::Answered(err::kEfault, "nanosleep: the request at 0x" + Hex(f.arg[0]) +
+                                                   " is not readable guest memory");
+      }
+      if (req[0] < 0 || req[1] < 0 || req[1] >= 1'000'000'000) {
+        return Outcome::Answered(err::kEinval, "nanosleep({" + std::to_string(req[0]) + ", " +
+                                                   std::to_string(req[1]) +
+                                                   "}) = -EINVAL (-22): tv_sec < 0 or tv_nsec outside [0, 1e9)");
+      }
+      const std::int64_t nanos = static_cast<std::int64_t>(req[0]) * 1'000'000'000 + req[1];
+      const std::string why = "nanosleep({" + std::to_string(req[0]) + ", " + std::to_string(req[1]) +
+                              "}) -> 0, slept on the host with the GGL released (no signal ever interrupts it)";
+      Outcome o{Verdict::kBlocking, 0, why, {}};
+      o.block = [nanos, why] {
+        std::this_thread::sleep_for(std::chrono::nanoseconds(nanos));
+        return Outcome::Emulated(0, why);
+      };
+      return o;
     }
 
     case nr::kExitGroup:
@@ -455,13 +503,13 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
                                 "svc #256 (set_tid_address) before the launcher set this instance's ids; "
                                 "refusing rather than returning a tid nobody produced");
       }
-      clear_child_tid_ = f.arg[0];
-      const std::string why = "set_tid_address(0x" + Hex(clear_child_tid_) + ") -> tid " +
-                              std::to_string(tid_) +
+      th.clear_child_tid = f.arg[0];
+      const std::string why = "set_tid_address(0x" + Hex(th.clear_child_tid) + ") -> tid " +
+                              std::to_string(th.tid) +
                               "; the clear-child-tid slot is recorded, and no thread exit walks it "
                               "because this build models one thread";
       Observe(why);
-      return Outcome::Emulated(tid_, why);
+      return Outcome::Emulated(th.tid, why);
     }
 
     case nr::kSetRobustList: {
@@ -472,10 +520,10 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
                                                    ") = -EINVAL (-22): the kernel requires exactly "
                                                    "sizeof(struct robust_list_head) = 24");
       }
-      robust_head_ = f.arg[0];
-      robust_len_ = f.arg[1];
-      const std::string why = "set_robust_list(head=0x" + Hex(robust_head_) + ", len=" +
-                              std::to_string(robust_len_) +
+      th.robust_head = f.arg[0];
+      th.robust_len = f.arg[1];
+      const std::string why = "set_robust_list(head=0x" + Hex(th.robust_head) + ", len=" +
+                              std::to_string(th.robust_len) +
                               ") recorded -> 0; this build models one thread and no thread exit, so "
                               "nothing ever walks the list";
       Observe(why);
@@ -608,21 +656,21 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
         return Outcome::Answered(err::kEfault, "rt_sigprocmask: the set at 0x" + Hex(set) +
                                                    " is not readable guest memory");
       }
-      if (old != 0 && !memory_->Write(old, &signal_mask_, sizeof signal_mask_)) {
+      if (old != 0 && !memory_->Write(old, &th.signal_mask, sizeof th.signal_mask)) {
         return Outcome::Answered(err::kEfault, "rt_sigprocmask: the old-set out-parameter at 0x" +
                                                    Hex(old) + " is not writable guest memory");
       }
       if (set != 0) {
         if (how == 0) {
-          signal_mask_ |= incoming;
+          th.signal_mask |= incoming;
         } else if (how == 1) {
-          signal_mask_ &= ~incoming;
+          th.signal_mask &= ~incoming;
         } else {
-          signal_mask_ = incoming;
+          th.signal_mask = incoming;
         }
       }
       return Outcome::Emulated(0, "rt_sigprocmask(how=" + std::to_string(how) + ") -> mask 0x" +
-                                      Hex(signal_mask_) +
+                                      Hex(th.signal_mask) +
                                       " (modelled in the monitor; this build delivers no signals)");
     }
 
@@ -650,15 +698,15 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
             }
             if (name[i] == '\0') break;
           }
-          thread_name_ = name;
+          th.name = name;
           return Outcome::Emulated(0, std::string{"prctl(PR_SET_NAME, \""} + name.data() +
                                       "\") recorded in the monitor; the host thread is not renamed");
         }
-        if (!memory_->Write(f.arg[1], thread_name_.data(), thread_name_.size())) {
+        if (!memory_->Write(f.arg[1], th.name.data(), th.name.size())) {
           return Outcome::Answered(err::kEfault, "prctl(PR_GET_NAME): the buffer at 0x" + Hex(f.arg[1]) +
                                                      " is not writable guest memory");
         }
-        return Outcome::Emulated(0, std::string{"prctl(PR_GET_NAME) -> \""} + thread_name_.data() + "\"");
+        return Outcome::Emulated(0, std::string{"prctl(PR_GET_NAME) -> \""} + th.name.data() + "\"");
       }
       return Outcome::Refused(err::kEnosys, "svc #172 (prctl) is not implemented for option 0x" +
                                                 Hex(option) +
@@ -1164,10 +1212,44 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
   }
 }
 
-Outcome Monitor::Handle(exec::MachineState& state, std::uint32_t svc_imm) {
+void Monitor::set_main_thread(runtime::GuestThread* t) {
+  runtime::GuestThread* next = t != nullptr ? t : &own_main_;
+  if (next == main_) return;
+  // The values set so far belong to the main thread whichever object holds them.
+  next->tid = main_->tid;
+  next->clear_child_tid = main_->clear_child_tid;
+  next->robust_head = main_->robust_head;
+  next->robust_len = main_->robust_len;
+  next->signal_mask = main_->signal_mask;
+  next->name = main_->name;
+  main_ = next;
+}
+
+Outcome Monitor::Handle(exec::MachineState& state, std::uint32_t svc_imm, runtime::GuestThread* thread) {
+  Outcome o = Begin(state, svc_imm, thread);
+  if (o.verdict != Verdict::kBlocking) return o;
+  // Single-threaded caller: there is no lock to release, so the wait runs here.
+  return Finish(state, o.block ? o.block() : Outcome::Refused(err::kEnosys, "a blocking answer with no wait"));
+}
+
+Outcome Monitor::Begin(exec::MachineState& state, std::uint32_t svc_imm, runtime::GuestThread* thread) {
   const Frame f = Frame::Capture(state, svc_imm);
   Note(f.number);
-  Outcome o = Classify(f, state);
+  Outcome o = Classify(f, state, thread);
+  if (o.verdict == Verdict::kBlocking) return o;  // no write-back yet: the wait has not happened
+  return Complete(state, std::move(o));
+}
+
+Outcome Monitor::Finish(exec::MachineState& state, Outcome done) {
+  if (done.verdict == Verdict::kBlocking) {
+    // A wait that answered "still waiting" is a bug in the wait, not an answer: refuse by name.
+    done = Outcome::Refused(err::kEnosys, "a blocking call's wait returned another blocking verdict: " + done.detail);
+  }
+  return Complete(state, std::move(done));
+}
+
+Outcome Monitor::Complete(exec::MachineState& state, Outcome o) {
+  const Frame f = Frame::Capture(state, 0);
   // Refusals and errno answers are recorded alongside the successes: the report's answer lines exist
   // so a run that died on an `openat` can say which path and why, not merely that openat happened.
   // Only four success sites called `Observe` before, so every refusal reached the report as a tally

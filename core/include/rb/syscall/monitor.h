@@ -71,6 +71,7 @@
 
 #include "rb/diag/diag.h"
 #include "rb/exec/machine_state.h"
+#include "rb/runtime/guest_thread.h"
 
 namespace rb::mem {
 class GuestMemory;  ///< the monitor never owns it: the launcher builds one and hands it over
@@ -113,6 +114,8 @@ constexpr std::uint32_t kGettimeofday = 78;
 constexpr std::uint32_t kMunmap = 91;
 constexpr std::uint32_t kFstat = 108;  ///< the 32-bit-time `stat`; bionic does not use it
 constexpr std::uint32_t kMprotect = 125;
+constexpr std::uint32_t kSchedYield = 158;  ///< blocking: answered with the GGL released (M2)
+constexpr std::uint32_t kNanosleep = 162;   ///< blocking: answered with the GGL released (M2)
 constexpr std::uint32_t kMremap = 163;
 constexpr std::uint32_t kWritev = 146;
 constexpr std::uint32_t kPrctl = 172;
@@ -192,6 +195,11 @@ enum class Verdict {
   kUnsupported, ///< RetroBug has no answer: refused with ENOSYS, which is what the real kernel does.
   kExit,       ///< the instance is finished; `r0` is the exit code.
   kForward,    ///< handed to the host kernel through the allowlist. Never returned today.
+  /// The call waits (a sleep, a yield; Task 4's futex WAIT). Only `Monitor::Begin` returns it: the wait is
+  /// `Outcome::block`, which the caller runs with the Global Guest Lock *released* — so other guest threads
+  /// run meanwhile — and whose result it hands to `Monitor::Finish` once the lock is held again. The callable
+  /// captures what it needs by value and touches no monitor state.
+  kBlocking,
 };
 
 [[nodiscard]] const char* Name(Verdict v);
@@ -216,6 +224,8 @@ struct Outcome {
   std::int32_t r0 = 0;
   /// Why, in the terms a reader of a log needs: which name, which policy row, what was missing.
   std::string detail;
+  /// `Verdict::kBlocking` only: the wait itself, run without the GGL; its result is the call's answer.
+  std::function<Outcome()> block;
 
   [[nodiscard]] static Outcome Emulated(std::int32_t value, std::string why = {}) {
     return Outcome{Verdict::kEmulated, value, std::move(why)};
@@ -277,6 +287,13 @@ using RandomSource = std::function<bool(std::uint8_t* dst, std::size_t len)>;
 
 /// The monitor. One per guest instance, like everything else that is per-instance: a refusal tally that
 /// mixes apps would be a diagnostics lie, and no isolation property is shared across apps.
+///
+/// Threads (M2): every entry point that dispatches (`Handle`, `Begin`, `Finish`, `Classify`) is called with
+/// the process's Global Guest Lock held — the bridge's run loop is the only caller with more than one guest
+/// thread — so the process-wide tables here (fd table, allocator cursor, tally, notes, captured output) need
+/// no lock of their own: nothing touches them off the GGL. A blocking call's wait (`Outcome::block`) is the
+/// one piece that runs without the GGL, and it touches no monitor state. The accessors (`tally`, `notes`,
+/// captured output) are for a reader that holds the GGL or knows no guest thread is running.
 class Monitor {
  public:
   /// Self-modifying code (AD-7): ARM's `cacheflush` is how a guest says "the bytes you compiled are no
@@ -289,9 +306,16 @@ class Monitor {
   /// `set_ids`'s caller in the launch path — so an unset id is refused rather than invented.
   void set_ids(std::int32_t pid, std::int32_t tid) {
     pid_ = pid;
-    tid_ = tid;
+    main_->tid = tid;
     ids_set_ = true;
   }
+
+  /// The main guest thread's per-thread state (tid, clear-child-tid, robust list, signal mask, name) — what
+  /// a syscall is answered from when its caller names no thread. The monitor holds its own until a bridge
+  /// attaches its main `GuestThread` here (`AbiContext::set_monitor`), which takes over the values set so far
+  /// so `set_ids` / `set_clear_child_tid` before or after the attach mean the same thread.
+  void set_main_thread(runtime::GuestThread* t);
+  [[nodiscard]] runtime::GuestThread& main_thread() { return *main_; }
 
   /// The pointer-shaped calls need guest memory: to copy a path out, to copy a buffer in or out, to
   /// write a `timespec` or a `stat64`. Without one attached, every such call is a named refusal rather
@@ -311,19 +335,29 @@ class Monitor {
   /// `set_tid_address` state for a thread whose call the guest never made: bionic's linker calls
   /// `set_tid_address(&main_thread.tid)` before libc runs, so a process that plays the linker's part
   /// records the same pointer here. Read back by whatever will clear it and wake a joiner on exit.
-  void set_clear_child_tid(std::uint32_t at) { clear_child_tid_ = at; }
-  [[nodiscard]] std::uint32_t clear_child_tid() const { return clear_child_tid_; }
+  void set_clear_child_tid(std::uint32_t at) { main_->clear_child_tid = at; }
+  [[nodiscard]] std::uint32_t clear_child_tid() const { return main_->clear_child_tid; }
 
   /// Anonymous mappings (`mmap2`, a moving or growing `mremap`) are placed only below this guest address,
   /// whatever the window holds above it: the top of a 4 GiB window carries the runtime's trap and the kuser
   /// helpers. 0 (the default) means "the window's end".
   void set_alloc_ceiling(std::uint32_t ceiling) { alloc_ceiling_ = ceiling; }
 
-  /// Capture, dispatch, write the result back. This is what an executor's `Syscall` stop hands to.
-  Outcome Handle(exec::MachineState& state, std::uint32_t svc_imm);
+  /// Capture, dispatch, write the result back, for a single-threaded caller: a blocking call's wait runs in
+  /// place (there is no lock to release), so the verdict returned is never `kBlocking`. `thread` is the
+  /// calling guest thread (null = the main thread).
+  Outcome Handle(exec::MachineState& state, std::uint32_t svc_imm, runtime::GuestThread* thread = nullptr);
 
-  /// Dispatch without the write-back, so a test can assert a verdict without a state to check.
-  Outcome Classify(const Frame&, exec::MachineState& for_writeback);
+  /// The bridge's entry (an executor's `Syscall` stop, with the GGL held). Like `Handle`, except that a
+  /// blocking call comes back as `kBlocking` *without* a write-back: the caller runs `Outcome::block` with
+  /// the GGL released, re-acquires it, and passes the result to `Finish`. Every other verdict is complete.
+  Outcome Begin(exec::MachineState& state, std::uint32_t svc_imm, runtime::GuestThread* thread);
+  /// Records and writes back the answer a blocking call's wait produced (GGL held again).
+  Outcome Finish(exec::MachineState& state, Outcome done);
+
+  /// Dispatch without the write-back, so a test can assert a verdict without a state to check. `thread`
+  /// as for `Handle`.
+  Outcome Classify(const Frame&, exec::MachineState& for_writeback, runtime::GuestThread* thread = nullptr);
 
   [[nodiscard]] const std::vector<std::pair<std::uint32_t, unsigned>>& tally() const { return tally_; }
   /// Distinct numbers seen, and how many times each — the line C17 records.
@@ -391,10 +425,16 @@ class Monitor {
   [[nodiscard]] std::int32_t NextFd() const;
   [[nodiscard]] ServedFile* FileFor(std::int32_t fd);
 
+  /// Records a completed answer: the refusal count and note for a negative `r0`, then the write-back.
+  Outcome Complete(exec::MachineState& state, Outcome o);
+
   Invalidator invalidator_;
   std::int32_t pid_ = 0;
-  std::int32_t tid_ = 0;
   bool ids_set_ = false;
+  /// Per-thread state (tid, clear-child-tid, robust list, signal mask, name) lives in `GuestThread`; this is
+  /// the main thread's until a bridge attaches its own (`set_main_thread`).
+  runtime::GuestThread own_main_;
+  runtime::GuestThread* main_ = &own_main_;
   std::vector<std::pair<std::uint32_t, unsigned>> tally_;  ///< first-seen order, not sorted: a launch's
                                                            ///< story is the order the guest asked in
 
@@ -403,15 +443,9 @@ class Monitor {
   ClockSource clock_;
   RandomSource random_;
   std::vector<ServedFile> served_;
-  /// `rt_sigprocmask`'s model: the kernel's arm32 sigset is 8 bytes, so this is the whole of it. Stored
-  /// because a guest may read back what it blocked, and no signal is ever delivered by this build.
-  std::uint64_t signal_mask_ = 0;
-  /// `set_tid_address`'s clear-child-tid pointer, and `set_robust_list`'s head: recorded so the guest
-  /// gets the identity and the acceptance a real kernel gives, and named in the notes as un-walked.
-  std::uint32_t clear_child_tid_ = 0;
-  std::uint32_t robust_head_ = 0;
-  std::uint32_t robust_len_ = 0;
-  std::array<char, 16> thread_name_{};  ///< `prctl(PR_SET_NAME)`, TASK_COMM_LEN bytes
+  // `rt_sigprocmask`'s mask (the kernel's arm32 sigset is 8 bytes, so a u64 is the whole of it; no signal is
+  // ever delivered by this build), `set_tid_address`'s clear-child-tid pointer, `set_robust_list`'s head and
+  // `prctl(PR_SET_NAME)`'s name are per-thread: they live in the calling `runtime::GuestThread`.
   /// Guest output for fd 1/2 — see `captured_stdout`. `CaptureOutput` answers the call as a console
   /// fd would (the full length reported consumed) and counts over-cap bytes rather than losing them
   /// silently.

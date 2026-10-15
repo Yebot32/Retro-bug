@@ -3008,8 +3008,9 @@ RunResult InterpExecutor::Run(MachineState& state, unsigned max_instructions) {
   // and calling that number something it is not would make Tier I's telemetry and Tier J's disagree in
   // the one place the two tiers are meant to be compared. C04's code cache can carry a real count.
   unsigned steps = 0;
-  static unsigned run_index = 0;
-  ++run_index;
+  // A member, not a function-local static: one executor per process serves every guest thread (under the
+  // GGL), and two processes must not share one trace counter.
+  const unsigned run_index = ++run_index_;
   const char* tenv = std::getenv("RB_T1_TRACE");
   const bool trace = tenv != nullptr && static_cast<unsigned>(std::atoi(tenv)) == run_index;
   unsigned shown = 0;

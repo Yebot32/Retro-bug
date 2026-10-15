@@ -239,7 +239,8 @@ Runtime& R() {
   return *rt;
 }
 
-/// One boot at a time per process; the guest process is single-entry until M2's GGL lands.
+/// One boot at a time per process. Lock order: g_mu, then the process's GGL (taken inside each guest call);
+/// nothing that holds the GGL — no host slot, no guest call — takes g_mu.
 std::mutex g_mu;
 
 bool BootScope(Runtime& rt, ApkZip& zip, std::string* out) {
@@ -378,6 +379,10 @@ bool BootOne(Runtime& rt, const std::string& apk, const std::string& lib, std::s
     Line(out, "scope: reused — booted by an earlier rb_runtime_boot in this process (" +
                   std::to_string(rt.proc->constructors_run()) + " constructors run so far); " + lib +
                   " loads against it");
+    // The main guest thread runs every boot's guest work (constructors, JNI_OnLoad). A later boot can arrive
+    // on a different Java thread (each System.loadLibrary runs on its caller's thread); boots are serialized
+    // by g_mu, so handing the main thread to this one is safe (Task 5 adopts other threads properly).
+    rb::runtime::BindCurrentHostThread(rt.proc->main_guest_thread());
   }
   GuestProcess& p = *rt.proc;
   std::set<std::string> in_progress;

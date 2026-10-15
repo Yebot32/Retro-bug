@@ -271,6 +271,9 @@ std::vector<std::string> NeededSonames(const std::vector<std::uint8_t>& img) {
 
 HostSlots::HostSlots(runtime::GuestProcess& p, int target_sdk, std::function<void(const std::string&)> live_log)
     : p_(p), target_sdk_(target_sdk), live_log_(std::move(live_log)) {
+  // Both tables are bound `kHoldsGgl`: they are the linker's and liblog's part of the process (they read the
+  // module list and bump this object's counters and log record, which the GGL protects), they never wait on
+  // another guest thread, and logcat's write does not block on the guest.
   abi::AbiContext& ctx = p_.abi();
   for (std::size_t i = 0; i < sizeof(kDlTable) / sizeof(kDlTable[0]); ++i) {
     dl_calls_.push_back(DlCall{kDlTable[i].name, 0, {}, 0});
@@ -315,7 +318,7 @@ HostSlots::HostSlots(runtime::GuestProcess& p, int target_sdk, std::function<voi
           s.r[0] = 0;  // NULL / 0 / "no error since last clear": every caller checks
           return true;
       }
-    });
+    }, abi::AbiContext::SlotLock::kHoldsGgl);
   }
   for (std::size_t i = 0; i < sizeof(kLogTable) / sizeof(kLogTable[0]); ++i) {
     const LogKind kind = kLogTable[i].kind;
@@ -347,7 +350,7 @@ HostSlots::HostSlots(runtime::GuestProcess& p, int target_sdk, std::function<voi
       }
       s.r[0] = 1;  // liblog returns a positive byte count on success; 1 is truthful for "written"
       return true;
-    });
+    }, abi::AbiContext::SlotLock::kHoldsGgl);
   }
 }
 

@@ -5,4 +5,4 @@
 # other core component and below the launcher, so nothing in core may depend on it.
 add_library(rb_runtime STATIC guest_process.cpp)
 target_compile_features(rb_runtime PUBLIC cxx_std_20)
-target_link_libraries(rb_runtime PUBLIC rb_linker rb_loader rb_exec rb_abi rb_syscall rb_mem)
+target_link_libraries(rb_runtime PUBLIC rb_linker rb_loader rb_exec rb_abi rb_syscall rb_guest_thread rb_mem)

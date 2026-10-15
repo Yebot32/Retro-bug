@@ -46,6 +46,7 @@
  */
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -55,6 +56,8 @@
 
 #include "rb/exec/machine_state.h"
 #include "rb/mem/guest_memory.h"
+#include "rb/runtime/ggl.h"
+#include "rb/runtime/guest_thread.h"
 
 namespace rb {
 namespace syscall {
@@ -223,6 +226,14 @@ using HostFn = std::function<bool(MachineState&, std::string* err)>;
  *
  * It *is* the `exec::HostDispatch` the executor consults, so a guest `blx` to any address this object
  * published stops with `StopReason::HostCall` instead of trying to execute memory that does not exist.
+ *
+ * **Threads (M2).** Registers and per-thread kernel state live in a `runtime::GuestThread`; a host thread
+ * runs guest code on the one it is bound to (`runtime::BindCurrentHostThread`). The bridge owns the process's
+ * main `GuestThread` and its Global Guest Lock (`runtime::Ggl`): `CallGuest` holds the lock while guest
+ * code runs and releases it at every slice boundary (`kSliceSteps`), around host-slot calls (unless the slot
+ * is an engine service bound with `SlotLock::kHoldsGgl`) and around a blocking syscall's wait. The executors
+ * are shared by every thread — they are stateless between `Run` calls — and so is the host-entry table:
+ * `Bind` belongs to setup, before more than one host thread calls in.
  */
 class AbiContext : public exec::HostDispatch {
  public:
@@ -236,7 +247,8 @@ class AbiContext : public exec::HostDispatch {
    * them for atomics and barriers instead of using ldrex/strex — Angry Birds Go's static constructors
    * branch to `__kuser_memory_barrier` (0xffff0fa0). They are recognised here as host entries, beyond
    * `kMaxSlots` so no `Bind` can alias them, and `CallGuest` runs their semantics and returns to `lr`.
-   * One guest thread is modelled, so each is atomic by construction.
+   * They run with the GGL held (it is never released around them), which is what makes each one atomic
+   * with respect to every other guest thread.
    */
   static constexpr GuestAddr kKuserCmpxchg64 = 0xffff'0f60u;
   static constexpr GuestAddr kKuserMemoryBarrier = 0xffff'0fa0u;
@@ -252,20 +264,34 @@ class AbiContext : public exec::HostDispatch {
   /// forever inside one JNI method, and the failure that produces is a hung UI, not an error message.
   /// Real apps make thousands of syscalls per *launch*; per call, this is generous.
   static constexpr unsigned kMaxSyscallsPerCall = 100'000u;
+  /// The preemption slice: after this many guest instructions (Tier I: IR steps) under one hold of the GGL,
+  /// the running thread releases it, yields, and re-acquires — so a guest thread spinning without a syscall
+  /// cannot starve the others (spec: Runtime, GGL).
+  static constexpr unsigned kSliceSteps = 200'000u;
+
+  /// Whether a host slot runs with the GGL released (the default, and the rule: host code may block, and
+  /// other guest threads must run meanwhile) or held. `kHoldsGgl` is for the engine's own services — the
+  /// JNIEnv table and the dynamic-linker slots — which mutate process state the GGL protects, never wait
+  /// on another guest thread, and may call back into the guest (a nested call keeps the lock).
+  enum class SlotLock { kReleasesGgl, kHoldsGgl };
 
   /// No executor at construction, deliberately: the bridge *is* the dispatch table the executor has to
   /// consult, so the two reference each other. Taking the executor later keeps that a one-way
   /// dependency at any instant rather than requiring either object to be born half-built.
   AbiContext(mem::GuestMemory& memory, GuestAddr stack_top, GuestAddr return_address);
+  ~AbiContext() override;
 
-  void set_executor(exec::Executor& executor) { executor_ = &executor; }
-  [[nodiscard]] exec::Executor& executor() const { return *executor_; }
+  /// The tier guest calls run on. Set from a host thread bound to one of this context's guest threads, it
+  /// is that thread's choice (so another thread's `set_executor` cannot change the tier of a call this one
+  /// is about to make); it is also the default for threads that never chose.
+  void set_executor(exec::Executor& executor);
+  [[nodiscard]] exec::Executor& executor() const;
 
   /// The monitor an SVC reaches. Optional in the type and not optional in a real launch: without one, a
   /// guest syscall stops the call with a `Fault` that says so, because silently continuing past an SVC
   /// the host never answered is the same silent-ignore mistake in a place where the guest is now holding
-  /// a return value that was never produced.
-  void set_monitor(syscall::Monitor* monitor) { monitor_ = monitor; }
+  /// a return value that was never produced. Attaching hands the monitor this context's main thread.
+  void set_monitor(syscall::Monitor* monitor);
   [[nodiscard]] syscall::Monitor* monitor() const { return monitor_; }
 
   /// Set when a call ended in `StopReason::Exited`; the status the guest passed to `exit_group`.
@@ -273,7 +299,9 @@ class AbiContext : public exec::HostDispatch {
 
   /// Makes host function `slot` callable by the guest. Re-binding replaces, which is what lets a
   /// profile override a default rather than needing a second table.
-  void Bind(std::uint32_t slot, HostFn fn);
+  void Bind(std::uint32_t slot, HostFn fn, SlotLock lock = SlotLock::kReleasesGgl);
+  /// Changes how an already-bound slot treats the GGL (no-op for an unbound slot).
+  void SetSlotLock(std::uint32_t slot, SlotLock lock);
   [[nodiscard]] bool IsBound(std::uint32_t slot) const { return bound_.count(slot) != 0; }
 
   /// The guest address a table entry must hold for host function `slot`. Slots are laid out
@@ -287,6 +315,11 @@ class AbiContext : public exec::HostDispatch {
   /// Marshals, runs until the callee returns, servicing host calls on the way, and returns the result.
   /// `max_steps` bounds the whole call, host calls included, so a guest loop that never returns cannot
   /// take the host with it.
+  ///
+  /// It runs on the calling host thread's `GuestThread` (`runtime::CurrentGuestThread()`). A host thread
+  /// with no binding gets this context's main thread when that is not bound to another host thread (the
+  /// first caller claims it); otherwise the call is refused by name (`StopReason::Internal`, "host thread
+  /// not bound to a guest thread; adoption arrives in Task 5"). The GGL is acquired unless already held.
   ///
   /// `exit_state` is optional and exists because without it there is no way to ask the question: the
   /// bridge restores the caller's registers on the way out — correctly, since a nested call's caller is
@@ -304,21 +337,43 @@ class AbiContext : public exec::HostDispatch {
     return CallGuest(fn, Args32{args}, shorty, max_steps, outcome);
   }
 
-  MachineState& state() { return state_; }
+  /// The run loop: runs `thread` from its current state until it returns to the sentinel, exits, faults
+  /// or spends `budget`, servicing syscalls and host calls and slicing for the GGL on the way. Acquires the
+  /// GGL unless held. `instructions_executed` is the whole run's count. `CallGuest` and thread entry use it.
+  exec::RunResult RunThread(runtime::GuestThread& thread, unsigned budget);
+
+  /// The calling host thread's guest-thread state when it is bound to one of this context's threads, else
+  /// the main thread's — the state a single-threaded caller sets `tp` or SP on before its first call.
+  MachineState& state();
   mem::GuestMemory& memory() { return memory_; }
   GuestAddr return_address() const { return return_address_; }
   unsigned stack_bytes() const { return stack_bytes_; }
 
+  runtime::GuestThread& main_thread() { return main_; }
+  runtime::Ggl& ggl() { return ggl_; }
+  /// How many slice boundaries released the GGL so far (all threads).
+  [[nodiscard]] std::uint64_t slices() const { return slices_.load(std::memory_order_relaxed); }
+
  private:
-  /// One kuser helper's semantics on `state_` (index: 0 cmpxchg64, 1 barrier, 2 cmpxchg, 3 get_tls).
-  bool RunKuserHelper(std::uint32_t which, std::string* err);
+  struct Slot {
+    HostFn fn;
+    SlotLock lock = SlotLock::kReleasesGgl;
+  };
+  /// One kuser helper's semantics on `state` (index: 0 cmpxchg64, 1 barrier, 2 cmpxchg, 3 get_tls).
+  bool RunKuserHelper(MachineState& state, std::uint32_t which, std::string* err);
+  /// The guest thread a call from this host thread runs on (see `CallGuest`), or null with `why`.
+  runtime::GuestThread* ThreadForThisHost(std::string* why);
+  /// The calling host thread's guest thread when it belongs to this context, else null.
+  runtime::GuestThread* BoundThreadOfMine();
 
   mem::GuestMemory& memory_;
   exec::Executor* executor_ = nullptr;
   syscall::Monitor* monitor_ = nullptr;
   std::int32_t exit_status_ = 0;
-  std::unordered_map<std::uint32_t, HostFn> bound_;
-  MachineState state_{};
+  std::unordered_map<std::uint32_t, Slot> bound_;
+  runtime::Ggl ggl_;
+  runtime::GuestThread main_;
+  std::atomic<std::uint64_t> slices_{0};
   GuestAddr slot_base_;
   GuestAddr return_address_;
   unsigned stack_bytes_;

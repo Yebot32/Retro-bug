@@ -120,3 +120,10 @@ target_compile_definitions(rb_guest_process_tests PRIVATE
   RB_GUEST_LIBZ_PATH="/data/local/tmp/libz.so"
   RB_FIXTURE_PATH="/data/local/tmp/librb_fixture.so"
   RB_STRIPPED_FIXTURE_PATH="/data/local/tmp/librb_fixture_stripped.so")
+
+# M2 Task 3: per-thread guest contexts under one Global Guest Lock — real host threads, each bound to its own
+# `rb::runtime::GuestThread`, sharing one process on both tiers (shared counters via ldrex/strex and the kuser
+# cmpxchg, slice preemption, the GGL released around host calls and blocking syscalls). Gating; every row has
+# a watchdog that names a hang instead of hanging the run.
+add_executable(rb_guest_thread_tests guest_thread_test.cpp)
+target_link_libraries(rb_guest_thread_tests PRIVATE rb_abi rb_exec rb_syscall rb_guest_thread rb_mem)

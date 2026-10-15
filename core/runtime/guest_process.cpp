@@ -266,6 +266,7 @@ std::unique_ptr<GuestProcess> GuestProcess::Create(const GuestProcessOptions& op
   }
 
   p->abi_ = std::make_unique<abi::AbiContext>(m, p->stack_top_, kReturnAddress);
+  p->abi_->main_thread().stack_lo = stack_lo;
   p->monitor_ = std::make_unique<syscall::Monitor>();
   p->monitor_->set_memory(&m);
   p->monitor_->set_ids(kPid, kMainTid);
@@ -417,6 +418,11 @@ bool GuestProcess::LoadScope(const std::vector<std::uint8_t>& libc, const std::v
   if (libc.empty()) return fail("no libc.so image");
   if (libm.empty()) return fail("no libm.so image");
   if (libz.empty()) return fail("no libz.so image");
+  // Ruling 1 (M2 Task 3): the main guest thread belongs to the host thread that boots the scope. Every guest
+  // call this process makes on its behalf (IFUNC resolvers, the main-thread setup, constructors, and the
+  // caller's own later calls) runs there; another host thread must be bound to its own GuestThread (or, for
+  // a caller that boots on one thread and continues on another, rebind the main thread under its own lock).
+  runtime::BindCurrentHostThread(abi_->main_thread());
 
   // The linker's shared globals (zeroed, two pages: libc writes up to +0x564) and the function that
   // returns them, `__loader_shared_globals`, as twelve bytes of ARM:
@@ -578,6 +584,9 @@ bool GuestProcess::SetUpMainThread(std::string* err) {
   if (!list || !mem_->Read(*list, &head, 4) || head != 0) return fail("g_thread_list is missing or not empty");
 
   abi_->state().tp = tp_;
+  runtime::GuestThread& main = abi_->main_thread();
+  main.pthread_struct = thread_;
+  main.tid = kMainTid;
   monitor_->set_clear_child_tid(thread_ + kThTid);  // set_tid_address(&main_thread.tid)
   Log("thread: main pthread_internal_t at " + Hex(thread_) + " (tid " + std::to_string(kMainTid) +
       "), static TLS at " + Hex(static_tls) + " in a " + Hex(size) + "-byte mapping at " + Hex(base) +

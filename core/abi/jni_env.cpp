@@ -21,6 +21,14 @@ namespace rb::abi {
 
 namespace {
 
+/// The guest registers at the `Call<T>Method` slot a host method is running for, per host thread (M2: two
+/// guest threads can be inside host methods at once). `env` scopes it to one environment.
+struct CallingFrame {
+  const JniEnv* env = nullptr;
+  const exec::MachineState* state = nullptr;
+};
+thread_local CallingFrame tls_calling;
+
 /// Hex digits for a guest word — what every "0x" in a refusal is followed by. The file used to print
 /// `"0x" + Hex32(addr)`, a decimal number wearing a hex prefix, in every handle it named.
 std::string Hex32(std::uint32_t v) {
@@ -75,6 +83,10 @@ std::uint32_t Arg(const exec::MachineState& state, unsigned index) {
 }
 
 }  // namespace
+
+const exec::MachineState* JniEnv::calling_state() const {
+  return tls_calling.env == this ? tls_calling.state : nullptr;
+}
 
 JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsigned arena_bytes,
                std::string* err)
@@ -520,6 +532,17 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
   });
   abi_.Bind(jni::kExceptionDescribe, noop);
 
+  // The JNIEnv table is an engine service, not foreign host code: its functions mutate this environment's
+  // arena, records and host class model, which the GGL protects, and none of them waits on another guest
+  // thread. So they run with the GGL held — including the host methods `CallHost` dispatches to, which
+  // reach the same records through `NewHostByteArray`/`StringText`/`HostArray`. A nested guest call one
+  // of them makes (a host method calling back into the guest) may still release the lock at a slice
+  // boundary or a blocking syscall; nothing here keeps an invariant across that call except the
+  // `methods_` record, which only setup (`DefineHostMethod`) grows.
+  for (std::uint32_t slot = 0; slot < jni::kTableEntries; ++slot) {
+    abi_.SetSlotLock(slot, AbiContext::SlotLock::kHoldsGgl);
+  }
+
   ok_ = true;
   if (err != nullptr) err->clear();
 }
@@ -961,9 +984,12 @@ bool JniEnv::CallHost(exec::MachineState& s, char family, ArgForm form, std::str
   std::uint64_t ret = 0;
   std::string why;
   ++m.calls;
-  calling_state_ = &s;
+  // Per host thread, and saved/restored, so a host method on one thread never sees another thread's caller,
+  // and a host method that calls back into the guest (which calls another host method) gets its own back.
+  const CallingFrame saved = tls_calling;
+  tls_calling = CallingFrame{this, &s};
   const bool answered = m.fn(*this, args, ret, &why);
-  calling_state_ = nullptr;
+  tls_calling = saved;
   if (!answered) {
     ++m.refused;
     return fail(who + ": " + why);

@@ -96,7 +96,7 @@ class GuestProcess {
 
   /// Loads libc (required), libm, libz and — when non-empty — libstdc++, in that order, plays the
   /// linker's part (shared globals, auxv, static-TLS fields, main thread) and leaves constructors unrun.
-  /// Once per process.
+  /// Once per process. Binds the main guest thread to the calling host thread (M2 Task 3, Ruling 1).
   bool LoadScope(const std::vector<std::uint8_t>& libc, const std::vector<std::uint8_t>& libm,
                  const std::vector<std::uint8_t>& libz, const std::vector<std::uint8_t>& libstdcxx,
                  std::string* err);
@@ -124,6 +124,10 @@ class GuestProcess {
   abi::AbiContext& abi() { return *abi_; }
   syscall::Monitor& monitor() { return *monitor_; }
   abi::JniEnv& jni() { return *jni_; }
+  /// The process's Global Guest Lock (owned by the bridge) and its main guest thread, which `LoadScope` binds to
+  /// the host thread that called it.
+  runtime::Ggl& ggl() { return abi_->ggl(); }
+  runtime::GuestThread& main_guest_thread() { return abi_->main_thread(); }
   /// 1 = Tier I, 2 = Tier J (anything else is Tier I).
   exec::Executor& engine(int tier);
   const loader::GuestModule* libc() const { return libc_; }

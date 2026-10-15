@@ -216,9 +216,9 @@ class JniEnv {
   };
   [[nodiscard]] std::vector<HostMethodUse> host_method_uses() const;
   /// The guest's registers at the `Call<T>Method` slot, valid only while a host method runs (null
-  /// otherwise) — what a host method needs to say *who* called it, e.g. a stack scan for return
+  /// otherwise) on the calling host thread — what a host method needs to say *who* called it, e.g. a stack scan for return
   /// addresses when the arguments alone do not explain the request.
-  [[nodiscard]] const exec::MachineState* calling_state() const { return calling_state_; }
+  [[nodiscard]] const exec::MachineState* calling_state() const;
   /// The bytes of a live `byte[]` this environment made, or null — what a host method reads a `[B`
   /// argument through.
   [[nodiscard]] const std::vector<std::uint8_t>* HostArray(GuestAddr handle) const {
@@ -263,7 +263,6 @@ class JniEnv {
   std::vector<HostMethodRec> methods_;   ///< id = kMethodIdBase + 4 * index
   std::map<GuestAddr, GuestAddr> bound_;  ///< guest value -> class handle
   std::map<GuestAddr, std::vector<std::uint8_t>> arrays_;  ///< live arrays by handle
-  const exec::MachineState* calling_state_ = nullptr;
   /// Live `GetByteArrayElements` blocks: block handle -> the array it copies. The release checks both
   /// halves, so elements handed back against the wrong array are refused by name.
   std::map<GuestAddr, GuestAddr> elements_;
