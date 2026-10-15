@@ -264,15 +264,22 @@ class AbiContext : public exec::HostDispatch {
   /// forever inside one JNI method, and the failure that produces is a hung UI, not an error message.
   /// Real apps make thousands of syscalls per *launch*; per call, this is generous.
   static constexpr unsigned kMaxSyscallsPerCall = 100'000u;
-  /// The preemption slice: after this many guest instructions (Tier I: IR steps) under one hold of the GGL,
+  /// The preemption slice: after this many units of executor progress under one hold of the GGL — guest
+  /// instructions on Tier J, but IR steps on Tier I (its `Run` counts IR steps, not guest instructions, so a
+  /// Tier I slice is a different number of guest instructions than a Tier J one) —
   /// the running thread releases it, yields, and re-acquires — so a guest thread spinning without a syscall
   /// cannot starve the others (spec: Runtime, GGL).
   static constexpr unsigned kSliceSteps = 200'000u;
 
   /// Whether a host slot runs with the GGL released (the default, and the rule: host code may block, and
   /// other guest threads must run meanwhile) or held. `kHoldsGgl` is for the engine's own services — the
-  /// JNIEnv table and the dynamic-linker slots — which mutate process state the GGL protects, never wait
-  /// on another guest thread, and may call back into the guest (a nested call keeps the lock).
+  /// JNIEnv table and the dynamic-linker slots — which mutate process state the GGL protects and never wait
+  /// on another guest thread. What is held is exactly the slot's own host code: the GGL is not released
+  /// between the slot's entry and its return. A nested guest call such a slot makes (a host method calling
+  /// back into the guest) does *not* keep the lock throughout: its `RunThread` releases it at every slice
+  /// boundary, around every `kReleasesGgl` host slot and around every blocking syscall, exactly as a
+  /// top-level call does, and re-acquires before returning to the slot — so the slot's host code must not
+  /// rely on process state staying unchanged across a nested call.
   enum class SlotLock { kReleasesGgl, kHoldsGgl };
 
   /// No executor at construction, deliberately: the bridge *is* the dispatch table the executor has to
@@ -353,6 +360,9 @@ class AbiContext : public exec::HostDispatch {
   runtime::Ggl& ggl() { return ggl_; }
   /// How many slice boundaries released the GGL so far (all threads).
   [[nodiscard]] std::uint64_t slices() const { return slices_.load(std::memory_order_relaxed); }
+  /// Slice boundaries at which another host thread was waiting for the GGL — i.e. the boundary handed guest
+  /// execution to a different thread. Evidence of real interleaving, which `slices()` alone is not.
+  [[nodiscard]] std::uint64_t contended_slices() const { return contended_slices_.load(std::memory_order_relaxed); }
 
  private:
   struct Slot {
@@ -374,6 +384,7 @@ class AbiContext : public exec::HostDispatch {
   runtime::Ggl ggl_;
   runtime::GuestThread main_;
   std::atomic<std::uint64_t> slices_{0};
+  std::atomic<std::uint64_t> contended_slices_{0};
   GuestAddr slot_base_;
   GuestAddr return_address_;
   unsigned stack_bytes_;

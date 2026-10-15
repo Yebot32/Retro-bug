@@ -482,7 +482,7 @@ exec::RunResult AbiContext::RunThread(runtime::GuestThread& thread, unsigned bud
     return run;
   }
   unsigned remaining = budget;
-  unsigned held = 0;  ///< instructions run under the current hold of the GGL — the slice clock
+  unsigned held = 0;  ///< progress under the current hold of the GGL (Tier I: IR steps) — the slice clock
   unsigned syscalls = 0;
   for (;;) {
     if (held >= kSliceSteps) {
@@ -491,6 +491,7 @@ exec::RunResult AbiContext::RunThread(runtime::GuestThread& thread, unsigned bud
       // budget, exactly as it does at the end of any call's budget — and both tiers start every Run with
       // no exclusive reservation, so an LL/SC sequence split by the switch fails its strex and retries.
       slices_.fetch_add(1, std::memory_order_relaxed);
+      if (ggl_.waiters() > 0) contended_slices_.fetch_add(1, std::memory_order_relaxed);
       {
         runtime::Ggl::Released off(ggl_);
         std::this_thread::yield();
@@ -580,7 +581,8 @@ exec::RunResult AbiContext::RunThread(runtime::GuestThread& thread, unsigned bud
       } else {
         // The rule for host code: it may block (a GL driver, a host condition variable, a nested guest
         // call that itself waits), so other guest threads must be able to run while it does. A nested
-        // `CallGuest` it makes takes the lock back for its own duration.
+        // `CallGuest` it makes re-acquires the lock to run guest code (and itself releases it at slices,
+        // host slots and blocking syscalls, like any call).
         runtime::Ggl::Released off(ggl_);
         ok = slot->second.fn(state, &herr);
       }

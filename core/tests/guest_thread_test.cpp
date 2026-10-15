@@ -240,60 +240,77 @@ bool WaitFor(const std::function<bool()>& cond, std::chrono::milliseconds limit)
 
 // ---- rows
 
-/// Two host threads, each on its own GuestThread, increment one guest word 100,000 times each with an
-/// ldrex/add/strex loop: the GGL preempts them at arbitrary instructions (every slice), and the result is
-/// exactly 200,000 — a reservation never survives a switch (both tiers clear it at Run entry).
-void two_host_threads_share_one_process(int tier) {
-  const std::string name = std::string{"two_host_threads_share_one_process/"} + TierName(tier);
+/// The shared-counter rows. Both workers are released together from a start gate (each binds its own
+/// GuestThread first, then waits until both are ready), so their calls start within microseconds of each
+/// other. The row then proves the calls really interleaved rather than ran back to back:
+///   - the two calls overlap in wall time (a.start < b.end && b.start < a.end), and
+///   - at least one slice boundary found the *other* thread waiting for the GGL (`contended_slices()`), i.e.
+///     a boundary handed guest execution to the other thread mid-loop.
+/// With that established, an exact total is the atomicity claim. Iterations per thread: 100,000 on Tier I
+/// (the brief's number; ~700k IR steps per thread, ~22 slices in all) and 1,000,000 on Tier J — at Tier J's
+/// speed 100,000 iterations are ~1 ms of work, too short to guarantee overlap against thread start-up skew.
+void SharedCounterRow(int tier, const char* row, exec::GuestAddr blob, exec::GuestAddr word) {
+  const std::string name = std::string{row} + "/" + TierName(tier);
   Watchdog wd(name, std::chrono::seconds(120));
   Rig r = Build(tier);
   if (!r.ok) return;
   const std::uint32_t zero = 0;
-  r.mem->Write(kData, &zero, 4);
+  r.mem->Write(word, &zero, 4);
+  const std::uint32_t per_thread = tier == 1 ? 100'000u : 1'000'000u;
   GuestThread a, b;
   Prepare(a, 1, 6001);
   Prepare(b, 2, 6002);
   CallOut ca, cb;
-  const abi::Args32 args{abi::Value32::Ptr(kData), abi::Value32::U32(100'000)};
-  std::thread ta = Worker(r, a, kLdrexLoop, args, 100'000'000u, ca);
-  std::thread tb = Worker(r, b, kLdrexLoop, args, 100'000'000u, cb);
+  std::atomic<int> ready{0};
+  const abi::Args32 args{abi::Value32::Ptr(word), abi::Value32::U32(per_thread)};
+  const auto worker = [&](GuestThread& t, CallOut& out) {
+    return std::thread([&, args] {
+      runtime::BindCurrentHostThread(t);
+      ready.fetch_add(1);
+      while (ready.load() < 2) std::this_thread::yield();
+      out.start = Clock::now();
+      out.ret = r.abi->CallGuest(blob, args, abi::Shorty::For("I"), 0xc000'0000u, &out.rr);
+      out.end = Clock::now();
+      out.done = true;
+    });
+  };
+  std::thread ta = worker(a, ca);
+  std::thread tb = worker(b, cb);
   ta.join();
   tb.join();
+  const std::uint32_t got = Word(r, word);
   CHECK_CTX(ca.rr.reason == exec::StopReason::Returned, Why(ca));
   CHECK_CTX(cb.rr.reason == exec::StopReason::Returned, Why(cb));
-  CHECK_CTX(Word(r, kData) == 200'000u, name + ": the word is " + std::to_string(Word(r, kData)));
-  CHECK_CTX(r.abi->slices() >= 2, name + ": " + std::to_string(r.abi->slices()) + " slice boundaries (want >= 2)");
+  CHECK_CTX(got == 2 * per_thread, name + ": the word is " + std::to_string(got) + ", want " +
+                                       std::to_string(2 * per_thread));
+  const bool overlap = ca.start < cb.end && cb.start < ca.end;
+  CHECK_CTX(overlap, name + ": the two calls did not overlap in time (A " + std::to_string(Ms(ca.start, ca.end)) +
+                         " ms, B " + std::to_string(Ms(cb.start, cb.end)) + " ms) — nothing interleaved");
+  CHECK_CTX(r.abi->contended_slices() >= 1,
+            name + ": no slice boundary found the other thread waiting (" + std::to_string(r.abi->slices()) +
+                " slices, 0 contended) — the threads never handed the GGL to each other");
   CHECK(r.abi->ggl().misuses() == 0);
   CHECK(!r.abi->ggl().HeldByMe());
-  std::fprintf(stderr, "# Tier %s: ldrex/strex counter %u after 2 x 100000, %llu slice boundaries\n", TierName(tier),
-               Word(r, kData), static_cast<unsigned long long>(r.abi->slices()));
+  std::fprintf(stderr,
+               "# Tier %s: %s counter %u after 2 x %u; calls overlapped %s (A %.1f ms, B %.1f ms); %llu slices, "
+               "%llu contended\n",
+               TierName(tier), row, got, per_thread, overlap ? "yes" : "NO", Ms(ca.start, ca.end), Ms(cb.start, cb.end),
+               static_cast<unsigned long long>(r.abi->slices()),
+               static_cast<unsigned long long>(r.abi->contended_slices()));
+}
+
+/// Two host threads, each on its own GuestThread, increment one guest word with an ldrex/add/strex loop:
+/// the GGL preempts them at arbitrary instructions (every slice), and the total is exact — a reservation
+/// never survives a switch (both tiers clear it at Run entry).
+void two_host_threads_share_one_process(int tier) {
+  SharedCounterRow(tier, "two_host_threads_share_one_process", kLdrexLoop, kData);
 }
 
 /// The same row through `__kuser_cmpxchg` (0xffff0fc0): the helper's read-then-write is atomic because it
 /// runs under the GGL, and a switch between the guest's load of the old value and the helper makes the
 /// helper fail and the guest retry.
 void kuser_cmpxchg_shared_by_two_threads(int tier) {
-  const std::string name = std::string{"kuser_cmpxchg_shared_by_two_threads/"} + TierName(tier);
-  Watchdog wd(name, std::chrono::seconds(120));
-  Rig r = Build(tier);
-  if (!r.ok) return;
-  const std::uint32_t zero = 0;
-  r.mem->Write(kData + 4, &zero, 4);
-  GuestThread a, b;
-  Prepare(a, 1, 6001);
-  Prepare(b, 2, 6002);
-  CallOut ca, cb;
-  const abi::Args32 args{abi::Value32::Ptr(kData + 4), abi::Value32::U32(100'000)};
-  std::thread ta = Worker(r, a, kKuserLoop, args, 100'000'000u, ca);
-  std::thread tb = Worker(r, b, kKuserLoop, args, 100'000'000u, cb);
-  ta.join();
-  tb.join();
-  CHECK_CTX(ca.rr.reason == exec::StopReason::Returned, Why(ca));
-  CHECK_CTX(cb.rr.reason == exec::StopReason::Returned, Why(cb));
-  CHECK_CTX(Word(r, kData + 4) == 200'000u, name + ": the word is " + std::to_string(Word(r, kData + 4)));
-  CHECK_CTX(r.abi->slices() >= 2, name + ": " + std::to_string(r.abi->slices()) + " slice boundaries (want >= 2)");
-  std::fprintf(stderr, "# Tier %s: kuser cmpxchg counter %u after 2 x 100000, %llu slice boundaries\n",
-               TierName(tier), Word(r, kData + 4), static_cast<unsigned long long>(r.abi->slices()));
+  SharedCounterRow(tier, "kuser_cmpxchg_shared_by_two_threads", kKuserLoop, kData + 4);
 }
 
 /// Thread A spins 50M instructions (Tier I: 5M, see below) with no syscall and no host call; thread B's ten-instruction call, made
