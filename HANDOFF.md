@@ -14,7 +14,7 @@ Branch `m1-repackager` (not merged to `main`, not pushed). Design: `docs/superpo
 64-bit app whose own process boots the game's 32-bit library: `AxmlEditor` (binary manifest rewrite),
 `ApkRepackager` (APK transform; libs move to `assets/rb32`), `RepackSigner` (apksig, AndroidKeyStore alias
 `retrobug-repack`), `RepackInstaller` (PackageInstaller, off the UI thread). Native side: prebuilt `librbstub.so`
-plus `rb_runtime_boot` in `librbguest.so` (GuestLinker over `assets/rb32`, constructors on Tier J, guest
+plus `rb_runtime_boot` in `librbguest.so` (Inspect over the one library the stub names plus `assets/rb32sys`; sibling app libs in `assets/rb32` are NOT linked and their imports are trapped; constructors on Tier J, guest
 `JNI_OnLoad`, report file).
 
 **Driving it.**
@@ -38,6 +38,27 @@ plus `rb_runtime_boot` in `librbguest.so` (GuestLinker over `assets/rb32`, const
 
 **Known deviations.** (1) The stub is prebuilt and exports only `JNI_OnLoad` until M3 generates real per-app stubs.
 (2) Inspect's 64 MiB window and per-run teardown stay until M2. (3) minSdk/targetSdk raised to 24 (install floor).
+Additional known deviations: (1b) each stub boots its library in isolation, with teardown after the run (see above for what is linked).
+(4) The in-process boot calls the launcher's `Inspect()`, which runs launcher-only per-game code: for `libgumball.so` that is the
+hand-written Gumball profile (stand-in JNIGLSurface + 1200 headless frames; the source of the "1200 frames" evidence), run
+synchronously inside the game's `JNI_OnLoad` on the loading thread, after reading the whole APK into memory (`bad_alloc` on a
+1 GB+ APK would abort). Fix at the start of M2: a boot-only mode (constructors + guest `JNI_OnLoad`, no profile phase),
+streamed/mmapped zip reads, a wider catch.
+
+**Not yet verified on a device** (each needs the human to confirm a dialog; offered as a follow-up):
+(a) re-repacking the same game installs as an update (same key `retrobug-repack`; expected status=0 SUCCESS, unchanged firstInstallTime);
+(b) installing a repack over a natively installed original reports the installer's own incompatible-signature text (expected
+status=5 INSTALL_FAILED_UPDATE_INCOMPATIBLE).
+
+**Deferred to later milestones** (final review):
+- API-level check for on-device Java (compile `android/java` with `--release 8` or lint) before M3.
+- The stub finds its APK via the hidden ActivityThread API; derive from `dladdr` by M3.
+- Signing-key lifetime (dies with a RetroBug uninstall, so repacked games can't update) and printing the cert SHA-256, by M5.
+- Install-path hardening for API 26-32 (APK in app-specific external storage; exported status receiver <= 32).
+- Scripted repack re-runs on Activity recreation.
+- A failed re-repack deletes the previous good output.
+- The confirm dialog can be silently blocked if RetroBug is backgrounded.
+
 
 **New finding — targetSdk bump breaks old Java.** Gumball's `GumballBillingService.bindToMarketBillingService` does an
 implicit `bindService` (`com.android.vending.billing.MarketBillingService.BIND`), which throws `IllegalArgumentException:
