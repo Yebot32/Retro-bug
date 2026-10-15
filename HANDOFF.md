@@ -6,6 +6,49 @@ hand-written IR interpreter = "Tier I"). Engine in `core/`, on-device launcher a
 (`android/jni/launcher.cpp` + `android/jni/gl_forward.cpp` + `android/java/.../LauncherActivity.java`).
 Everything below this section is older, detailed session history — read it only when you need depth.
 
+## M1 — on-device repackager + stub boot (2026-10-15, ACCEPTED) — newest state, read first
+
+Branch `m1-repackager` (not merged to `main`, not pushed). Design: `docs/superpowers/specs/2026-10-15-general-32bit-app-support-design.md`.
+
+**What M1 delivers.** The RetroBug launcher repackages a staged 32-bit APK on the phone into a normal installable
+64-bit app whose own process boots the game's 32-bit library: `AxmlEditor` (binary manifest rewrite),
+`ApkRepackager` (APK transform; libs move to `assets/rb32`), `RepackSigner` (apksig, AndroidKeyStore alias
+`retrobug-repack`), `RepackInstaller` (PackageInstaller, off the UI thread). Native side: prebuilt `librbstub.so`
+plus `rb_runtime_boot` in `librbguest.so` (GuestLinker over `assets/rb32`, constructors on Tier J, guest
+`JNI_OnLoad`, report file).
+
+**Driving it.**
+- `adb shell am start -n com.retrobug.launcher/.LauncherActivity -e repack <name> [-e install 0]` (`install 0` = build only).
+- `-e bootcheck <name>` checks the boot path without a full repack/install.
+- Outputs: `/sdcard/Android/data/com.retrobug.launcher/files/repack/`.
+- Runtime logs: `adb logcat -s RBRUNTIME` (use the game's pid) and `/data/data/<pkg>/files/rb-report.txt`.
+- Host Java tests: `bash tools/run_java_tests.sh`.
+
+**Acceptance evidence (OnePlus 75ff8cd3, human confirmed the installs).**
+- Angry Birds Go: installed arm64-v8a, min/target 24; own process pid 613: `rb_runtime_boot` read `assets/rb32/libABK.so`
+  + rb32sys libs; 258 constructors (libABK 253) on Tier J in ~4 s; `JNI_OnLoad` returned 0x10006; `RESULT: startup
+  finished with no fault`; then `UnsatisfiedLinkError` `Java_com_rovio_angrybirdsgo_AngryBirdsGoActivity_isDeviceAmazon`
+  from `onCreate` — the designed M1 end point (M3 adds the exports).
+- Gumball: installed arm64-v8a, min/target 24; own process pid 7414: 24 constructors (libgumball 19) on Tier J;
+  headless profile ran 1200 frames to GumballMainMenu (413 fps); `RESULT` ran to the end; then `onCreate` crashed in
+  its own Java (below).
+- Tests: engine 18 lanes green via `RB_SERIAL=R52Y106BECZ bash tools/run_engine_tests.sh arm64-v8a` on the tablet
+  (exit 0; dynarmic 200,561 assertions; guest-apk 1376; diff 998; monitor 167);
+  `bash tools/run_java_tests.sh` exit 0, 0 failures (141 + 54 checks).
+
+**Known deviations.** (1) The stub is prebuilt and exports only `JNI_OnLoad` until M3 generates real per-app stubs.
+(2) Inspect's 64 MiB window and per-run teardown stay until M2. (3) minSdk/targetSdk raised to 24 (install floor).
+
+**New finding — targetSdk bump breaks old Java.** Gumball's `GumballBillingService.bindToMarketBillingService` does an
+implicit `bindService` (`com.android.vending.billing.MarketBillingService.BIND`), which throws `IllegalArgumentException:
+Service Intent must be explicit` at targetSdk >= 21. Not an emulator fault. Needs a new "targetSdk compatibility
+shims" component (spec Architecture; scheduled before M3 acceptance, which needs Gumball to reach its activity).
+
+**Tablet note.** RetroBug's "Install unknown apps" permission is allowed on the tablet; the agent did not grant it.
+Whether to revoke is the human's call. Native Angry Birds Go 1.8.7 on the tablet was untouched.
+
+**Next = M2** (multi-entry core: thread contexts, GGL, clone/futex/exit, adopted ART threads) per the spec.
+
 ## Where it stands (all verified on the tablet)
 
 - **Current target game: Gumball Lite** (`com.twentysixdigital.gumballlite`, `libgumball.so`, ARMv5 Thumb,
@@ -46,7 +89,7 @@ Everything below this section is older, detailed session history — read it onl
 
 ## Git state
 
-- All 2026-10-14/15 work is committed on `main` (local, **not pushed** — ask the human before pushing).
+- M1 work is on branch `m1-repackager` (local, not merged to `main`, not pushed). All earlier 2026-10-14/15 work is committed on `main` (local, **not pushed** — ask the human before pushing).
   The side branch's GuestLinker IFUNC fix (`d06d354`) was cherry-picked onto main; the branch's snapshot
   commit under it (`30047c0`) was not needed. The junk files are gone.
 - `build/device-libs/` holds the tablet's own `libc.so` and `libstdc++.so` (pulled, not in git; required).

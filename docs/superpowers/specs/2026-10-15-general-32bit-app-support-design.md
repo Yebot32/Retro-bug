@@ -105,13 +105,22 @@ forwarded to the real class with host trampolines. Argument shapes come from the
 - **Errors**: unchanged rule — anything unanswered is a named trap. The runtime writes its report to logcat
   (`RBRUNTIME`) and to a file in the app's private dir; the RetroBug app shows the last report per app.
 
+### targetSdk compatibility shims (*new*, found in M1)
+
+The install floor forces targetSdk >= 24, which switches on post-API-21 behaviour changes the old Java was never
+written for: implicit service intents throw (`Service Intent must be explicit`; Gumball's billing `bindService`
+hit this on the OnePlus), background-service limits at 26+, and others. Approach to be designed; candidate is an
+injected DEX/Application-level shim set chosen per detected API use at repackage time. The repack report should
+list the detected risky calls. Scheduled before M3's acceptance (Gumball needs it to reach its activity).
+
 ## Milestones (*review*: threads before the JNI bridge — ART calls natives from UI and GL threads on frame 1)
 
-1. **M1 Repackager + stub boot.** AXML rewriter, apksig signing, stub ELF generator (exports + capture
+1. **M1 Repackager + stub boot. DONE 2026-10-15.** AXML rewriter, apksig signing, stub ELF generator (exports + capture
    trampolines), runtime boot in-process (4 GiB biased window, GuestLinker over `assets/rb32`,
    constructors, guest `JNI_OnLoad` with today's env), report file. *Acceptance*: repackaged Gumball and
    Angry Birds Go install on the OnePlus, open their real first activity, and report "constructors ran,
    JNI_OnLoad returned" from inside their own process.
+   *Evidence*: both install on the OnePlus (min/target 24) and boot in their own process: Angry Birds Go 258 constructors, `JNI_OnLoad` returned, "startup finished with no fault", then the designed `UnsatisfiedLinkError` at `isDeviceAmazon`; Gumball 24 constructors, headless 1200 frames to the main menu, then a targetSdk-compat crash (implicit billing `bindService`) -> see shims component.
 2. **M2 Multi-entry core.** Thread contexts, GGL, clone/futex/exit, adopted ART threads with synthesized
    guest pthreads. *Tests*: fixture rows (pthread create/join, mutex contention, condvar, TLS keys and
    destructors) on both tiers, expected values from the tablet running the same `.so` natively.
@@ -122,7 +131,7 @@ forwarded to the real class with host trampolines. Argument shapes come from the
 4. **M4 Thunk layer.** Generic caller + GLES2/3/EGL, libandroid, OpenSL ES, jnigraphics, host-memory
    window service. *Acceptance*: Angry Birds Go reaches its title screen with sound. Retire per-game
    profiles from the launcher (keep it as a diagnostics tool).
-5. **M5 Breadth.** Run the tablet's 31 installed 32-bit apps through the repackager; fix what each names;
+5. **M5 Breadth.** (targetSdk compatibility shims land earlier, before M3 acceptance.) Run the tablet's 31 installed 32-bit apps through the repackager; fix what each names;
    keep a pass/fail table in `docs/`. Bound the code cache per process.
 6. **Later.** Parallel executors (see GGL), shared code cache, NativeActivity polish, apps that JIT.
 
