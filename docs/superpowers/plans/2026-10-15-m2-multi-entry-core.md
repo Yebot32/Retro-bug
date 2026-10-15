@@ -128,5 +128,5 @@
 
 - [ ] **Step 1:** Rebuild the launcher, install it on the tablet (adb) and OnePlus (human confirms), re-repack Angry Birds Go and Gumball on the OnePlus (human confirms installs — this also exercises M1's unverified "re-repack installs as an update": record `status=0` and unchanged `firstInstallTime` from `adb shell dumpsys package <pkg>`).
 - [ ] **Step 2:** Launch each by its icon; expected `RBRUNTIME`: `scope: booted once`, constructors and `RESULT: startup finished with no fault` with no profile lines; then the documented end point (`UnsatisfiedLinkError` at the first `Java_*` for Angry Birds Go; Gumball's targetSdk-compat crash or its first `Java_*`). Record pids, timings and the exact end-point symbol.
-- [ ] **Step 3:** All lanes green on both phones; `bash tools/run_java_tests.sh` green.
+- [ ] **Step 3:** All lanes green on both phones; `bash tools/run_java_tests.sh` green. *(2026-10-16: Java green; tablet lanes run — see HANDOFF.md; OnePlus rerun pending.)*
 - [ ] **Step 4:** HANDOFF: M2 section (what exists, commands, evidence, deviations closed: (1b) isolated boot, (4) profile-in-boot; remaining deviations; Next = targetSdk shims then M3). Commit `git commit -m "M2 accepted: guest threads on real host threads under one lock"`.
