@@ -101,7 +101,8 @@ namespace {
 using namespace rb;
 using namespace rb::mem;
 
-/// The guest's address layout, identical to `core/tests/guest_apk_test.cpp`'s rig so that the two lanes'
+/// `Launch`'s guest address layout (the probe self-test; `Inspect` runs on a `GuestProcess`, which places its
+/// own), identical to `core/tests/guest_apk_test.cpp`'s rig so that the two lanes'
 /// stack frames, sentinel and guard page have the same shape and a difference between them cannot be
 /// blamed on where the code landed.
 ///
@@ -111,8 +112,7 @@ using namespace rb::mem;
 /// enough for bionic: its `__libc_preinit` walked 65,640 bytes down it and the next store landed 104 bytes
 /// past the bottom, which reads as `guest memory write at 0xeff90 refused` with `sp = 0xeff98` — an address
 /// that sends a reader hunting a bug in libc when the bug is this constant. It sits at the top of the
-/// window because the crowded part is the *bottom*: `kGuardPage` at 8 MiB, the sentinel at 12 MiB, TLS at
-/// 4 MiB, the loader stub and JNI environment above that, the GL strings at 5 MiB, and images placed
+/// window because the crowded part is the *bottom*: `kGuardPage` at 8 MiB, the sentinel at 12 MiB, and images placed
 /// upward from 0x2000.
 constexpr exec::GuestAddr kReturnAddress = 0x00c0'0000u;
 constexpr exec::GuestAddr kStackTop = 0x03f0'0000u;

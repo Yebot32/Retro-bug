@@ -28,7 +28,6 @@
 
 #include <chrono>
 #include <cstdint>
-#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -58,6 +57,9 @@
 #endif
 #ifndef RB_STRIPPED_FIXTURE_PATH
 #define RB_STRIPPED_FIXTURE_PATH "/data/local/tmp/librb_fixture_stripped.so"
+#endif
+#ifndef RB_CTOR_FAULT_PATH
+#define RB_CTOR_FAULT_PATH "/data/local/tmp/librbctorfault.so"
 #endif
 
 namespace {
@@ -465,6 +467,38 @@ void trivial_tier_j_calls_are_fast(const Images& im) {
   CHECK_CTX(pid_ms < 1000.0, "200 getpid calls on Tier J took " + std::to_string(pid_ms) + " ms (bound 1000)");
 }
 
+/// A module whose constructors fault part-way (tests/corpus/ctor_fault.c: [0] counts itself, [1] calls an
+/// unmapped address). The first RunConstructors fails naming DT_INIT_ARRAY[1]; a second refuses by name
+/// and does not run [0] again — `g_ctor_runs` stays 1 — because a half-initialized module must not be
+/// initialized twice.
+void faulted_constructors_are_not_rerun(const Images& im, int tier) {
+  const std::vector<std::uint8_t> image = read_file(RB_CTOR_FAULT_PATH);
+  CHECK_CTX(!image.empty(), std::string{"nothing at "} + RB_CTOR_FAULT_PATH);
+  if (image.empty()) return;
+  Booted b = Boot(tier, im.libc, im.libm, im.libz);
+  CHECK_CTX(b.p != nullptr, b.err);
+  if (!b.p) return;
+  GuestProcess& p = *b.p;
+  std::string err;
+  const loader::GuestModule* m = p.LoadApp(image, "librbctorfault.so", &err);
+  CHECK_CTX(m != nullptr, err);
+  if (m == nullptr) return;
+  const auto counter = m->FindExport("g_ctor_runs");
+  CHECK(counter.has_value());
+  if (!counter) return;
+  std::string failed;
+  CHECK(!p.RunConstructors(&failed));
+  CHECK_CTX(failed.find("librbctorfault.so DT_INIT_ARRAY[1]") != std::string::npos, failed);
+  CHECK_CTX(Word(p, counter->addr) == 1u, "after the first run g_ctor_runs=" + Hex(Word(p, counter->addr)));
+  std::string again;
+  CHECK(!p.RunConstructors(&again));
+  CHECK_CTX(again.find("librbctorfault.so: its constructors faulted in an earlier RunConstructors") != std::string::npos,
+            again);
+  CHECK_CTX(Word(p, counter->addr) == 1u, "a second RunConstructors reran [0]: g_ctor_runs=" + Hex(Word(p, counter->addr)));
+  std::fprintf(stderr, "# Tier %s: faulted constructors: %s\n#   then refused: %s\n", TierName(tier), failed.c_str(),
+               again.c_str());
+}
+
 }  // namespace
 
 int main() {
@@ -474,6 +508,7 @@ int main() {
       boots_the_real_libc(im, tier);
       main_thread_is_real(im, tier);
       static_tls_fields_match_libc(im, tier);
+      faulted_constructors_are_not_rerun(im, tier);
     }
     a_different_libc_layout_is_refused_by_name(im);
     find_local_symbol(im);

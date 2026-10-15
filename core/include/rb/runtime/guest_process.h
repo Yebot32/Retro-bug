@@ -108,7 +108,9 @@ class GuestProcess {
 
   /// Every module whose constructors have not run, in load order (scope, then apps): `DT_INIT`, then
   /// `DT_INIT_ARRAY`, as bionic's `soinfo::call_constructors`. Stops at the first that does not return
-  /// and names it (with the stop reason and the callee's pc) in `failed`.
+  /// and names it (with the stop reason and the callee's pc) in `failed`. That module is then marked
+  /// faulted: a later call refuses by name rather than rerunning its constructors that already ran (a
+  /// half-initialized module must not be initialized twice), and runs nothing after it.
   bool RunConstructors(std::string* failed);
 
   /// A page-aligned free run of the window below `kAllocCeiling`, mapped with `prot`. 0 and `err` when none.
@@ -174,6 +176,8 @@ class GuestProcess {
   GuestAddr thread_ = 0, tp_ = 0, thread_mapping_ = 0;
   std::uint32_t thread_mapping_size_ = 0;
   std::map<std::string, std::uint32_t> export_ifunc_cache_;
+  /// Modules whose constructors stopped part-way, with the reason RunConstructors named.
+  std::map<const loader::GuestModule*, std::string> ctor_faults_;
   std::vector<std::string> unanswered_;
   std::size_t ctors_run_ = 0;
 };

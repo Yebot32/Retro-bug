@@ -226,6 +226,12 @@ struct Runtime {
   std::map<std::string, const rb::loader::GuestModule*> loaded;  ///< soname -> module (apps, libstdc++)
   std::set<std::string> booted;                                  ///< libraries whose boot succeeded
   std::string* report = nullptr;                                 ///< the boot in progress's report
+  /// Set when a boot failed after guest state changed (a module placed, guest code run): the process is
+  /// then half-initialized, so every later call refuses by name instead of running into its leftovers
+  /// (a faulted module's constructors, a sibling whose constructors never ran) under another report.
+  std::string poisoned;
+  bool touched = false;  ///< this boot changed guest state
+  std::string failure;   ///< this boot's failure, for `poisoned`
 };
 
 Runtime& R() {
@@ -306,8 +312,13 @@ const rb::loader::GuestModule* LoadWithNeeded(Runtime& rt, ApkZip& zip, const st
   std::string host_side;
   for (const std::string& n : rb::launcher::NeededSonames(*image)) {
     if (n == "libc.so" || n == "libm.so" || n == "libz.so" || rt.loaded.count(n) != 0) continue;
+    // libstdc++ comes in through LoadApp, on demand, where the launcher's Inspect passes it to LoadScope:
+    // this scope is booted once for every library the process will ever load, before anyone knows whether
+    // one of them needs libstdc++, so it joins later the way a device's linker loads a DT_NEEDED — after
+    // the scope, before its user, its constructors run with the user's.
     if (n == "libstdc++.so" && zip.Has("assets/rb32sys/libstdc++.so")) {
       auto cxx = zip.Read("assets/rb32sys/libstdc++.so", &err);
+      rt.touched = true;
       const rb::loader::GuestModule* m = cxx ? rt.proc->LoadApp(*cxx, n, &err) : nullptr;
       if (m == nullptr) {
         Line(out, "FATAL: rb_runtime_boot: " + lib + " needs libstdc++.so, which did not load: " + err);
@@ -327,6 +338,7 @@ const rb::loader::GuestModule* LoadWithNeeded(Runtime& rt, ApkZip& zip, const st
               " host (dl*, liblog) or trapped by name at " + Hex(kTrap));
   }
   const std::size_t unanswered_before = rt.proc->unanswered().size();
+  rt.touched = true;
   const rb::loader::GuestModule* m = rt.proc->LoadApp(*image, lib, &err);
   if (m == nullptr) {
     Line(out, "FATAL: " + err);
@@ -371,11 +383,14 @@ bool BootOne(Runtime& rt, const std::string& apk, const std::string& lib, std::s
   std::set<std::string> in_progress;
   const rb::loader::GuestModule* app = LoadWithNeeded(rt, zip, lib, in_progress, out);
   if (app == nullptr) {
+    rt.failure = lib + " did not load";
     Line(out, "RESULT: stopped during startup — " + lib + " did not load (the FATAL line above says why)");
     return false;
   }
   std::string failed;
+  rt.touched = true;
   if (!p.RunConstructors(&failed)) {
+    rt.failure = "constructor " + failed;
     Line(out, "RESULT: stopped during startup — constructor " + failed);
     return false;
   }
@@ -403,6 +418,7 @@ bool BootOne(Runtime& rt, const std::string& apk, const std::string& lib, std::s
   if (rr.reason != rb::exec::StopReason::Returned) {
     Line(out, "JNI_OnLoad: did not return on Tier J after " + std::to_string(rr.instructions_executed) +
                   " steps: " + rr.detail + "; pc " + Hex(exit.pc) + " lr " + Hex(exit.r[14]));
+    rt.failure = lib + " JNI_OnLoad did not return: " + rr.detail;
     Line(out, "RESULT: the constructors finished, then JNI_OnLoad stopped — the line above says where");
     return false;
   }
@@ -439,17 +455,37 @@ extern "C" int rb_runtime_boot(JavaVM* /*vm*/, const char* apk_path, const char*
   Line(&report, "rb_runtime_boot: lib=" + (lib.empty() ? std::string{"(none)"} : lib) +
                     " apk=" + (apk.empty() ? std::string{"(none)"} : apk));
   bool ok = false;
-  try {
-    ok = BootOne(rt, apk, lib, &report);
-    Tallies(rt, &report);
-  } catch (const std::exception& e) {
-    Line(&report, std::string{"FATAL: unhandled exception while booting: "} + e.what());
-    Line(&report, "RESULT: stopped during startup — a host exception (above)");
-  } catch (...) {
-    Line(&report, "FATAL: unhandled exception of a non-standard type while booting");
-    Line(&report, "RESULT: stopped during startup — a host exception (above)");
+  rt.touched = false;
+  rt.failure.clear();
+  if (!rt.poisoned.empty()) {
+    Line(&report, "FATAL: rb_runtime_boot: refused — the guest process faulted in an earlier boot: " + rt.poisoned +
+                      ". It is half-initialized, so no guest work runs in this process again");
+    Line(&report, "RESULT: stopped during startup — the guest process faulted in an earlier boot (above)");
+  } else {
+    try {
+      ok = BootOne(rt, apk, lib, &report);
+      Tallies(rt, &report);
+    } catch (const std::exception& e) {
+      Line(&report, std::string{"FATAL: unhandled exception while booting: "} + e.what());
+      Line(&report, "RESULT: stopped during startup — a host exception (above)");
+      rt.failure = std::string{"a host exception: "} + e.what();
+      rt.touched = rt.touched || rt.proc != nullptr;
+    } catch (...) {
+      Line(&report, "FATAL: unhandled exception of a non-standard type while booting");
+      Line(&report, "RESULT: stopped during startup — a host exception (above)");
+      rt.failure = "a host exception of a non-standard type";
+      rt.touched = rt.touched || rt.proc != nullptr;
+    }
+    if (ok) {
+      rt.booted.insert(lib);
+    } else if (rt.touched && rt.proc) {
+      // Guest state changed before the failure: nothing in this process may run guest code again.
+      rt.poisoned = lib + ": " + (rt.failure.empty() ? std::string{"see its report"} : rt.failure);
+      Line(&report, "rb_runtime_boot: the guest process is now refused for every later boot (" + rt.poisoned + ")");
+    }
+    // A failure before any guest state changed (no APK, a missing entry, a scope that did not boot and was
+    // discarded) leaves nothing behind, so a later call may try again.
   }
-  if (ok) rt.booted.insert(lib);  // a failed boot may be retried by a later call
   rt.report = nullptr;
 
   const std::string pkg = PackageName();

@@ -126,6 +126,12 @@ WEAK="$BUILD/librbweak.so"
   -mthumb -mfloat-abi=softfp -mfpu=neon -fPIC -shared -nostdlib -Os \
   -Wl,-soname,librbweak.so -o "$WEAK" "$ROOT/tests/corpus/weak_unresolved.c"
 
+# Constructors that fault part-way (GuestProcess must not rerun the ones that already ran).
+CTORFAULT="$BUILD/librbctorfault.so"
+"$TC/bin/clang.exe" --target=armv7-none-linux-androideabi26 --sysroot="$TC/sysroot" \
+  -mthumb -mfloat-abi=softfp -mfpu=neon -fPIC -shared -nostdlib -Os \
+  -Wl,-soname,librbctorfault.so -o "$CTORFAULT" "$ROOT/tests/corpus/ctor_fault.c"
+
 # MSYS hands native programs /c/... paths and converts them on the way out — which is wrong for the
 # *device* path in `adb push a /data/local/tmp/b`, hence the MSYS_NO_PATHCONV=1 on every adb call
 # below. That switch also stops the conversion of the **local** path, so adb.exe is then handed a
@@ -175,6 +181,7 @@ adb push "$(to_host "$IFLEAF")" /data/local/tmp/librbifuncleaf.so >/dev/null
 adb push "$(to_host "$IFUSER")" /data/local/tmp/librbifuncuser.so >/dev/null
 adb push "$(to_host "$IFLIBC")" /data/local/tmp/librbifunclibc.so >/dev/null
 adb push "$(to_host "$WEAK")" /data/local/tmp/librbweak.so >/dev/null
+adb push "$(to_host "$CTORFAULT")" /data/local/tmp/librbctorfault.so >/dev/null
 adb push "$(to_host "$FIXTURE_STRIPPED")" /data/local/tmp/librb_fixture_stripped.so >/dev/null
 adb push "$(to_host "$DEVICE_LIBC")" /data/local/tmp/rb_device_libc.so >/dev/null
 adb push "$(to_host "$GUEST_LIBM")" /data/local/tmp/libm.so >/dev/null

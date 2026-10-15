@@ -619,11 +619,20 @@ bool GuestProcess::RunConstructors(std::string* failed) {
                             " lr " + Hex(exit.r[14]);
     if (failed) *failed = why;
     Log("constructors: " + why);
+    ctor_faults_[&m] = why;
     return false;
   };
   for (const auto& mp : modules_) {
     loader::GuestModule& m = *mp;
     if (m.constructors_called) continue;
+    if (const auto fault = ctor_faults_.find(&m); fault != ctor_faults_.end()) {
+      const std::string why = (m.soname.empty() ? m.path : m.soname) +
+                              ": its constructors faulted in an earlier RunConstructors (" + fault->second +
+                              "); the ones before the fault already ran, so none is run again";
+      if (failed) *failed = why;
+      Log("constructors: refused — " + why);
+      return false;
+    }
     if (m.init.addr != 0 && !run(m, m.init, "DT_INIT")) return false;
     for (std::size_t i = 0; i < m.init_array.size(); ++i) {
       if (m.init_array[i].addr == 0) continue;

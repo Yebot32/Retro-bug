@@ -632,12 +632,14 @@ public class LauncherActivity extends Activity {
     /// A staged original has no `assets/rb32/` layout; its repack output (`-e repack <name> -e install 0`,
     /// under getExternalFilesDir(null)/repack/, same file name) does, and is booted in its place.
     private String bootCheckOne(File apk, String lib) {
+        String note = "";
         try {
             if (largestRb32Lib(apk) == null) {
                 File repacked = new File(new File(getExternalFilesDir(null), "repack"), apk.getName());
                 if (repacked.isFile() && largestRb32Lib(repacked) != null) {
-                    Log.i(TAG, "bootcheck: " + apk.getName() + " has no assets/rb32/ — booting its repack output "
-                            + repacked);
+                    note = "bootcheck: " + apk.getName() + " has no assets/rb32/ — booted the M1 repack output "
+                            + repacked + " instead of the staged original\n";
+                    Log.i(TAG, note.trim());
                     apk = repacked;
                 }
             }
@@ -648,11 +650,11 @@ public class LauncherActivity extends Activity {
                         + " make it with tools/make_bootcheck_apk.sh";
             }
             Log.i(TAG, "bootcheck: " + apk.getName() + " lib=" + name);
-            return nativeBootCheck(apk.getAbsolutePath(), name);
+            return note + nativeBootCheck(apk.getAbsolutePath(), name);
         } catch (IOException | RuntimeException | UnsatisfiedLinkError e) {
             String report = "FATAL: bootcheck: " + e.getClass().getSimpleName() + ": " + e.getMessage();
             Log.e(TAG, report);
-            return report;
+            return note + report;
         }
     }
 
