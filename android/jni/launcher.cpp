@@ -73,25 +73,16 @@
 #include "rb/syscall/monitor.h"
 #include "rb/loader/guest_elf.h"
 #include "rb/mem/guest_memory.h"
+#include "rb/runtime/guest_process.h"
 
 #include <android/native_window_jni.h>
 #include <functional>
 
 #include "gl_forward.h"
+#include "host_slots.h"
 #include "inspect.h"
 #include "runtime_boot.h"
 
-#include <atomic>
-
-namespace rb::launcher {
-namespace {
-// A string literal (static lifetime) is the only thing ever stored: "RBLAUNCH" by default, "RBRUNTIME"
-// once `rb_runtime_boot` has run in this process.
-std::atomic<const char*> g_log_tag{"RBLAUNCH"};
-}  // namespace
-const char* LogTag() { return g_log_tag.load(std::memory_order_relaxed); }
-void SetLogTag(const char* tag) { g_log_tag.store(tag, std::memory_order_relaxed); }
-}  // namespace rb::launcher
 
 /// The milestones that a report line cannot cover. `Launch` returns its report as a string and the Java
 /// half logs every line, but a `SIGSEGV` inside a guest call is not a C++ exception: it takes the process
@@ -100,7 +91,7 @@ void SetLogTag(const char* tag) { g_log_tag.store(tag, std::memory_order_relaxed
   do {                                                 \
     char _rb_line[512];                                \
     std::snprintf(_rb_line, sizeof _rb_line, __VA_ARGS__);         \
-    __android_log_print(ANDROID_LOG_INFO, ::rb::launcher::LogTag(), "%s", _rb_line); \
+    __android_log_print(ANDROID_LOG_INFO, "RBLAUNCH", "%s", _rb_line); \
   } while (0)
 
 using namespace rb::launcher;
@@ -138,13 +129,6 @@ constexpr std::size_t kWindowBytes = 64u << 20;
 /// 12 MiB: the loader's free-space scan would place a module over the sentinel and the slots, and a
 /// guest branch to a 4-aligned address inside the range would then report a bogus host call.
 constexpr std::size_t kHostWindowBytes = 0x2000u;
-/// TLS: the thread pointer page and bionic's own thread struct. The first draft put the thread struct
-/// at 0x430000 — the same page as the GL strings below — and `Map`'s replace-on-overlap silently wiped
-/// the identity strings on every game run, so `glGetString` answered an empty string while the report
-/// claimed the strings were placed. The asserts below keep every reserved page pairwise distinct,
-/// because "two constants happened to agree" is exactly the failure no test caught.
-constexpr exec::GuestAddr kTlsBase = 0x0040'0000u;
-constexpr exec::GuestAddr kThreadStruct = 0x0046'0000u;
 /// One guest call's instruction budget, the same figure the APK lane uses. Tier I counts IR ops and Tier
 /// J guest encodings, so this bounds the two differently — it exists to stop a runaway guest, not to
 /// measure it.
@@ -156,37 +140,18 @@ constexpr unsigned kEntryBudget = 50 * kCallBudget;
 constexpr std::int32_t kJniVersion16 = 0x0001'0006;
 constexpr const char* kAppSoname = "libmathprobe.so";
 
-/// Where the host's answers to a guest's `gl*` calls live: one page, mapped before any module is placed,
-/// in the same run of host pages as the loader stub. Its whole content is the pair of strings
-/// `glGetString` hands back, and that is the reason it exists — a game parses that result, so a defined
-/// string is the difference between "this host has no GL" and a null dereference that reads as a bug in
-/// the game.
-constexpr exec::GuestAddr kGlStrings = 0x0043'0000u;
-/// `"RetroBug (no GL)"` is sixteen bytes and a NUL, so the empty answer starts at the next word. The
-/// assert is why the two are joined by a constant rather than placed by hand: a longer identity string
-/// would silently overwrite the empty one, and the only thing that would ever notice is a guest parsing
-/// the result it was handed.
+/// The host's answers to a guest's `gl*` calls point into one guest page `Inspect` maps (with `MapFree`)
+/// before any module is placed. Its whole content is the pair of strings `glGetString` hands back — a game
+/// parses that result, so a defined string is the difference between "this host has no GL" and a null
+/// dereference that reads as a bug in the game. `"RetroBug (no GL)"` is sixteen bytes and a NUL, so the
+/// empty answer starts at the next word; the assert keeps a longer identity string from overwriting it.
 constexpr unsigned kGlEmptyOffset = 20u;
-constexpr exec::GuestAddr kGlEmpty = kGlStrings + kGlEmptyOffset;
 static_assert(sizeof("RetroBug (no GL)") <= kGlEmptyOffset,
               "the identity string would run into the empty one");
 
-/// The rest of the reserved guest pages, hoisted out of `Inspect` and `Launch` so the check below can see
-/// them. Each was a function-local `constexpr`, which kept it outside the one assertion this file has
-/// against two reserved constants agreeing — the failure class that wiped the GL identity strings at
-/// 0x430000 on every game run. Values unchanged; only their scope moved.
-constexpr exec::GuestAddr kLoaderGlobals = 0x0041'0000u;
-constexpr exec::GuestAddr kLoaderStub = 0x0042'0000u;
-constexpr exec::GuestAddr kStandInObject = 0x0044'0000u;
-constexpr exec::GuestAddr kApkPathAt = 0x0045'0000u;
-constexpr exec::GuestAddr kJniEnvRegion = 0x0050'0000u;
-
-/// Every reserved guest address, so the check is over the whole set rather than over the pairs someone
-/// remembered to write down. The hand-written pairwise list this replaces covered seven of twelve
-/// constants, and the five it missed were exactly the ones still declared inside a function.
-constexpr exec::GuestAddr kReservedPages[] = {
-    kReturnAddress, kGuardPage, kTlsBase,       kLoaderGlobals, kLoaderStub,   kGlStrings,
-    kStandInObject, kApkPathAt,  kThreadStruct, kJniEnvRegion,  kUnresolved,   kStackTop};
+/// `Launch`'s fixed guest pages (`Inspect` runs on a `GuestProcess`, which places its own), checked as a
+/// set: the one collision this layout ever had wiped the GL identity strings on every game run.
+constexpr exec::GuestAddr kReservedPages[] = {kReturnAddress, kGuardPage, kUnresolved, kStackTop};
 
 constexpr bool ReservedPagesAreDistinctAndAligned() {
   constexpr std::size_t n = sizeof(kReservedPages) / sizeof(kReservedPages[0]);
@@ -246,215 +211,10 @@ static_assert(kGlSlotBase >= abi::jni::kTableEntries &&
                   kGlSlotBase + kGlSlots <= abi::AbiContext::kMaxSlots,
               "a GL slot would either alias the JNI table or be unreachable past kMaxSlots");
 
-/// Host slots for the dynamic-linker interface, right above the GL window. On a device these names
-/// (and `libdl.so` itself) live in the linker — libc imports them and calls them from its own
-/// constructors — so a build with no linker behind it must answer them, or the first constructor that
-/// reaches one faults at the trap address. See `kDlTable` for who answers what.
-constexpr std::uint32_t kDlSlotBase = 320u;
-constexpr std::size_t kDlSlots = 16;
-static_assert(kGlSlotBase + kGlSlots <= kDlSlotBase &&
-                  kDlSlotBase + kDlSlots <= abi::AbiContext::kMaxSlots,
-              "the dl* host slots would either alias the GL window or be unreachable past kMaxSlots");
-
-/// Host slots for liblog, right above the dl window. The device's `liblog.so` needs libc++, libm and libdl
-/// behind it; what a game calls is three functions, and answering them here puts the game's own log lines
-/// into this report — the first time a guest has been able to say what it thinks is happening.
-constexpr std::uint32_t kLogSlotBase = 336u;
-enum class LogKind { kPrint, kVprint, kWrite };
-struct LogEntry {
-  const char* name;
-  LogKind kind;
-};
-constexpr LogEntry kLogTable[] = {
-    {"__android_log_print", LogKind::kPrint},
-    {"__android_log_vprint", LogKind::kVprint},
-    {"__android_log_write", LogKind::kWrite},
-};
-static_assert(kDlSlotBase + kDlSlots <= kLogSlotBase &&
-                  kLogSlotBase + sizeof(kLogTable) / sizeof(kLogTable[0]) <= abi::AbiContext::kMaxSlots,
-              "the liblog host slots would alias the dl window or be unreachable past kMaxSlots");
-
-std::optional<std::size_t> LogSlotIndex(const std::string& name) {
-  for (std::size_t i = 0; i < sizeof(kLogTable) / sizeof(kLogTable[0]); ++i) {
-    if (name == kLogTable[i].name) return i;
-  }
-  return std::nullopt;
-}
-
-std::string GuestStringOrEmpty(const mem::GuestMemory& mem, std::uint32_t at);
-
-/// Where a guest printf's variadic arguments live: optionally one core register first (r3 for
-/// `__android_log_print(prio, tag, fmt, ...)`), then guest memory — the stack, or a `va_list`'s area.
-/// AAPCS puts a 64-bit value 8-aligned and never splits it into r3, which is the one rule that matters.
-struct GuestVarargs {
-  const mem::GuestMemory* mem = nullptr;
-  bool reg_free = false;
-  std::uint32_t reg = 0;
-  std::uint32_t at = 0;
-  bool ok = true;
-  std::uint32_t Next32() {
-    if (reg_free) {
-      reg_free = false;
-      return reg;
-    }
-    std::uint32_t v = 0;
-    if (!mem->Read(at, &v, 4)) ok = false;
-    at += 4;
-    return v;
-  }
-  std::uint64_t Next64() {
-    reg_free = false;
-    at = (at + 7u) & ~7u;
-    std::uint64_t v = 0;
-    if (!mem->Read(at, &v, 8)) ok = false;
-    at += 8;
-    return v;
-  }
-};
-
-/// A guest `printf` format rendered on the host: flags, width and precision (including `*`), the h/hh/l/
-/// ll/z/j/t/L lengths, and d i u o x X c s p f F e E g G a A %. `%s` reads a bounded guest string; `%n`
-/// writes nothing (a log call has no business storing through a guest pointer here). A conversion this
-/// does not know is copied through as text, so the line still says what the guest wrote.
-std::string GuestFormat(const mem::GuestMemory& mem, std::uint32_t fmt_at, GuestVarargs& va) {
-  const std::string fmt = GuestStringOrEmpty(mem, fmt_at);
-  std::string out;
-  for (std::size_t i = 0; i < fmt.size(); ++i) {
-    if (fmt[i] != '%') {
-      out.push_back(fmt[i]);
-      continue;
-    }
-    std::string spec = "%";
-    std::size_t j = i + 1;
-    while (j < fmt.size() && std::strchr("-+ #0", fmt[j]) != nullptr) spec.push_back(fmt[j++]);
-    if (j < fmt.size() && fmt[j] == '*') {
-      spec += std::to_string(static_cast<std::int32_t>(va.Next32()));
-      ++j;
-    } else {
-      while (j < fmt.size() && std::isdigit(static_cast<unsigned char>(fmt[j]))) spec.push_back(fmt[j++]);
-    }
-    if (j < fmt.size() && fmt[j] == '.') {
-      spec.push_back(fmt[j++]);
-      if (j < fmt.size() && fmt[j] == '*') {
-        spec += std::to_string(static_cast<std::int32_t>(va.Next32()));
-        ++j;
-      } else {
-        while (j < fmt.size() && std::isdigit(static_cast<unsigned char>(fmt[j]))) spec.push_back(fmt[j++]);
-      }
-    }
-    bool wide = false;  // a 64-bit integer argument
-    while (j < fmt.size() && std::strchr("hlLqjzt", fmt[j]) != nullptr) {
-      if (fmt[j] == 'l' && j + 1 < fmt.size() && fmt[j + 1] == 'l') {
-        wide = true;
-        ++j;
-      } else if (fmt[j] == 'q' || fmt[j] == 'j' || fmt[j] == 'L') {
-        wide = true;
-      }
-      ++j;  // h, hh, l, z, t are 32-bit on this ABI and promote to int
-    }
-    if (j >= fmt.size()) {
-      out += fmt.substr(i);
-      break;
-    }
-    const char c = fmt[j];
-    char buf[512];
-    buf[0] = 0;
-    if (c == '%') {
-      out.push_back('%');
-    } else if (std::strchr("diuoxX", c) != nullptr) {
-      const std::uint64_t raw = wide ? va.Next64() : va.Next32();
-      const std::string s = spec + "ll" + c;
-      if (c == 'd' || c == 'i') {
-        const long long v = wide ? static_cast<long long>(raw)
-                                 : static_cast<long long>(static_cast<std::int32_t>(raw));
-        std::snprintf(buf, sizeof buf, s.c_str(), v);
-      } else {
-        std::snprintf(buf, sizeof buf, s.c_str(), static_cast<unsigned long long>(raw));
-      }
-      out += buf;
-    } else if (c == 'c') {
-      std::snprintf(buf, sizeof buf, (spec + "c").c_str(), static_cast<int>(va.Next32() & 0xffu));
-      out += buf;
-    } else if (c == 'p') {
-      std::snprintf(buf, sizeof buf, "0x%x", va.Next32());
-      out += buf;
-    } else if (std::strchr("fFeEgGaA", c) != nullptr) {
-      const std::uint64_t bits = va.Next64();  // `...` promoted float to double
-      double d = 0;
-      std::memcpy(&d, &bits, 8);
-      std::snprintf(buf, sizeof buf, (spec + c).c_str(), d);
-      out += buf;
-    } else if (c == 's') {
-      const std::uint32_t p = va.Next32();
-      const std::string s = p == 0 ? std::string{"(null)"} : GuestStringOrEmpty(mem, p);
-      std::snprintf(buf, sizeof buf, (spec + "s").c_str(), s.c_str());
-      out += buf;
-    } else if (c == 'n') {
-      va.Next32();
-    } else {
-      out += fmt.substr(i, j - i + 1);
-    }
-    i = j;
-  }
-  return out;
-}
-
-/// The dynamic-linker surface this build answers, and the answer each name gives. A fixed table rather
-/// than `IsGlName`'s prefix shape: this is an interface, not a namespace — those names are what libc's
-/// loader-side callers actually import, and an unlisted `dl*`-looking name must stay trapped rather
-/// than collect a stub (a trap names itself since the scope-unanswered fix; a wrong stub does not).
-enum class DlKind {
-  kDlopen,
-  kDlopenExt,
-  kDlsym,
-  kDlclose,
-  kDlerror,
-  kDladdr,
-  kExidx,
-  kTargetSdk,
-  kAddDtor,
-  kRemoveDtor,
-  kNamespace,
-};
-struct DlEntry {
-  const char* name;
-  DlKind kind;
-};
-constexpr DlEntry kDlTable[] = {
-    {"dlopen", DlKind::kDlopen},
-    {"android_dlopen_ext", DlKind::kDlopenExt},
-    {"dlsym", DlKind::kDlsym},
-    {"dlclose", DlKind::kDlclose},
-    {"dlerror", DlKind::kDlerror},
-    {"dladdr", DlKind::kDladdr},
-    {"dl_unwind_find_exidx", DlKind::kExidx},
-    {"android_get_application_target_sdk_version", DlKind::kTargetSdk},
-    {"__loader_add_thread_local_dtor", DlKind::kAddDtor},
-    {"__loader_remove_thread_local_dtor", DlKind::kRemoveDtor},
-    {"__loader_android_get_exported_namespace", DlKind::kNamespace},
-};
-
-/// The table index of `name`, or `nullopt` — see `kDlTable` for why this is an exact match.
-std::optional<std::size_t> DlSlotIndex(const std::string& name) {
-  for (std::size_t i = 0; i < sizeof(kDlTable) / sizeof(kDlTable[0]); ++i) {
-    if (name == kDlTable[i].name) return i;
-  }
-  return std::nullopt;
-}
-
-/// A guest NUL-terminated string for diagnostic reports, bounded and refusal-free: a report line may
-/// not fault the run it describes, so an unreadable or absurd path yields the empty string. Only used
-/// for naming what a guest asked the host for.
-std::string GuestStringOrEmpty(const mem::GuestMemory& mem, std::uint32_t at) {
-  std::string out;
-  if (at == 0 || at >= mem.window_bytes()) return out;
-  for (unsigned i = 0; i < 256; ++i) {
-    char c = 0;
-    if (!mem.Read(at + i, &c, 1) || c == '\0') break;
-    out.push_back(c);
-  }
-  return out;
-}
+/// The dynamic-linker and liblog slots sit right above the GL window; they are `HostSlots`' (host_slots.h),
+/// shared with the in-app runtime.
+static_assert(kGlSlotBase + kGlSlots <= HostSlots::kDlSlotBase,
+              "the GL window would alias the dl* host slots");
 
 /// Whether a name is one of the OpenGL ES client entry points the host answers. The set is deliberately
 /// not a list: which entry points a run needs is whatever the app's own relocations ask for, and a list
@@ -788,57 +548,6 @@ bool ImageSize(const std::vector<std::uint8_t>& b, std::uint32_t& w, std::uint32
   return false;
 }
 
-/// Whether an ELF32 image names `soname` in its `DT_NEEDED` list — read from the bytes, because the
-/// scope is placed before the app is loaded and the decision to place an optional library has to come
-/// first. Bounds-checked throughout; anything malformed answers false (the loader will name it later).
-bool NeedsSoname(const std::vector<std::uint8_t>& img, const std::string& soname) {
-  const auto u16 = [&](std::size_t at) -> std::uint32_t {
-    return at + 2 <= img.size() ? (img[at] | (img[at + 1] << 8)) : 0u;
-  };
-  const auto u32 = [&](std::size_t at) -> std::uint32_t {
-    if (at + 4 > img.size()) return 0u;
-    std::uint32_t v = 0;
-    std::memcpy(&v, img.data() + at, 4);
-    return v;
-  };
-  if (img.size() < 52) return false;
-  const std::uint32_t phoff = u32(28), phentsize = u16(42), phnum = u16(44);
-  std::uint32_t dyn_off = 0, dyn_sz = 0;
-  const auto file_of = [&](std::uint32_t vaddr) -> std::size_t {
-    for (std::uint32_t i = 0; i < phnum; ++i) {
-      const std::size_t ph = phoff + std::size_t{i} * phentsize;
-      if (u32(ph) != 1u) continue;  // PT_LOAD
-      const std::uint32_t off = u32(ph + 4), va = u32(ph + 8), filesz = u32(ph + 16);
-      if (vaddr >= va && vaddr - va < filesz) return off + (vaddr - va);
-    }
-    return 0;
-  };
-  for (std::uint32_t i = 0; i < phnum; ++i) {
-    const std::size_t ph = phoff + std::size_t{i} * phentsize;
-    if (u32(ph) == 2u) {  // PT_DYNAMIC
-      dyn_off = u32(ph + 4);
-      dyn_sz = u32(ph + 16);
-    }
-  }
-  std::uint32_t strtab = 0;
-  std::vector<std::uint32_t> needed;
-  for (std::size_t at = dyn_off; dyn_off != 0 && at + 8 <= std::size_t{dyn_off} + dyn_sz; at += 8) {
-    const std::uint32_t tag = u32(at), val = u32(at + 4);
-    if (tag == 0u) break;
-    if (tag == 1u) needed.push_back(val);  // DT_NEEDED
-    if (tag == 5u) strtab = val;           // DT_STRTAB
-  }
-  const std::size_t str = strtab != 0 ? file_of(strtab) : 0;
-  if (str == 0) return false;
-  for (const std::uint32_t n : needed) {
-    std::size_t at = str + n;
-    std::string name;
-    while (at < img.size() && img[at] != 0 && name.size() < 256) name.push_back(static_cast<char>(img[at++]));
-    if (name == soname) return true;
-  }
-  return false;
-}
-
 }  // namespace
 
 // Out of the anonymous namespace so `runtime_boot.cpp` can call it (declared in `inspect.h`).
@@ -950,102 +659,6 @@ Outcome Call(exec::Executor& engine, abi::AbiContext& ctx, const loader::GuestMo
   out.detail = result.detail;
   return out;
 }
-
-/**
- * The IFUNC half of one image's load: the hook `LoadOptions::resolve_ifunc` is asked for each slot, the
- * guest call behind it, and the tally the report is made of.
- *
- * Why the call happens *inside* the load rather than in a pass over `GuestModule::ifunc_slots`
- * afterwards: the slot is only writable until the load ends, because `LoadFromBytes` runs its RELRO pass
- * on the way out — `docs/30` §Step 27 measured all eight of a real `libc.so`'s slots refusing the write
- * once it returns. The hook is that window (`core/loader/guest_elf.cpp`, the loop between relocation and
- * `enforce_relro`), and returning an address from it is what makes the loader write one.
- *
- * Why a tally rather than report lines written from the hook: the `GuestModule` that names these slots is
- * built by the same call that consults the hook, so at hook time nothing can say which image a slot
- * belongs to. `Report` says it once the module exists. A slot that did not resolve is a line of its own
- * with the reason it did not — "0 resolved" with nothing beside it is the shape this report may not have.
- */
-struct IfuncResolution {
-  abi::AbiContext* ctx = nullptr;
-  exec::Executor* engine = nullptr;  ///< The tier this run chose for guest code.
-  const char* tier = "I";
-  exec::Executor* spare = nullptr;   ///< The other tier, asked only when the first does not return.
-  const char* spare_tier = "J";
-  bool armed = false;                ///< False when the hook was never handed to a loader.
-  std::size_t slots = 0;
-  std::size_t resolved = 0;
-  /// One line per slot, resolved or not, in the order the loader recorded them — so a name that appears
-  /// in one place and not the other reads as a failure rather than as an omission.
-  std::vector<std::string> lines;
-
-  /**
-   * The loader's hook. `slot_value` goes in r0, which is the AArch32 convention rather than a guess: for
-   * an `R_ARM_IRELATIVE` slot that word *is* the addend the resolver is called with, and the device's own
-   * ARM resolvers ignore it either way (`memset_resolver` and `strlen_resolver` both begin by calling
-   * `get_cpu_variant` and take the answer from there). Only the return value is load-bearing.
-   */
-  std::optional<std::uint32_t> operator()(const loader::IfuncSlot& slot) {
-    ++slots;
-    const std::string name = slot.name.empty() ? "<R_ARM_IRELATIVE>" : slot.name;
-    const std::string where = Hex(slot.where);
-    std::string why;
-    for (int attempt = 0; attempt < 2; ++attempt) {
-      exec::Executor* on = attempt == 0 ? engine : spare;
-      const char* on_tier = attempt == 0 ? tier : spare_tier;
-      if (on == nullptr) continue;
-      ctx->set_executor(*on);
-      exec::RunResult result{};
-      exec::MachineState exit{};
-      const abi::Ret32 ret =
-          ctx->CallGuest(slot.resolver.tagged(), {abi::Value32::U32(slot.slot_value)},
-                         abi::Shorty::For("I"), kCallBudget, &result, &exit);
-      if (result.reason == exec::StopReason::Returned && ret.w() != 0) {
-        ++resolved;
-        lines.push_back("  " + name + " slot 0x" + where + " -> implementation 0x" + Hex(ret.w()) +
-                        " (resolver 0x" + Hex(slot.resolver.addr) + ", tier " + on_tier + ", " +
-                        std::to_string(result.instructions_executed) + " steps)");
-        return ret.w();
-      }
-      if (!why.empty()) why += "; ";
-      why += "tier ";
-      why += on_tier;
-      if (result.reason == exec::StopReason::Returned) {
-        // A resolver that returns zero is not an answer any caller can use, and writing it would trade
-        // "executes resolver code" for "branches to the null page". Named, and the slot is left alone.
-        why += " returned 0, which is not an implementation";
-      } else {
-        why += std::string{" stopped with "} + ReasonName(result.reason) + " after " +
-               std::to_string(result.instructions_executed) + " steps" +
-               (result.detail.empty() ? "" : " (" + result.detail + ")");
-      }
-    }
-    lines.push_back("  " + name + " slot 0x" + where + " NOT resolved: " + why +
-                    " — the slot still holds the resolver at 0x" + Hex(slot.resolver.addr) +
-                    ", so a caller of this name executes resolver code as if it were the function");
-    return std::nullopt;
-  }
-
-  /// The image's outcome, once its module exists. `armed` is the difference between "this image has no
-  /// resolver to run" and "nothing was asked of it", and the two deserve different lines.
-  void Report(std::string* out, const std::string& soname) const {
-    if (!armed) {
-      Say(out, "ifunc: %s: resolution did not run for this image, so any IFUNC slot it has still holds"
-               " the resolver the loader wrote",
-          soname.c_str());
-      return;
-    }
-    if (slots == 0) {
-      Say(out, "ifunc: %s has no slot to resolve — the loader found no relocation in it naming a"
-               " resolver",
-          soname.c_str());
-      return;
-    }
-    Say(out, "ifunc: %s — %zu of %zu slot(s) resolved through the guest, %zu still holding a resolver",
-        soname.c_str(), resolved, slots, slots - resolved);
-    for (const std::string& line : lines) Say(out, "%s", line.c_str());
-  }
-};
 
 /// The whole launch, as the report the Java half prints. Every failure path returns a report rather than
 /// an error code, because the caller is an Activity with no console and "it returned null" is the least
@@ -1284,21 +897,16 @@ using namespace rb::mem;
  * imports did the guest scope answer and which were answered by the trap address that faults when called,
  * and — if it exports one — what does its `JNI_OnLoad` return through the emulator.
  *
- * The memory layout and resolver setup are deliberately duplicated from `Launch` rather than shared with
- * it. `Launch`'s path is verified on hardware (`docs/30` §Step 37); a helper extracted for both would put
- * that verification behind a refactor no device has run, to save twenty lines.
- *
- * What this has that `Launch` does not is IFUNC: every image loaded here — the three in the scope and the
- * app — has its `STT_GNU_IFUNC` slots resolved by running their resolvers through the bridge while the
- * image is still writable, and the report names each slot's implementation. A library loaded without that
- * hands the guest a *resolver* where it expects a routine, which is the shape of this launcher's last
- * hang rather than a subtlety of the ELF format.
+ * The guest process — memory, bridge, monitor, JNIEnv, both tiers, and the device's libc booted with its
+ * IFUNC slots resolved and bionic's real main thread — is `rb::runtime::GuestProcess`, the one copy of that
+ * boot (the in-app runtime uses it too). What stays here is the launcher's own: its 64 MiB window and trap,
+ * the GL host slots, the per-game profiles (KA3D's renderer, Gumball's surface and frame loop) and the
+ * report. `Launch` keeps its own hand-built layout: its PASS/FAIL table was measured against it.
  *
  * `tiers`: 0 = interpreter then JIT, 1 = interpreter only, 2 = JIT only.
  *
- * `libc_image` and `libz_image` are the other two guest libraries this APK ships — a bionic `libc.so`
- * pulled off a 32-bit-capable device and a `libz.so` built from the NDK archive. Either may be empty (the
- * APK then carries no such asset), which is still a run this report has to make and name.
+ * `libc_image`, `libm_image` and `libz_image` are the guest scope this APK ships — the device's bionic
+ * `libc.so` and libm/libz built from the NDK archive; all three are required.
  *
  * `apk_path` is the chosen APK as the host filesystem names it (`File.getAbsolutePath()` on the Java
  * side), and it has two jobs: it becomes the NUL-terminated guest string the entry point is handed,
@@ -1340,156 +948,104 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
     return out;
   }
 
-  std::string err;
-  AddressModel model;
-  model.kind = AddressModel::kBiased;
-  model.host_page_shift = page_shift;
-  std::unique_ptr<GuestMemory> mem = GuestMemory::Create(kWindowBytes, model, &err);
-  if (!mem) {
-    Say(&out, "FATAL: GuestMemory::Create(%zu) refused: %s", kWindowBytes, err.c_str());
+  if (libc_image.empty() || libz_image.empty()) {
+    Say(&out, "FATAL: the guest %s asset is missing — the guest process boots the device's own bionic libc"
+              " with libm and libz, and runs nothing without them",
+        libc_image.empty() ? "libc" : "libz");
     return out;
   }
-  if (!mem->Map(kGuardPage, kGuestPage, kRead | kWrite, &err)) {
-    Say(&out, "FATAL: mapping the stack-guard page failed: %s", err.c_str());
-    return out;
-  }
-  const std::uint32_t guard = 0xdead'beefu;
-  mem->Write(kGuardPage, &guard, 4);
-  if (!mem->Map(kStackTop - kStackBytes, kStackBytes, kRead | kWrite, &err)) {
-    Say(&out, "FATAL: mapping the guest stack failed: %s", err.c_str());
-    return out;
-  }
-  // The host-entry window is reserved, not merely avoided: nothing maps it, but the loader's
-  // free-space scan must see it as taken, or a library ending past 12 MiB is placed over the return
-  // sentinel and the `AbiContext` slot table. `kNone` makes it a guard reservation — occupied for
-  // placement, refused for any access.
-  if (!mem->Map(kReturnAddress, kHostWindowBytes, kNone, &err)) {
-    Say(&out, "FATAL: reserving the host-entry window failed: %s", err.c_str());
-    return out;
-  }
-  // Same as `Launch`: no reservation, because the address is outside the window and cannot be reached by
-  // the placement scan. The earlier attempt to map it here refused the run along with the other one.
 
   /**
-   * The two guest pages the entry point's arguments live in, mapped here rather than at that call.
-   *
-   * Why here: the loader places every module in the first free run of the window it can find, so a page
-   * mapped after the loads could be a page a module already sits on — `Map` replaces, and what would
-   * disappear is the module's own text. Two pages, before anything is placed, cost nothing and take the
-   * ordering question away; the JNIEnv below is built early for the same reason.
-   *
-   * What: a zeroed page to stand in for the `MyRenderer` object the entry point receives twice — as
-   * `this` and as its first declared parameter — and the APK's absolute path as the NUL-terminated guest
-   * string the Java side would have passed. Neither is a Java object: there is no JavaVM here, and the
-   * call's own lines say what the addresses are.
+   * The guest process: memory, bridge, syscall monitor, JNIEnv, both tiers, the device's libc booted the
+   * way its linker leaves a process (`rb/runtime/guest_process.h`) — the one copy of that boot, shared with
+   * the in-app runtime. The launcher keeps its 64 MiB window and its trap at 0x0bad0000, outside the window
+   * so no module can be placed on it. Constructors (and IFUNC resolvers) run on the tier this run chose:
+   * Tier J when the JIT alone was asked for, Tier I otherwise — once, since they have side effects in one
+   * guest memory.
    */
-  exec::GuestAddr stand_in = 0;
-  exec::GuestAddr apk_path_guest = 0;
-  if (mem->Map(kStandInObject, kGuestPage, kRead | kWrite, &err)) {
-    stand_in = kStandInObject;
-  } else {
-    Say(&out, "entry: the stand-in object page at 0x%s could not be mapped (%s) — the entry point is"
-              " still called, with 0 where that object should be",
-        Hex(kStandInObject).c_str(), err.c_str());
+  const int ctor_tier_id = tiers == 2 ? 2 : 1;
+  const char* ctor_tier = ctor_tier_id == 2 ? "J" : "I";
+  /// What the launcher answers beyond the scope (set once the slots exist, below). The GL names are the
+  /// launcher's own; the dl* and liblog set is `HostSlots`'.
+  std::function<std::optional<std::uint32_t>(const std::string&)> host;
+  std::string err;
+  runtime::GuestProcessOptions popts;
+  popts.window_bytes = kWindowBytes;
+  popts.biased = true;
+  popts.unresolved_trap = kUnresolved;
+  popts.ctor_tier = ctor_tier_id;
+  popts.log = [&out](const std::string& line) { Say(&out, "%s", line.c_str()); };
+  popts.host_resolver = [&host](const std::string& name) -> std::optional<runtime::GuestAddr> {
+    return host ? host(name) : std::nullopt;
+  };
+  std::unique_ptr<runtime::GuestProcess> proc = runtime::GuestProcess::Create(popts, &err);
+  if (!proc) {
+    Say(&out, "FATAL: %s", err.c_str());
+    return out;
   }
+  GuestMemory* const mem = &proc->memory();
+  abi::AbiContext& ctx = proc->abi();
+  abi::JniEnv& jni = proc->jni();
+  syscall::Monitor& monitor = proc->monitor();
+  exec::Executor& interp = proc->engine(1);
+  exec::Executor& jit = proc->engine(2);
+  exec::Executor& ctor_engine = proc->engine(ctor_tier_id);
+  if (!jit.ok()) Say(&out, "tier J is unavailable before any guest code ran");
+  Say(&out, "process: a %zu MiB biased guest window, unresolved imports bound to 0x%s, constructors on tier %s",
+      kWindowBytes >> 20, Hex(kUnresolved).c_str(), ctor_tier);
+
+  /**
+   * The guest pages the entry points' arguments live in, mapped before anything is placed (the loader
+   * takes the first free run, so a page mapped later could not be told apart from a module's own): a zeroed
+   * page standing in for the Java object a game's entry point receives as `this` (and KA3D's `MyRenderer`
+   * parameter), and a page holding the APK's absolute path as a NUL-terminated guest string — also the
+   * launcher's scratch for the strings its profile calls hand the guest. Neither is a Java object: there is
+   * no JavaVM here, and the call lines say what the addresses are.
+   */
+  exec::GuestAddr stand_in = proc->MapFree(kGuestPage, kRead | kWrite, &err);
+  if (stand_in == 0) {
+    Say(&out, "entry: the stand-in object page could not be mapped (%s) — the entry point is still called,"
+              " with 0 where that object should be", err.c_str());
+  }
+  const exec::GuestAddr scratch_at = proc->MapFree(kGuestPage, kRead | kWrite, &err);
+  exec::GuestAddr apk_path_guest = 0;
   if (apk_path.empty()) {
     Say(&out, "entry: the Java half passed no APK path, so the library's path argument is 0 and it has no"
               " way to reach the assets inside its own APK");
   } else if (apk_path.size() + 1 > kGuestPage) {
-    Say(&out, "entry: the APK path is %zu bytes and does not fit this launcher's %u-byte path page — the"
-              " path argument is 0",
+    Say(&out, "entry: the APK path is %zu bytes and does not fit the %u-byte path page — the path argument is 0",
         apk_path.size(), kGuestPage);
-  } else if (!mem->Map(kApkPathAt, kGuestPage, kRead | kWrite, &err)) {
-    Say(&out, "entry: the APK path page at 0x%s could not be mapped (%s) — the path argument is 0",
-        Hex(kApkPathAt).c_str(), err.c_str());
-  } else if (!mem->Write(kApkPathAt, apk_path.c_str(), apk_path.size() + 1)) {
-    Say(&out, "entry: guest memory at 0x%s refused the APK path — the path argument is 0",
-        Hex(kApkPathAt).c_str());
+  } else if (scratch_at == 0) {
+    Say(&out, "entry: the APK path page could not be mapped (%s) — the path argument is 0", err.c_str());
+  } else if (!mem->Write(scratch_at, apk_path.c_str(), apk_path.size() + 1)) {
+    Say(&out, "entry: guest memory at 0x%s refused the APK path — the path argument is 0", Hex(scratch_at).c_str());
   } else {
-    apk_path_guest = kApkPathAt;
+    apk_path_guest = scratch_at;
   }
-
-  /**
-   * One function that belongs to the *dynamic linker*, answered with a synthesized stub.
-   *
-   * bionic's `__libc_preinit_impl` calls `__loader_shared_globals` and then writes into the struct it
-   * returns (at +0x438 — read off the constructor's disassembly, cross-referenced to the GOT slot at
-   * 0xd6b98 and its `R_ARM_JUMP_SLOT`). It is an import of `libc.so` rather than a definition, because
-   * the real implementation lives in the linker, which no image here provides. So the answer is a page of
-   * zeroed guest memory plus twelve bytes of ARM that returns its address:
-   *
-   *     ldr r0, [pc, #0]    @ the word below, which sits at pc+8
-   *     bx  lr
-   *     .word <globals page>
-   *
-   * That is the function's contract — "return the loader's shared globals" — implemented rather than
-   * deferred, and the report says the loader here is RetroBug's stand-in so nobody reads it as Android's.
-   * The alternative was leaving it trapped, which is what the previous run did: the call executed the
-   * trap page and the constructor stopped with `NoExecuteFault` at an address that names nothing.
-   *
-   * Only this one, on purpose. Every other linker-provided name (`android_dlopen_ext`, `pthread_atfork`,
-   * `dladdr`) stays trapped, so the next one the guest reaches names itself in the report instead of
-   * being guessed at now.
-   */
-  std::uint32_t loader_shared_globals = kUnresolved;
-  if (mem->Map(kLoaderGlobals, kGuestPage, kRead | kWrite, &err) &&
-      mem->Map(kLoaderStub, kGuestPage, kRead | kWrite | kExec, &err)) {
-    const std::uint32_t code[] = {0xe59f'0000u, 0xe12f'ff1eu, kLoaderGlobals};
-    if (mem->Write(kLoaderStub, code, sizeof code)) {
-      // ARM state on purpose: bit 0 stays clear, so a Thumb `blx` switches state on the way in and the
-      // `bx lr` above returns to the caller's Thumb address — the mechanism `docs/30` §Step 25 records.
-      loader_shared_globals = kLoaderStub;
-      Say(&out, "host: __loader_shared_globals -> ARM stub at 0x%s returning the zeroed page at 0x%s"
-                " (the real one lives in the linker, which no image here provides)",
-          Hex(kLoaderStub).c_str(), Hex(kLoaderGlobals).c_str());
-    }
-  }
-  if (loader_shared_globals == kUnresolved) {
-    Say(&out, "host: __loader_shared_globals could not be stubbed (%s) — the first constructor that calls"
-              " it will fault at 0x%s",
-        err.c_str(), Hex(kUnresolved).c_str());
-  }
-
-  // The bridge, built here rather than beside the executors below, because the answer to a `gl*` import
-  // is a host slot and only the bridge can hand one out. It has no executor yet, which is the ordering
-  // `rb/abi/abi.h` describes: the bridge *is* the table the executor consults, so the executor takes it.
-  abi::AbiContext ctx{*mem, kStackTop, kReturnAddress};
 
   /**
    * The host-answered OpenGL ES 1.x set.
    *
-   * Why this exists at all: 53 of the Angry Birds 1.0.0 library's 182 imports are `gl*`, and that list was
-   * the *entire* trapped list of the run before this one — the client library that would define them,
-   * `libGLESv1_CM.so`, is in no image here and is not being fabricated. Left alone they land on
-   * `kUnresolved`, so the first one the game calls faults at an address that names nothing, which is the
-   * worst of both: no answer and no name. This answers them instead, and the answer is *visible*: one host
-   * slot per name the run asks for, a tally per name, and report lines that say exactly what happened.
-   * That is the sanctioned shape of "not implemented" here — counted, named, and explained — rather than
-   * the silent zero the project forbids.
+   * Why this exists at all: 53 of the Angry Birds 1.0.0 library's 182 imports are `gl*`, and the client
+   * library that would define them, `libGLESv1_CM.so`, is in no image here and is not being fabricated.
+   * Left alone they land on `kUnresolved`, so the first one the game calls faults at an address that names
+   * nothing. This answers them instead, and visibly: one host slot per name the run asks for, a tally per
+   * name, and report lines that say exactly what happened — the sanctioned shape of "not implemented".
    *
-   * What a call does: nothing but count, and leave r0 at 0. For a `void` function that is invisible, and
-   * for the rest it is a defined value a caller can store; for `glGetError` a 0 is `GL_NO_ERROR`, the
-   * answer a working driver gives. `glGetString` is the exception that has to be answered with bytes,
-   * because a game parses its result and a null would crash it in a way that looks like a game bug — see
-   * the two strings above.
+   * What a call does without a live context: nothing but count, and leave r0 at 0 (`glGetError`'s 0 is
+   * `GL_NO_ERROR`). `glGetString` is answered with bytes, because a game parses its result and a null would
+   * crash it in a way that looks like a game bug.
    */
-  std::string gl_why;
-  const auto gl_ready = [&]() -> bool {
-    if (!mem->Map(kGlStrings, kGuestPage, kRead | kWrite, &err)) {
-      gl_why = "the page could not be mapped: " + err;
-      return false;
-    }
-    if (!mem->Write(kGlStrings, "RetroBug (no GL)", sizeof("RetroBug (no GL)")) ||
-        !mem->Write(kGlEmpty, "", 1)) {
-      gl_why = "the mapped page refused the writes";
-      return false;
-    }
-    return true;
-  }();
+  const exec::GuestAddr gl_strings = proc->MapFree(kGuestPage, kRead | kWrite, &err);
+  const exec::GuestAddr gl_empty = gl_strings + kGlEmptyOffset;
+  std::string gl_why = err;
+  const bool gl_ready = gl_strings != 0 &&
+                        mem->Write(gl_strings, "RetroBug (no GL)", sizeof("RetroBug (no GL)")) &&
+                        mem->Write(gl_empty, "", 1);
   if (!gl_ready) {
-    Say(&out, "gl: the strings glGetString must return could not be placed at 0x%s (%s) — the gl* imports"
-              " stay trapped at 0x%s, which faults the moment one is called",
-        Hex(kGlStrings).c_str(), gl_why.c_str(), Hex(kUnresolved).c_str());
+    Say(&out, "gl: the strings glGetString must return could not be placed (%s) — the gl* imports stay"
+              " trapped at 0x%s, which faults the moment one is called",
+        gl_strings == 0 ? gl_why.c_str() : "the page refused the writes", Hex(kUnresolved).c_str());
   }
   struct GlEntry {
     std::string name;
@@ -1503,8 +1059,7 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
   bool gl_live = false;
   std::map<std::string, std::string> gl_forward_fail;  ///< first refusal per name
   /// Hands one `gl*` name a host slot, allocating on first sight and reusing it after. `nullopt` is a
-  /// refusal — no strings to point at, or the set is full — and the caller turns that into the trap
-  /// address, so a GL answer is never a slot the executor would not recognise.
+  /// refusal — no strings to point at, or the set is full — and the name then stays trapped.
   const auto gl_slot_for = [&](const std::string& name) -> std::optional<std::uint32_t> {
     if (!gl_ready) return std::nullopt;
     for (std::size_t i = 0; i < gl_calls.size(); ++i) {
@@ -1516,7 +1071,7 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
     gl_calls.push_back(GlEntry{name, 0});
     // The name is captured by value and the counter is reached by index, so a later `push_back` moving
     // the vector cannot leave this closure counting into freed memory.
-    ctx.Bind(slot, [&gl_calls, &gl_forward, &gl_live, &gl_forward_fail, &mem, index,
+    ctx.Bind(slot, [&gl_calls, &gl_forward, &gl_live, &gl_forward_fail, mem, gl_strings, gl_empty, index,
                     name](exec::MachineState& s, std::string*) {
       ++gl_calls[index].calls;
       const bool wants_a_string = name == "glGetString";
@@ -1529,195 +1084,56 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
         gl_forward_fail.emplace(name, why);
       }
       const bool parsed_by_the_game = s.r[0] == kGlVendor || s.r[0] == kGlRenderer || s.r[0] == kGlVersion;
-      s.r[0] = wants_a_string ? (parsed_by_the_game ? kGlStrings : kGlEmpty) : 0u;
+      s.r[0] = wants_a_string ? (parsed_by_the_game ? gl_strings : gl_empty) : 0u;
       return true;
     });
     return ctx.SlotFor(slot);
   };
 
-  /// The dynamic-linker interface, bound eagerly because the set is fixed. On a device this lives in
-  /// the linker (`ld-android`): libc's own constructors call into it — `netdClientInitImpl` opens
-  /// `libnetd_client.so` and checks the NULL (SM-X710, 2026-10-09) — and leaving it trapped made that
-  /// call fault at the trap address with the report unable to say which symbol. The answers are the
-  /// honest ones for a build with no linker behind it, every one is counted, and the report's `dl:`
-  /// block names each with its call count.
-  struct DlCall {
-    std::string name;
-    unsigned calls = 0;
-    std::string last_path;
-    unsigned answered = 0;  ///< dl_unwind_find_exidx: calls whose pc a loaded module's index covered
+  /// The dynamic-linker interface and liblog (`host_slots.h`), bound now: libc's own constructors call
+  /// into the first (netd's `dlopen`), and the game's log lines land in this report through the second.
+  HostSlots slots(*proc, /*target_sdk=*/34);
+  /// Which bucket the app's non-scope imports landed in — read only while the app is loading, so the
+  /// scope's own (libc's dlopen) are not counted as the app's.
+  bool app_loading = false;
+  std::vector<std::string> gl_answered, host_answered;
+  const auto record = [](std::vector<std::string>& list, const std::string& name) {
+    for (const std::string& seen : list) {
+      if (seen == name) return;
+    }
+    list.push_back(name);
   };
-  /// Each placed module's unwind index, appended as modules load (the slots are bound before any is):
-  /// what `dl_unwind_find_exidx(pc, &count)` answers, the way bionic's linker walks its soinfo list.
-  struct ExidxRange {
-    std::uint32_t base = 0, extent = 0, exidx = 0, count = 0;
+  host = [&](const std::string& name) -> std::optional<std::uint32_t> {
+    std::optional<std::uint32_t> answer;
+    if (IsGlName(name)) answer = gl_slot_for(name);
+    if (answer) {
+      if (app_loading) record(gl_answered, name);
+      return answer;
+    }
+    answer = slots.Resolve(name);
+    if (answer && app_loading) record(host_answered, name);
+    return answer;
   };
-  std::vector<ExidxRange> exidx_ranges;
-  std::vector<DlCall> dl_calls;
-  for (std::size_t i = 0; i < sizeof(kDlTable) / sizeof(kDlTable[0]); ++i) {
-    dl_calls.push_back(DlCall{kDlTable[i].name, 0, {}, 0});
-    const std::size_t index = i;
-    ctx.Bind(kDlSlotBase + static_cast<std::uint32_t>(i),
-             [&dl_calls, &mem, &exidx_ranges, index](exec::MachineState& s, std::string* serr) {
-               DlCall& c = dl_calls[index];
-               ++c.calls;
-               switch (kDlTable[index].kind) {
-                 case DlKind::kExidx: {
-                   // `_Unwind_Ptr dl_unwind_find_exidx(_Unwind_Ptr pc, int* pcount)`: the module whose
-                   // range holds pc gives its `.ARM.exidx` and entry count; no module, NULL and 0 —
-                   // bionic's answer too. Answering NULL for everything made every C++ throw in the game
-                   // terminate: libgcc's unwinder found no frame with unwind info, so no catch at all.
-                   const std::uint32_t pc = s.r[0] & ~1u;
-                   std::uint32_t at = 0, count = 0;
-                   for (const ExidxRange& r : exidx_ranges) {
-                     if (pc >= r.base && pc - r.base < r.extent && r.exidx != 0) {
-                       at = r.exidx;
-                       count = r.count;
-                       break;
-                     }
-                   }
-                   if (s.r[1] != 0 && !mem->Write(s.r[1], &count, 4)) {
-                     if (serr != nullptr) *serr = "dl_unwind_find_exidx: pcount 0x" + Hex(s.r[1]) + " is not writable";
-                     return false;
-                   }
-                   if (at != 0) ++c.answered;
-                   s.r[0] = at;
-                   return true;
-                 }
-                 case DlKind::kDlopen:
-                 case DlKind::kDlopenExt:
-                   // NULL: the library this build cannot provide. A caller that checks — netd's does —
-                   // carries on; one that does not faults on the NULL it asked to be lied to about.
-                   c.last_path = GuestStringOrEmpty(*mem, s.r[0]);
-                   s.r[0] = 0;
-                   return true;
-                 case DlKind::kTargetSdk:
-                   s.r[0] = 34u;  // this app's targetSdkVersion, what a device's linker would answer
-                   return true;
-                 default:
-                   s.r[0] = 0;  // NULL / 0 / "no error since last clear": every caller checks
-                   return true;
-               }
-             });
-  }
 
-  /// liblog, answered: every line the guest logs, formatted from its own format string and arguments,
-  /// kept for the report's `guest log:` block. Bounded, with the overflow counted rather than dropped
-  /// silently, because a game that logs per frame would otherwise fill the report.
-  struct GuestLogLine {
-    int prio = 0;
-    std::string tag, text;
-  };
-  std::vector<GuestLogLine> guest_log;
-  unsigned guest_log_dropped = 0;
-  constexpr std::size_t kGuestLogMax = 300;
-  for (std::size_t i = 0; i < sizeof(kLogTable) / sizeof(kLogTable[0]); ++i) {
-    const LogKind kind = kLogTable[i].kind;
-    ctx.Bind(kLogSlotBase + static_cast<std::uint32_t>(i),
-             [&guest_log, &guest_log_dropped, &mem, kind](exec::MachineState& s, std::string*) {
-               // (prio, tag, fmt, ...) / (prio, tag, fmt, va_list) / (prio, tag, msg)
-               GuestLogLine line{static_cast<int>(s.r[0]), GuestStringOrEmpty(*mem, s.r[1]), {}};
-               if (kind == LogKind::kWrite) {
-                 line.text = GuestStringOrEmpty(*mem, s.r[2]);
-               } else {
-                 GuestVarargs va;
-                 va.mem = mem.get();
-                 if (kind == LogKind::kPrint) {
-                   va.reg_free = true;
-                   va.reg = s.r[3];
-                   va.at = s.r[13];
-                 } else {
-                   va.at = s.r[3];  // AAPCS va_list: one pointer into the argument area
-                 }
-                 line.text = GuestFormat(*mem, s.r[2], va);
-                 if (!va.ok) line.text += "  [some arguments were unreadable guest memory]";
-               }
-               while (!line.text.empty() && (line.text.back() == '\n' || line.text.back() == '\r')) {
-                 line.text.pop_back();
-               }
-               if (guest_log.size() < kGuestLogMax) {
-                 guest_log.push_back(std::move(line));
-               } else {
-                 ++guest_log_dropped;
-               }
-               s.r[0] = 1;  // liblog returns a positive byte count on success; 1 is truthful for "written"
-               return true;
-             });
-  }
-
-  /**
-   * The guest-callable `JNIEnv`, from `rb/abi/jni_env.h` — the machinery the JNI seam already has, used
-   * here for its second caller rather than reimplemented.
-   *
-   * It is built before anything is loaded for one reason: it maps guest pages of its own, and the
-   * loader's placement scan takes the first free run it finds, so a region mapped afterwards could be
-   * occupied by an image. Built now, every module is placed around it instead.
-   *
-   * The table is guest *data*, not guest code: `jni_env.h` fills it with `AbiContext` slots, which the
-   * executor recognises before it translates anything, so no page of the guest window has to hold host
-   * instructions. The GL set above reaches the same slot mechanism independently; what both need is a
-   * guest that calls through them, and for the JNIEnv that caller is the entry point below.
-   */
-  // 1 MiB (was 32 KiB, originally 4): `Get<T>ArrayElements` copies live here too (Gumball 2013 reads its
-  // data files that way), and `GetStringUTFChars` hands back a real copy in this arena (JNI's
-  // `isCopy=1`, a `kCharsMagic` block told apart from the `jstring` by its magic), so one string in
-  // flight can hold two blocks — and 4 KiB refused any message larger than a couple of KiB even before
-  // that. The reserved gap is megabytes wide (the next reserved constant is the guard page 3 MiB up),
-  // so the growth costs a few pages of guest address space and nothing else.
-  constexpr unsigned kJniEnvArena = 1u << 20;
-  std::string jni_err;
-  abi::JniEnv jni{*mem, ctx, kJniEnvRegion, kJniEnvArena, &jni_err};
-  // The value the entry point gets in r0: a real fake environment when the region above was granted, and
-  // a null when it was not, which is the only other honest answer — the report says which one it was.
   const abi::GuestAddr env_ptr = jni.ok() ? jni.env() : 0;
   if (jni.ok()) {
-    Say(&out, "env: a fake JNIEnv at 0x%s — %u table entries of host-call slots (0..%u) and a %u-byte"
-              " string arena, all guest memory. It is RetroBug's, not a JavaVM's: a guest that"
-              " dereferences it reads a real table, and an entry with no implementation refuses by name"
-              " instead of branching to address 0.",
-        Hex(env_ptr).c_str(), abi::jni::kTableEntries, abi::jni::kTableEntries - 1u, kJniEnvArena);
+    Say(&out, "env: a fake JNIEnv at 0x%s — %u table entries of host-call slots (0..%u) and a string arena,"
+              " all guest memory. It is RetroBug's, not a JavaVM's: an entry with no implementation refuses"
+              " by name instead of branching to address 0.",
+        Hex(env_ptr).c_str(), abi::jni::kTableEntries, abi::jni::kTableEntries - 1u);
   } else {
-    Say(&out, "env: the fake JNIEnv could not be built (%s) — a guest JNI method is called with env=0, so"
-              " one that reads its table faults near address 0 rather than in a table this run could have"
-              " provided",
-        jni_err.c_str());
+    Say(&out, "env: the guest process's JNIEnv is not usable — a guest JNI method is called with env=0");
   }
 
   /**
-   * The syscall monitor — the piece of the OS a guest `svc` instruction reaches.
-   *
-   * Without one, the first `svc` a guest libc makes stops the run with `no syscall monitor attached`,
-   * which is what bionic's own preinit did on this phone the first time it ran far enough to ask the
-   * kernel for anything. With one attached, each call is either *answered* — the monitor knows the call
-   * and has the fact — or *refused by name*, and its tally says how many of each, which is the difference
-   * between "the guest asked for nothing" and "the guest asked and nobody answered".
-   *
-   * Two setters and one path. `set_memory` is what lets a pointer-shaped call copy a path out of guest
-   * memory or a `stat64` into it; without it every such call is a refusal rather than a write to address 0.
-   * `set_ids` gives the guest its own pid and tid, because nothing in this path may ask the host kernel
-   * for one and an unset id is refused rather than invented.
-   *
-   * The file provider is why this run is not the one before it. The entry point below is handed the APK's
-   * path because the game opens that file to read its `assets/` — levels, textures, whatever the APK
-   * carries — and a monitor with no provider answers that open with `no file provider is installed`,
-   * which is where the game's first asset read stops. The provider answers that one path and nothing else:
-   * every other path still comes back to the guest as a named `ENOENT`, and it cannot do otherwise,
-   * because it compares against the single string captured here. "Serve this one file" therefore stays
-   * distinguishable from "serve the host's filesystem", which is the decision this monitor's design asks
-   * to be made per path.
+   * The one file the syscall monitor serves: the APK the entry point is handed, because the game opens it
+   * to read its `assets/`. Read once, here, so a failure is a line in this report rather than an ENOENT
+   * about a file that is sitting right there. Every other path is answered ENOENT, by name.
    */
-  syscall::Monitor monitor;
-  monitor.set_memory(mem.get());
-  monitor.set_ids(4242, 4243);
-  // Read once, here, rather than inside the provider: the provider's contract returns the bytes by value
-  // and the monitor keeps its own copy per open, so a read on each call would be the same bytes read
-  // twice — and a failure has to become a line in *this* report rather than an ENOENT about a file that
-  // is sitting right there.
   std::optional<std::vector<std::uint8_t>> apk_file;
   if (apk_path.empty()) {
-    Say(&out, "file: no APK path arrived from the Java half, so the provider below has nothing to serve"
-              " and every openat is still answered by name — ENOENT from the provider, carrying the"
-              " path — rather than served from the host");
+    Say(&out, "file: no APK path arrived from the Java half, so the provider below has nothing to serve and"
+              " every openat is answered ENOENT by name");
   } else {
     std::string read_err;
     apk_file = ReadHostFile(apk_path, &read_err);
@@ -1726,22 +1142,18 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
                 " point is handed and the guest's openat of it are the same file",
           apk_path.c_str(), apk_file->size());
     } else {
-      Say(&out, "file: %s could not be read (%s) — the provider is still attached but has nothing to"
-                " answer with, so the guest's openat of it comes back ENOENT and this line says why",
+      Say(&out, "file: %s could not be read (%s) — the guest's openat of it comes back ENOENT and this line"
+                " says why",
           apk_path.c_str(), read_err.c_str());
     }
   }
-  // Captured by reference, and here that is safe: the provider is consulted only from inside a guest call
-  // this function is making — the monitor never invokes it on its own lifetime — and `apk_file` is alive
-  // for every one of those calls. The by-value capture the file header insists on is for `GuestLinker`'s
-  // provider, which is stored beyond the call that made it; this one is not. The path is captured by value
-  // so the comparison does not depend on the caller's string outliving the monitor.
+  // By reference: the provider is consulted only from inside a guest call this function makes, and
+  // `apk_file` outlives every one of them; the path is captured by value.
   monitor.set_file_provider([&apk_file, apk_path](const std::string& path)
                                 -> std::optional<std::vector<std::uint8_t>> {
     if (path != apk_path || !apk_file) return std::nullopt;
     return apk_file;
   });
-  ctx.set_monitor(&monitor);
 
   /**
    * The class model's one Java class: the game's renderer, which is where KA3D gets its files.
@@ -1869,358 +1281,49 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
   }
 
   /**
-   * The two tiers, built here rather than beside the constructors below, because IFUNC resolution runs
-   * *inside* each load: a resolver is guest code, so an executor has to exist before the first
-   * `LoadFromBytes` — `LoadOptions::resolve_ifunc` is called between relocation and RELRO, and that call
-   * has to be able to run something. Constructing an executor maps no guest page and runs no guest code,
-   * so nothing the loads below place is affected by the order.
+   * The scope — libc, libm, libz, and libstdc++ only when the app's DT_NEEDED names it (Angry Birds needs
+   * none; Gumball 2013 does) — booted by the guest process: IFUNC slots resolved during each load, the
+   * linker's shared globals and auxv published, bionic's real main thread built. Its report lines (loads,
+   * IFUNC slots, the bionic layout, the thread) arrive through the process's log above.
    */
-  exec::InterpExecutor interp{*mem, kReturnAddress, &ctx};
-  exec::JitExecutor jit{*mem, kReturnAddress, &ctx};
-  if (!jit.ok()) Say(&out, "tier J is unavailable before any guest code ran: %s", jit.error().c_str());
-  // The tier this run was asked for, by the same rule the constructor sequence below uses, and the other
-  // tier as the fallback a resolver this one cannot execute falls through to. One `set_executor` call,
-  // here, is what arms the bridge for everything that follows.
-  exec::Executor& ctor_engine = (tiers == 2 && jit.ok()) ? static_cast<exec::Executor&>(jit)
-                                                         : static_cast<exec::Executor&>(interp);
-  const char* ctor_tier = ctor_engine.tier() == exec::CodeTier::Interp ? "I" : "J";
-  ctx.set_executor(ctor_engine);
-
-  /**
-   * IFUNC resolution, armed with the guest call it needs and handed to every load below.
-   *
-   * Without it the loader leaves the **resolver's address** in each IFUNC slot, and the guest then calls
-   * resolver *code* as if it were the function. That is not hypothetical: it is what this build was
-   * doing, and a disassembly trace on the phone caught `strlen`'s slot holding `strlen_resolver`, so
-   * `__strlen_chk` received a pointer where it expects a length, failed its fortify check, and recursed
-   * through `async_safe_fatal_va_list` until the step budget and the stack were gone. One unresolved
-   * IFUNC, one infinite recursion, and every symptom pointed at the wrong layer.
-   *
-   * A resolver that probes `/dev/cpu_variant:arm` is answered by the monitor attached above; its `ENOENT`
-   * is the answer that makes bionic choose the generic implementation, which is the one that is right
-   * without knowing which SoC this is. With no monitor there is no such answer, so the hook is not handed
-   * over at all and each image's line below says its slots were left as they were.
-   */
-  IfuncResolution ifunc;
-  ifunc.ctx = &ctx;
-  ifunc.engine = &ctor_engine;
-  ifunc.tier = ctor_tier;
-  // A fallback tier is offered only when this run asked for both (`tiers` 0): 1 and 2 are requests to see
-  // one engine alone, so a resolver that engine cannot execute is that tier's gap to name, not something
-  // to cover with the engine the caller excluded. A JIT that could not be built is not a retry either.
-  if (tiers == 0) {
-    if (&ctor_engine == &interp) {
-      if (jit.ok()) ifunc.spare = &jit;
-    } else {
-      ifunc.spare = &interp;
-    }
+  const std::vector<std::string> app_needs = NeededSonames(app_image);
+  const bool wants_libstdcxx =
+      std::find(app_needs.begin(), app_needs.end(), "libstdc++.so") != app_needs.end();
+  if (wants_libstdcxx && libstdcxx_image.empty()) {
+    Say(&out, "scope: %s needs libstdc++.so and this APK carries no such asset — its imports from it are"
+              " trapped by name", label.c_str());
   }
-  ifunc.spare_tier = (&ctor_engine == &interp) ? "J" : "I";
-  // Both halves of the requirement are checked rather than assumed: a resolver is guest code (an engine)
-  // that probes for the CPU variant with a syscall (a monitor). With either missing, the hook is not
-  // handed over at all and every image's line below says its slots were left as they were.
-  ifunc.armed = ifunc.engine != nullptr && ctx.monitor() != nullptr;
-  if (!ifunc.armed) {
-    Say(&out, "ifunc: no engine and monitor pair is available to run a resolver — a resolver is guest"
-              " code whose openat(\"/dev/cpu_variant:arm\") probe a monitor has to answer — so no image"
-              " has its IFUNC slots resolved, and each one's line below says so as it is loaded");
+  if (!proc->LoadScope(libc_image, libm_image, libz_image,
+                       wants_libstdcxx ? libstdcxx_image : std::vector<std::uint8_t>{}, &err)) {
+    Say(&out, "FATAL: %s", err.c_str());
+    Say(&out, "RESULT: stopped before the app — the guest scope did not boot (the line above says why)");
+    return out;
   }
-
-  const loader::SymbolResolver host = [&](const std::string& name) -> std::optional<std::uint32_t> {
-    if (name == "__stack_chk_guard") return kGuardPage;
-    if (name == "__loader_shared_globals") return loader_shared_globals;
-    if (IsGlName(name)) {
-      if (const auto slot = gl_slot_for(name)) return slot;
-    }
-    if (const auto dl = DlSlotIndex(name)) {
-      return ctx.SlotFor(kDlSlotBase + static_cast<std::uint32_t>(*dl));
-    }
-    if (const auto lg = LogSlotIndex(name)) {
-      return ctx.SlotFor(kLogSlotBase + static_cast<std::uint32_t>(*lg));
-    }
-    return kUnresolved;
-  };
+  /// Scope imports the host could not answer, so the report can NAME them (a libc constructor can be
+  /// their first caller — `netdClientInitImpl` called `dlopen` on 2026-10-09).
+  const std::vector<std::string> scope_unanswered = proc->unanswered();
 
   /**
-   * The scope, built by hand from the images the APK ships rather than by `GuestLinker::Link`.
-   *
-   * The reason is in the image: the device's `libc.so` declares `DT_NEEDED: ld-android.so, libdl.so`,
-   * and `LinkAt` refuses a needed soname with no provider image (`core/linker/guest_linker.cpp:183-185`).
-   * RetroBug ships no image for either and will not fabricate one — those two sonames say what the app
-   * does not import from us, not what it needs to load — so a `Link`-built scope never contains libc at
-   * all, which is exactly the failure this change exists to remove.
-   *
-   * A module that does not load is a report line, not an exit: the run against a scope with no libc is
-   * the run this launcher had before libc was shipped, and the trapped list below is exactly what the
-   * missing library costs.
+   * The app, against the scope. Every import is answered from the scope, then by the host (GL, dl*,
+   * liblog), and otherwise bound to the trap — the buckets are recorded as the answers are given.
    */
-  std::optional<loader::GuestModule> libc_mod, libm_mod, libz_mod, libstdcxx_mod;
-  /**
-   * An import that names another module's IFUNC export must be bound to what the resolver *returns*, the
-   * way bionic's linker does — `FindExport` can only do that when the defining module's own relocations
-   * happened to resolve a slot of the same name. libc's do for strcmp/strlen/memcpy/memmove/memset and two
-   * `_chk`s, and not for strcpy, stpcpy, strcat or the other `_chk`s: Gumball 2013's `strcpy` was bound to
-   * libc's *resolver* (0xcb0a5), so every texture name it copied came back as untouched heap and its splash
-   * screen waited forever for an image it had been given (measured with the game's own GOT, 2026-10-14).
-   * Resolved once per name, through the same tiers and tally as the slot resolution above.
-   */
-  IfuncResolution export_ifunc = ifunc;
-  std::map<std::string, std::uint32_t> export_ifunc_cache;
-  const auto export_of = [&](const loader::GuestModule& m,
-                             const std::string& name) -> std::optional<std::uint32_t> {
-    const auto fn = m.FindExport(name);
-    if (!fn) return std::nullopt;
-    // The same test `GuestLinker::Lookup` makes; this scope is built by hand, so it runs the resolver here.
-    if (!linker::UnresolvedIfuncExport(m, name)) return fn->tagged();
-    // FindExport handed back the resolver itself: run it.
-    const std::string base = name.substr(0, name.find('@'));
-    if (const auto hit = export_ifunc_cache.find(base); hit != export_ifunc_cache.end()) return hit->second;
-    if (!export_ifunc.armed) return fn->tagged();  // reported once below: nothing could run it
-    loader::IfuncSlot slot{};
-    slot.name = base;
-    slot.resolver = *fn;
-    const auto impl = export_ifunc(slot);
-    if (!impl) return fn->tagged();  // the tally names the failure; the resolver stays bound
-    export_ifunc_cache[base] = *impl;
-    return *impl;
-  };
-  /// Scope imports the host could not answer, so the report can NAME them. The app's imports were
-  /// always recorded; the scope's were not, and on 2026-10-09 a libc constructor (`netdClientInitImpl`)
-  /// called one — faulting at 0xbad0000 with "imports … did not answer: none" printed above it, which
-  /// is the one shape this report must never produce: a named trap with no name.
-  std::vector<std::string> scope_unanswered;
-  const auto load_scope = [&](const char* soname, std::optional<loader::GuestModule>& slot,
-                              const std::vector<std::uint8_t>& image) {
-    if (image.empty()) {
-      Say(&out, "scope: %s not loaded — no image arrived for it (this APK has no such asset)", soname);
-      return;
-    }
-    loader::LoadOptions opts;
-    // The opt-in is what lets a real bionic `libc.so` load at all: it has TLS relocation slots this loader
-    // cannot apply, and without the opt-in every one of them fails the load by name. What it tolerates is
-    // not hidden — each module keeps its skipped slots in `unsupported_relocs`, printed below.
-    opts.tolerate_unresolved_relocs = true;
-    // This image's own tally, with the bridge and the tiers armed above: the hook is per image because the
-    // lines below name the module, and a failure is named per slot rather than counted. Captured by
-    // reference like `opts.resolve` below — and that is not a style choice: assigning the object itself
-    // would copy it into the `std::function`, and the loader would fill the *copy's* tally while this one
-    // reported zero slots for every image.
-    IfuncResolution image_ifunc = ifunc;
-    if (ifunc.armed) {
-      opts.resolve_ifunc = [&image_ifunc](const loader::IfuncSlot& s) { return image_ifunc(s); };
-    }
-    // By reference, and that is safe here where the file header's provider has to be by value: this
-    // resolver is consulted only inside `LoadFromBytes`, which this lambda calls synchronously and does
-    // not retain. It answers from what is already in the scope, which is what makes the load order below
-    // dependency-first rather than a preference.
-    opts.unresolved_trap = kUnresolved;
-    opts.resolve = [&](const std::string& name) -> std::optional<std::uint32_t> {
-      for (const std::optional<loader::GuestModule>* placed : {&libc_mod, &libm_mod, &libz_mod, &libstdcxx_mod}) {
-        if (*placed) {
-          if (const auto fn = export_of(**placed, name)) return *fn;
-        }
-      }
-      const std::optional<std::uint32_t> from_host = host(name);
-      if (!from_host || *from_host == kUnresolved) {
-        // An import can fill more than one slot, and each slot is asked separately — the same name must
-        // not be printed once per relocation (the first device run listed two `__loader_*` hooks
-        // twice). Dedup here rather than at print time: this is also the list a future answer loop will
-        // walk, and it should have one entry per symbol.
-        bool seen = false;
-        for (const std::string& already : scope_unanswered) {
-          if (already == name) {
-            seen = true;
-            break;
-          }
-        }
-        if (!seen) scope_unanswered.push_back(name);
-      }
-      return from_host;
-    };
-    std::string load_err;
-    slot = loader::LoadFromBytes(*mem, image, soname, opts, &load_err);
-    if (!slot) {
-      Say(&out, "scope: %s not loaded: %s", soname, load_err.c_str());
-      // A refusal can be a resolved slot the loader could not write, which names itself in `load_err`
-      // above; anything resolved before that is still a fact, so the tally is printed rather than lost.
-      if (image_ifunc.slots != 0) image_ifunc.Report(&out, soname);
-      return;
-    }
-    std::size_t exports = 0;
-    for (const loader::Symbol& sym : slot->exports) {
-      if (sym.defined) ++exports;
-    }
-    Say(&out, "scope: %s at 0x%s extent 0x%s, %zu defined exports", soname, Hex(slot->base).c_str(),
-        Hex(slot->extent).c_str(), exports);
-    exidx_ranges.push_back(ExidxRange{slot->base, slot->extent, slot->exidx, slot->exidx_count});
-    if (!slot->unsupported_relocs.empty()) {
-      std::string kinds;
-      for (const std::string& one : slot->unsupported_relocs) {
-        kinds += (kinds.empty() ? "" : ", ") + one;
-      }
-      Say(&out, "scope: %s: %zu relocation(s) tolerated but not applied — %s. Those slots still hold"
-                " file data (placeholders); that is a lurking WRONG VALUE if the guest ever reads them,"
-                " not a safe skip — the real linker resolves each from its module and TLS layout",
-          soname, slot->unsupported_relocs.size(), kinds.c_str());
-    }
-    // Per image, now that the module that names the slots exists. Every slot gets a line, resolved or
-    // not: a name missing from this list would be exactly the silent zero the launcher forbids.
-    image_ifunc.Report(&out, soname);
-  };
-  load_scope("libc.so", libc_mod, libc_image);
-  load_scope("libm.so", libm_mod, libm_image);
-  load_scope("libz.so", libz_mod, libz_image);
-  // Only when the app names it: an image no DT_NEEDED asks for would be a module in scope that a device
-  // would not have loaded (Angry Birds needs no libstdc++; Gumball 2013 does). Placed after libc, its
-  // only dependency.
-  if (NeedsSoname(app_image, "libstdc++.so")) load_scope("libstdc++.so", libstdcxx_mod, libstdcxx_image);
-
-  /**
-   * The `auxv`, which on a real device the dynamic linker has already published by the time libc.so is
-   * loaded: `__libc_init_main_thread_early` (compiled into the linker — `libc/bionic/__libc_init_main_
-   * thread.cpp`) writes `__libc_shared_globals()->auxv = args.auxv`, and libc's own
-   * `__libc_shared_globals()` is a thunk to `__loader_shared_globals` — the stub this launcher answers
-   * from the zeroed page at 0x410000. Left zero, libc's `__libc_preinit` (its `DT_INIT_ARRAY[0]`)
-   * reaches `getauxval` and faults reading address 0: that is the wall the SM-X710 run currently stops
-   * at, pc inside `getauxval` one instruction past the globals load.
-   *
-   * The field's offset inside the globals struct is a private detail of the libc build, so it is
-   * decoded from the image rather than assumed: `getauxval` calls `__libc_shared_globals` and then
-   * loads the pointer with `ldr.w rX, [rX, #imm]`, so the scan below looks for exactly that pair in
-   * the exported function's first instructions and takes the immediate as the offset. The shape and
-   * the field's current contents (zero) are both checked before anything is written; a differing
-   * shape is refused by name rather than guessed at.
-   *
-   * What goes in the array is measured rather than assumed: this libc has three `getauxval` call
-   * sites — AT_SYSINFO_EHDR (`__libc_init_vdso`, which takes the absent path on 0), AT_RANDOM (the
-   * setjmp cookie, read only when /dev/urandom is unreachable) and AT_CLKTCK (not on the constructor
-   * path). So: AT_RANDOM with 16 bytes of host entropy, then AT_NULL. The absent vdso entry is the
-   * honest answer — there is no vdso to point at — and `init_vdso` treats its absence as that case.
-   */
-  if (libc_mod) {
-    const auto getauxval = libc_mod->FindExport("getauxval");
-    if (!getauxval) {
-      Say(&out, "auxv: libc.so exports no getauxval, so preinit's auxv read cannot be decoded — this"
-                " libc predates the shared-globals mechanism this launcher plays the linker for");
-    } else {
-      std::uint16_t insn[16] = {};
-      std::optional<std::uint32_t> field;
-      if (mem->Read(getauxval->addr, insn, sizeof(insn))) {
-        for (unsigned i = 0; i + 3 < 16 && !field; ++i) {
-          const std::uint16_t h0 = insn[i], h1 = insn[i + 1];
-          if ((h0 & 0xF800u) != 0xF000u || (h1 & 0xD000u) != 0xD000u) continue;  // BL / BLX
-          const std::uint16_t ldr = insn[i + 2], imm = insn[i + 3];
-          if ((ldr & 0xFFF0u) != 0xF8D0u) continue;  // LDR.W Rt,[Rn,#imm12]
-          const unsigned rn = ldr & 0xFu, rt = (imm >> 12) & 0xFu;
-          const std::uint32_t off = imm & 0xFFFu;
-          if (rn == rt && off != 0 && (off & 3u) == 0 && off < kGuestPage) field = off;
-        }
-      }
-      if (!field) {
-        Say(&out, "auxv: getauxval at 0x%s does not match the shared-globals shape (no `bl` followed by"
-                  " `ldr.w rX,[rX,#imm]` in its first instructions) — preinit will fault reading address"
-                  " 0 when getauxval runs; the offset is a per-libc detail and is not guessed at",
-            Hex(getauxval->addr).c_str());
-      } else {
-        std::uint32_t current = 0xffff'ffffu;
-        if (!mem->Read(kLoaderGlobals + *field, &current, 4)) {
-          Say(&out, "auxv: the auxv field at 0x%s could not be read",
-              Hex(kLoaderGlobals + *field).c_str());
-        } else if (current != 0) {
-          Say(&out, "auxv: the auxv field at 0x%s already holds 0x%s — refusing to overwrite state this"
-                    " run did not write",
-              Hex(kLoaderGlobals + *field).c_str(), Hex(current).c_str());
-        } else {
-          const std::uint32_t array_at = kLoaderGlobals + ((*field + 16u + 3u) & ~3u);
-          const std::uint32_t random_at = array_at + 16u;
-          if (random_at + 16u > kLoaderGlobals + kGuestPage) {
-            Say(&out, "auxv: the decoded field (+0x%s) leaves no room in the loader-globals page for the"
-                      " array", Hex(*field).c_str());
-          } else {
-            std::random_device entropy;
-            std::uint32_t rand_words[4];
-            for (std::uint32_t& w : rand_words) w = entropy();
-            const std::uint32_t array[4] = {25u /* AT_RANDOM */, random_at, 0u /* AT_NULL */, 0u};
-            if (mem->Write(array_at, array, sizeof(array)) &&
-                mem->Write(random_at, rand_words, sizeof(rand_words)) &&
-                mem->Write(kLoaderGlobals + *field, &array_at, 4)) {
-              Say(&out, "auxv: getauxval's globals-read decoded to +0x%s; AT_RANDOM (16 host-entropy"
-                        " bytes at 0x%s) then AT_NULL at 0x%s, and the pointer written to 0x%s — the"
-                        " linker's part, played before libc's preinit runs",
-                  Hex(*field).c_str(), Hex(random_at).c_str(), Hex(array_at).c_str(),
-                  Hex(kLoaderGlobals + *field).c_str());
-            } else {
-              Say(&out, "auxv: writing the array or the pointer into the loader-globals page failed");
-            }
-          }
-        }
-      }
-    }
-  }
-
-  /**
-   * The app's imports, answered from the hand-built scope and nothing else. `FindExport` is the whole
-   * lookup and its tagged address is what a GOT entry wants (`rb/loader/guest_elf.h`) — the same answer
-   * `GuestLinker::Lookup` produced, with the linker no longer in the way. Only a name none of the three
-   * libraries defines falls through to the trap address, and only that falls through.
-   */
-  std::vector<std::string> answered;
-  /// The `gl*` names the app's relocations asked for and the host answered with a slot. Kept apart from
-  /// `answered` on purpose: "the guest scope answered it" and "the host bound it to a counted no-op" are
-  /// different facts, and the imports line below is a claim about the first one.
-  std::vector<std::string> gl_answered;
-  /// Non-GL names the host answered with a slot of its own (the dl* and liblog tables). They used to be
-  /// filed under `trapped`, so Gumball's `__android_log_print` was listed as unanswered while bound.
-  std::vector<std::string> host_answered;
-  std::vector<std::string> trapped;
-  // One entry per imported name, not per relocation slot: the loader asks once per slot, and an import
-  // can fill more than one, so a plain push would count the same import twice.
-  const auto record = [](std::vector<std::string>& list, const std::string& name) {
-    for (const std::string& seen : list) {
-      if (seen == name) return;
-    }
-    list.push_back(name);
-  };
-  loader::LoadOptions app_opts;
-  // The app's own IFUNC slots (if any) get what the scope's got: resolved during this load, by the same
-  // hook, before RELRO makes the slots unwritable. Its `strlen` and friends come from the scope and are
-  // already implementations by the time `FindExport` answers them.
-  IfuncResolution app_ifunc = ifunc;
-  if (ifunc.armed) {
-    app_opts.resolve_ifunc = [&app_ifunc](const loader::IfuncSlot& s) { return app_ifunc(s); };
-  }
-  app_opts.unresolved_trap = kUnresolved;  // a weak import nothing answers is null, as on a device
-  app_opts.resolve = [&](const std::string& name) -> std::optional<std::uint32_t> {
-    for (const std::optional<loader::GuestModule>* mod : {&libc_mod, &libz_mod, &libm_mod, &libstdcxx_mod}) {
-      if (*mod) {
-        if (const auto fn = export_of(**mod, name)) {
-          record(answered, name);
-          return *fn;
-        }
-      }
-    }
-    const std::optional<std::uint32_t> from_host = host(name);
-    // The bucket has to be the answer the name actually got, not the question that was asked: a `gl*`
-    // name is in the host-answered set only when a slot really came back, so a refused slot set still
-    // reports those names as trapped rather than claiming an answer nobody can call.
-    if (IsGlName(name) && from_host && *from_host != kUnresolved) {
-      record(gl_answered, name);
-    } else if (from_host && *from_host != kUnresolved) {
-      record(host_answered, name);
-    } else {
-      record(trapped, name);
-    }
-    return from_host;
-  };
-  auto app_mod = loader::LoadFromBytes(*mem, app_image, label, app_opts, &err);
-  if (!app_mod) {
+  app_loading = true;
+  const loader::GuestModule* app_mod = proc->LoadApp(app_image, label, &err);
+  app_loading = false;
+  if (app_mod == nullptr) {
     Say(&out, "FATAL: the loader refused %s: %s", label.c_str(), err.c_str());
     Say(&out, "  (a refusal names every slot it could not fill; a library built against a libc RetroBug"
               " does not ship yet is the expected shape of this)");
-    if (app_ifunc.slots != 0) app_ifunc.Report(&out, label);
     return out;
   }
   const loader::GuestModule& app = *app_mod;
+  std::vector<std::string> trapped(proc->unanswered().begin() + static_cast<std::ptrdiff_t>(scope_unanswered.size()),
+                                   proc->unanswered().end());
+  std::vector<std::string> answered;
+  for (const loader::Symbol& sym : app.imports) {
+    const auto in = [&](const std::vector<std::string>& v) { return std::find(v.begin(), v.end(), sym.name) != v.end(); };
+    if (!in(gl_answered) && !in(host_answered) && !in(trapped)) record(answered, sym.name);
+  }
   std::size_t defined_exports = 0;
   for (const auto& sym : app.exports) {
     if (sym.defined) ++defined_exports;
@@ -2228,7 +1331,6 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
   Say(&out, "loaded: %s at 0x%s extent 0x%s, %zu defined exports, %zu recorded dynsym imports",
       app.soname.empty() ? label.c_str() : app.soname.c_str(), Hex(app.base).c_str(),
       Hex(app.extent).c_str(), defined_exports, app.imports.size());
-  exidx_ranges.push_back(ExidxRange{app.base, app.extent, app.exidx, app.exidx_count});
   scan_mod = &app;
   Say(&out, "unwind: %s's .ARM.exidx is %s — what dl_unwind_find_exidx answers for a pc inside it, so a"
             " C++ throw can find its catch",
@@ -2245,170 +1347,16 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
     for (const std::string& one : app.unsupported_relocs) relocs += (relocs.empty() ? "" : ", ") + one;
     Say(&out, "refused relocations: %s", relocs.c_str());
   }
-  app_ifunc.Report(&out, app.soname.empty() ? label : app.soname);
-  // Imports bound to another module's IFUNC export (strcpy and friends), resolved by running the resolver.
-  if (export_ifunc.slots != 0) export_ifunc.Report(&out, "cross-module IFUNC imports");
 
   /**
-   * The thread pointer, before any guest constructor runs.
-   *
-   * `__get_tls()` in bionic is a read of the coprocessor register TPIDRURW — `MachineState::tp`, which
-   * defaults to zero — and every per-thread thing a constructor touches goes through it. With it zero the
-   * first TLS slot read is a read of a near-null address, and that is exactly what the run before this
-   * one did: libc's own `DT_INIT_ARRAY[0]` stopped at `guest memory read at 0x14 refused` on
-   * `ReadMemory32`, which is slot 5 of a null TLS block rather than anything libc did wrong.
-   *
-   * One page, read/write, at an address the file-scope layout constants leave free (they are declared
-   * beside the other reserved pages, and the static_asserts there keep the two distinct — the first
-   * draft of this block declared its own `kThreadStruct` at 0x430000, which was also `kGlStrings`, and
-   * the map below silently replaced the identity strings with a zero page).
+   * The constructors: the scope's in load order, then the app's — `DT_INIT` then `DT_INIT_ARRAY`, as
+   * bionic's `soinfo::call_constructors` — on the constructor tier, once. The sequence stops at the first
+   * that does not return (a half-initialized module must not look loaded) and the process names it.
    */
-  if (mem->Map(kTlsBase, kGuestPage, kRead | kWrite, &err) &&
-      mem->Map(kThreadStruct, kGuestPage, kRead | kWrite, &err)) {
-    ctx.state().tp = kTlsBase;
-    /*
-     * The thread struct, which is what the blank page above was missing.
-     *
-     * bionic's `__errno()` is `tls = TPIDRURW; return *(void**)(tls + 4) + 0x29c` — slot 1 of the TLS
-     * block is `TLS_SLOT_THREAD_ID`, a pointer to the thread's `pthread_internal_t`, and errno lives
-     * inside *that*, not inside the TLS block. With slot 1 left blank the arithmetic lands on 0x29c and
-     * the first write faults, which is exactly what this run did before the fix: libc's own constructor
-     * stopped at `guest memory write at 0x29c refused`, three frames below `mprotect`'s error path, in
-     * `__set_errno_internal`.
-     *
-     * On a real device the *dynamic linker* allocates this and installs it during main-thread setup. This
-     * image has no such initialiser — `llvm-objdump` over the whole `.text` finds no write to TPIDRURW,
-     * and the one function that could do it (`__set_tls`) has no callers in the image — so the launcher
-     * plays the linker's part with two stores. Slot 0 is set to the block's own address, the convention
-     * bionic's ARM `__get_tls` assumes; `tid` matches the identity the syscall monitor hands the guest, so
-     * `gettid()`'s cached copy reads the same number the syscalls do.
-     */
-    const std::uint32_t thread_self = kTlsBase;
-    const std::uint32_t thread_struct = kThreadStruct;
-    const std::uint32_t tid = 4243;
-    // One page *below* the thread-pointer block, for this libc's `*(TP - 4)` read. TP-4 is
-    // `TLS_SLOT_BIONIC_TLS` (-1): the pointer to the thread's `bionic_tls` object, written on a device
-    // by the linker's `__libc_init_main_thread_late` -> `__init_bionic_tls_ptrs` (pthread_create.cpp),
-    // and read by preinit's tail as `mrc p15` (TP) ; `ldr r0, [r0, #-4]` ; `strb r5, [r0, #0xb49]`
-    // (file 0x6e8b4-0x6e8bc, SM-X710 2026-10-09) — the byte at bionic_tls+0xb49 is the systrace
-    // "disabled" flag, beside fdtrack's at +0xb48 (`libc/private/bionic_tls.h`). So the slot needs a
-    // readable, zeroed, >=0xB4C-byte object; `kThreadStruct`'s page is exactly that, and its +8 is the
-    // tid the syscall monitor answers with — one launcher-created zero page playing both the
-    // bionic_tls and the thread-struct part a real linker would have allocated separately.
-    if (!mem->Map(kTlsBase - kGuestPage, kGuestPage, kRead | kWrite, &err)) {
-      Say(&out, "tls: could not map the page below the thread block (0x%s): %s — this libc's preinit"
-                " reads *(TP-4) right after netd's constructor and will fault there",
-          Hex(kTlsBase - kGuestPage).c_str(), err.c_str());
-    } else {
-      const std::uint32_t below = kThreadStruct;
-      if (!mem->Write(kTlsBase - 4u, &below, 4)) {
-        Say(&out, "tls: could not write the thread struct pointer at 0x%s (TP-4)",
-            Hex(kTlsBase - 4u).c_str());
-      }
-    }
-    if (!mem->Write(kTlsBase, &thread_self, 4) || !mem->Write(kTlsBase + 4, &thread_struct, 4) ||
-        !mem->Write(kThreadStruct + 8, &tid, 4)) {
-      Say(&out, "tls: the thread block could not be written — bionic's __errno() will compute a null"
-                " thread struct and fault near 0x29c");
-    }
-    Say(&out, "tls: thread pointer set to 0x%s; TLS_SLOT_THREAD_ID (TP+4) -> 0x%s, a zeroed writable page"
-              " whose +0x29c is the errno __errno() computes and whose +8 is tid %u. The linker would"
-              " allocate these; this image has no initialiser, so the launcher does",
-        Hex(kTlsBase).c_str(), Hex(kThreadStruct).c_str(), tid);
-  } else {
-    Say(&out, "tls: could not map the thread-pointer block (0x%s/0x%s): %s — a guest constructor that"
-              " touches per-thread data will fault near address 0",
-        Hex(kTlsBase).c_str(), Hex(kThreadStruct).c_str(), err.c_str());
-  }
-
-  /**
-   * The constructors, run here for the first time: the scope's in dependency order, then the app's own.
-   *
-   * `GuestLinker::RunInitializers` cannot do this one. It walks the linker's `order()`, and neither the
-   * app nor this scope is in it — the app is placed with `LoadFromBytes` (which is why it never runs
-   * through `Link`; see above) and the scope's modules are not linked at all — so the app's own
-   * `DT_INIT_ARRAY` was recorded and never run. Each module's two tags are walked the way
-   * `guest_linker.cpp:238` establishes, verbatim from bionic's `soinfo::call_constructors`: `DT_INIT`
-   * first, then `DT_INIT_ARRAY`, a zero entry skipped rather than called. This call site kept the old
-   * array-first order (and cited the linker as having established it) after the linker itself was
-   * fixed — and it is the only runner the shipping Inspect flow uses, so the bug stayed live on device
-   * until the audit looked here. The app's tags come last because a constructor may call into the scope.
-   *
-   * One tier only, and that is a correctness rule rather than a speed one: a constructor has side effects
-   * and this is one guest memory, so running the sequence on both tiers would run every constructor
-   * twice. The engine and tier are the pair chosen above, before the loads, for the same reason the
-   * IFUNC hook needed one.
-   */
-  // `CallGuest` hands the callee's last state back through its out-parameter, not through `ctx.state()`,
-  // which the bridge restores to the caller's registers on the way out (`rb/abi/abi.h`).
-  Outcome ctor_call;
-  const auto run_one_ctor = [&](loader::CodeAddress fn) {
-    ctor_call = Outcome{};
-    exec::RunResult result{};
-    const abi::Ret32 ret = ctx.CallGuest(fn.tagged(), {}, abi::Shorty::For(""), kCallBudget, &result,
-                                         &ctor_call.exit);
-    ctor_call.reason = result.reason;
-    ctor_call.bits = ret.bits;
-    ctor_call.steps = result.instructions_executed;
-    ctor_call.detail = result.detail;
-    return result.reason == exec::StopReason::Returned;
-  };
-  // One failure, with everything needed to find where it stopped. `what` names the entry — module, tag and
-  // index — because "a constructor failed" without one is a report a reader cannot act on, and `detail` is
-  // where a named fault (an unanswered import called at 0xbad0000, an unimplemented IR op) appears.
   std::string ctor_failed;  // the first constructor that did not return, for the RESULT line
-  const auto say_ctor_failure = [&](const std::string& what) {
-    if (ctor_failed.empty()) ctor_failed = what + " (" + ctor_call.detail + ")";
-    Say(&out, "constructors: %s did not return on tier=%s: %s", what.c_str(), ctor_tier,
-        ReasonName(ctor_call.reason));
-    if (!ctor_call.detail.empty()) Say(&out, "    stopped because: %s", ctor_call.detail.c_str());
-    Say(&out, "    callee's last state: pc=0x%s lr=0x%s r0=0x%s r1=0x%s sp=0x%s cpsr=0x%s",
-        Hex(ctor_call.exit.pc).c_str(), Hex(ctor_call.exit.r[14]).c_str(),
-        Hex(ctor_call.exit.r[0]).c_str(), Hex(ctor_call.exit.r[1]).c_str(),
-        Hex(ctor_call.exit.r[13]).c_str(), Hex(ctor_call.exit.cpsr).c_str());
-  };
-  // Stops the whole sequence at the first constructor that does not return: the rest of the scope's and
-  // the app's constructors are not run after a failure, because a half-initialized module must not look
-  // loaded.
-  const auto run_ctors = [&](const char* soname, const std::optional<loader::GuestModule>& slot,
-                             std::size_t* ran) -> bool {
-    if (!slot) return true;
-    if (slot->init.addr != 0) {
-      if (run_one_ctor(slot->init)) {
-        ++*ran;
-      } else {
-        say_ctor_failure(std::string{soname} + " DT_INIT at 0x" + Hex(slot->init.addr));
-        return false;
-      }
-    }
-    for (std::size_t i = 0; i < slot->init_array.size(); ++i) {
-      const loader::CodeAddress fn = slot->init_array[i];
-      if (fn.addr == 0) continue;  // a gap some linkers leave in the array, not a function to call
-      if (run_one_ctor(fn)) {
-        ++*ran;
-        continue;
-      }
-      say_ctor_failure(std::string{soname} + " DT_INIT_ARRAY[" + std::to_string(i) + "] at 0x" +
-                       Hex(fn.addr));
-      return false;
-    }
-    return true;
-  };
-  std::size_t libc_ctors = 0, libm_ctors = 0, libz_ctors = 0, libstdcxx_ctors = 0, app_ctors = 0;
-  const bool ctors_ok = run_ctors("libc.so", libc_mod, &libc_ctors) &&
-                        run_ctors("libm.so", libm_mod, &libm_ctors) &&
-                        run_ctors("libz.so", libz_mod, &libz_ctors) &&
-                        run_ctors("libstdc++.so", libstdcxx_mod, &libstdcxx_ctors) &&
-                        run_ctors(label.c_str(), app_mod, &app_ctors);
-  if (ctors_ok) {
-    Say(&out, "constructors: %zu ran in total on tier=%s (libc.so %zu, libm.so %zu, libz.so %zu, libstdc++.so %zu, %s %zu)",
-        libc_ctors + libm_ctors + libz_ctors + libstdcxx_ctors + app_ctors, ctor_tier, libc_ctors, libm_ctors,
-        libz_ctors, libstdcxx_ctors,
-        label.c_str(), app_ctors);
-  }
-  // The app's own tags are the point of running these by hand, so "it had none" is its own line rather
-  // than a zero in the tuple above.
-  if (app_ctors == 0 && app.init_array.empty() && app.init.addr == 0) {
+  const bool ctors_ok = proc->RunConstructors(&ctor_failed);
+  // The app's own tags are the point of running these, so "it had none" is its own line.
+  if (ctors_ok && app.init_array.empty() && app.init.addr == 0) {
     Say(&out, "constructors: %s carries no DT_INIT_ARRAY and no DT_INIT — no startup work of its own",
         label.c_str());
   }
@@ -2471,6 +1419,11 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
     }
   };
 
+  /// The dl* set's tally and the game's own log, in its own words — both `HostSlots`' (host_slots.h).
+  const auto say_line = [&out](const std::string& s) { Say(&out, "%s", s.c_str()); };
+  const auto say_dl = [&]() { slots.ReportDl(say_line, kUnresolved); };
+  const auto say_guest_log = [&]() { slots.ReportLog(say_line); };
+
   /**
    * One place that writes the GL tally, at every exit, for the same reason `say_trapped` exists.
    *
@@ -2480,57 +1433,6 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
    * where an omission would say nothing. The two are distinguishable at a glance and that matters here,
    * because a run that stops early and one that never bound the set produce the same silence otherwise.
    */
-  /// The dl* set's tally, in `say_gl`'s shape. The disclosure is the point: what a device's linker
-  /// provides, this build answers for — and each answer is named, because "the app loaded" is only
-  /// honest alongside what its loader-side imports were actually given.
-  const auto say_dl = [&]() {
-    unsigned called = 0, calls = 0;
-    for (const DlCall& e : dl_calls) {
-      if (e.calls != 0) ++called;
-      calls += e.calls;
-    }
-    Say(&out, "dl: %zu dynamic-linker import(s) were answered by host slots %u..%u — this build ships"
-              " no linker: dlopen/android_dlopen_ext return NULL (a caller that checks, as netd's does,"
-              " carries on), dl_unwind_find_exidx answers from the placed modules' PT_ARM_EXIDX (NULL for"
-              " a pc no module holds, as bionic does), dlsym/dladdr/__loader_android_get_exported_namespace"
-              " return NULL, dlclose returns 0, dlerror returns NULL (\"no error since last clear\"),"
-              " android_get_application_target_sdk_version answers 34 (this app's targetSdkVersion), and"
-              " the two __loader_*_thread_local_dtor hooks are counted no-ops. Disclosed, not silently"
-              " stubbed.",
-        dl_calls.size(), kDlSlotBase, kDlSlotBase + static_cast<std::uint32_t>(dl_calls.size()) - 1u);
-    if (called == 0) {
-      Say(&out, "dl: none has been called by this run yet — the set is bound, so a call arrives answered"
-                " instead of faulting at 0x%s",
-          Hex(kUnresolved).c_str());
-      return;
-    }
-    Say(&out, "dl: %u of them have been called, %u calls in total:", called, calls);
-    for (const DlCall& e : dl_calls) {
-      if (e.calls == 0) continue;
-      if (!e.last_path.empty()) {
-        Say(&out, "  %s(\"%s\") x%u", e.name.c_str(), e.last_path.c_str(), e.calls);
-      } else if (e.name == "dl_unwind_find_exidx") {
-        Say(&out, "  %s x%u (%u found a module's index; the rest were a pc no module holds)", e.name.c_str(),
-            e.calls, e.answered);
-      } else {
-        Say(&out, "  %s x%u", e.name.c_str(), e.calls);
-      }
-    }
-  };
-
-  /// The game's own log, in its own words, through the liblog slots.
-  const auto say_guest_log = [&]() {
-    if (guest_log.empty()) return;
-    Say(&out, "guest log: %zu line(s) the game wrote through __android_log_*%s:", guest_log.size(),
-        guest_log_dropped != 0 ? (", " + std::to_string(guest_log_dropped) + " more dropped past the cap").c_str()
-                               : "");
-    static const char* const kPrio[] = {"?", "?", "V", "D", "I", "W", "E", "F", "S"};
-    for (const GuestLogLine& l : guest_log) {
-      Say(&out, "  %s/%s: %s", (l.prio >= 0 && l.prio <= 8) ? kPrio[l.prio] : "?", l.tag.c_str(),
-          l.text.c_str());
-    }
-  };
-
   /// What the game asked its Java side for: each host method's tally, then every readFile request with
   /// the APK entry that answered it or the reason it came back null.
   const auto say_java = [&]() {
@@ -2793,7 +1695,7 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
           std::string err2;
           // The name travels as a jstring made by the env itself, so the game's GetStringUTFChars works.
           const abi::GuestAddr jname = [&]() -> abi::GuestAddr {
-            const abi::GuestAddr scratch = kApkPathAt;  // a guest page the launcher owns
+            const abi::GuestAddr scratch = scratch_at;  // a guest page the launcher owns
             std::string n = t.name;
             if (n.size() + 1 > kGuestPage) return 0;
             if (!mem->Write(scratch, n.c_str(), n.size() + 1)) return 0;
@@ -3167,9 +2069,9 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
           }
           std::string probe = "unavailable";
           const char kName[] = "mm_splash_cn.png";
-          if (mem->Write(kApkPathAt, kName, sizeof kName)) {
+          if (mem->Write(scratch_at, kName, sizeof kName)) {
             const Outcome c = Call(ctor_engine, ctx, app, "_Z25checkUnclaimedTexturesForPKc", "Z",
-                                   {abi::Value32::Ptr(kApkPathAt)}, kCallBudget);
+                                   {abi::Value32::Ptr(scratch_at)}, kCallBudget);
             probe = c.ok() ? ((c.bits & 0xffu) ? "true (delivered, unclaimed)" : "false")
                            : std::string{"stopped: "} + c.detail;
           }
@@ -3188,14 +2090,14 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
             if (rr.reason != exec::StopReason::Returned) return "stopped: " + rr.detail;
             return std::to_string(static_cast<std::int32_t>(r.w())) + " (via 0x" + Hex(fn) + ")";
           };
-          const abi::GuestAddr dst = kApkPathAt + 0x100u;
+          const abi::GuestAddr dst = scratch_at + 0x100u;
           const std::uint8_t poison[32] = {0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee,
                                            0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee,
                                            0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee};
           mem->Write(dst, poison, sizeof poison);
-          const std::string len = via_got(0x9ddf0u, {abi::Value32::Ptr(kApkPathAt)});
-          const std::string cmp = via_got(0x9df18u, {abi::Value32::Ptr(kApkPathAt), abi::Value32::Ptr(kApkPathAt)});
-          const std::string cpy = via_got(0x9df74u, {abi::Value32::Ptr(dst), abi::Value32::Ptr(kApkPathAt)});
+          const std::string len = via_got(0x9ddf0u, {abi::Value32::Ptr(scratch_at)});
+          const std::string cmp = via_got(0x9df18u, {abi::Value32::Ptr(scratch_at), abi::Value32::Ptr(scratch_at)});
+          const std::string cpy = via_got(0x9df74u, {abi::Value32::Ptr(dst), abi::Value32::Ptr(scratch_at)});
           Say(&out, "gumball: libc through the game's GOT on \"%s\" (16 bytes): strlen=%s strcmp(self)=%s"
                     " strcpy returned %s and wrote \"%s\"",
               kName, len.c_str(), cmp.c_str(), cpy.c_str(), GuestStringOrEmpty(*mem, dst).c_str());
@@ -3605,9 +2507,9 @@ Java_com_retrobug_launcher_LauncherActivity_nativeLaunch(JNIEnv* env, jclass /*c
   return env->NewStringUTF(report.c_str());
 }
 
-/// `-e bootcheck`: M1's in-process boot, run from the launcher against a staged APK with the repackaged
-/// layout. `rb_runtime_boot` switches this process's log tag to RBRUNTIME (it is written for a game's own
-/// process); the launcher's is put back afterwards. Returns a summary line plus the report file it wrote.
+/// `-e bootcheck`: the in-process boot (`rb_runtime_boot`), run from the launcher against a staged APK with
+/// the repackaged layout — in this process, whose guest process then lives as long as it does (a second
+/// bootcheck reuses its scope). Returns a summary line plus the report file the boot wrote.
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_retrobug_launcher_LauncherActivity_nativeBootCheck(JNIEnv* env, jclass /*clazz*/, jstring apk_path,
                                                             jstring lib_name) {
@@ -3625,17 +2527,18 @@ Java_com_retrobug_launcher_LauncherActivity_nativeBootCheck(JNIEnv* env, jclass 
   const std::string lib = text(lib_name);
   JavaVM* vm = nullptr;
   env->GetJavaVM(&vm);
-  // A report left by an earlier run must not be read back as this one's.
-  static const char* const kReport = "/data/data/com.retrobug.launcher/files/rb-report.txt";
-  std::remove(kReport);
+  // The path rb_runtime_boot writes (its own package, this user). A report left by an earlier run must not
+  // be read back as this one's.
+  const std::string report_path =
+      "/data/user/" + std::to_string(::getuid() / 100000) + "/com.retrobug.launcher/files/rb-report.txt";
+  std::remove(report_path.c_str());
   const int rc = rb_runtime_boot(vm, apk.c_str(), lib.c_str());
-  rb::launcher::SetLogTag("RBLAUNCH");
   char head[160];
   std::snprintf(head, sizeof head, "bootcheck: rb_runtime_boot(%s) returned 0x%x", lib.c_str(),
                 static_cast<unsigned>(rc));
   std::string report = head;
   report += '\n';
-  FILE* f = std::fopen(kReport, "rb");
+  FILE* f = std::fopen(report_path.c_str(), "rb");
   if (f == nullptr) {
     report += std::string{"bootcheck: no rb-report.txt to read back: "} + std::strerror(errno) + "\n";
   } else {

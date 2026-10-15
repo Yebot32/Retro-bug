@@ -135,6 +135,9 @@ class GuestProcess {
   GuestAddr thread_pointer() const { return tp_; }
   GuestAddr stack_top() const { return stack_top_; }
   std::size_t constructors_run() const { return ctors_run_; }
+  /// Every loaded module, in load order (scope, then apps) — what a linker's soinfo walk sees
+  /// (`dl_unwind_find_exidx`, a backtrace).
+  const std::vector<std::unique_ptr<loader::GuestModule>>& modules() const { return modules_; }
   /// Imports (scope and apps) nothing answered, each once, in first-asked order.
   const std::vector<std::string>& unanswered() const { return unanswered_; }
 

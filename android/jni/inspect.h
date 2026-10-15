@@ -1,7 +1,8 @@
 // RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
 //
-// The launcher's run entry points, shared with the in-process runtime boot (`runtime_boot.cpp`).
-// Internal to librbguest.so: the definitions live in `launcher.cpp`, where they always were.
+// The launcher's run entry points (`Inspect` and its zip reader). Internal to librbguest.so: the definitions
+// live in `launcher.cpp`. The in-process runtime (`runtime_boot.cpp`) no longer runs `Inspect`: it boots a
+// `GuestProcess` of its own, with no per-game profile.
 #pragma once
 
 #include <cstdint>
@@ -31,7 +32,7 @@ std::optional<std::vector<std::uint8_t>> ZipEntry(const std::vector<std::uint8_t
                                                   const std::string& name, std::string* why);
 
 /// Runs a guest library through the engine and returns the report, one line per `\n`; every line is also
-/// logged live under `LogTag()`. `tiers`: 0 = interpreter then JIT, 1 = interpreter only, 2 = JIT only.
+/// logged live under RBLAUNCH. `tiers`: 0 = interpreter then JIT, 1 = interpreter only, 2 = JIT only.
 std::string Inspect(const std::vector<std::uint8_t>& app_image,
                     const std::vector<std::uint8_t>& libm_image,
                     const std::vector<std::uint8_t>& libc_image,
@@ -39,10 +40,5 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
                     const std::vector<std::uint8_t>& libstdcxx_image, const std::string& label,
                     int tiers, const std::string& apk_path, int surface_width,
                     int surface_height, const RenderHooks& render);
-
-/// The logcat tag every live report line goes out under. Process-wide: "RBLAUNCH" in the launcher, and
-/// "RBRUNTIME" once `rb_runtime_boot` has made this process a runtime.
-const char* LogTag();
-void SetLogTag(const char* tag);
 
 }  // namespace rb::launcher
