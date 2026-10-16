@@ -132,6 +132,12 @@ CTORFAULT="$BUILD/librbctorfault.so"
   -mthumb -mfloat-abi=softfp -mfpu=neon -fPIC -shared -nostdlib -Os \
   -Wl,-soname,librbctorfault.so -o "$CTORFAULT" "$ROOT/tests/corpus/ctor_fault.c"
 
+# Two strong imports nothing defines: a call to either must fault naming that import (guest_thread_test).
+UNRESOLVED="$BUILD/librbunresolved.so"
+"$TC/bin/clang.exe" --target=armv7-none-linux-androideabi26 --sysroot="$TC/sysroot" \
+  -mthumb -mfloat-abi=softfp -mfpu=neon -fPIC -shared -nostdlib -Os \
+  -Wl,-soname,librbunresolved.so -o "$UNRESOLVED" "$ROOT/tests/corpus/unresolved_call.c"
+
 # M2 Task 4: guest pthreads. Built exactly as tools/run_pthread_oracle.sh builds the copy it runs natively
 # (keep the two lines in step), linked against the NDK stub libc for its DT_NEEDED.
 PTHREAD_FIXTURE="$BUILD/libpthread_fixture.so"
@@ -196,6 +202,7 @@ adb push "$(to_host "$IFUSER")" /data/local/tmp/librbifuncuser.so >/dev/null
 adb push "$(to_host "$IFLIBC")" /data/local/tmp/librbifunclibc.so >/dev/null
 adb push "$(to_host "$WEAK")" /data/local/tmp/librbweak.so >/dev/null
 adb push "$(to_host "$CTORFAULT")" /data/local/tmp/librbctorfault.so >/dev/null
+adb push "$(to_host "$UNRESOLVED")" /data/local/tmp/librbunresolved.so >/dev/null
 adb push "$(to_host "$PTHREAD_FIXTURE")" /data/local/tmp/libpthread_fixture.so >/dev/null
 adb push "$(to_host "$JNIBRIDGE_FIXTURE")" /data/local/tmp/libjnibridge_fixture.so >/dev/null
 adb push "$(to_host "$ROOT/tests/corpus/oracle-pthread.txt")" /data/local/tmp/oracle-pthread.txt >/dev/null

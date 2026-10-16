@@ -295,10 +295,14 @@ std::unique_ptr<GuestProcess> GuestProcess::Create(const GuestProcessOptions& op
       !m.Map(kAllocCeiling, options.window_bytes - kAllocCeiling, mem::kNone, &e)) {
     return fail("reserving the window above " + Hex(kAllocCeiling) + ": " + e);
   }
-  const GuestAddr trap = options.unresolved_trap & ~(mem::kGuestPage - 1u);
-  if (options.unresolved_trap != 0 && trap < p->ceiling_ && !m.IsMapped(trap) &&
-      !m.Map(trap, mem::kGuestPage, mem::kNone, &e)) {
-    return fail("reserving the unresolved-import trap page " + Hex(trap) + ": " + e);
+  if (options.unresolved_trap != 0) {
+    const std::uint64_t end = std::uint64_t{options.unresolved_trap} + kTrapSpan;
+    for (std::uint64_t at = options.unresolved_trap & ~(mem::kGuestPage - 1u); at < end; at += mem::kGuestPage) {
+      const auto page = static_cast<GuestAddr>(at);
+      if (page < p->ceiling_ && !m.IsMapped(page) && !m.Map(page, mem::kGuestPage, mem::kNone, &e)) {
+        return fail("reserving the unresolved-import trap page " + Hex(page) + ": " + e);
+      }
+    }
   }
   // The main thread's stack, 1 MiB below the ceiling, with a guard page under it.
   p->stack_top_ = p->ceiling_ - 0x0010'0000u;
@@ -322,6 +326,8 @@ std::unique_ptr<GuestProcess> GuestProcess::Create(const GuestProcessOptions& op
     p->monitor_->set_thread_spawner([owner](std::unique_ptr<GuestThread> t) { return owner->Spawn(std::move(t)); });
     // Adopted ART threads (Task 5): a host thread with no binding that calls in gets a guest thread of its own.
     p->abi_->set_adopter([owner](std::string* why) { return owner->AdoptCurrentHostThread(why); });
+    // A fault at a trap slot names the import bound there, whichever thread made the call.
+    p->abi_->set_fault_namer([owner](GuestAddr pc) { return owner->TrapName(pc); });
   }
 
   // The JNIEnv maps its own table and arena from a page-aligned base; a free run is found for it now,
@@ -425,13 +431,28 @@ std::optional<std::uint32_t> GuestProcess::ResolveImport(const std::string& name
   if (name == "__loader_shared_globals" && stub_ != 0) return stub_;
   if (opts_.host_resolver) {
     const auto h = opts_.host_resolver(name);
-    if (h && (opts_.unresolved_trap == 0 || *h != opts_.unresolved_trap)) return h;
+    if (h && (opts_.unresolved_trap == 0 || *h - opts_.unresolved_trap >= kTrapSpan)) return h;
   }
-  if (std::find(unanswered_.begin(), unanswered_.end(), name) == unanswered_.end()) {
-    unanswered_.push_back(name);
+  auto it = std::find(unanswered_.begin(), unanswered_.end(), name);
+  if (it == unanswered_.end()) it = unanswered_.insert(unanswered_.end(), name);
+  if (opts_.unresolved_trap == 0) return std::nullopt;
+  // Its own slot, so a call names it (TrapName); one shared address named nothing (ABGo, 2026-10-17).
+  const auto slot =
+      std::min<std::size_t>(static_cast<std::size_t>(it - unanswered_.begin()), kTrapSpan / kTrapSlot - 1u);
+  return opts_.unresolved_trap + static_cast<std::uint32_t>(kTrapSlot * slot);
+}
+
+std::string GuestProcess::TrapName(GuestAddr pc) const {
+  if (opts_.unresolved_trap == 0 || pc - opts_.unresolved_trap >= kTrapSpan) return {};
+  const std::size_t slot = (pc - opts_.unresolved_trap) / kTrapSlot;
+  const GuestAddr at = opts_.unresolved_trap + static_cast<GuestAddr>(slot * kTrapSlot);
+  if (slot >= unanswered_.size()) return "an unresolved-import trap slot no import is bound to (" + Hex(at) + ")";
+  if (slot == kTrapSpan / kTrapSlot - 1u && unanswered_.size() > kTrapSpan / kTrapSlot) {
+    return "one of the unanswered imports from " + unanswered_[slot] + " on (" +
+           std::to_string(unanswered_.size() - slot) + " names share the trap's last slot " + Hex(at) + ")";
   }
-  if (opts_.unresolved_trap != 0) return opts_.unresolved_trap;
-  return std::nullopt;
+  return "called the unanswered import " + unanswered_[slot] + " (nothing answers it; bound to trap slot " +
+         Hex(at) + ")";
 }
 
 loader::GuestModule* GuestProcess::LoadOne(const std::vector<std::uint8_t>& image, const std::string& soname,
@@ -441,6 +462,7 @@ loader::GuestModule* GuestProcess::LoadOne(const std::vector<std::uint8_t>& imag
   // recorded in `unsupported_relocs`). An app does not: a refused relocation fails its load by name.
   opts.tolerate_unresolved_relocs = scope;
   opts.unresolved_trap = opts_.unresolved_trap;
+  opts.unresolved_trap_span = kTrapSpan;
   opts.resolve = [this](const std::string& name) { return ResolveImport(name); };
   opts.resolve_ifunc = [this](const loader::IfuncSlot& s) { return RunIfunc(s); };
   if (scope && soname == "libc.so") {

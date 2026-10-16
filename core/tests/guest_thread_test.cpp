@@ -1227,6 +1227,66 @@ void adoption_after_exit_is_refused(int tier) {
   CHECK(pr.p->threads_adopted() == 0u);
 }
 
+/// An import nothing answers faults *by name* when called, on the main thread and on an adopted host thread
+/// alike (Angry Birds Go, 2026-10-17: `nativeInitialize` on its GL thread stopped at "instruction fetch failed
+/// at 0xfffe0000" and nothing said which of 78 unanswered imports that was). Each unanswered import is bound to
+/// its own trap address, and the run loop names the one a fault stopped on — beta as beta, not as the
+/// first-bound alpha.
+void unresolved_import_faults_by_name(int tier) {
+  const std::string name = std::string{"unresolved_import_faults_by_name/"} + TierName(tier);
+  Watchdog wd(name, std::chrono::seconds(60));
+  const std::vector<std::uint8_t> image = ReadFile(RB_UNRESOLVED_FIXTURE_PATH);
+  CHECK_CTX(!image.empty(), std::string{"missing "} + RB_UNRESOLVED_FIXTURE_PATH);
+  if (image.empty()) return;
+  Proc pr = BootPthreads(tier);
+  CHECK_CTX(pr.p != nullptr, pr.err);
+  if (!pr.p) return;
+  std::string e;
+  const loader::GuestModule* lib = pr.p->LoadApp(image, "librbunresolved.so", &e);
+  CHECK_CTX(lib != nullptr, e);
+  if (lib == nullptr) return;
+  {
+    runtime::Ggl::Held hold(pr.p->ggl());
+    const auto& un = pr.p->unanswered();
+    CHECK(std::find(un.begin(), un.end(), "rb_never_defined_alpha") != un.end());
+    CHECK(std::find(un.begin(), un.end(), "rb_never_defined_beta") != un.end());
+  }
+  const auto call = [&](const char* fn) {
+    exec::RunResult rr{};
+    const auto at = lib->FindExport(fn);
+    if (!at) {
+      rr.reason = exec::StopReason::Internal;
+      rr.detail = std::string{"no export "} + fn;
+      return rr;
+    }
+    pr.p->abi().set_executor(pr.p->engine(tier));
+    pr.p->abi().CallGuest(at->tagged(), {abi::Value32::S32(5)}, abi::Shorty::For("II"), 1'000'000u, &rr);
+    return rr;
+  };
+  const auto names = [](const exec::RunResult& rr, const char* want, const char* not_want) {
+    return rr.reason == exec::StopReason::Fault && rr.detail.find(want) != std::string::npos &&
+           rr.detail.find(not_want) == std::string::npos;
+  };
+  const exec::RunResult main_beta = call("uc_call_beta");
+  CHECK_CTX(names(main_beta, "rb_never_defined_beta", "rb_never_defined_alpha"),
+            name + " main thread: " + main_beta.detail);
+  exec::RunResult adopted_alpha{}, adopted_beta{};
+  bool adopted = false;
+  std::thread t([&] {
+    adopted_alpha = call("uc_call_alpha");
+    GuestThread* g = runtime::CurrentGuestThread();
+    adopted = g != nullptr && g->adopted;
+    adopted_beta = call("uc_call_beta");
+  });
+  t.join();
+  CHECK_CTX(adopted, name + ": the second host thread was not adopted");
+  CHECK_CTX(names(adopted_alpha, "rb_never_defined_alpha", "rb_never_defined_beta"),
+            name + " adopted thread: " + adopted_alpha.detail);
+  CHECK_CTX(names(adopted_beta, "rb_never_defined_beta", "rb_never_defined_alpha"),
+            name + " adopted thread: " + adopted_beta.detail);
+  std::fprintf(stderr, "#   %s: %s\n", name.c_str(), adopted_beta.detail.c_str());
+}
+
 void guest_pthreads(int tier) {
   const auto oracle = Oracle();
   CHECK_CTX(!oracle.empty(), std::string{"no oracle rows at "} + RB_PTHREAD_ORACLE_PATH);
@@ -1273,6 +1333,7 @@ void guest_pthreads(int tier) {
   adopted_exit_runs_thread_finalizers(tier);
   faulting_key_destructor_is_named(tier, oracle);
   unlinkable_exit_keeps_the_mapping(tier, oracle);
+  unresolved_import_faults_by_name(tier);
 }
 
 }  // namespace

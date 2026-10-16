@@ -544,7 +544,8 @@ const rb::loader::GuestModule* LoadWithNeeded(Runtime& rt, ApkZip& zip, const st
     std::string names;
     for (std::size_t i = unanswered_before; i < un.size(); ++i) names += (names.empty() ? "" : ", ") + un[i];
     Line(out, "imports: " + lib + ": " + std::to_string(un.size() - unanswered_before) +
-              " nothing answers, bound to " + Hex(kTrap) + " (a call faults by name; weak ones are 0): " + names);
+              " nothing answers, each bound to its own trap slot from " + Hex(kTrap) +
+              " (a call faults naming it; weak ones are 0): " + names);
   }
   return m;
 }

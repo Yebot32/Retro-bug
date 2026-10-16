@@ -32,8 +32,18 @@ Tasks 1–6 done on the tablet (the OnePlus was set aside by the human; its runs
   recommended" → Scan app → "looks safe" → Install; launched by its LAUNCHER intent: shims, boot, JNI_OnLoad clean,
   **past `isDeviceAmazon()`**; end point on the GL thread in `ExientGLSurfaceView.nativeInitialize`
   (`onSurfaceCreated`): `instruction fetch failed at 0xfffe0000` — an unanswered EGL/GLES2/OpenSL/AAsset import (78
-  remain; M4's work, as the plan expected). Gap: that fault does not name the import, though the design says such a
-  call "faults by name". Gumball: see the rename entry below (stale local ref in `jniInit`; fix in progress on branch
+  remain; M4's work, as the plan expected). ~~Gap: that fault does not name the import~~ — fixed on branch
+  `claude/vigilant-cannon-683313` (off package-rename): every unanswered import shared the one trap address and nothing
+  mapped a fault back to a name, on any thread (the adopted GL thread was incidental). Now each gets its own 16-byte
+  slot from the trap (`GuestProcess::kTrapSpan`/`kTrapSlot`; 16 because both tiers leave PC one instruction past a
+  failed fetch) and `AbiContext::RunThread` appends `GuestProcess::TrapName` to any fault; lane row
+  `unresolved_import_faults_by_name` (guest_thread_test, `tests/corpus/unresolved_call.c`, main + adopted thread, I+J).
+  OnePlus re-run 2026-10-17 (launcher + repack rebuilt, camera/location/contacts/phone/files permissions denied):
+  **ABGo's first missing import is `AAssetManager_fromJava`** — `nativeInitialize stopped: fault: instruction fetch
+  failed at 0xfffe00d0 ...: called the unanswered import AAssetManager_fromJava (bound to trap slot 0xfffe00d0)`.
+  M4's first target: the AAsset* family (AAssetManager_fromJava/open/openDir, AAsset_getLength/getBuffer/close/
+  openFileDescriptor, AAssetDir_*). Lanes after the fix: OnePlus 22/22 and tablet R52Y106BECZ 22/22, 0 failures.
+  Gumball: see the rename entry below (stale local ref in `jniInit`; fix in progress on branch
   `m3-stale-local-ref`). Still owed for Gumball: `GumballMainMenu` drawn.
 - **Install beside the original** (branch `package-rename`, off m3-jni-bridge): `-e repack <name> -e rename 1` renames
   the package to `<orig>.rb` (`-e rename <pkg>` for another name), kept as `repack/<name>.rb.apk`. AxmlEditor.renamePackage

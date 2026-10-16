@@ -308,6 +308,11 @@ class AbiContext : public exec::HostDispatch {
   /// once, at setup, before any host thread calls in.
   using Adopter = std::function<runtime::GuestThread*(std::string* why)>;
   void set_adopter(Adopter adopter) { adopter_ = std::move(adopter); }
+  /// Says what a fault's PC is when the context alone cannot (`GuestProcess`: an unanswered import's trap slot,
+  /// by name), or "" for nothing to add. `RunThread` appends it to a `Fault`'s detail — every call, guest thread
+  /// and adopted host thread runs there. Called under the GGL. Set once, at setup.
+  using FaultNamer = std::function<std::string(GuestAddr pc)>;
+  void set_fault_namer(FaultNamer namer) { fault_namer_ = std::move(namer); }
   [[nodiscard]] syscall::Monitor* monitor() const { return monitor_; }
 
   /// Set when a call ended in `StopReason::Exited`; the status the guest passed to `exit_group`.
@@ -406,6 +411,7 @@ class AbiContext : public exec::HostDispatch {
   std::atomic<exec::Executor*> executor_{nullptr};
   syscall::Monitor* monitor_ = nullptr;
   Adopter adopter_;
+  FaultNamer fault_namer_;
   std::int32_t exit_status_ = 0;
   std::unordered_map<std::uint32_t, SlotRef> bound_;  ///< GGL-protected
   runtime::Ggl ggl_;

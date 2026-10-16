@@ -134,7 +134,8 @@ target_compile_definitions(rb_guest_thread_tests PRIVATE
   RB_GUEST_LIBM_PATH="/data/local/tmp/libm.so"
   RB_GUEST_LIBZ_PATH="/data/local/tmp/libz.so"
   RB_PTHREAD_FIXTURE_PATH="/data/local/tmp/libpthread_fixture.so"
-  RB_PTHREAD_ORACLE_PATH="/data/local/tmp/oracle-pthread.txt")
+  RB_PTHREAD_ORACLE_PATH="/data/local/tmp/oracle-pthread.txt"
+  RB_UNRESOLVED_FIXTURE_PATH="/data/local/tmp/librbunresolved.so")
 
 # M3 Task 1: the forwarding JNI bridge over a fake Java, driven by tests/corpus/jni_bridge_fixture.c.
 add_executable(rb_jni_forward_tests jni_forward_test.cpp fake_java.cpp)

@@ -671,6 +671,10 @@ exec::RunResult AbiContext::RunThread(runtime::GuestThread& thread, unsigned bud
     }
   }
 
+  if (run.reason == exec::StopReason::Fault && fault_namer_) {
+    const std::string what = fault_namer_(state.pc);
+    if (!what.empty()) run.detail += (run.detail.empty() ? "" : ": ") + what;
+  }
   // The whole call's count, not the last segment's: `run` is the slice after the final host call or
   // syscall, so a call that made any reported only its tail — Gumball's jniRun read "38 steps" every frame
   // while issuing 17 GL calls. Nested calls a host function makes run on their own budgets and are not
