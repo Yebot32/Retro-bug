@@ -6,7 +6,7 @@ hand-written IR interpreter = "Tier I"). Engine in `core/`, on-device launcher a
 (`android/jni/launcher.cpp` + `android/jni/gl_forward.cpp` + `android/java/.../LauncherActivity.java`).
 Everything below this section is older, detailed session history — read it only when you need depth.
 
-## M2 — multi-entry core (2026-10-16, tablet-verified; OnePlus acceptance runs still open) — newest state, read first
+## M2 — multi-entry core (2026-10-16, ACCEPTED on the tablet and the OnePlus) — newest state, read first
 
 Branch `m2-multi-entry-core` (not merged, not pushed). Plan: `docs/superpowers/plans/2026-10-15-m2-multi-entry-core.md`.
 Ledger (git-ignored): `.superpowers/sdd/2026-10-15-m2-multi-entry-core/progress.md`. Newest notes: `NEXT-AI-HANDOFF.txt`.
@@ -65,11 +65,21 @@ TLS module 1 ...`. Test: `guest_process_test` `libc_thread_locals_live_in_libcs_
 `__tls_get_addr({1, 8})` = block + 8; TP+4 intact after constructors) plus layout rows. Evidence: 30/30 clean
 `rb_guest_thread_tests` runs with a store watch on TP+4 (before the fix: a failure within 3–7 runs).
 
-**Still open for M2 acceptance (needs the OnePlus + the human for install dialogs).** Plan Task 6 steps 1–2:
-re-repack ABGo and Gumball on the OnePlus (verifies M1's "re-repack installs as an update": status=0, unchanged
-firstInstallTime 2026-10-15 14:38:58 for ABGo), launch each by its icon, record the end points. The tablet cannot do
-this without replacing its native 32-bit originals (ABGo 1.8.7, Gumball Lite 1.1 — both installed natively there).
-Then a final whole-branch review, then ask the human to merge to `main`.
+**OnePlus 75ff8cd3 acceptance (2026-10-16, human confirmed every install).** Plan Task 6 steps 1–3:
+- New launcher installed (16:12:46). Engine lanes `RB_SERIAL=75ff8cd3 bash tools/run_engine_tests.sh arm64-v8a`:
+  exit 0, all 19 gating lanes 0 failures and both advisory lanes green — guest_libc 147/0 (its `ld-android.so` row
+  failed here before the libc-sibling push), guest_apk 1376/0.
+- **M1 (a) closed: a re-repack installs as an update.** Angry Birds Go `-e repack base`: `install: status=0 (SUCCESS)`,
+  firstInstallTime still 2026-10-15 14:38:58, lastUpdateTime 2026-10-16 16:18:34, arm64-v8a. Gumball
+  `-e repack gumball`: status=0, firstInstallTime still 2026-10-15 14:40:19, lastUpdateTime 16:19:14.
+- Angry Birds Go by its icon, pid 24394: `tls:` module line, "scope: booted once", 258 constructors on Tier J
+  (16:18:45.36 → 48.36, ~3 s), `JNI_OnLoad` 0x10006, "RESULT: startup finished with no fault", no profile lines; then
+  `UnsatisfiedLinkError` at `AngryBirdsGoActivity.isDeviceAmazon()` (`Java_com_rovio_angrybirdsgo_AngryBirdsGoActivity_isDeviceAmazon`).
+- Gumball by its icon, pid 26352: scope booted once, 24 constructors on Tier J (~0.85 s), no `JNI_OnLoad` (12 `Java_*`
+  for its own Java), "RESULT: startup finished with no fault"; then on its GL thread `UnsatisfiedLinkError` at
+  `JNIGLSurface.jniClearTextures()` from `onSurfaceCreated` — this run the GL thread got there before the known
+  targetSdk billing crash (implicit `bindService`), which is still there for the shims to fix.
+- Remaining before merge: a final whole-branch review, then the human's OK to merge to `main`.
 
 **Next after M2:** targetSdk compatibility shims (Gumball's implicit `bindService`) → M3 JNI bridge (see the M3 MUST
 list in `NEXT-AI-HANDOFF.txt`).
@@ -114,7 +124,7 @@ synchronously inside the game's `JNI_OnLoad` on the loading thread, after readin
 streamed/mmapped zip reads, a wider catch.
 
 **Not yet verified on a device** (each needs the human to confirm a dialog; offered as a follow-up):
-(a) re-repacking the same game installs as an update (same key `retrobug-repack`; expected status=0 SUCCESS, unchanged firstInstallTime);
+(a) ~~re-repacking the same game installs as an update~~ VERIFIED 2026-10-16 on the OnePlus (status=0, firstInstallTime unchanged; see M2);
 (b) installing a repack over a natively installed original reports the installer's own incompatible-signature text (expected
 status=5 INSTALL_FAILED_UPDATE_INCOMPATIBLE).
 
