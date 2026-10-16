@@ -32,8 +32,15 @@ Tasks 1–6 done on the tablet (the OnePlus was set aside by the human; its runs
   expands relative class names against the ORIGINAL package (the DEX is not renamed), renames provider authorities and
   declared permissions (+ their uses), a GCM category equal to the package, taskAffinity/process under it;
   resources.arsc's package name follows. Tablet 2026-10-16: Gumball repacked as `com.twentysixdigital.gumballlite.rb`,
-  installer offered a fresh "Install this app?", then **Play Protect blocked it** ("built for an older version of
-  Android", targetSdk 24) — not bypassed; the human's call. The original was untouched (lastUpdateTime 2025-04-28).
+  installer offered a fresh "Install this app?", then Play Protect blocked it ("built for an older version of
+  Android", targetSdk 24); the human let it through on 2026-10-17 (installed 00:30:58, arm64-v8a, beside the original,
+  which was untouched: lastUpdateTime 2025-04-28). **Launched by its LAUNCHER intent** (pid 13432): five RBSHIM lines,
+  RBRUNTIME "startup finished with no fault", GL thread adopted, every texture atlas loaded, then on
+  `loadTextureImage:font.png` → **crash**: `java.lang.Error: guest native Java_..._JNIGLSurface_jniInit stopped: host
+  call at slot 671: JNIEnv->GetObjectClass: 0xf0000204 is a stale local reference` (from `onDrawFrame`). The M3 bridge
+  likely drops a local ref made during a nested Java callback before the outer native returns. No main menu yet.
+  The renamed copy stays installed on the tablet; re-run with `monkey -p com.twentysixdigital.gumballlite.rb -c
+  android.intent.category.LAUNCHER 1` (dialogs: platform "older version" OK; permissions were denied).
 - Final whole-branch review (opus) done: 5 Important findings fixed in 04c76e9 (Delete* of a stale handle
   ignored as ART does, detach frees locals, no 4 KiB NewStringUTF cap, ID records in a deque, boot teardown on
   every failure); 9 Minor deferred in the ledger. Tablet: 21 lanes 0 failures after the fixes.
