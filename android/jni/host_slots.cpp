@@ -4,6 +4,8 @@
 // answers the same names the same way.
 #include "host_slots.h"
 
+#include <dlfcn.h>
+
 #include <cctype>
 #include <cstdio>
 #include <cstring>
@@ -354,10 +356,75 @@ HostSlots::HostSlots(runtime::GuestProcess& p, int target_sdk, std::function<voi
   }
 }
 
-std::optional<std::uint32_t> HostSlots::Resolve(const std::string& name) const {
+std::optional<std::uint32_t> HostSlots::Resolve(const std::string& name) {
   if (const auto dl = DlSlotIndex(name)) return p_.abi().SlotFor(kDlSlotBase + static_cast<std::uint32_t>(*dl));
   if (const auto lg = LogSlotIndex(name)) return p_.abi().SlotFor(kLogSlotBase + static_cast<std::uint32_t>(*lg));
-  return std::nullopt;
+  if (!gl_on_ || name.rfind("gl", 0) != 0) return std::nullopt;
+  const bool get_string = name == "glGetString";
+  if (!get_string && !GlForward::Known(name)) return std::nullopt;  // no signature: stays trapped, faults by name
+  for (std::size_t i = 0; i < gl_calls_.size(); ++i) {
+    if (gl_calls_[i].name == name) return p_.abi().SlotFor(kGlSlotBase + static_cast<std::uint32_t>(i));
+  }
+  if (gl_calls_.size() >= kGlSlots) return std::nullopt;
+  const std::size_t index = gl_calls_.size();
+  gl_calls_.push_back(GlCall{name, 0, {}, 0});
+  // `kHoldsGgl`, as the launcher's GL slots (M2 Task 4, ruling i): the driver reads guest memory through
+  // translated pointers (and client arrays a `gl*Pointer` registered earlier), which another guest thread could
+  // unmap with the GGL released; a GL call never waits on another guest thread. The index, not a reference, is
+  // captured: a later push_back may move the vector.
+  p_.abi().Bind(kGlSlotBase + static_cast<std::uint32_t>(index), [this, index, get_string](exec::MachineState& s,
+                                                                                            std::string*) {
+    GlCall& c = gl_calls_[index];
+    ++c.calls;
+    std::string why;
+    if (get_string) {
+      // The result is a host pointer: copied once per enum into guest memory, which the guest may parse.
+      const std::uint32_t which = s.r[0];
+      auto it = gl_strings_.find(which);
+      if (it == gl_strings_.end()) {
+        using GetString = const unsigned char* (*)(unsigned);
+        static void* lib = dlopen("libGLESv1_CM.so", RTLD_NOW | RTLD_LOCAL);
+        const auto fn = reinterpret_cast<GetString>(lib != nullptr ? dlsym(lib, "glGetString") : nullptr);
+        const unsigned char* host = fn != nullptr ? fn(which) : nullptr;
+        std::uint32_t at = 0;
+        if (host != nullptr) {
+          const std::string text(reinterpret_cast<const char*>(host));
+          std::string e;
+          at = p_.MapFree(static_cast<std::uint32_t>(text.size() + 1), mem::kRead | mem::kWrite, &e);
+          if (at != 0 && !p_.memory().Write(at, text.c_str(), text.size() + 1)) at = 0;
+          if (at == 0) why = "glGetString(0x" + Hex(which) + "): no guest memory for its answer: " + e;
+        } else {
+          why = fn == nullptr ? "glGetString is not exported by this device's GLES1 driver"
+                              : "glGetString(0x" + Hex(which) + ") returned NULL (no current context on this thread?)";
+        }
+        if (at != 0) it = gl_strings_.emplace(which, at).first;
+      }
+      s.r[0] = it != gl_strings_.end() ? it->second : 0u;
+      if (why.empty()) return true;
+    } else if (gl_.Call(c.name, s, p_.memory(), &why)) {
+      return true;
+    } else {
+      s.r[0] = 0;
+    }
+    if (c.refusals++ == 0) {
+      c.refused = why;
+      if (live_log_) live_log_("gl: " + c.name + " refused: " + why);
+    }
+    return true;
+  }, abi::AbiContext::SlotLock::kHoldsGgl);
+  return p_.abi().SlotFor(kGlSlotBase + static_cast<std::uint32_t>(index));
+}
+
+void HostSlots::ReportGl(const std::function<void(const std::string&)>& say) const {
+  if (gl_calls_.empty()) return;
+  unsigned calls = 0;
+  for (const GlCall& c : gl_calls_) calls += c.calls;
+  say("gl: " + std::to_string(gl_calls_.size()) + " GLES1 import(s) on host slots " + std::to_string(kGlSlotBase) +
+      ".. forwarded to this device's driver on the game's GL thread, " + std::to_string(calls) + " call(s), " +
+      std::to_string(gl_.forwarded()) + " forwarded");
+  for (const GlCall& c : gl_calls_) {
+    if (c.refusals != 0) say("  " + c.name + ": " + std::to_string(c.refusals) + " refused — " + c.refused);
+  }
 }
 
 void HostSlots::ReportDl(const std::function<void(const std::string&)>& say, std::uint32_t trap) const {

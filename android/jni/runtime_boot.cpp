@@ -443,6 +443,8 @@ bool BootScope(Runtime& rt, ApkZip& zip, std::string* out) {
   rt.proc = std::move(proc);
   rt.slots = std::make_unique<rb::launcher::HostSlots>(*rt.proc, TargetSdk(),
                                                        [](const std::string& s) { Live(s); });
+  // The game's own GLSurfaceView makes its GLES1 context current on its GL thread, where its natives call gl*.
+  rt.slots->enable_gl();
   if (!BootBridge(rt, out)) return false;
   // Boot-only: no asset or file is served yet (M3). A provider that answers nothing makes every guest
   // openat an ENOENT the monitor's notes name, rather than ENOSYS.

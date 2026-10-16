@@ -128,7 +128,7 @@ lists risky DEX calls. Gumball now passes its first-run billing bind on the OneP
 2. **M2 Multi-entry core.** *(DONE 2026-10-16, branch `m2-multi-entry-core`: accepted on the tablet and the OnePlus — see HANDOFF.md.)* Thread contexts, GGL, clone/futex/exit, adopted ART threads with synthesized
    guest pthreads. *Tests*: fixture rows (pthread create/join, mutex contention, condvar, TLS keys and
    destructors) on both tiers, expected values from the tablet running the same `.so` natively.
-3. **M3 JNI bridge.** Forwarding env/VM, handle tables, trampolines from stub exports, guest
+3. **M3 JNI bridge.** *(IN PROGRESS 2026-10-16, branch `m3-jni-bridge`: bridge, stubs and GLES1 slots done; the test APK matches the tablet's native run 10/10; Gumball icon-launch acceptance waits on the OnePlus — see HANDOFF.md.)* Forwarding env/VM, handle tables, trampolines from stub exports, guest
    RegisterNatives. *Acceptance*: Gumball runs from its own `JNIGLSurface` with no profile (GLES1 thunks).
    *Tests*: an instrumented test APK whose Java calls a 32-bit fixture `.so` through the bridge (strings,
    arrays, callbacks, exceptions, globals, threads), expectations from the tablet natively.

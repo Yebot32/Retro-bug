@@ -21,7 +21,12 @@ Tasks 1–6 done on the tablet (the OnePlus was set aside by the human; its runs
 - `-e stubcheck <game>` in the launcher: Gumball 13/13, ABGo 93/93 exports resolve to rb_stub_capture.
 - Play Protect blocks a repacked app with an old targetSdk ("built for an older version of Android"); the test
   app targets 34. Real games keep their target ≥ 24 — watch for this on Gumball/ABGo installs.
-- Next: Task 7 (GLES1 in the runtime, Gumball running its own Java, docs), then the final review.
+- Task 7: GLES1 in the runtime — `HostSlots::enable_gl()` (slots 256..319, forwarded to the device driver on the
+  game's own GL thread; a call that cannot be forwarded returns 0 and is named once in the live log). Tablet
+  bootcheck: Gumball's unanswered imports 34 → 3 (only `__cxa_*` EH helpers left), ABGo 117 → 78, both boot clean.
+- **Waiting on the OnePlus** (the tablet has both games' originals installed natively, and a repacked copy has the
+  same package name, so it must not be installed there): `-e repack gumball`, install, launch by its icon, expect
+  `GumballMainMenu` drawn; ABGo by its icon past `isDeviceAmazon()`. Then OnePlus lanes + `run_bridge_check.sh`.
 
 ## targetSdk compatibility shims (2026-10-16, branch `targetsdk-shims`, not merged, not pushed) — newest state
 
