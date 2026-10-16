@@ -79,7 +79,18 @@ TLS module 1 ...`. Test: `guest_process_test` `libc_thread_locals_live_in_libcs_
   for its own Java), "RESULT: startup finished with no fault"; then on its GL thread `UnsatisfiedLinkError` at
   `JNIGLSurface.jniClearTextures()` from `onSurfaceCreated` — this run the GL thread got there before the known
   targetSdk billing crash (implicit `bindService`), which is still there for the shims to fix.
-- Remaining before merge: a final whole-branch review, then the human's OK to merge to `main`.
+**Final whole-branch review (2026-10-16, Opus reviewer over 3280c6f..3cf6218) — all four findings fixed.**
+1. CRITICAL, fixed in 8cf1273: `RunThread` returned Budget at an SVC the tier had stepped past (syscall cap of 100,000
+   per turn), so a re-entered turn skipped that syscall with r0 = arg0. Caps are now checked after the syscall is
+   answered. Row `pt_syscall_storm(150000)` (device oracle 150000) read 149999 on both tiers before the fix.
+2. IMPORTANT, fixed in 93c10b0: the in-app boot report raced with guest-thread logs (and was detached under them);
+   `runtime_boot.cpp` now guards it with a leaf mutex (`Live`, `SetReport`) and reads the tallies holding the GGL.
+   No dedicated test (needs a guest JNI_OnLoad that leaves a logging thread running) — exercised by the boot checks.
+3. MINOR, fixed in 93c10b0: static TLS rounded to libc's PT_TLS alignment; an odd alignment is refused.
+4. MINOR, fixed in 93c10b0: the libc TLS test now checks the TPOFF32 slot value (TP + 0xb6c) and that no libc TLS
+   relocation was left unapplied.
+After the fixes: all lanes green on the tablet and the OnePlus (guest_thread 457, abi_call 191, guest_process 161);
+launcher reinstalled on the OnePlus, ABGo bootcheck: 258 constructors, 0x10006, no fault. Ready to merge to `main`.
 
 **Next after M2:** targetSdk compatibility shims (Gumball's implicit `bindService`) → M3 JNI bridge (see the M3 MUST
 list in `NEXT-AI-HANDOFF.txt`).
