@@ -114,6 +114,15 @@ struct LocalSymbol {
 };
 
 /// The linker-facing facts about one loaded module.
+/// A module's `PT_TLS` segment: its initialization image (biased guest address, file size) and the block's
+/// size and alignment. What a linker needs to give the module a TLS block, static or dynamic.
+struct TlsSegment {
+  std::uint32_t vaddr = 0;   ///< biased: where the initialization image sits in this module
+  std::uint32_t filesz = 0;  ///< bytes copied from the image; the rest of `memsz` is zero
+  std::uint32_t memsz = 0;
+  std::uint32_t align = 1;
+};
+
 struct GuestModule {
   std::string path;
   std::string soname;
@@ -164,6 +173,9 @@ struct GuestModule {
   /// for a pc inside [base, base + extent).
   std::uint32_t exidx = 0;
   std::uint32_t exidx_count = 0;
+
+  /// `PT_TLS`, when the image has one.
+  std::optional<TlsSegment> tls;
 
   /// Set once this module's `DT_INIT`/`DT_INIT_ARRAY` have run, and never cleared. bionic guards
   /// constructors per-soinfo the same way: a shared dependency loaded by two dependents (or a retry
@@ -256,6 +268,16 @@ struct LoadOptions {
    * worse than a refused load. Assert on `implementation != 0` before you trust an IFUNC export.
    */
   std::function<std::optional<std::uint32_t>(const IfuncSlot&)> resolve_ifunc;
+
+  /**
+   * Called for each of this module's **own** TLS relocations (`R_ARM_TLS_DTPMOD32`, `_DTPOFF32`, `_TPOFF32`
+   * with symbol 0) while the image is still writable, with the relocation type, its addend and the module's
+   * `PT_TLS`. A value is written into the slot; nullopt leaves the relocation refused exactly as without the
+   * hook. Only the caller knows where the module's block lives (the static-TLS layout is the linker's), so
+   * the loader asks instead of guessing — a guessed 0 put GWP-ASan's thread-locals on bionic's TLS slots.
+   */
+  std::function<std::optional<std::uint32_t>(std::uint32_t type, std::uint32_t addend, const TlsSegment&)>
+      resolve_tls;
 };
 
 /// Reads a whole image from `fd` (seekable) and maps it into `mem`.

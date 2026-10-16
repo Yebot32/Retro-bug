@@ -18,6 +18,7 @@
 #include <system_error>
 
 #include "rb/linker/guest_linker.h"
+#include "rb/loader/elf_defs.h"
 
 namespace rb::runtime {
 namespace {
@@ -79,6 +80,17 @@ constexpr std::uint32_t kGlobalsStaticTlsSize = 0x420;   // [image]
 constexpr std::uint32_t kGlobalsOffsetTcb = 0x428;       // [image]
 constexpr std::uint32_t kGlobalsOffsetTls = 0x42c;       // [image]
 constexpr std::uint32_t kGlobalsTlsModuleCount = 0x464;  // [image]
+constexpr std::uint32_t kGlobalsTlsGeneration = 0x434;   // [image] TlsModules::generation (copied by __libc_preinit_impl)
+constexpr std::uint32_t kGlobalsTlsStaticCount = 0x468;  // [image] TlsModules::static_module_count
+constexpr std::uint32_t kGlobalsTlsModuleTable = 0x46c;  // [image] TlsModules::module_table
+constexpr std::uint32_t kTlsModuleBytes = 0x20;          // [image] sizeof(TlsModule)
+constexpr std::uint32_t kTlsGenerationFirst = 1;         // bionic's kTlsGenerationFirst (0 is "none")
+
+/// Where the device's linker puts libc.so's TLS block in static TLS: after the tcb (at 0) and bionic_tls, at
+/// the segment's own alignment. [probe] tls_layout_probe.c measured 0xb78 for this libc (align 8).
+std::uint32_t LibcTlsOffset(const loader::TlsSegment& seg) {
+  return RoundUp(RoundUp(kTcbSize, kStaticTlsAlign) + kBionicTlsSize, seg.align);
+}
 /// [image] __allocate_thread_mapping(stack, guard): mmap_size = round(static_tls + stack + guard + 0x3000);
 /// the static TLS sits 0x3000 below the top: 0x2000 of basename/dirname buffers (bionic_tls+0x414) and a
 /// 0x1000 guard page; the body [base+guard, end-0x1000) is the read/write part.
@@ -150,6 +162,12 @@ std::optional<BionicLayout> VerifyBionicLayout(const mem::GuestMemory& mem, cons
       {"basename", {0xf8d1, 0x4414}, "bionic_tls's temp-buffer pointer at +0x414"},
       {"__init_static_tls", {0xf8d5, 0x0464}, "the TLS module count at shared-globals +0x464"},
       {"__init_static_tls", {0xf8d5, 0x146c}, "the TLS module array at shared-globals +0x46c"},
+      {"__init_static_tls", {0x3720}, "TlsModule entries are 0x20 bytes (`adds r7, #0x20`)"},
+      {"__init_static_tls", {0x694b, 0x1c5a}, "TlsModule::static_offset at +0x14, SIZE_MAX = not static (`ldr r3, [r1, #0x14]; adds r2, r3, #1`)"},
+      {"__init_static_tls", {0x690a}, "TlsModule::segment.init_size at +0x10 (`ldr r2, [r1, #0x10]`)"},
+      {"__init_static_tls", {0x68c9}, "TlsModule::segment.init_ptr at +0xc (`ldr r1, [r1, #0xc]`)"},
+      {"__libc_preinit_impl", {0xf200, 0x4034}, "the TLS generation at shared-globals +0x434 (`addw r0, r0, #0x434`)"},
+      {"__libc_iterate_dynamic_tls", {0xf8d6, 0x5468}, "the static TLS module count at shared-globals +0x468"},
       // The pthread_internal_t fields the host writes for the main thread, each where libc's own code puts it.
       {"pthread_create", {0x68f2, 0x4479, 0xf360, 0x021e, 0x60f2}, "pthread_internal_t::cached_pid_:31 at +0xc (`ldr r2,[r6,#0xc]; bfi r2,r0,#0,#31; str r2,[r6,#0xc]`)"},
       {"pthread_create", {0xf10b, 0x0110}, "pthread_internal_t::attr copied to +0x10 (`add.w r1, r11, #0x10`)"},
@@ -193,6 +211,12 @@ std::optional<BionicLayout> VerifyBionicLayout(const mem::GuestMemory& mem, cons
   l.offset_bionic_tcb = 0;
   l.offset_bionic_tls = RoundUp(l.offset_bionic_tcb + l.tcb_size, kStaticTlsAlign);
   l.static_tls_size = RoundUp(l.offset_bionic_tls + l.bionic_tls_size, kStaticTlsAlign);
+  if (libc.tls) {
+    // reserve_solib_segment(libc's PT_TLS), then finish_layout(): the device's own 0xba8 for this libc.
+    l.libc_tls = *libc.tls;
+    l.libc_tls_offset = LibcTlsOffset(*libc.tls);
+    l.static_tls_size = RoundUp(l.libc_tls_offset + libc.tls->memsz, kStaticTlsAlign);
+  }
 
   // getauxval: `bl __libc_shared_globals` then `ldr.w rX, [rX, #imm]` — the auxv pointer's offset.
   const auto getauxval = libc.FindExport("getauxval");
@@ -207,7 +231,7 @@ std::optional<BionicLayout> VerifyBionicLayout(const mem::GuestMemory& mem, cons
     if (rn == rt && off != 0 && (off & 3u) == 0) l.auxv_field = off;
   }
   if (l.auxv_field == 0) return refuse("getauxval does not read the auxv as `bl; ldr.w rX, [rX, #imm]`");
-  if (l.auxv_field >= kGlobalsStaticTlsSize && l.auxv_field < kGlobalsTlsModuleCount + 8u) {
+  if (l.auxv_field >= kGlobalsStaticTlsSize && l.auxv_field < kGlobalsTlsModuleTable + 4u) {
     return refuse("getauxval's auxv field " + Hex(l.auxv_field) + " overlaps the static-TLS fields");
   }
   return l;
@@ -415,6 +439,19 @@ loader::GuestModule* GuestProcess::LoadOne(const std::vector<std::uint8_t>& imag
   opts.unresolved_trap = opts_.unresolved_trap;
   opts.resolve = [this](const std::string& name) { return ResolveImport(name); };
   opts.resolve_ifunc = [this](const loader::IfuncSlot& s) { return RunIfunc(s); };
+  if (scope && soname == "libc.so") {
+    // libc's own thread-locals (GWP-ASan's, llvm-libc's randomness state), answered the way the device's linker
+    // answers them: libc is TLS module 1 with a static block at LibcTlsOffset (SetUpMainThread registers it),
+    // the tcb at static-TLS offset 0 and TP = tcb + kTpOffsetInTcb. Left unapplied, the initial-exec offset
+    // read 0 and GWP-ASan (on in a random few processes) wrote its thread-locals over TLS_SLOT_THREAD_ID.
+    opts.resolve_tls = [](std::uint32_t type, std::uint32_t addend,
+                          const loader::TlsSegment& seg) -> std::optional<std::uint32_t> {
+      if (type == loader::elf::R_ARM_TLS_TPOFF32) return addend + LibcTlsOffset(seg) - kTpOffsetInTcb;
+      if (type == loader::elf::R_ARM_TLS_DTPMOD32) return 1u;
+      if (type == loader::elf::R_ARM_TLS_DTPOFF32) return addend;
+      return std::nullopt;
+    };
+  }
   std::string e;
   auto mod = loader::LoadFromBytes(*mem_, image, soname, opts, &e);
   if (!mod) {
@@ -535,27 +572,69 @@ bool GuestProcess::CallSetup(const char* fn, const abi::Args32& args, std::strin
   return true;
 }
 
+bool GuestProcess::RegisterLibcTls(std::string* err) {
+  // What the linker's register_soinfo_tls + finish_layout leave in __libc_shared_globals()->tls_modules for a
+  // process whose only TLS module is libc.so: one static module, visible from the first generation.
+  const BionicLayout& l = layout_;
+  std::string e;
+  const GuestAddr table = MapFree(mem::kGuestPage, mem::kRead | mem::kWrite, &e);
+  if (table == 0) {
+    if (err) *err = "the TLS module table page: " + e;
+    return false;
+  }
+  // TlsModule: segment {size, alignment {value, skew}, init_ptr, init_size}, static_offset, first_generation,
+  // soinfo_ptr (none: no soinfo exists here; only dl_iterate_phdr-style lookups read it).
+  const std::uint32_t module[kTlsModuleBytes / 4] = {l.libc_tls.memsz, l.libc_tls.align, 0u, l.libc_tls.vaddr,
+                                                     l.libc_tls.filesz, l.libc_tls_offset, kTlsGenerationFirst, 0u};
+  std::uint32_t generation = 0xffff'ffffu;
+  if (!mem_->Read(globals_ + kGlobalsTlsGeneration, &generation, 4) || generation > kTlsGenerationFirst) {
+    if (err) *err = "the TLS generation at shared-globals + " + Hex(kGlobalsTlsGeneration) + " reads " + Hex(generation) +
+                    ", not a fresh process's 0 or 1";
+    return false;
+  }
+  const std::uint32_t fields[][2] = {{kGlobalsTlsGeneration, kTlsGenerationFirst},
+                                     {kGlobalsTlsModuleCount, 1u},
+                                     {kGlobalsTlsStaticCount, 1u},
+                                     {kGlobalsTlsModuleTable, table}};
+  if (!mem_->Write(table, module, sizeof module)) {
+    if (err) *err = "writing the TLS module table";
+    return false;
+  }
+  for (const auto& f : fields) {
+    if (!mem_->Write(globals_ + f[0], &f[1], 4)) {
+      if (err) *err = "writing shared-globals + " + Hex(f[0]);
+      return false;
+    }
+  }
+  Log("tls: libc.so is static TLS module 1: " + Hex(l.libc_tls.memsz) + " bytes (align " + Hex(l.libc_tls.align) +
+      ", image " + Hex(l.libc_tls.filesz) + " at " + Hex(l.libc_tls.vaddr) + ") at static-TLS offset " +
+      Hex(l.libc_tls_offset) + " (TP + " + Hex(l.libc_tls_offset - l.offset_bionic_tcb - l.tp_offset_in_tcb) +
+      "); static TLS " + Hex(l.static_tls_size) + "; module table at " + Hex(table));
+  return true;
+}
+
 bool GuestProcess::SetUpMainThread(std::string* err) {
   const auto fail = [&](const std::string& why) {
     if (err) *err = "main thread: " + why;
     return false;
   };
   const BionicLayout& l = layout_;
-  // The static-TLS layout, published where `pthread_create`/`__init_static_tls` read it. No TLS module is
-  // registered (count +0x464 stays 0): libc's own PT_TLS segment is not given a static offset here.
+  // The static-TLS layout, published where `pthread_create`/`__init_static_tls` read it, and libc's own PT_TLS
+  // registered as static TLS module 1 the way the device's linker registers it (RegisterLibcTls).
   const std::uint32_t fields[][2] = {{kGlobalsStaticTlsSize, l.static_tls_size},
                                      {kGlobalsOffsetTcb, l.offset_bionic_tcb},
                                      {kGlobalsOffsetTls, l.offset_bionic_tls}};
   for (const auto& f : fields) {
     if (!mem_->Write(globals_ + f[0], &f[1], 4)) return fail("writing shared-globals + " + Hex(f[0]));
   }
+  std::string e;
+  if (l.libc_tls_offset != 0 && !RegisterLibcTls(&e)) return fail(e);
 
   // The thread mapping, shaped as __allocate_thread_mapping(0, PTHREAD_GUARD_SIZE) shapes one (and as the
   // device's own main thread shows it: mmap_size 0x5000 for its 0xba8 of static TLS): a guard page, the
   // read/write body, a guard page; static TLS ending 0x3000 below the top, then the 0x2000 scratch.
   const std::uint32_t size = RoundUp(l.static_tls_size + kPthreadGuard + kMappingTop, mem::kGuestPage);
   const GuestAddr base = FindFree(size);
-  std::string e;
   if (base == 0 || !mem_->Map(base, kPthreadGuard, mem::kNone, &e) ||
       !mem_->Map(base + kPthreadGuard, size - kPthreadGuard - 0x1000u, mem::kRead | mem::kWrite, &e) ||
       !mem_->Map(base + size - 0x1000u, 0x1000u, mem::kNone, &e)) {
@@ -595,6 +674,8 @@ bool GuestProcess::SetUpMainThread(std::string* err) {
   // bionic's own code fills the tcb's thread and DTV slots, exactly as pthread_create does.
   if (!CallSetup("__init_tcb", {abi::Value32::Ptr(tcb), abi::Value32::Ptr(thread_)}, &e)) return fail(e);
   if (!CallSetup("__init_tcb_dtv", {abi::Value32::Ptr(tcb)}, &e)) return fail(e);
+  // libc's TLS block gets its initialization image, by libc's own code, as pthread_create does for a new thread.
+  if (l.libc_tls_offset != 0 && !CallSetup("__init_static_tls", {abi::Value32::Ptr(static_tls)}, &e)) return fail(e);
   // TLS_SLOT_BIONIC_TLS and the stack guard (the linker's: from AT_RANDOM; libc's __libc_preinit copies
   // TP+0x14 into __stack_chk_guard).
   std::uint32_t guard = 0;
@@ -988,6 +1069,10 @@ GuestThread* GuestProcess::AdoptCurrentHostThread(std::string* err) {
 
   // libc's own code fills the rest, on the new thread (its TP and stack), exactly as pthread_create does.
   std::uint32_t r0 = 0;
+  if (layout_.libc_tls_offset != 0 &&
+      !CallOn(t, "__init_static_tls", {abi::Value32::Ptr(static_tls)}, nullptr, &e)) {  // as pthread_create does
+    return undo(e);
+  }
   if (!CallOn(t, "__init_tcb", {abi::Value32::Ptr(tcb), abi::Value32::Ptr(thread)}, nullptr, &e) ||
       !CallOn(t, "__init_tcb_dtv", {abi::Value32::Ptr(tcb)}, nullptr, &e) ||
       !CallOn(t, "__init_tcb_stack_guard", {abi::Value32::Ptr(tcb)}, nullptr, &e)) {

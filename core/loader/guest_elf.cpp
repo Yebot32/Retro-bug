@@ -28,7 +28,7 @@ using elf::Ehdr32; using elf::Phdr32; using elf::Shdr32; using elf::Dyn32;
 using elf::Rel32; using elf::Rela32; using elf::Sym32;
 using elf::ET_DYN; using elf::EM_ARM; using elf::EF_ARM_MASK;
 using elf::PT_LOAD; using elf::PT_DYNAMIC; using elf::PT_NOTE;
-using elf::PT_GNU_RELRO; using elf::PT_ARM_EXIDX;
+using elf::PT_GNU_RELRO; using elf::PT_ARM_EXIDX; using elf::PT_TLS;
 using elf::PF_X; using elf::PF_W; using elf::PF_R;
 using elf::SHN_UNDEF; using elf::SHN_ABS;
 using elf::SHT_DYNSYM; using elf::SHT_SYMTAB;
@@ -546,6 +546,17 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
     return true;
   };
 
+  // ---- PT_TLS, before relocation: a module's own TLS relocations are answered against it.
+  for (const auto& p : phdrs) {
+    if (p.p_type != PT_TLS) continue;
+    if (p.p_filesz > p.p_memsz || p.p_vaddr < lo || p.p_vaddr + p.p_filesz < p.p_vaddr ||
+        p.p_vaddr + p.p_filesz > hi) {
+      break;  // an image this module's own range does not hold: leave it absent rather than half-trusted
+    }
+    mod.tls = TlsSegment{base + p.p_vaddr, p.p_filesz, p.p_memsz, p.p_align ? p.p_align : 1u};
+    break;
+  }
+
   // ---- relocations
   if (opts.apply_relocations && dyn.present) {
     auto apply = [&](std::uint32_t table, std::uint32_t bytes, std::uint32_t entsize,
@@ -691,6 +702,15 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
             break;
           }
           default:
+            if (tls_kind && sidx == 0 && mod.tls && opts.resolve_tls) {
+              if (const std::optional<std::uint32_t> v = opts.resolve_tls(type, addend, *mod.tls)) {
+                if (!write32(r_offset, *v)) {
+                  if (err) *err = "failed writing a TLS relocation slot";
+                  return false;
+                }
+                break;
+              }
+            }
             // Refused kinds are recorded with their address and type, and — unless the caller set
             // `tolerate_unresolved_relocs` — they fail the load at the end of relocation with every slot
             // named. That flag exists for one reason: IFUNC needs a guest call, so the linker loads the

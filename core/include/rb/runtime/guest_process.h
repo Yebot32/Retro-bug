@@ -73,7 +73,11 @@ struct BionicLayout {
   std::uint32_t bionic_tls_size = 0;    ///< sizeof(bionic_tls)
   std::uint32_t offset_bionic_tcb = 0;  ///< within static TLS: StaticTlsLayout::offset_bionic_tcb()
   std::uint32_t offset_bionic_tls = 0;  ///< within static TLS: StaticTlsLayout::offset_bionic_tls()
-  std::uint32_t static_tls_size = 0;    ///< StaticTlsLayout::size() with no TLS module registered
+  std::uint32_t static_tls_size = 0;    ///< StaticTlsLayout::size(), libc's own TLS module included
+  /// libc.so's `PT_TLS` as a static TLS module (the only one: the device's linker reserves it after bionic_tls).
+  /// `libc_tls_offset` is within static TLS; 0 when libc has no `PT_TLS`.
+  std::uint32_t libc_tls_offset = 0;
+  loader::TlsSegment libc_tls{};
   std::uint32_t auxv_field = 0;         ///< the shared-globals offset `getauxval` reads the auxv from
 };
 
@@ -228,6 +232,8 @@ class GuestProcess {
   std::optional<std::uint32_t> RunIfunc(const loader::IfuncSlot& slot);
   bool PublishAuxv(std::string* err);
   bool SetUpMainThread(std::string* err);
+  /// Registers libc.so's PT_TLS as static TLS module 1 in the shared globals (linker's job on a device).
+  bool RegisterLibcTls(std::string* err);
   bool CallSetup(const char* fn, const abi::Args32& args, std::string* err);
 
   GuestProcessOptions opts_;

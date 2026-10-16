@@ -333,13 +333,16 @@ void static_tls_fields_match_libc(const Images& im, int tier) {
   CHECK(l.bionic_tls_size == 0xb4cu);  // [device probe]
   CHECK(l.offset_bionic_tcb == 0u);  // [device probe]
   CHECK(l.offset_bionic_tls == 0x2cu);  // [device probe]
-  CHECK(l.static_tls_size == 0xb78u);  // [derived from the above]
+  CHECK(l.libc_tls_offset == 0xb78u);  // [device probe] libc.so's TLS module, after bionic_tls at align 8
+  CHECK(l.static_tls_size == 0xba8u);  // [device probe] the device's own main thread: 0xb78 + libc's 0x30
 
   const std::uint32_t g = p.shared_globals();
   CHECK_CTX(Word(p, g + 0x420) == l.static_tls_size, "+0x420 = " + Hex(Word(p, g + 0x420)));  // [host echo of the layout]
   CHECK_CTX(Word(p, g + 0x428) == l.offset_bionic_tcb, "+0x428 = " + Hex(Word(p, g + 0x428)));  // [host echo]
   CHECK_CTX(Word(p, g + 0x42c) == l.offset_bionic_tls, "+0x42c = " + Hex(Word(p, g + 0x42c)));  // [host echo]
-  CHECK_CTX(Word(p, g + 0x464) == 0u, "tls_modules count = " + Hex(Word(p, g + 0x464)));  // [host echo]
+  CHECK_CTX(Word(p, g + 0x464) == 1u, "tls_modules count = " + Hex(Word(p, g + 0x464)));  // [host echo]
+  CHECK_CTX(Word(p, g + 0x468) == 1u, "static module count = " + Hex(Word(p, g + 0x468)));  // [host echo]
+  CHECK_CTX(Word(p, g + 0x434) == 1u, "tls generation = " + Hex(Word(p, g + 0x434)));  // [host echo]
 
   const std::uint32_t tp = p.thread_pointer();
   const std::uint32_t static_tls = tp - l.tp_offset_in_tcb - l.offset_bionic_tcb;
@@ -356,6 +359,33 @@ void static_tls_fields_match_libc(const Images& im, int tier) {
     CHECK_CTX(Word(p, out + 4) - Word(p, out) == l.static_tls_size,  // [libc code]
               "end - start = " + Hex(Word(p, out + 4) - Word(p, out)));
   }
+}
+
+/// libc's own thread-locals (GWP-ASan's, llvm-libc's randomness state) live in libc's static TLS block, not on
+/// bionic's TLS slots. libc's `__tls_get_addr` finds module 1 at the device's offset, and after every constructor
+/// TLS_SLOT_THREAD_ID (TP + 4) still names the main thread. Before, the initial-exec offset was left 0 and GWP-ASan
+/// (sampled on in a random few processes) wrote its thread-locals over that slot: an intermittent boot fault.
+void libc_thread_locals_live_in_libcs_own_tls_block(const Images& im, int tier) {
+  Booted b = Boot(tier, im.libc, im.libm, im.libz);
+  CHECK_CTX(b.p != nullptr, std::string{"Tier "} + TierName(tier) + ": " + b.err);
+  if (!b.p) return;
+  GuestProcess& p = *b.p;
+  const runtime::BionicLayout& l = p.layout();
+  const std::uint32_t tp = p.thread_pointer();
+  const std::uint32_t block = tp - l.tp_offset_in_tcb - l.offset_bionic_tcb + l.libc_tls_offset;
+  CHECK_CTX(l.libc_tls.memsz == 0x30u && l.libc_tls.filesz == 0x28u && l.libc_tls.align == 8u,  // [image] PT_TLS
+            "PT_TLS memsz " + Hex(l.libc_tls.memsz) + " filesz " + Hex(l.libc_tls.filesz) + " align " + Hex(l.libc_tls.align));
+  CHECK_CTX(Word(p, tp + 4) == p.abi().main_thread().pthread_struct,  // [host echo, after libc's constructors]
+            "TLS_SLOT_THREAD_ID = " + Hex(Word(p, tp + 4)));
+  std::string merr;
+  const std::uint32_t ti = p.MapFree(mem::kGuestPage, mem::kRead | mem::kWrite, &merr);
+  CHECK_CTX(ti != 0, merr);
+  if (ti == 0) return;
+  const std::uint32_t index[2] = {1u, 8u};  // TlsIndex {module 1 = libc.so, offset 8: llvm-libc's randomness state}
+  CHECK(p.memory().Write(ti, index, sizeof index));
+  const Call c = CallLibc(p, tier, "__tls_get_addr", {abi::Value32::Ptr(ti)}, "LL");
+  CHECK_CTX(c.ok, c.why);
+  CHECK_CTX(c.r0 == block + 8u, "__tls_get_addr({1, 8}) = " + Hex(c.r0) + " want " + Hex(block + 8u));  // [libc code]
 }
 
 /// A libc whose `pthread_create` places a differently sized `pthread_internal_t` is refused by name.
@@ -508,6 +538,7 @@ int main() {
       boots_the_real_libc(im, tier);
       main_thread_is_real(im, tier);
       static_tls_fields_match_libc(im, tier);
+      libc_thread_locals_live_in_libcs_own_tls_block(im, tier);
       faulted_constructors_are_not_rerun(im, tier);
     }
     a_different_libc_layout_is_refused_by_name(im);
