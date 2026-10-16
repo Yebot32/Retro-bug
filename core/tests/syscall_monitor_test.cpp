@@ -453,6 +453,48 @@ void mmap2_serves_real_anonymous_pages() {
   CHECK_CTX(file.detail.find("file descriptor") != std::string::npos, file.detail);
 }
 
+/// The runtime's window is the whole 32-bit space (4 GiB). `uint32(window_bytes)` is 0 there, so a 32-bit
+/// limit refused every allocation; and the top of that window belongs to the trap and the kuser helpers, so
+/// the monitor allocates only below its ceiling (GuestProcess's 0xfff00000), whatever the window holds.
+void mmap2_in_a_4gib_window_stays_below_the_ceiling() {
+  mem::AddressModel model;
+  model.kind = mem::AddressModel::kBiased;
+  const long host_page = sysconf(_SC_PAGESIZE);
+  model.host_page_shift = mem::kGuestPageShift;
+  while (host_page > 0 && (1L << model.host_page_shift) < host_page) ++model.host_page_shift;
+  std::string err;
+  auto window = mem::GuestMemory::Create(std::size_t{1} << 32, model, &err);
+  CHECK_CTX(window != nullptr, "a 4 GiB biased window: " + err);
+  if (!window) return;
+  constexpr std::uint32_t kCeiling = 0xfff0'0000u;
+  sc::Monitor m;
+  m.set_memory(window.get());
+  m.set_alloc_ceiling(kCeiling);
+  const auto mmap = [&](std::uint32_t hint, std::uint32_t len) {
+    exec::MachineState s = State(sc::nr::kMmap2);
+    s.r[0] = hint;
+    s.r[1] = len;
+    s.r[2] = 3;            // PROT_READ | PROT_WRITE
+    s.r[3] = 0x22;         // MAP_PRIVATE | MAP_ANONYMOUS
+    s.r[4] = 0xffff'ffffu;  // fd -1
+    return m.Handle(s, 0);
+  };
+  const sc::Outcome few = mmap(0, 4 * mem::kGuestPage);
+  CHECK_CTX(few.verdict == sc::Verdict::kEmulated, few.detail);
+  const std::uint32_t at = static_cast<std::uint32_t>(few.r0);
+  CHECK_CTX(few.r0 > 0 && static_cast<std::uint64_t>(at) + 4 * mem::kGuestPage <= kCeiling &&
+                window->IsMapped(at),
+            "few pages -> 0x" + std::to_string(at));
+  // A hint straddling the ceiling is not honoured (the kernel may ignore a hint); the answer lands below.
+  const sc::Outcome hinted = mmap(kCeiling - mem::kGuestPage, 2 * mem::kGuestPage);
+  CHECK_CTX(hinted.verdict == sc::Verdict::kEmulated &&
+                static_cast<std::uint64_t>(static_cast<std::uint32_t>(hinted.r0)) + 2 * mem::kGuestPage <= kCeiling,
+            hinted.detail);
+  // Fits in the 4 GiB window, not below the ceiling: ENOMEM.
+  const sc::Outcome big = mmap(0, kCeiling);
+  CHECK_CTX(big.r0 == -static_cast<std::int32_t>(sc::err::kEnomem), "len=0xfff00000: " + big.detail);
+}
+
 /// `munmap` releases what `mmap2` served: the pages stop being mapped, the call answers 0 whether or
 /// not everything in the range was mapped — which is what a kernel does — and the range is validated
 /// rather than trusted (a range past the window is EINVAL, not a silent no-op).
@@ -693,6 +735,7 @@ int main() {
   the_policy_is_echoed_not_assumed();
   the_tally_is_per_monitor_and_in_first_seen_order();
   mmap2_serves_real_anonymous_pages();
+  mmap2_in_a_4gib_window_stays_below_the_ceiling();
   munmap_releases_served_pages();
   mremap_grows_moves_and_shrinks_like_a_kernel();
   console_writes_are_captured_and_answered_as_written();

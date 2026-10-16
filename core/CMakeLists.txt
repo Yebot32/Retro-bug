@@ -60,13 +60,22 @@ add_library(rb_exec STATIC exec/census.cpp exec/interp.cpp exec/jit.cpp)
 target_compile_features(rb_exec PUBLIC cxx_std_20)
 target_link_libraries(rb_exec PUBLIC rb_isa rb_mem)
 
+# rb::runtime's thread context (M2): `GuestThread` (one guest thread's registers, stack and per-thread
+# kernel state) and its host-thread binding, plus the header-only Global Guest Lock (rb/runtime/ggl.h). It
+# lives below the bridge and the monitor because both read a thread's fields; the rest of rb::runtime
+# (GuestProcess) composes everything and stays on top. Also the futex table (M2 Task 4): the monitor parks
+# futex waiters on it, and GuestProcess owns one per process.
+add_library(rb_guest_thread STATIC runtime/guest_thread.cpp runtime/futex_table.cpp)
+target_compile_features(rb_guest_thread PUBLIC cxx_std_20)
+target_link_libraries(rb_guest_thread PUBLIC rb_exec)
+
 # rb::abi (C08): the call bridge. It consumes an executor rather than knowing which tier it is — the
 # marshalling in abi/call.cpp is register arithmetic over MachineState, and the only executor coupling
 # is Run/resume around a host call or a guest syscall, so Tier J inherits the bridge unchanged
 # (docs/20 §C08).
 add_library(rb_abi STATIC abi/call.cpp abi/jni_env.cpp)
 target_compile_features(rb_abi PUBLIC cxx_std_20)
-target_link_libraries(rb_abi PUBLIC rb_exec rb_mem rb_syscall)
+target_link_libraries(rb_abi PUBLIC rb_exec rb_mem rb_syscall rb_guest_thread)
 
 # rb::diag (C17) has no engine dependency and must not gain one: it is the component that reports on the
 # others, so a report that could not be produced because something else failed to build would be the
@@ -80,7 +89,7 @@ target_include_directories(rb_diag PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 # allowlist" reviewable in one file rather than grep'd across the engine.
 add_library(rb_syscall STATIC syscall/monitor.cpp)
 target_compile_features(rb_syscall PUBLIC cxx_std_20)
-target_link_libraries(rb_syscall PUBLIC rb_exec rb_diag)
+target_link_libraries(rb_syscall PUBLIC rb_exec rb_diag rb_guest_thread)
 
 # rb::codecache (C04): the block-cache policy. It reaches no executable memory of its own — the
 # allocator is injected, so the three backends (anon RWX, memfd dual alias, none) are the platform's
@@ -101,8 +110,12 @@ target_link_libraries(rb_profile PUBLIC rb_diag)
 # rb_core is the aggregate the engine-facing components will hang off.
 add_library(rb_core INTERFACE)
 target_link_libraries(rb_core INTERFACE rb_mem rb_loader rb_linker rb_isa rb_exec rb_abi rb_diag
-                                        rb_syscall rb_codecache rb_profile dynarmic)
+                                        rb_syscall rb_guest_thread rb_codecache rb_profile dynarmic)
 
 if(DEFINED RB_COMPAT_INCLUDE_DIR)
   target_include_directories(rb_core INTERFACE "${RB_COMPAT_INCLUDE_DIR}")
 endif()
+
+# rb::runtime (M2) composes the components above; it lives in its own directory because it is the one
+# layer allowed to depend on all of them.
+add_subdirectory(runtime)

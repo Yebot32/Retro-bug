@@ -42,7 +42,7 @@ ADB="$SDK/platform-tools/adb.exe"
 
 # One list for build, push and run: a suite that is missing here silently does not execute, which is
 # the least useful kind of green.
-SUITES="rb_interval_compat_tests rb_variant_compat_tests rb_guest_memory_tests rb_guest_elf_tests rb_linker_tests rb_isa_front_end_tests rb_exec_census_tests rb_exec_interp_tests rb_abi_call_tests rb_abi_jni_tests rb_exec_tier_diff_tests rb_diag_tests rb_syscall_monitor_tests rb_codecache_tests rb_profile_tests dynarmic_tests"
+SUITES="rb_interval_compat_tests rb_variant_compat_tests rb_guest_memory_tests rb_guest_elf_tests rb_linker_tests rb_isa_front_end_tests rb_exec_census_tests rb_exec_interp_tests rb_abi_call_tests rb_abi_jni_tests rb_exec_tier_diff_tests rb_diag_tests rb_syscall_monitor_tests rb_codecache_tests rb_profile_tests rb_guest_process_tests rb_guest_thread_tests dynarmic_tests"
 # Lanes that are red on purpose because every failure names a real gap (a Tier I refusal, an unlinked
 # loader step), so they cannot gate a green run. They are still built and run here: before this list
 # existed they were in no build at all, which let a stale binary report the same failure count for hours
@@ -63,6 +63,33 @@ FIXTURE="$BUILD/librb_fixture.so"
 "$TC/bin/clang.exe" --target=armv7-none-linux-androideabi26 --sysroot="$TC/sysroot" \
   -mthumb -mfloat-abi=softfp -mfpu=neon -fPIC -shared -Os \
   -o "$FIXTURE" "$ROOT/tests/corpus/fixture_jni.c" -llog
+# The same image without a `.symtab`, for `GuestModule::FindLocalSymbol`'s "nothing to read" case: the
+# fixture as linked carries one, so the stripped copy is made here rather than assumed.
+FIXTURE_STRIPPED="$BUILD/librb_fixture_stripped.so"
+"$TC/bin/llvm-strip.exe" --strip-all -o "$FIXTURE_STRIPPED" "$FIXTURE"
+
+# The guest images the libc/process lanes boot. None is made here: the device's own bionic is pulled off a
+# 32-bit-capable phone (`build/device-libs/`, not in git) and libm/libz come from tools/build-guest-libs.sh.
+# These pushes used to be manual (a stale or missing copy on the device was a lane failing for a reason
+# the tree could not see). An input a *gating* lane needs is a refusal that names the command that makes
+# it; an input only an advisory lane needs is a warning, and that lane is skipped rather than run against
+# whatever stale copy the device may still hold.
+DEVICE_LIBC="$ROOT/build/device-libs/libc.so"
+GUEST_LIBM="$ROOT/build/guest-libs/libm.so"
+GUEST_LIBZ="$ROOT/build/guest-libs/libz.so"
+GUEST_APK="$ROOT/build/guest-apk/rb_guestprobe.apk"
+for spec in "$DEVICE_LIBC|adb pull /system/lib/libc.so build/device-libs/libc.so (from a 32-bit-capable device)" \
+            "$GUEST_LIBM|bash tools/build-guest-libs.sh libm" "$GUEST_LIBZ|bash tools/build-guest-libs.sh libz"; do
+  in="${spec%%|*}"
+  [ -s "$in" ] || { echo "missing $in — this script does not create it. Run: ${spec##*|}" >&2; exit 1; }
+done
+# Only the advisory rb_guest_apk_tests cannot run without the probe APK (rb_guest_libc_tests reads it
+# optionally and says so when it is absent).
+if [ ! -s "$GUEST_APK" ]; then
+  echo "WARNING: missing $GUEST_APK (run: bash tools/build-guest-apk.sh) — skipping the advisory" \
+       "rb_guest_apk_tests" >&2
+  ADVISORY="${ADVISORY/rb_guest_apk_tests/}"
+fi
 
 # C06's fixture: two libraries with a real DT_NEEDED edge and a constructor each, built `-nostdlib` so
 # the chain under test is two modules and not libc wearing a hat. `-Wl,-soname` is what makes the
@@ -98,6 +125,19 @@ WEAK="$BUILD/librbweak.so"
 "$TC/bin/clang.exe" --target=armv7-none-linux-androideabi26 --sysroot="$TC/sysroot" \
   -mthumb -mfloat-abi=softfp -mfpu=neon -fPIC -shared -nostdlib -Os \
   -Wl,-soname,librbweak.so -o "$WEAK" "$ROOT/tests/corpus/weak_unresolved.c"
+
+# Constructors that fault part-way (GuestProcess must not rerun the ones that already ran).
+CTORFAULT="$BUILD/librbctorfault.so"
+"$TC/bin/clang.exe" --target=armv7-none-linux-androideabi26 --sysroot="$TC/sysroot" \
+  -mthumb -mfloat-abi=softfp -mfpu=neon -fPIC -shared -nostdlib -Os \
+  -Wl,-soname,librbctorfault.so -o "$CTORFAULT" "$ROOT/tests/corpus/ctor_fault.c"
+
+# M2 Task 4: guest pthreads. Built exactly as tools/run_pthread_oracle.sh builds the copy it runs natively
+# (keep the two lines in step), linked against the NDK stub libc for its DT_NEEDED.
+PTHREAD_FIXTURE="$BUILD/libpthread_fixture.so"
+"$TC/bin/clang.exe" --target=armv7-none-linux-androideabi26 --sysroot="$TC/sysroot" \
+  -mthumb -mfloat-abi=softfp -mfpu=neon -fPIC -shared -nostdlib -Os \
+  -Wl,-soname,libpthread_fixture.so -o "$PTHREAD_FIXTURE" "$ROOT/tests/corpus/pthread_fixture.c" -lc
 
 # MSYS hands native programs /c/... paths and converts them on the way out — which is wrong for the
 # *device* path in `adb push a /data/local/tmp/b`, hence the MSYS_NO_PATHCONV=1 on every adb call
@@ -148,6 +188,21 @@ adb push "$(to_host "$IFLEAF")" /data/local/tmp/librbifuncleaf.so >/dev/null
 adb push "$(to_host "$IFUSER")" /data/local/tmp/librbifuncuser.so >/dev/null
 adb push "$(to_host "$IFLIBC")" /data/local/tmp/librbifunclibc.so >/dev/null
 adb push "$(to_host "$WEAK")" /data/local/tmp/librbweak.so >/dev/null
+adb push "$(to_host "$CTORFAULT")" /data/local/tmp/librbctorfault.so >/dev/null
+adb push "$(to_host "$PTHREAD_FIXTURE")" /data/local/tmp/libpthread_fixture.so >/dev/null
+adb push "$(to_host "$ROOT/tests/corpus/oracle-pthread.txt")" /data/local/tmp/oracle-pthread.txt >/dev/null
+adb push "$(to_host "$FIXTURE_STRIPPED")" /data/local/tmp/librb_fixture_stripped.so >/dev/null
+adb push "$(to_host "$DEVICE_LIBC")" /data/local/tmp/rb_device_libc.so >/dev/null
+# libc's own DT_NEEDED, from the same 32-bit system (optional: a 32-bit-capable device has them in /system/lib;
+# a 64-bit-only one needs them pushed — adb pull /system/lib/{libdl,ld-android}.so build/device-libs/).
+for dep in libdl.so ld-android.so; do
+  if [ -s "$ROOT/build/device-libs/$dep" ]; then
+    adb push "$(to_host "$ROOT/build/device-libs/$dep")" "/data/local/tmp/rb_device_$dep" >/dev/null
+  fi
+done
+adb push "$(to_host "$GUEST_LIBM")" /data/local/tmp/libm.so >/dev/null
+adb push "$(to_host "$GUEST_LIBZ")" /data/local/tmp/libz.so >/dev/null
+if [ -s "$GUEST_APK" ]; then adb push "$(to_host "$GUEST_APK")" /data/local/tmp/rb_guestprobe.apk >/dev/null; fi
 for t in $SUITES $ADVISORY; do
   src="$BUILD/core/tests/$t"
   [ -f "$src" ] || src="$BUILD/external/dynarmic/tests/$t"

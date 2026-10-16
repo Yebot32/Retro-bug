@@ -9,8 +9,10 @@
  */
 #include "rb/abi/abi.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
+#include <thread>
 #include <utility>
 
 #include "rb/syscall/monitor.h"
@@ -259,25 +261,109 @@ AbiContext::AbiContext(mem::GuestMemory& memory, GuestAddr stack_top, GuestAddr 
       slot_base_{return_address + 0x1000u},
       return_address_{return_address},
       stack_bytes_{kCallFrameBytes} {
-  // The bridge's own view of the guest's state. Registers start zeroed and every call overwrites the
+  // The main thread's view of the guest's state. Registers start zeroed and every call overwrites the
   // argument ones, so a callee can never read a value the host meant to hide; SP is the stack top and
   // descends one `kCallFrameBytes` frame per nesting level.
-  state_.r[RegLayout::kSp] = stack_top;
-  state_.r[15] = return_address;
-  state_.pc = return_address;
+  MachineState& s = main_.state;
+  s.r[RegLayout::kSp] = stack_top;
+  s.r[15] = return_address;
+  s.pc = return_address;
   // An initial value only: `PlaceArgs` derives the mode from bit 0 of every target, and this line used
   // to be the bug — a mode fixed here meant the bridge could not enter ARM-state code at all. It is
   // left set to Thumb because the host-entry slots the guest calls *into* are Thumb-shaped, and because
   // a state with no mode at all would be a worse default than one that matches the common case.
-  state_.mode = isa::Mode::Thumb;
+  s.mode = isa::Mode::Thumb;
+  main_.stack_hi = stack_top;
+  main_.owner = this;
 }
 
-void AbiContext::Bind(std::uint32_t slot, HostFn fn) {
+// The main GuestThread's own destructor drops the destroying host thread's binding to it.
+AbiContext::~AbiContext() = default;
+
+runtime::GuestThread* AbiContext::BoundThreadOfMine() {
+  runtime::GuestThread* t = runtime::CurrentGuestThread();
+  if (t == nullptr || !runtime::BoundHere(*t)) return nullptr;
+  // `owner` is compared, never dereferenced: a thread first used by another context is not ours.
+  if (t->owner != nullptr && t->owner != this) return nullptr;
+  return t;
+}
+
+runtime::GuestThread* AbiContext::ThreadForThisHost(std::string* why) {
+  if (runtime::GuestThread* t = BoundThreadOfMine()) {
+    t->owner = this;  // only the bound host thread writes it, and only before its first call here
+    return t;
+  }
+  // No binding of ours on this host thread. With an adopter (a `GuestProcess`), the host thread gets a guest
+  // thread of its own — the main one belongs only to the host thread that ran `LoadScope` (M2 Task 5 ruling a).
+  if (adopter_) {
+    std::string e;
+    runtime::GuestThread* t = adopter_(&e);
+    if (t != nullptr && runtime::BoundHere(*t)) {
+      t->owner = this;
+      return t;
+    }
+    if (e.empty()) {
+      e = t == nullptr ? "the adopter returned no guest thread and gave no reason"
+                       : "the adopter returned a guest thread that is not bound to this host thread";
+    }
+    if (why != nullptr) *why = "host thread not bound to a guest thread, and adopting it failed: " + e;
+    return nullptr;
+  }
+  // A bare bridge (no adopter: a single-threaded rig): the main thread goes to the first host thread that asks,
+  // or back to the one that holds it. `BindCurrentHostThread` refuses a main thread another live host thread
+  // holds, so two unbound host threads cannot both get it; a holder that exited has released it.
+  if (runtime::BindCurrentHostThread(main_)) {
+    main_.owner = this;
+    return &main_;
+  }
+  if (why != nullptr) {
+    *why = "host thread not bound to a guest thread (this bridge has no adopter, and its main guest thread is "
+           "bound to another live host thread)";
+  }
+  return nullptr;
+}
+
+MachineState& AbiContext::state() {
+  if (runtime::GuestThread* t = BoundThreadOfMine()) return t->state;
+  return main_.state;
+}
+
+void AbiContext::set_executor(exec::Executor& executor) {
+  executor_.store(&executor, std::memory_order_release);
+  if (runtime::GuestThread* t = BoundThreadOfMine()) t->executor = &executor;
+}
+
+exec::Executor& AbiContext::executor() const {
+  runtime::GuestThread* t = const_cast<AbiContext*>(this)->BoundThreadOfMine();
+  return (t != nullptr && t->executor != nullptr) ? *t->executor : *executor_.load(std::memory_order_acquire);
+}
+
+void AbiContext::set_monitor(syscall::Monitor* monitor) {
+  monitor_ = monitor;
+  // The monitor answers a syscall from the calling thread's per-thread fields; for the main thread those
+  // are `main_`'s, so it takes over whatever `set_ids`/`set_clear_child_tid` recorded before this.
+  if (monitor_ != nullptr) monitor_->set_main_thread(&main_);
+}
+
+void AbiContext::Bind(std::uint32_t slot, HostFn fn, SlotLock lock) {
   // Past `kMaxSlots` there is no address `SlotFor` could name that `IsHostEntry` would map back to
   // this slot, so the binding is dropped rather than aliased onto somebody else's. Callers that need
   // to know ask with `IsBound`.
   if (slot >= kMaxSlots) return;
-  bound_[slot] = std::move(fn);
+  auto entry = std::make_shared<const Slot>(Slot{std::move(fn), lock});
+  runtime::Ggl::Held hold(ggl_);
+  bound_[slot] = std::move(entry);
+}
+
+void AbiContext::SetSlotLock(std::uint32_t slot, SlotLock lock) {
+  runtime::Ggl::Held hold(ggl_);
+  const auto it = bound_.find(slot);
+  if (it != bound_.end()) it->second = std::make_shared<const Slot>(Slot{it->second->fn, lock});
+}
+
+bool AbiContext::IsBound(std::uint32_t slot) const {
+  runtime::Ggl::Held hold(const_cast<runtime::Ggl&>(ggl_));
+  return bound_.count(slot) != 0;
 }
 
 bool AbiContext::IsHostEntry(GuestAddr pc, std::uint32_t* slot) const {
@@ -299,13 +385,14 @@ bool AbiContext::IsHostEntry(GuestAddr pc, std::uint32_t* slot) const {
   return true;
 }
 
-bool AbiContext::RunKuserHelper(std::uint32_t which, std::string* err) {
+bool AbiContext::RunKuserHelper(MachineState& state, std::uint32_t which, std::string* err) {
   // The kernel's contract (kernel_user_helpers.rst): cmpxchg returns r0 = 0 with C set when it stored,
   // non-zero with C clear when it did not; r3, ip and the flags are clobbered; get_tls returns the TLS
-  // value in r0 and touches nothing else.
+  // value in r0 and touches nothing else. Called with the GGL held: the read-then-write below is atomic
+  // with respect to every other guest thread only because no other one runs meanwhile.
   constexpr std::uint32_t kCarry = 1u << 29;
-  auto& r = state_.r;
-  const auto set_carry = [&](bool c) { state_.cpsr = c ? (state_.cpsr | kCarry) : (state_.cpsr & ~kCarry); };
+  auto& r = state.r;
+  const auto set_carry = [&](bool c) { state.cpsr = c ? (state.cpsr | kCarry) : (state.cpsr & ~kCarry); };
   switch (which) {
     case 0: {  // __kuser_cmpxchg64(const int64_t* oldval, const int64_t* newval, volatile int64_t* ptr)
       std::uint64_t oldv = 0, newv = 0, cur = 0;
@@ -322,7 +409,7 @@ bool AbiContext::RunKuserHelper(std::uint32_t which, std::string* err) {
       set_carry(ok);
       return true;
     }
-    case 1:  // __kuser_memory_barrier: one modelled thread, so ordering is already total
+    case 1:  // __kuser_memory_barrier: guest threads run one at a time under the GGL, so ordering is total
       return true;
     case 2: {  // __kuser_cmpxchg(int32_t oldval, int32_t newval, volatile int32_t* ptr)
       std::uint32_t cur = 0;
@@ -341,7 +428,7 @@ bool AbiContext::RunKuserHelper(std::uint32_t which, std::string* err) {
       return true;
     }
     case 3:  // __kuser_get_tls
-      r[0] = state_.tp;
+      r[0] = state.tp;
       return true;
     default:
       *err = "no such kuser helper";
@@ -352,16 +439,43 @@ bool AbiContext::RunKuserHelper(std::uint32_t which, std::string* err) {
 Ret32 AbiContext::CallGuest(GuestAddr fn, const Args32& args, const Shorty& shorty,
                             unsigned max_steps, exec::RunResult* outcome,
                             MachineState* exit_state) {
+  return CallGuestImpl(fn, args, shorty, max_steps, false, outcome, exit_state);
+}
+
+Ret32 AbiContext::CallGuestToCompletion(GuestAddr fn, const Args32& args, const Shorty& shorty, unsigned turn_budget,
+                                        exec::RunResult* outcome) {
+  return CallGuestImpl(fn, args, shorty, turn_budget, true, outcome, nullptr);
+}
+
+Ret32 AbiContext::CallGuestImpl(GuestAddr fn, const Args32& args, const Shorty& shorty, unsigned max_steps,
+                                bool resume_on_budget, exec::RunResult* outcome, MachineState* exit_state) {
+  std::string why;
+  runtime::GuestThread* const thread = ThreadForThisHost(&why);
+  if (thread == nullptr) {
+    // Refused by name rather than run on somebody else's registers: a host thread that is not a guest
+    // thread has no stack, no tid and no TLS of its own here (and it could not be adopted).
+    if (outcome != nullptr) {
+      *outcome = exec::RunResult{};
+      outcome->reason = exec::StopReason::Internal;
+      outcome->detail = std::move(why);
+    }
+    return Ret32{};
+  }
+  // Held from here to the restore below, except where `RunThread` releases it (slices, host slots,
+  // blocking syscalls) — never across the marshalling or the restore, which touch this thread's registers
+  // and guest memory.
+  runtime::Ggl::Held hold(ggl_);
+  MachineState& state = thread->state;
+
   // A nested call (a JNI function calling back into the guest) runs on a copy and restores the outer
   // state on the way out, because the outer guest is still mid-instruction: its registers, PC and SP
   // are live. A handler that wants a result out of a nested call takes it from the `Ret32`, *not* from
   // the state — the state it was handed belongs to the outer call and is put back when this returns.
-  const MachineState outer = state_;
+  const MachineState outer = state;
   Ret32 ret{};
-  unsigned remaining = max_steps;
   std::string err;
 
-  if (!PlaceArgs(memory_, state_, fn, args, return_address_, stack_bytes_, &err)) {
+  if (!PlaceArgs(memory_, state, fn, args, return_address_, stack_bytes_, &err)) {
     if (outcome != nullptr) {
       outcome->reason = exec::StopReason::Internal;
       outcome->detail = std::move(err);
@@ -372,19 +486,79 @@ Ret32 AbiContext::CallGuest(GuestAddr fn, const Args32& args, const Shorty& shor
     // reports that half-built state. It is a mapped-memory failure rather than a bad argument list, so
     // the outcome is a fault either way, but `exit_state` is documented as "the state when the call
     // ended" and that is what it gets.
-    if (exit_state != nullptr) *exit_state = state_;
-    state_ = outer;
+    if (exit_state != nullptr) *exit_state = state;
+    state = outer;
     return ret;
   }
 
+  exec::RunResult run = RunThread(*thread, max_steps);
+  // To completion (a thread's own work, e.g. its TLS-key destructors at exit): a turn that ran out of budget is
+  // re-entered from where it stopped, as a clone()d thread's `ThreadMain` re-enters `RunThread`, until the callee
+  // returns, exits, faults or the process exits.
+  while (resume_on_budget && run.reason == exec::StopReason::Budget &&
+         !(monitor_ != nullptr && monitor_->group_exited())) {
+    run = RunThread(*thread, max_steps);
+  }
+  ret = ReturnValue(state, shorty);
+  if (outcome != nullptr) *outcome = run;
+  // Copied out before the restore below, which is the only reason this is a parameter rather than
+  // something a caller reads back from `state()`.
+  if (exit_state != nullptr) *exit_state = state;
+  state = outer;
+  return ret;
+}
+
+exec::RunResult AbiContext::RunThread(runtime::GuestThread& thread, unsigned budget) {
+  runtime::Ggl::Held hold(ggl_);
+  MachineState& state = thread.state;
+  exec::Executor* const engine =
+      thread.executor != nullptr ? thread.executor : executor_.load(std::memory_order_acquire);
   exec::RunResult run{};
+  if (engine == nullptr) {
+    run.reason = exec::StopReason::Internal;
+    run.detail = "no executor is set on this bridge";
+    return run;
+  }
+  unsigned remaining = budget;
+  unsigned held = 0;  ///< progress under the current hold of the GGL (Tier I: IR steps) — the slice clock
+  // Checked after every (re-)acquisition of the GGL — the loop top, which every slice boundary returns to, and
+  // right after a blocking wait or a released host slot — before any guest work, write-back or dispatch (M2
+  // Task 4 fix round 1).
+  const auto group_stop = [&] {
+    if (monitor_ == nullptr || !monitor_->group_exited()) return false;
+    run.reason = exec::StopReason::Exited;
+    run.detail = "the guest process exited (" + monitor_->group_exit_reason() + "); this thread stopped with it";
+    return true;
+  };
   unsigned syscalls = 0;
   for (;;) {
-    run = executor().Run(state_, remaining);
-    if (run.instructions_executed >= remaining) {
-      remaining = 0;
-    } else {
-      remaining -= run.instructions_executed;
+    // `exit_group` on another thread (or a fatal fault in one, or the process's teardown) ends this one too: it
+    // stops here, at its next slice boundary, syscall or host call, instead of running guest code in a process
+    // that has finished (Review Focus: no host thread is left running guest code).
+    if (group_stop()) break;
+    if (held >= kSliceSteps) {
+      // The slice boundary: hand the GGL to the longest waiter (the lock is a FIFO ticket lock, so this
+      // thread queues behind it), then carry on. State is consistent here — the executor stopped on a
+      // budget, exactly as it does at the end of any call's budget — and both tiers start every Run with
+      // no exclusive reservation, so an LL/SC sequence split by the switch fails its strex and retries.
+      slices_.fetch_add(1, std::memory_order_relaxed);
+      if (ggl_.waiters() > 0) contended_slices_.fetch_add(1, std::memory_order_relaxed);
+      {
+        runtime::Ggl::Released off(ggl_);
+        std::this_thread::yield();
+      }
+      held = 0;
+      continue;  // re-acquired: back to the top, which re-checks for a group exit before any guest work
+    }
+    const unsigned slice = std::min(remaining, kSliceSteps - held);
+    run = engine->Run(state, slice);
+    const unsigned done = std::min(run.instructions_executed, remaining);
+    remaining -= done;
+    held += done;
+    if (run.reason == exec::StopReason::Budget) {
+      // A slice ran out (go round: the top of the loop releases the lock) or the whole call's budget did.
+      if (remaining == 0 || done == 0) break;
+      continue;
     }
     if (run.reason == exec::StopReason::Syscall) {
       // The tier stops with PC already past the instruction and the number in `svc_number`, which is the
@@ -397,22 +571,44 @@ Ret32 AbiContext::CallGuest(GuestAddr fn, const Args32& args, const Shorty& shor
                      "nobody produced";
         break;
       }
+      // The budget and the syscall cap are checked only *after* this syscall is answered: the tier already
+      // stepped past the SVC, so a Budget stop here would have a re-entered turn (ThreadMain,
+      // CallGuestToCompletion) resume after it with r0 still holding arg0 — a silently skipped syscall.
+      syscall::Outcome o = monitor_->Begin(state, run.svc_number, &thread);
+      if (o.verdict == syscall::Verdict::kBlocking) {
+        // The wait runs with the GGL released, so other guest threads run meanwhile; the answer is recorded
+        // and written back once the lock is held again.
+        syscall::Outcome waited;
+        {
+          runtime::Ggl::Released off(ggl_);
+          waited = o.block ? o.block()
+                           : syscall::Outcome::Refused(syscall::err::kEnosys, "a blocking answer with no wait");
+        }
+        held = 0;
+        if (group_stop()) break;  // re-acquired after the wait: no write-back, no guest work in an exited process
+        o = monitor_->Finish(state, std::move(waited));
+      }
+      if (o.verdict == syscall::Verdict::kExit) {
+        run.reason = exec::StopReason::Exited;
+        run.detail = o.detail;
+        exit_status_ = o.r0;
+        break;
+      }
+      if (o.verdict == syscall::Verdict::kThreadExit) {
+        // `exit` (1): this guest thread is finished; the process and its other threads carry on.
+        run.reason = exec::StopReason::Exited;
+        run.detail = o.detail;
+        break;
+      }
       if (remaining == 0) {
         run.reason = exec::StopReason::Budget;
-        run.detail = "call budget exhausted inside a syscall";
+        run.detail = "call budget exhausted at a syscall (answered; the state is past it)";
         break;
       }
       if (++syscalls > kMaxSyscallsPerCall) {
         run.reason = exec::StopReason::Budget;
         run.detail = "more than " + std::to_string(kMaxSyscallsPerCall) +
-                     " syscalls in one call, which is a loop rather than a program";
-        break;
-      }
-      const syscall::Outcome o = monitor_->Handle(state_, run.svc_number);
-      if (o.verdict == syscall::Verdict::kExit) {
-        run.reason = exec::StopReason::Exited;
-        run.detail = o.detail;
-        exit_status_ = o.r0;
+                     " syscalls in one call, which is a loop rather than a program (the last was answered)";
         break;
       }
       continue;
@@ -426,50 +622,61 @@ Ret32 AbiContext::CallGuest(GuestAddr fn, const Args32& args, const Shorty& shor
 
     std::string herr;
     if (run.host_slot >= kKuserSlotBase && run.host_slot < kKuserSlotBase + 4u) {
-      if (!RunKuserHelper(run.host_slot - kKuserSlotBase, &herr)) {
+      // Under the GGL, never released: this is what makes the helpers atomic.
+      if (!RunKuserHelper(state, run.host_slot - kKuserSlotBase, &herr)) {
         run.reason = exec::StopReason::Fault;
-        run.detail = "kuser helper at 0x" + Hex32(state_.pc) + ": " + herr;
+        run.detail = "kuser helper at 0x" + Hex32(state.pc) + ": " + herr;
         break;
       }
       // Every helper ends in `bx lr`.
-      const GuestAddr lr = state_.r[RegLayout::kLr];
-      state_.mode = (lr & 1u) ? isa::Mode::Thumb : isa::Mode::Arm;
-      state_.pc = lr & (state_.mode == isa::Mode::Thumb ? ~1u : ~3u);
-      state_.r[15] = state_.pc;
+      const GuestAddr lr = state.r[RegLayout::kLr];
+      state.mode = (lr & 1u) ? isa::Mode::Thumb : isa::Mode::Arm;
+      state.pc = lr & (state.mode == isa::Mode::Thumb ? ~1u : ~3u);
+      state.r[15] = state.pc;
       continue;
     }
-    const auto fn = bound_.find(run.host_slot);
-    const bool ok = fn != bound_.end() && fn->second(state_, &herr);
+    SlotRef slot;  // our own reference: a `Bind` while this slot runs (GGL released) replaces, never frees, it
+    if (const auto it = bound_.find(run.host_slot); it != bound_.end()) slot = it->second;
+    bool ok = false;
+    if (slot) {
+      if (slot->lock == SlotLock::kHoldsGgl) {
+        ok = slot->fn(state, &herr);
+      } else {
+        // The rule for host code: it may block (a GL driver, a host condition variable, a nested guest
+        // call that itself waits), so other guest threads must be able to run while it does. A nested
+        // `CallGuest` it makes re-acquires the lock to run guest code (and itself releases it at slices,
+        // host slots and blocking syscalls, like any call).
+        runtime::Ggl::Released off(ggl_);
+        ok = slot->fn(state, &herr);
+      }
+      if (slot->lock != SlotLock::kHoldsGgl) held = 0;
+      // Re-acquired after a released slot, or after a held slot whose nested guest call released it inside.
+      if (group_stop()) break;
+    }
     if (!ok) {
       run.reason = exec::StopReason::Fault;
       run.detail = "host call at slot " + std::to_string(run.host_slot) +
-                   (fn == bound_.end() ? " is not bound" : "") +
+                   (!slot ? " is not bound" : "") +
                    (herr.empty() ? "" : ": " + herr);
       break;
     }
     // A host function is a callee, so it returns the way one does. Checked against the slot rather
     // than assumed: a handler that called back into the guest has already left PC where the guest
     // should continue, and overwriting that would resume the wrong instruction.
-    if (state_.pc == SlotFor(run.host_slot) && state_.r[RegLayout::kLr] != 0) {
-      const GuestAddr lr = state_.r[RegLayout::kLr];
-      state_.mode = (lr & 1u) ? isa::Mode::Thumb : isa::Mode::Arm;
-      state_.pc = lr & (state_.mode == isa::Mode::Thumb ? ~1u : ~3u);
-      state_.r[15] = state_.pc;
+    if (state.pc == SlotFor(run.host_slot) && state.r[RegLayout::kLr] != 0) {
+      const GuestAddr lr = state.r[RegLayout::kLr];
+      state.mode = (lr & 1u) ? isa::Mode::Thumb : isa::Mode::Arm;
+      state.pc = lr & (state.mode == isa::Mode::Thumb ? ~1u : ~3u);
+      state.r[15] = state.pc;
     }
   }
 
-  ret = ReturnValue(state_, shorty);
   // The whole call's count, not the last segment's: `run` is the slice after the final host call or
   // syscall, so a call that made any reported only its tail — Gumball's jniRun read "38 steps" every frame
   // while issuing 17 GL calls. Nested calls a host function makes run on their own budgets and are not
   // included.
-  run.instructions_executed = max_steps - remaining;
-  if (outcome != nullptr) *outcome = run;
-  // Copied out before the restore below, which is the only reason this is a parameter rather than
-  // something a caller reads back from `state()`.
-  if (exit_state != nullptr) *exit_state = state_;
-  state_ = outer;
-  return ret;
+  run.instructions_executed = budget - remaining;
+  return run;
 }
 
 }  // namespace rb::abi

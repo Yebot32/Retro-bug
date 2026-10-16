@@ -119,6 +119,8 @@ class InterpExecutor : public Executor {
   mem::GuestMemory& memory_;
   GuestAddr return_address_;
   const HostDispatch* dispatch_;
+  /// Runs so far, for `RB_T1_TRACE=<n>` (trace the n-th Run). Per executor rather than a static.
+  unsigned run_index_ = 0;
   /// The reservation `ldaex`/`strex` consult. Per-core, and outliving one block: Dynarmic's own marker
   /// lives in the JIT state for the whole `Run`, and an LL/SC retry loop whose load and store land in
   /// different basic blocks is normal for a mutex, so a per-block record would make every such store fail

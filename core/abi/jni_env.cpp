@@ -21,6 +21,14 @@ namespace rb::abi {
 
 namespace {
 
+/// The guest registers at the `Call<T>Method` slot a host method is running for, per host thread (M2: two
+/// guest threads can be inside host methods at once). `env` scopes it to one environment.
+struct CallingFrame {
+  const JniEnv* env = nullptr;
+  const exec::MachineState* state = nullptr;
+};
+thread_local CallingFrame tls_calling;
+
 /// Hex digits for a guest word — what every "0x" in a refusal is followed by. The file used to print
 /// `"0x" + Hex32(addr)`, a decimal number wearing a hex prefix, in every handle it named.
 std::string Hex32(std::uint32_t v) {
@@ -75,6 +83,10 @@ std::uint32_t Arg(const exec::MachineState& state, unsigned index) {
 }
 
 }  // namespace
+
+const exec::MachineState* JniEnv::calling_state() const {
+  return tls_calling.env == this ? tls_calling.state : nullptr;
+}
 
 JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsigned arena_bytes,
                std::string* err)
@@ -346,7 +358,7 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
       if (serr != nullptr) *serr = "GetArrayLength(0x" + Hex32(Arg(s, 1)) + "): not a live byte[] of this environment";
       return false;
     }
-    s.r[0] = static_cast<std::uint32_t>(it->second.size());
+    s.r[0] = static_cast<std::uint32_t>(it->second->size());
     return true;
   });
   abi_.Bind(jni::kGetByteArrayRegion, [this](exec::MachineState& s, std::string* serr) {
@@ -363,7 +375,7 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
       if (serr != nullptr) *serr = "GetByteArrayRegion: the stacked buf argument is not readable";
       return false;
     }
-    const auto size = static_cast<std::int64_t>(it->second.size());
+    const auto size = static_cast<std::int64_t>(it->second->size());
     if (start < 0 || len < 0 || static_cast<std::int64_t>(start) + len > size) {
       // JNI throws ArrayIndexOutOfBoundsException here; with no exceptions to raise, refuse by name.
       if (serr != nullptr) {
@@ -372,7 +384,7 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
       }
       return false;
     }
-    if (len != 0 && !memory_.Write(buf, it->second.data() + start, static_cast<std::size_t>(len))) {
+    if (len != 0 && !memory_.Write(buf, it->second->data() + start, static_cast<std::size_t>(len))) {
       if (serr != nullptr) {
         *serr = "GetByteArrayRegion: could not write " + std::to_string(len) + " bytes to guest 0x" + Hex32(buf);
       }
@@ -410,7 +422,7 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
       if (serr != nullptr) *serr = "SetByteArrayRegion: the stacked buf argument is not readable";
       return false;
     }
-    const auto size = static_cast<std::int64_t>(it->second.size());
+    const auto size = static_cast<std::int64_t>(it->second->size());
     if (start < 0 || len < 0 || static_cast<std::int64_t>(start) + len > size) {
       if (serr != nullptr) {
         *serr = "SetByteArrayRegion: [" + std::to_string(start) + ", +" + std::to_string(len) +
@@ -418,7 +430,7 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
       }
       return false;
     }
-    if (len != 0 && !memory_.Read(buf, it->second.data() + start, static_cast<std::size_t>(len))) {
+    if (len != 0 && !memory_.Read(buf, it->second->data() + start, static_cast<std::size_t>(len))) {
       if (serr != nullptr) {
         *serr = "SetByteArrayRegion: could not read " + std::to_string(len) + " bytes from guest 0x" + Hex32(buf);
       }
@@ -437,7 +449,7 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
       if (serr != nullptr) *serr = "GetByteArrayElements(0x" + Hex32(arr) + "): not a live byte[] of this environment";
       return false;
     }
-    const auto n = static_cast<std::uint32_t>(it->second.size());
+    const auto n = static_cast<std::uint32_t>(it->second->size());
     const unsigned total = (jni::kStringHeaderBytes + n + 3u) & ~3u;
     const GuestAddr block = AllocBlock(total);
     std::string werr;
@@ -451,7 +463,7 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
       return false;
     }
     live_.emplace(block, LiveBlock{total, n, jni::kElementsMagic});
-    if (n != 0 && !memory_.Write(block + jni::kStringHeaderBytes, it->second.data(), n)) {
+    if (n != 0 && !memory_.Write(block + jni::kStringHeaderBytes, it->second->data(), n)) {
       ReleaseInternal(block);
       if (serr != nullptr) *serr = "GetByteArrayElements: could not write the copy at 0x" + Hex32(block);
       return false;
@@ -491,8 +503,8 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
         if (serr != nullptr) *serr = "ReleaseByteArrayElements: the array 0x" + Hex32(arr) + " was deleted before its elements";
         return false;
       }
-      if (!it->second.empty() &&
-          !memory_.Read(block + jni::kStringHeaderBytes, it->second.data(), it->second.size())) {
+      if (!it->second->empty() &&
+          !memory_.Read(block + jni::kStringHeaderBytes, it->second->data(), it->second->size())) {
         if (serr != nullptr) *serr = "ReleaseByteArrayElements: the copy at 0x" + Hex32(elems) + " is unreadable";
         return false;
       }
@@ -519,6 +531,17 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
     return true;
   });
   abi_.Bind(jni::kExceptionDescribe, noop);
+
+  // The JNIEnv table is an engine service, not foreign host code: its functions mutate this environment's
+  // arena, records and host class model, which the GGL protects, and none of them waits on another guest
+  // thread. So they run with the GGL held — including the host methods `CallHost` dispatches to, which
+  // reach the same records through `NewHostByteArray`/`StringText`/`HostArray`. A nested guest call one
+  // of them makes (a host method calling back into the guest) may still release the lock at a slice
+  // boundary or a blocking syscall; nothing here keeps an invariant across that call except the
+  // `methods_` record, which only setup (`DefineHostMethod`) grows.
+  for (std::uint32_t slot = 0; slot < jni::kTableEntries; ++slot) {
+    abi_.SetSlotLock(slot, AbiContext::SlotLock::kHoldsGgl);
+  }
 
   ok_ = true;
   if (err != nullptr) err->clear();
@@ -859,7 +882,7 @@ GuestAddr JniEnv::ClassOf(GuestAddr obj) const {
 GuestAddr JniEnv::NewHostByteArray(std::vector<std::uint8_t> bytes) {
   if (next_array_ >= jni::kHandleSpan / 4u) return 0;
   const GuestAddr h = jni::kArrayRefBase + next_array_++ * 4u;
-  arrays_.emplace(h, std::move(bytes));
+  arrays_.emplace(h, std::make_shared<std::vector<std::uint8_t>>(std::move(bytes)));
   ++arrays_made_;
   return h;
 }
@@ -961,9 +984,12 @@ bool JniEnv::CallHost(exec::MachineState& s, char family, ArgForm form, std::str
   std::uint64_t ret = 0;
   std::string why;
   ++m.calls;
-  calling_state_ = &s;
+  // Per host thread, and saved/restored, so a host method on one thread never sees another thread's caller,
+  // and a host method that calls back into the guest (which calls another host method) gets its own back.
+  const CallingFrame saved = tls_calling;
+  tls_calling = CallingFrame{this, &s};
   const bool answered = m.fn(*this, args, ret, &why);
-  calling_state_ = nullptr;
+  tls_calling = saved;
   if (!answered) {
     ++m.refused;
     return fail(who + ": " + why);
@@ -1013,7 +1039,7 @@ void JniEnv::Audit(diag::Auditor& audit) const {
   audit.Info("jni/arena", std::to_string(arena_total) + " bytes, " + std::to_string(strings_made_) +
                              " string(s) made, " + std::to_string(chars_made_) + " copy/copies");
   std::size_t array_bytes = 0;
-  for (const auto& [handle, bytes] : arrays_) array_bytes += bytes.size();
+  for (const auto& [handle, bytes] : arrays_) array_bytes += bytes->size();
   audit.Check("jni/array-accounting", arrays_made_ - arrays_freed_ == arrays_.size(),
               std::to_string(arrays_made_) + " made - " + std::to_string(arrays_freed_) + " freed vs " +
                   std::to_string(arrays_.size()) + " live (" + std::to_string(array_bytes) + " B on the host)");

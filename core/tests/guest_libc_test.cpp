@@ -1332,8 +1332,13 @@ void an_importer_of_strcpy_and_strcat_gets_the_work_done() {
     return;
   }
   const auto libc_image = read_file(RB_DEVICE_LIBC_PATH);
-  const auto libdl = read_file("/system/lib/libdl.so");
-  const auto ld_android = read_file("/system/lib/ld-android.so");
+  // Pushed beside the libc (tools/run_engine_tests.sh) so a 64-bit-only device has them; else the device's own.
+  const auto sibling = [](const std::string& so) {
+    auto img = read_file(("/data/local/tmp/rb_device_" + so).c_str());
+    return img.empty() ? read_file(("/system/lib/" + so).c_str()) : img;
+  };
+  const auto libdl = sibling("libdl.so");
+  const auto ld_android = sibling("ld-android.so");
   // By value: the linker keeps the provider for as long as it lives.
   const linker::ImageProvider provider =
       [libc_image, libdl, ld_android, user](

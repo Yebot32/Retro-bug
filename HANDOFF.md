@@ -6,7 +6,96 @@ hand-written IR interpreter = "Tier I"). Engine in `core/`, on-device launcher a
 (`android/jni/launcher.cpp` + `android/jni/gl_forward.cpp` + `android/java/.../LauncherActivity.java`).
 Everything below this section is older, detailed session history — read it only when you need depth.
 
-## M1 — on-device repackager + stub boot (2026-10-15, ACCEPTED) — newest state, read first
+## M2 — multi-entry core (2026-10-16, ACCEPTED on the tablet and the OnePlus) — newest state, read first
+
+Branch `m2-multi-entry-core` (not merged, not pushed). Plan: `docs/superpowers/plans/2026-10-15-m2-multi-entry-core.md`.
+Ledger (git-ignored): `.superpowers/sdd/2026-10-15-m2-multi-entry-core/progress.md`. Newest notes: `NEXT-AI-HANDOFF.txt`.
+
+**What M2 delivers.**
+- `GuestProcess` (`core/runtime/guest_process.cpp`): one persistent guest process per app — 4 GiB biased window,
+  bionic's real main thread, every libc layout fact asserted against the image. The in-app runtime
+  (`android/jni/runtime_boot.cpp`) boots it once per process ("scope: booted once"), links DT_NEEDED siblings from
+  `assets/rb32`, streams zip entries, runs constructors + guest `JNI_OnLoad` only (boot-only, no per-game profile).
+- `GuestThread` + Global Guest Lock (FIFO ticket lock, 200k-step slices; released in host slots and blocking syscalls).
+- Guest pthreads on real host threads: `clone`, `futex` (`FutexTable`), `exit`/`exit_group`, sleeps; native pthread
+  oracle `tests/corpus/oracle-pthread.txt` (`tools/run_pthread_oracle.sh`).
+- Adopted ART threads: a Java thread calling into the guest gets a synthesized guest pthread made by libc's own init
+  functions; at host-thread exit its TLS-key destructors run to completion, it is unlinked, its mapping freed (kept,
+  and named, when it cannot be unlinked).
+
+**Deviations closed:** M1 (1b) isolated boot (siblings now linked), (4) profile-in-boot (boot-only mode), M1 (2) the
+64 MiB per-run window (now a process-lifetime 4 GiB window).
+
+**Evidence (tablet R52Y106BECZ, 2026-10-16, after the final-review fixes below).**
+- Launcher `RB_WAIT=100 bash tools/run_launcher_on_device.sh R52Y106BECZ gumball`: "RESULT: ran to the end — 7068
+  frame(s) on tier J, final scene GumballMainMenu, no fault, drawn on screen".
+- After the TLS fix (launcher rebuilt): ABGo bootcheck again 258 constructors, 0x10006, no fault, with the `tls:` line;
+  Gumball launcher run (2026-10-16 16:10): "RESULT: ran to the end — 7063 frame(s) on tier J, final scene
+  GumballMainMenu, no fault, drawn on screen". (The attempt before it stopped at 3827 frames on `eglSwapBuffers`
+  EGL_BAD_SURFACE 0x300d — the display surface went away right after the human unlocked the tablet; not an
+  emulation fault, did not repeat.)
+- `am start -S -n com.retrobug.launcher/.LauncherActivity -e bootcheck angry-birds-go`: scope booted once, 258
+  constructors on Tier J, `JNI_OnLoad` 0x10006, "RESULT: startup finished with no fault"; 92 `Java_*` wait for M3.
+- `bash tools/run_java_tests.sh`: 141 + 54 checks, 0 failures.
+- Engine lanes `RB_SERIAL=R52Y106BECZ bash tools/run_engine_tests.sh arm64-v8a`: exit 0, all 19 gating lanes 0 failures
+  (guest_thread 445, guest_process 159, abi_call 127, monitor 172, diff 998, dynarmic 200,561) and both advisory lanes
+  green (guest_libc 147, guest_apk 1376) — after the TLS fix below.
+- Earlier (2026-10-15, OnePlus 75ff8cd3): all 19 gating lanes 0 failures on the M2 code; new launcher installed.
+
+**Final-review fixes (2026-10-16).**
+- An adopted thread that exits while another live host thread holds its guest thread no longer frees that
+  `GuestThread` (use-after-free): it moves to `stranded_` and lives until the process goes (also after a group exit).
+  Regression check in `unlinkable_exit_keeps_the_mapping` (the holder still sees its thread after the exit).
+- `CallGuestToCompletion`'s re-entry across turn budgets now has a test (`abi_call_test`
+  `a_call_to_completion_is_re_entered_across_turns`: fib(12) with a 1000-step turn).
+- guest_libc's `librbifunclibc` row failed on 64-bit-only phones (no `/system/lib/ld-android.so`): the script now pushes
+  `build/device-libs/{libdl,ld-android}.so` (pulled from the tablet) as `/data/local/tmp/rb_device_*` and the row prefers them.
+
+**Fixed: intermittent boot fault — libc's own TLS was never registered (2026-10-16).** About 1 run in 5–10 of
+`rb_guest_thread_tests`, a fresh `GuestProcess` faulted in `__libc_preinit` (`__set_errno_internal` storing to 0x1387):
+TLS_SLOT_THREAD_ID (TP+4) held 0x10eb instead of the thread. A store watch caught the writer: **GWP-ASan**
+(`GuardedPoolAllocator::init`, `gwp_asan_malloc`), which libc turns on in a random few processes, keeps its
+thread-locals in libc's own `PT_TLS` block through an initial-exec `R_ARM_TLS_TPOFF32` slot that the loader left
+unapplied (0), so they sat on bionic's TLS slots. Fix: the loader's new `LoadOptions::resolve_tls` hook answers a
+module's own TLS relocations; GuestProcess places libc's block where the device's linker does (static-TLS offset
+0xb78 = TP+0xb6c, static TLS 0xba8 — the probe's measured values), registers it as static TLS module 1 in the shared
+globals (module table, counts, generation 1; six new [image] facts) and copies its init image with libc's own
+`__init_static_tls` (main and adopted threads; `pthread_create` already does). Runtime log: `tls: libc.so is static
+TLS module 1 ...`. Test: `guest_process_test` `libc_thread_locals_live_in_libcs_own_tls_block` (libc's
+`__tls_get_addr({1, 8})` = block + 8; TP+4 intact after constructors) plus layout rows. Evidence: 30/30 clean
+`rb_guest_thread_tests` runs with a store watch on TP+4 (before the fix: a failure within 3–7 runs).
+
+**OnePlus 75ff8cd3 acceptance (2026-10-16, human confirmed every install).** Plan Task 6 steps 1–3:
+- New launcher installed (16:12:46). Engine lanes `RB_SERIAL=75ff8cd3 bash tools/run_engine_tests.sh arm64-v8a`:
+  exit 0, all 19 gating lanes 0 failures and both advisory lanes green — guest_libc 147/0 (its `ld-android.so` row
+  failed here before the libc-sibling push), guest_apk 1376/0.
+- **M1 (a) closed: a re-repack installs as an update.** Angry Birds Go `-e repack base`: `install: status=0 (SUCCESS)`,
+  firstInstallTime still 2026-10-15 14:38:58, lastUpdateTime 2026-10-16 16:18:34, arm64-v8a. Gumball
+  `-e repack gumball`: status=0, firstInstallTime still 2026-10-15 14:40:19, lastUpdateTime 16:19:14.
+- Angry Birds Go by its icon, pid 24394: `tls:` module line, "scope: booted once", 258 constructors on Tier J
+  (16:18:45.36 → 48.36, ~3 s), `JNI_OnLoad` 0x10006, "RESULT: startup finished with no fault", no profile lines; then
+  `UnsatisfiedLinkError` at `AngryBirdsGoActivity.isDeviceAmazon()` (`Java_com_rovio_angrybirdsgo_AngryBirdsGoActivity_isDeviceAmazon`).
+- Gumball by its icon, pid 26352: scope booted once, 24 constructors on Tier J (~0.85 s), no `JNI_OnLoad` (12 `Java_*`
+  for its own Java), "RESULT: startup finished with no fault"; then on its GL thread `UnsatisfiedLinkError` at
+  `JNIGLSurface.jniClearTextures()` from `onSurfaceCreated` — this run the GL thread got there before the known
+  targetSdk billing crash (implicit `bindService`), which is still there for the shims to fix.
+**Final whole-branch review (2026-10-16, Opus reviewer over 3280c6f..3cf6218) — all four findings fixed.**
+1. CRITICAL, fixed in 8cf1273: `RunThread` returned Budget at an SVC the tier had stepped past (syscall cap of 100,000
+   per turn), so a re-entered turn skipped that syscall with r0 = arg0. Caps are now checked after the syscall is
+   answered. Row `pt_syscall_storm(150000)` (device oracle 150000) read 149999 on both tiers before the fix.
+2. IMPORTANT, fixed in 93c10b0: the in-app boot report raced with guest-thread logs (and was detached under them);
+   `runtime_boot.cpp` now guards it with a leaf mutex (`Live`, `SetReport`) and reads the tallies holding the GGL.
+   No dedicated test (needs a guest JNI_OnLoad that leaves a logging thread running) — exercised by the boot checks.
+3. MINOR, fixed in 93c10b0: static TLS rounded to libc's PT_TLS alignment; an odd alignment is refused.
+4. MINOR, fixed in 93c10b0: the libc TLS test now checks the TPOFF32 slot value (TP + 0xb6c) and that no libc TLS
+   relocation was left unapplied.
+After the fixes: all lanes green on the tablet and the OnePlus (guest_thread 457, abi_call 191, guest_process 161);
+launcher reinstalled on the OnePlus, ABGo bootcheck: 258 constructors, 0x10006, no fault. Ready to merge to `main`.
+
+**Next after M2:** targetSdk compatibility shims (Gumball's implicit `bindService`) → M3 JNI bridge (see the M3 MUST
+list in `NEXT-AI-HANDOFF.txt`).
+
+## M1 — on-device repackager + stub boot (2026-10-15, ACCEPTED)
 
 Branch `m1-repackager` (not merged to `main`, not pushed). Design: `docs/superpowers/specs/2026-10-15-general-32bit-app-support-design.md`.
 
@@ -46,7 +135,7 @@ synchronously inside the game's `JNI_OnLoad` on the loading thread, after readin
 streamed/mmapped zip reads, a wider catch.
 
 **Not yet verified on a device** (each needs the human to confirm a dialog; offered as a follow-up):
-(a) re-repacking the same game installs as an update (same key `retrobug-repack`; expected status=0 SUCCESS, unchanged firstInstallTime);
+(a) ~~re-repacking the same game installs as an update~~ VERIFIED 2026-10-16 on the OnePlus (status=0, firstInstallTime unchanged; see M2);
 (b) installing a repack over a natively installed original reports the installer's own incompatible-signature text (expected
 status=5 INSTALL_FAILED_UPDATE_INCOMPATIBLE).
 

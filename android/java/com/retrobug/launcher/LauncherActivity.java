@@ -158,9 +158,22 @@ public class LauncherActivity extends Activity {
         }
         final String bootcheck = getIntent() == null ? null : getIntent().getStringExtra("bootcheck");
         if (bootcheck != null && !bootcheck.isEmpty()) {
+            // `-e bootcheck2 <name>`: a second boot right after the first, in this same process — the
+            // in-process runtime's guest process is process-lifetime, so the second must reuse its scope.
+            final String second = getIntent().getStringExtra("bootcheck2");
+            File secondApk = null;
+            if (second != null && !second.isEmpty()) {
+                for (File f : games()) {
+                    if (f.getName().toLowerCase().contains(second.toLowerCase())) {
+                        secondApk = f;
+                        break;
+                    }
+                }
+                if (secondApk == null) Log.w(TAG, "bootcheck2: no game matching '" + second + "'");
+            }
             for (File f : games()) {
                 if (f.getName().toLowerCase().contains(bootcheck.toLowerCase())) {
-                    bootCheck(f, getIntent().getStringExtra("lib"));
+                    bootCheck(f, getIntent().getStringExtra("lib"), secondApk);
                     return;
                 }
             }
@@ -597,34 +610,52 @@ public class LauncherActivity extends Activity {
 
     private boolean wantPortrait_ = false;
 
-    /// The `-e bootcheck` run: `nativeBootCheck` on a worker thread, its answer shown as a report.
-    private void bootCheck(final File apk, final String lib) {
+    /// The `-e bootcheck` run: `nativeBootCheck` on a worker thread, its answer shown as a report. With a
+    /// `second` APK (`-e bootcheck2`), a second boot follows on the same thread, in the same process.
+    private void bootCheck(final File apk, final String lib, final File second) {
         reportTitle_ = "bootcheck " + apk.getName();
         currentReport_ = "bootcheck " + apk.getName() + " ...";
         show(Screen.REPORT);
         new Thread(new Runnable() {
             @Override public void run() {
-                String report;
-                try {
-                    String name = lib;
-                    if (name == null || name.isEmpty()) name = largestRb32Lib(apk);
-                    if (name == null) {
-                        report = "FATAL: bootcheck: " + apk.getName() + " has no assets/rb32/*.so entry —"
-                                + " make it with tools/make_bootcheck_apk.sh";
-                    } else {
-                        Log.i(TAG, "bootcheck: " + apk.getName() + " lib=" + name);
-                        report = nativeBootCheck(apk.getAbsolutePath(), name);
-                    }
-                } catch (IOException | RuntimeException | UnsatisfiedLinkError e) {
-                    report = "FATAL: bootcheck: " + e.getClass().getSimpleName() + ": " + e.getMessage();
-                    Log.e(TAG, report);
-                }
+                String report = bootCheckOne(apk, lib);
+                if (second != null) report += "\n" + bootCheckOne(second, null);
                 final String text = report;
                 runOnUiThread(new Runnable() {
                     @Override public void run() { saveAndShow("bootcheck", text); }
                 });
             }
         }, "rb-bootcheck").start();
+    }
+
+    /// One `nativeBootCheck` on `apk` (its largest `assets/rb32/*.so` unless `lib` names one); never throws.
+    /// A staged original has no `assets/rb32/` layout; its repack output (`-e repack <name> -e install 0`,
+    /// under getExternalFilesDir(null)/repack/, same file name) does, and is booted in its place.
+    private String bootCheckOne(File apk, String lib) {
+        String note = "";
+        try {
+            if (largestRb32Lib(apk) == null) {
+                File repacked = new File(new File(getExternalFilesDir(null), "repack"), apk.getName());
+                if (repacked.isFile() && largestRb32Lib(repacked) != null) {
+                    note = "bootcheck: " + apk.getName() + " has no assets/rb32/ — booted the M1 repack output "
+                            + repacked + " instead of the staged original\n";
+                    Log.i(TAG, note.trim());
+                    apk = repacked;
+                }
+            }
+            String name = lib;
+            if (name == null || name.isEmpty()) name = largestRb32Lib(apk);
+            if (name == null) {
+                return "FATAL: bootcheck: " + apk.getName() + " has no assets/rb32/*.so entry —"
+                        + " make it with tools/make_bootcheck_apk.sh";
+            }
+            Log.i(TAG, "bootcheck: " + apk.getName() + " lib=" + name);
+            return note + nativeBootCheck(apk.getAbsolutePath(), name);
+        } catch (IOException | RuntimeException | UnsatisfiedLinkError e) {
+            String report = "FATAL: bootcheck: " + e.getClass().getSimpleName() + ": " + e.getMessage();
+            Log.e(TAG, report);
+            return note + report;
+        }
     }
 
     private static String largestRb32Lib(File apk) throws IOException {
