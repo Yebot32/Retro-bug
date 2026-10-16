@@ -377,6 +377,14 @@ void libc_thread_locals_live_in_libcs_own_tls_block(const Images& im, int tier) 
             "PT_TLS memsz " + Hex(l.libc_tls.memsz) + " filesz " + Hex(l.libc_tls.filesz) + " align " + Hex(l.libc_tls.align));
   CHECK_CTX(Word(p, tp + 4) == p.abi().main_thread().pthread_struct,  // [host echo, after libc's constructors]
             "TLS_SLOT_THREAD_ID = " + Hex(Word(p, tp + 4)));
+  // The value that was broken: GWP-ASan's initial-exec slot. [image] `llvm-readelf -r`: libc's only
+  // R_ARM_TLS_TPOFF32 is at 0xd67e8 (symbol 0, addend 0); it must hold the block's offset from TP, 0xb78 - 0xc.
+  CHECK_CTX(Word(p, p.libc()->base + 0xd67e8u) == l.libc_tls_offset - l.offset_bionic_tcb - l.tp_offset_in_tcb,
+            "TPOFF32 slot = " + Hex(Word(p, p.libc()->base + 0xd67e8u)));
+  // And none of libc's TLS relocations was left unapplied (17/18/19: DTPMOD32, DTPOFF32, TPOFF32).
+  for (const std::uint32_t t : p.libc()->unsupported_reloc_types) {
+    CHECK_CTX(t != 17u && t != 18u && t != 19u, "libc.so TLS relocation type " + std::to_string(t) + " not applied");
+  }
   std::string merr;
   const std::uint32_t ti = p.MapFree(mem::kGuestPage, mem::kRead | mem::kWrite, &merr);
   CHECK_CTX(ti != 0, merr);

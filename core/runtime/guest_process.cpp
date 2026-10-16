@@ -211,11 +211,15 @@ std::optional<BionicLayout> VerifyBionicLayout(const mem::GuestMemory& mem, cons
   l.offset_bionic_tcb = 0;
   l.offset_bionic_tls = RoundUp(l.offset_bionic_tcb + l.tcb_size, kStaticTlsAlign);
   l.static_tls_size = RoundUp(l.offset_bionic_tls + l.bionic_tls_size, kStaticTlsAlign);
+  if (libc.tls && (libc.tls->align == 0 || (libc.tls->align & (libc.tls->align - 1)) != 0 || libc.tls->align > 0x1000)) {
+    return refuse("libc.so's PT_TLS alignment " + Hex(libc.tls->align) + " is not a power of two up to a page");
+  }
   if (libc.tls) {
     // reserve_solib_segment(libc's PT_TLS), then finish_layout(): the device's own 0xba8 for this libc.
     l.libc_tls = *libc.tls;
     l.libc_tls_offset = LibcTlsOffset(*libc.tls);
-    l.static_tls_size = RoundUp(l.libc_tls_offset + libc.tls->memsz, kStaticTlsAlign);
+    // finish_layout rounds to the largest alignment reserved, so every thread's block keeps libc's alignment.
+    l.static_tls_size = RoundUp(l.libc_tls_offset + libc.tls->memsz, std::max(kStaticTlsAlign, libc.tls->align));
   }
 
   // getauxval: `bl __libc_shared_globals` then `ldr.w rX, [rX, #imm]` — the auxv pointer's offset.

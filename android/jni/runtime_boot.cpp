@@ -53,10 +53,16 @@ std::string Hex(std::uint32_t v) {
   return buf;
 }
 
+/// Guards the report being collected and `Runtime::report`: guest threads log into it from their own host
+/// threads (holding the GGL, not g_mu) while the boot thread appends and finally detaches it. A leaf lock: held
+/// only for an append or a pointer swap, never while taking anything else.
+std::mutex g_report_mu;
+
 /// A line of the report: logged under RBRUNTIME and, when a boot is collecting one, kept for the file.
 void Line(std::string* out, const std::string& s) {
   __android_log_print(ANDROID_LOG_INFO, kTag, "%s", s.c_str());
   if (out != nullptr) {
+    std::lock_guard<std::mutex> lk(g_report_mu);
     *out += s;
     *out += '\n';
   }
@@ -239,6 +245,23 @@ Runtime& R() {
   return *rt;
 }
 
+/// A line from a guest thread (the process's log, a host slot's liblog): the report is read under its lock, so a
+/// line that races the boot's end either lands in the report or only in logcat, never in a detached string.
+void Live(const std::string& s) {
+  __android_log_print(ANDROID_LOG_INFO, kTag, "%s", s.c_str());
+  std::lock_guard<std::mutex> lk(g_report_mu);
+  if (std::string* out = R().report) {
+    *out += s;
+    *out += '\n';
+  }
+}
+
+/// Attaches (or, with nullptr, detaches) the report guest-thread lines go to.
+void SetReport(Runtime& rt, std::string* report) {
+  std::lock_guard<std::mutex> lk(g_report_mu);
+  rt.report = report;
+}
+
 /// One boot at a time per process. Lock order: g_mu, then the process's GGL (taken inside each guest call);
 /// nothing that holds the GGL — no host slot, no guest call — takes g_mu.
 std::mutex g_mu;
@@ -249,7 +272,7 @@ bool BootScope(Runtime& rt, ApkZip& zip, std::string* out) {
   o.biased = true;
   o.unresolved_trap = kTrap;
   o.ctor_tier = kTier;
-  o.log = [](const std::string& s) { Line(R().report, s); };
+  o.log = [](const std::string& s) { Live(s); };
   o.host_resolver = [](const std::string& name) -> std::optional<rb::exec::GuestAddr> {
     Runtime& r = R();
     return r.slots ? r.slots->Resolve(name) : std::nullopt;
@@ -262,7 +285,7 @@ bool BootScope(Runtime& rt, ApkZip& zip, std::string* out) {
   }
   rt.proc = std::move(proc);
   rt.slots = std::make_unique<rb::launcher::HostSlots>(*rt.proc, TargetSdk(),
-                                                       [](const std::string& s) { Line(R().report, s); });
+                                                       [](const std::string& s) { Live(s); });
   // Boot-only: no asset or file is served yet (M3). A provider that answers nothing makes every guest
   // openat an ENOENT the monitor's notes name, rather than ENOSYS.
   rt.proc->monitor().set_file_provider([](const std::string&) -> std::optional<std::vector<std::uint8_t>> {
@@ -434,6 +457,9 @@ bool BootOne(Runtime& rt, const std::string& apk, const std::string& lib, std::s
 
 void Tallies(Runtime& rt, std::string* out) {
   if (!rt.proc) return;
+  // Guest threads the boot started (a JNI_OnLoad's worker) may be making syscalls and dl calls right now: the
+  // monitor's tallies and notes and the slots' dl records are GGL-protected, so they are read holding it.
+  rb::runtime::Ggl::Held hold(rt.proc->ggl());
   const auto say = [out](const std::string& s) { Line(out, s); };
   rt.slots->ReportDl(say, kTrap);
   const std::string tally = rt.proc->monitor().TallyText();
@@ -455,7 +481,7 @@ extern "C" int rb_runtime_boot(JavaVM* /*vm*/, const char* apk_path, const char*
     return JNI_VERSION_1_6;
   }
   std::string report;
-  rt.report = &report;
+  SetReport(rt, &report);
   Line(&report, "rb_runtime_boot: lib=" + (lib.empty() ? std::string{"(none)"} : lib) +
                     " apk=" + (apk.empty() ? std::string{"(none)"} : apk));
   bool ok = false;
@@ -490,7 +516,7 @@ extern "C" int rb_runtime_boot(JavaVM* /*vm*/, const char* apk_path, const char*
     // A failure before any guest state changed (no APK, a missing entry, a scope that did not boot and was
     // discarded) leaves nothing behind, so a later call may try again.
   }
-  rt.report = nullptr;
+  SetReport(rt, nullptr);
 
   const std::string pkg = PackageName();
   if (pkg.empty()) {
