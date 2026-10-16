@@ -78,6 +78,93 @@ bool FieldKind(const std::string& sig, char* kind) {
   return true;
 }
 
+/// UTF-16 to Modified UTF-8, exactly as ART's GetStringUTFChars gives it: U+0000 as C0 80, a supplementary
+/// character as its two surrogate halves, each a 3-byte sequence.
+std::string Mutf8(const char16_t* s, std::size_t n) {
+  std::string out;
+  out.reserve(n);
+  for (std::size_t i = 0; i < n; ++i) {
+    const std::uint32_t c = s[i];
+    if (c != 0 && c < 0x80) {
+      out.push_back(static_cast<char>(c));
+    } else if (c < 0x800) {
+      out.push_back(static_cast<char>(0xC0 | (c >> 6)));
+      out.push_back(static_cast<char>(0x80 | (c & 0x3F)));
+    } else {
+      out.push_back(static_cast<char>(0xE0 | (c >> 12)));
+      out.push_back(static_cast<char>(0x80 | ((c >> 6) & 0x3F)));
+      out.push_back(static_cast<char>(0x80 | (c & 0x3F)));
+    }
+  }
+  return out;
+}
+
+/// Guest bytes (NUL-terminated, so no 00 inside) to UTF-16, the way ART's NewStringUTF reads them: 1-, 2- and
+/// 3-byte sequences (C0 80 and surrogate halves included) and standard 4-byte UTF-8 as a surrogate pair. Anything
+/// else becomes U+FFFD, one per offending byte, and `*sanitized` is set.
+std::u16string FromMutf8(const std::string& b, bool* sanitized) {
+  std::u16string out;
+  const auto cont = [&](std::size_t i) { return i < b.size() && (static_cast<unsigned char>(b[i]) & 0xC0) == 0x80; };
+  for (std::size_t i = 0; i < b.size();) {
+    const unsigned c = static_cast<unsigned char>(b[i]);
+    if (c < 0x80) {
+      out.push_back(static_cast<char16_t>(c));
+      ++i;
+    } else if ((c & 0xE0) == 0xC0 && cont(i + 1)) {
+      out.push_back(static_cast<char16_t>(((c & 0x1F) << 6) | (static_cast<unsigned char>(b[i + 1]) & 0x3F)));
+      i += 2;
+    } else if ((c & 0xF0) == 0xE0 && cont(i + 1) && cont(i + 2)) {
+      out.push_back(static_cast<char16_t>(((c & 0x0F) << 12) | ((static_cast<unsigned char>(b[i + 1]) & 0x3F) << 6) |
+                                          (static_cast<unsigned char>(b[i + 2]) & 0x3F)));
+      i += 3;
+    } else if ((c & 0xF8) == 0xF0 && cont(i + 1) && cont(i + 2) && cont(i + 3)) {
+      const std::uint32_t cp = ((c & 0x07) << 18) | ((static_cast<unsigned char>(b[i + 1]) & 0x3F) << 12) |
+                               ((static_cast<unsigned char>(b[i + 2]) & 0x3F) << 6) |
+                               (static_cast<unsigned char>(b[i + 3]) & 0x3F);
+      if (cp >= 0x10000 && cp <= 0x10FFFF) {
+        out.push_back(static_cast<char16_t>(0xD800 + ((cp - 0x10000) >> 10)));
+        out.push_back(static_cast<char16_t>(0xDC00 + ((cp - 0x10000) & 0x3FF)));
+      } else {
+        out.push_back(char16_t{0xFFFD});
+        *sanitized = true;
+      }
+      i += 4;
+    } else {
+      out.push_back(char16_t{0xFFFD});
+      *sanitized = true;
+      ++i;
+    }
+  }
+  return out;
+}
+
+constexpr char kArrayKinds[] = "ZBCSIJFD";  // the New/Get/Release/Region<T>Array families, in table order
+
+std::uint32_t ElemSize(char k) {
+  switch (k) {
+    case 'Z':
+    case 'B': return 1;
+    case 'C':
+    case 'S': return 2;
+    case 'J':
+    case 'D': return 8;
+    default: return 4;
+  }
+}
+
+/// Entries JNI allows while an exception is pending (JNI spec, "Exceptions"): the rest are forwarded too, as release
+/// ART does, but named.
+bool ExceptionSafe(std::uint32_t i) {
+  switch (i) {
+    case 15: case 16: case 17: case 228:              // ExceptionOccurred/Describe/Clear/Check
+    case 166: case 170: case 223: case 225:           // ReleaseStringChars/UTFChars, the criticals
+    case 19: case 20: case 22: case 23: case 227:     // frames, deleting references
+    case 218:                                         // MonitorExit
+      return true;
+    default: return i >= 191 && i <= 198;             // Release<T>ArrayElements
+  }
+}
+
 /// Kinds a `Call<T>Method` family may be used for: its own, and any integral kind of at most 32 bits for another
 /// (the value sits in r0 either way, as it does on a device with CheckJNI off).
 bool Compatible(char family, char actual) {
@@ -117,6 +204,23 @@ ForwardingJni::ForwardingJni(mem::GuestMemory& memory, AbiContext& abi, GuestAdd
         kEnvSlotBase + i, [this, i](exec::MachineState& s, std::string* e) { return Slot(i, s, e); },
         AbiContext::SlotLock::kReleasesGgl);
   }
+  // The JavaVM: a word at kVmOffset holding its invoke-interface table's address, 3 reserved entries then 5.
+  const GuestAddr vm_table = where + kVmOffset + 16;
+  const GuestAddr vm_word = where + kVmOffset;
+  if (!memory_.Write(vm_word, &vm_table, 4)) {
+    fail("writing the JavaVM word");
+    return;
+  }
+  for (std::uint32_t i = 0; i < kVmEntries; ++i) {
+    const GuestAddr slot = abi_.SlotFor(kVmSlotBase + i);
+    if (!memory_.Write(vm_table + 4 * i, &slot, 4)) {
+      fail("writing the JavaVM table");
+      return;
+    }
+    abi_.Bind(
+        kVmSlotBase + i, [this, i](exec::MachineState& s, std::string* e) { return VmSlot(i, s, e); },
+        AbiContext::SlotLock::kReleasesGgl);
+  }
   ok_ = true;
 }
 
@@ -129,9 +233,24 @@ ForwardingJni::~ForwardingJni() {
       return false;
     });
   }
+  for (std::uint32_t i = 0; i < kVmEntries; ++i) {
+    abi_.Bind(kVmSlotBase + i, [](exec::MachineState&, std::string* e) {
+      if (e != nullptr) *e = "JavaVM: the forwarding JNI bridge has been destroyed";
+      return false;
+    });
+  }
 }
 
 // ------------------------------------------------------------------------------------------------- handles
+
+ForwardingJni::LocalTable::~LocalTable() {
+  // The host thread is exiting: its locals are gone with it, and its thread number goes back to the pool.
+  std::size_t live = 0;
+  for (const HostRef r : refs) live += r != 0;
+  shared->live.fetch_sub(live, std::memory_order_relaxed);
+  std::lock_guard<std::mutex> lk(shared->mu);
+  shared->free_threads.push_back(thread);
+}
 
 ForwardingJni::LocalTable* ForwardingJni::Locals(std::string* err) {
   // Per host thread and per bridge instance (several bridges can live in one process, e.g. a test's).
@@ -139,13 +258,22 @@ ForwardingJni::LocalTable* ForwardingJni::Locals(std::string* err) {
   for (auto& [serial, t] : tables) {
     if (serial == serial_) return t.get();
   }
-  const std::uint32_t thread = next_thread_.fetch_add(1, std::memory_order_relaxed);
-  if (thread >= kMaxThreads) {
-    if (err != nullptr) *err = "more than " + std::to_string(kMaxThreads) + " host threads used this JNI bridge";
-    return nullptr;
-  }
   auto t = std::make_unique<LocalTable>();
-  t->thread = thread;
+  t->shared = shared_;
+  {
+    std::lock_guard<std::mutex> lk(shared_->mu);
+    if (!shared_->free_threads.empty()) {
+      t->thread = shared_->free_threads.back();
+      shared_->free_threads.pop_back();
+    } else if (shared_->next_thread < kMaxThreads) {
+      t->thread = shared_->next_thread++;
+    } else {
+      if (err != nullptr) *err = "more than " + std::to_string(kMaxThreads) + " live host threads use this JNI bridge";
+      t->shared = nullptr;  // nothing to give back
+      return nullptr;
+    }
+  }
+  t->free.emplace_back();  // the base frame's free slots
   tables.emplace_back(serial_, std::move(t));
   return tables.back().second.get();
 }
@@ -154,17 +282,29 @@ GuestAddr ForwardingJni::ToGuestLocal(HostRef r, std::string* err) {
   if (r == 0) return 0;
   LocalTable* t = Locals(err);
   if (t == nullptr) return 0;
-  const std::size_t n = t->refs.size();
-  if (n >= kMaxLocals) {
-    if (err != nullptr) {
-      *err = "more than " + std::to_string(kMaxLocals) + " local references in this thread's frames (a guest that "
-             "never deletes its locals, or a native that never returns)";
+  // A deleted slot of the current frame first (a native that loops inside one call keeps reusing a few), else
+  // a new one at the top.
+  std::size_t n = 0;
+  if (!t->free.back().empty()) {
+    n = t->free.back().back();
+    t->free.back().pop_back();
+  } else {
+    n = t->refs.size();
+    if (n >= kMaxLocals) {
+      if (err != nullptr) {
+        *err = "more than " + std::to_string(kMaxLocals) + " live local references on one thread (a guest that "
+               "never deletes its locals inside a long call)";
+      }
+      return 0;
     }
-    return 0;
+    t->refs.push_back(0);
+    if (t->serials.size() <= n) t->serials.resize(n + 1, 0);
   }
-  t->refs.push_back(r);
-  live_locals_.fetch_add(1, std::memory_order_relaxed);
-  return kLocalBase | (t->thread << 18) | (static_cast<std::uint32_t>(n) << 2);
+  t->refs[n] = r;
+  t->serials[n] = static_cast<std::uint8_t>((t->serials[n] + 1) & 0xfu);
+  shared_->live.fetch_add(1, std::memory_order_relaxed);
+  return kLocalBase | (t->thread << 20) | (static_cast<std::uint32_t>(n) << 6) |
+         (static_cast<std::uint32_t>(t->serials[n]) << 2);
 }
 
 HostRef ForwardingJni::FromGuest(GuestAddr h, std::string* err) {
@@ -180,18 +320,19 @@ HostRef ForwardingJni::FromGuest(GuestAddr h, std::string* err) {
   if (h >= kLocalBase) {
     LocalTable* t = Locals(err);
     if (t == nullptr) return 0;
-    const std::uint32_t thread = (h >> 18) & 0x3ffu;
-    const std::uint32_t n = (h >> 2) & 0xffffu;
+    const std::uint32_t thread = (h >> 20) & 0xffu;
+    const std::uint32_t n = (h >> 6) & 0x3fffu;
+    const std::uint32_t serial = (h >> 2) & 0xfu;
     if (thread != t->thread) {
       return fail(Hex(h) + " is another thread's local reference (thread " + std::to_string(thread) +
                   "; this is thread " + std::to_string(t->thread) + ")");
     }
-    if (n >= t->refs.size() || t->refs[n] == 0) {
+    if (n >= t->refs.size() || t->refs[n] == 0 || t->serials[n] != serial) {
       return fail(Hex(h) + " is a stale local reference (deleted, or the frame that made it has returned)");
     }
     return t->refs[n];
   }
-  if (h >= kGlobalBase || h >= kWeakBase) {
+  if (h >= kWeakBase) {
     const bool weak = h < kGlobalBase;
     std::lock_guard<std::mutex> lk(globals_mu_);
     const std::vector<HostRef>& table = weak ? weaks_ : globals_;
@@ -213,7 +354,10 @@ HostRef ForwardingJni::FromGuest(GuestAddr h, std::string* err) {
 
 void ForwardingJni::PushFrame() {
   std::string e;
-  if (LocalTable* t = Locals(&e)) t->frames.push_back(t->refs.size());
+  if (LocalTable* t = Locals(&e)) {
+    t->frames.push_back(t->refs.size());
+    t->free.emplace_back();
+  }
 }
 
 HostRef ForwardingJni::PopFrame(GuestAddr result, std::string* err) {
@@ -223,10 +367,11 @@ HostRef ForwardingJni::PopFrame(GuestAddr result, std::string* err) {
   if (t == nullptr || t->frames.empty()) return r;
   const std::size_t start = t->frames.back();
   t->frames.pop_back();
+  t->free.pop_back();
   std::size_t live = 0;
   for (std::size_t n = start; n < t->refs.size(); ++n) live += t->refs[n] != 0;
-  t->refs.resize(start);
-  live_locals_.fetch_sub(live, std::memory_order_relaxed);
+  t->refs.resize(start);  // the slots' serials stay, so a handle into a popped frame stays stale
+  shared_->live.fetch_sub(live, std::memory_order_relaxed);
   return r;
 }
 
@@ -477,6 +622,9 @@ bool ForwardingJni::Slot(std::uint32_t i, exec::MachineState& s, std::string* er
   };
   const auto name_arg = [&](unsigned arg, std::string* out) { return ReadCString(s.r[arg], out, &why); };
   HostRef a = 0, b = 0;
+  if (!ExceptionSafe(i) && i != 4 && java_.ExceptionCheck()) {
+    Note("JNIEnv->" + EntryName(i) + " called while an exception is pending (forwarded, as release ART does)");
+  }
   switch (i) {
     case 4:  // GetVersion
       s.r[0] = 0x00010006u;
@@ -556,8 +704,11 @@ bool ForwardingJni::Slot(std::uint32_t i, exec::MachineState& s, std::string* er
       if (!ref(1, &a)) return refuse(why);
       LocalTable* t = Locals(&why);
       if (t == nullptr) return refuse(why);
-      t->refs[(h >> 2) & 0xffffu] = 0;
-      live_locals_.fetch_sub(1, std::memory_order_relaxed);
+      const std::uint32_t n = (h >> 6) & 0x3fffu;
+      t->refs[n] = 0;
+      // Reusable in the frame it belongs to; a slot below the current frame waits for its own frame to pop.
+      if (t->frames.empty() || n >= t->frames.back()) t->free.back().push_back(n);
+      shared_->live.fetch_sub(1, std::memory_order_relaxed);
       java_.DeleteLocalRef(a);
       return true;
     }
@@ -627,10 +778,14 @@ bool ForwardingJni::Slot(std::uint32_t i, exec::MachineState& s, std::string* er
       s.r[0] = java_.ExceptionCheck() ? 1u : 0u;
       return true;
     case 232: {  // GetObjectRefType: JNIInvalidRefType 0, Local 1, Global 2, WeakGlobal 3
+      // ART answers from the reference's kind bits alone and does not check that it is still live; so does this.
+      // A class handle is what FindClass/GetObjectClass hand out — locals, on a device.
       const GuestAddr h = s.r[1];
-      std::string e;
-      const HostRef r = FromGuest(h, &e);
-      s.r[0] = (h == 0 || r == 0) ? 0u : h >= kLocalBase ? 1u : h >= kGlobalBase ? 2u : h >= kWeakBase ? 3u : 2u;
+      s.r[0] = h == 0 || (h & 3u) != 0 || h < kClassBase ? 0u
+               : h >= kLocalBase                         ? 1u
+               : h >= kGlobalBase                        ? 2u
+               : h >= kWeakBase                          ? 3u
+                                                         : 1u;
       return true;
     }
     default: break;
@@ -639,7 +794,567 @@ bool ForwardingJni::Slot(std::uint32_t i, exec::MachineState& s, std::string* er
     return CallFamily(i, s, &why) ? true : refuse(why);
   }
   if ((i >= 95 && i <= 112) || (i >= 145 && i <= 162)) return FieldFamily(i, s, &why) ? true : refuse(why);
-  return refuse("not forwarded by this bridge yet");
+  bool ok = false;
+  if ((i >= 163 && i <= 170) || i == 220 || i == 221 || i == 224 || i == 225) {
+    ok = StringEntry(i, s, &why);
+  } else if ((i >= 171 && i <= 214) || i == 222 || i == 223) {
+    ok = ArrayEntry(i, s, &why);
+  } else {
+    ok = OtherEntry(i, s, &why);
+  }
+  return ok ? true : refuse(why);
 }
 
+
+// ------------------------------------------------------------------------------------------------- Task 2
+
+std::vector<std::string> ForwardingJni::notes() const {
+  std::lock_guard<std::mutex> lk(notes_mu_);
+  return notes_;
+}
+
+void ForwardingJni::Note(const std::string& note) {
+  std::lock_guard<std::mutex> lk(notes_mu_);
+  for (const std::string& n : notes_) {
+    if (n == note) return;
+  }
+  if (notes_.size() < kMaxNotes) notes_.push_back(note);
+}
+
+bool ForwardingJni::ThrowNamed(const char* cls, const std::string& message) {
+  const HostRef c = java_.FindClass(cls);
+  if (c == 0) return false;
+  java_.ThrowNew(c, message);
+  java_.DeleteLocalRef(c);
+  return true;
+}
+
+GuestAddr ForwardingJni::Alloc(std::uint32_t bytes, std::string* err) {
+  // Power-of-two blocks from 16 bytes, carved from 1 MiB chunks; anything over 64 KiB gets whole pages of its own.
+  // Freed blocks go to a free list by size and are reused; pages are never returned.
+  std::uint32_t size = 16;
+  while (size < bytes && size < (64u << 10)) size <<= 1;
+  if (bytes > (64u << 10)) size = (bytes + mem::kGuestPage - 1) & ~(mem::kGuestPage - 1);
+  {
+    std::lock_guard<std::mutex> lk(arena_mu_);
+    auto& free = free_by_size_[size];
+    if (!free.empty()) {
+      const GuestAddr at = free.back();
+      free.pop_back();
+      block_size_[at] = size;
+      return at;
+    }
+    if (size <= (64u << 10) && chunk_next_ + size <= chunk_end_ && chunk_next_ != 0) {
+      const GuestAddr at = chunk_next_;
+      chunk_next_ += size;
+      block_size_[at] = size;
+      return at;
+    }
+  }
+  if (!alloc_) {
+    if (err != nullptr) *err = "no guest allocator is set on this JNI bridge, so it has nowhere to put a copy";
+    return 0;
+  }
+  // Mapping takes the GGL: never with arena_mu_ held (a guest thread holding the GGL may be waiting for it).
+  const std::uint32_t want = size > (64u << 10) ? size : (1u << 20);
+  const GuestAddr got = alloc_(want, err);
+  if (got == 0) return 0;
+  std::lock_guard<std::mutex> lk(arena_mu_);
+  if (size > (64u << 10)) {
+    block_size_[got] = size;
+    return got;
+  }
+  // The old chunk's tail is abandoned (at most 64 KiB); the new chunk serves this block first.
+  chunk_next_ = got + size;
+  chunk_end_ = got + want;
+  block_size_[got] = size;
+  return got;
+}
+
+void ForwardingJni::Free(GuestAddr at) {
+  std::lock_guard<std::mutex> lk(arena_mu_);
+  const auto it = block_size_.find(at);
+  if (it == block_size_.end()) return;
+  free_by_size_[it->second].push_back(at);
+  block_size_.erase(it);
+}
+
+GuestAddr ForwardingJni::CopyOut(const void* data, std::uint32_t bytes, const Copy& rec, std::string* err) {
+  const GuestAddr at = Alloc(bytes == 0 ? 1 : bytes, err);
+  if (at == 0) return 0;
+  if (bytes != 0 && !memory_.Write(at, data, bytes)) {
+    Free(at);
+    if (err != nullptr) *err = "writing the copy at " + Hex(at);
+    return 0;
+  }
+  std::lock_guard<std::mutex> lk(arena_mu_);
+  copies_[at] = rec;
+  return at;
+}
+
+bool ForwardingJni::StringEntry(std::uint32_t i, exec::MachineState& s, std::string* err) {
+  const auto write_is_copy = [&](unsigned arg) {
+    const std::uint8_t one = 1;
+    if (s.r[arg] != 0) memory_.Write(s.r[arg], &one, 1);
+  };
+  if (i == 167) {  // NewStringUTF(bytes)
+    if (s.r[1] == 0) {
+      s.r[0] = 0;
+      return true;
+    }
+    std::string bytes;
+    if (!ReadCString(s.r[1], &bytes, err)) return false;
+    bool sanitized = false;
+    const std::u16string chars = FromMutf8(bytes, &sanitized);
+    if (sanitized) {
+      Note("NewStringUTF: the guest's bytes were not valid Modified UTF-8; the bad bytes were sanitized to U+FFFD "
+           "(first seen: " + std::to_string(bytes.size()) + " bytes)");
+    }
+    s.r[0] = ToGuestLocal(java_.NewString(chars), err);
+    return true;
+  }
+  if (i == 163) {  // NewString(const jchar*, len)
+    const std::int32_t n = static_cast<std::int32_t>(s.r[2]);
+    if (n < 0) return ThrowNamed("java/lang/NegativeArraySizeException", std::to_string(n)), s.r[0] = 0, true;
+    std::u16string chars(static_cast<std::size_t>(n), u'\0');
+    if (n > 0 && !memory_.Read(s.r[1], chars.data(), static_cast<std::size_t>(n) * 2)) {
+      *err = "the chars at " + Hex(s.r[1]) + " are unreadable";
+      return false;
+    }
+    s.r[0] = ToGuestLocal(java_.NewString(chars), err);
+    return true;
+  }
+  if (i == 166 || i == 170 || i == 225) {  // ReleaseStringChars / ReleaseStringUTFChars / ReleaseStringCritical
+    Copy rec;
+    {
+      std::lock_guard<std::mutex> lk(arena_mu_);
+      const auto it = copies_.find(s.r[2]);
+      if (it == copies_.end() || it->second.kind != 0) {
+        *err = Hex(s.r[2]) + " is not a string copy this bridge handed out (released twice?)";
+        return false;
+      }
+      rec = it->second;
+      copies_.erase(it);
+    }
+    java_.DeleteGlobalRef(rec.pinned);
+    Free(s.r[2]);
+    return true;
+  }
+  HostRef str = 0;
+  str = FromGuest(s.r[1], err);
+  if (!err->empty()) return false;
+  if (str == 0) {
+    *err = "null string";
+    return false;
+  }
+  const std::u16string chars = java_.GetStringChars(str);
+  switch (i) {
+    case 164:  // GetStringLength
+      s.r[0] = static_cast<std::uint32_t>(chars.size());
+      return true;
+    case 168:  // GetStringUTFLength
+      s.r[0] = static_cast<std::uint32_t>(Mutf8(chars.data(), chars.size()).size());
+      return true;
+    case 165:     // GetStringChars
+    case 224: {   // GetStringCritical
+      Copy rec;
+      rec.pinned = java_.NewGlobalRef(str);
+      rec.length = static_cast<std::int32_t>(chars.size());
+      rec.bytes = static_cast<std::uint32_t>(chars.size() * 2);
+      s.r[0] = CopyOut(chars.data(), rec.bytes, rec, err);
+      if (s.r[0] == 0) return false;
+      write_is_copy(2);
+      return true;
+    }
+    case 169: {  // GetStringUTFChars
+      const std::string m = Mutf8(chars.data(), chars.size());
+      std::string z = m;
+      z.push_back('\0');
+      Copy rec;
+      rec.pinned = java_.NewGlobalRef(str);
+      rec.bytes = static_cast<std::uint32_t>(z.size());
+      s.r[0] = CopyOut(z.data(), rec.bytes, rec, err);
+      if (s.r[0] == 0) return false;
+      write_is_copy(2);
+      return true;
+    }
+    case 220:     // GetStringRegion(s, start, len, jchar* buf)
+    case 221: {   // GetStringUTFRegion(s, start, len, char* buf)
+      const std::int32_t start = static_cast<std::int32_t>(s.r[2]);
+      const std::int32_t len = static_cast<std::int32_t>(s.r[3]);
+      std::uint32_t buf = 0;
+      if (!jni::ArgWord(s, memory_, 4, &buf)) {
+        *err = "the buffer argument is unreadable";
+        return false;
+      }
+      if (start < 0 || len < 0 || static_cast<std::size_t>(start) + static_cast<std::size_t>(len) > chars.size()) {
+        ThrowNamed("java/lang/StringIndexOutOfBoundsException",
+                   "start " + std::to_string(start) + ", length " + std::to_string(len) + ", string length " +
+                       std::to_string(chars.size()));
+        return true;
+      }
+      bool wrote = true;
+      if (i == 220) {
+        wrote = len == 0 || memory_.Write(buf, chars.data() + start, static_cast<std::size_t>(len) * 2);
+      } else {
+        const std::string m = Mutf8(chars.data() + start, static_cast<std::size_t>(len));
+        wrote = m.empty() || memory_.Write(buf, m.data(), m.size());  // no NUL, as ART writes none
+      }
+      if (!wrote) {
+        *err = "the buffer at " + Hex(buf) + " is not writable";
+        return false;
+      }
+      return true;
+    }
+    default: break;
+  }
+  *err = "not a string entry";
+  return false;
+}
+
+bool ForwardingJni::ArrayEntry(std::uint32_t i, exec::MachineState& s, std::string* err) {
+  if (i >= 175 && i <= 182) {  // New<T>Array(len)
+    s.r[0] = ToGuestLocal(java_.NewArray(kArrayKinds[i - 175], static_cast<std::int32_t>(s.r[1]), 0, 0), err);
+    return true;
+  }
+  if (i == 172) {  // NewObjectArray(len, cls, init)
+    HostRef cls = FromGuest(s.r[2], err);
+    if (!err->empty()) return false;
+    HostRef init = FromGuest(s.r[3], err);
+    if (!err->empty()) return false;
+    if (cls == 0) {
+      *err = "null element class";
+      return false;
+    }
+    s.r[0] = ToGuestLocal(java_.NewArray('L', static_cast<std::int32_t>(s.r[1]), cls, init), err);
+    return true;
+  }
+  // Releases: the guest address of the copy identifies it; the array argument must be the one it came from.
+  if ((i >= 191 && i <= 198) || i == 223) {
+    const GuestAddr at = s.r[2];
+    const std::uint32_t mode = s.r[3];
+    Copy rec;
+    {
+      std::lock_guard<std::mutex> lk(arena_mu_);
+      const auto it = copies_.find(at);
+      if (it == copies_.end() || it->second.kind == 0) {
+        *err = Hex(at) + " is not an array copy this bridge handed out (released twice?)";
+        return false;
+      }
+      rec = it->second;
+      if (mode != 1) copies_.erase(it);  // JNI_COMMIT keeps it
+    }
+    if (mode != 2) {  // 0 and JNI_COMMIT copy back; JNI_ABORT does not
+      std::vector<std::uint8_t> bytes(rec.bytes);
+      if (rec.bytes != 0 && !memory_.Read(at, bytes.data(), bytes.size())) {
+        *err = "the copy at " + Hex(at) + " is unreadable";
+        return false;
+      }
+      java_.SetArrayRegion(rec.kind, rec.pinned, 0, rec.length, bytes.data());
+    }
+    if (mode != 1) {
+      java_.DeleteGlobalRef(rec.pinned);
+      Free(at);
+    }
+    return true;
+  }
+  HostRef arr = FromGuest(s.r[1], err);
+  if (!err->empty()) return false;
+  if (arr == 0) {
+    *err = "null array";
+    return false;
+  }
+  if (i == 171) {  // GetArrayLength
+    s.r[0] = static_cast<std::uint32_t>(java_.GetArrayLength(arr));
+    return true;
+  }
+  if (i == 173) {  // GetObjectArrayElement(a, index)
+    s.r[0] = ToGuestLocal(java_.GetObjectArrayElement(arr, static_cast<std::int32_t>(s.r[2])), err);
+    return true;
+  }
+  if (i == 174) {  // SetObjectArrayElement(a, index, value)
+    const HostRef v = FromGuest(s.r[3], err);
+    if (!err->empty()) return false;
+    java_.SetObjectArrayElement(arr, static_cast<std::int32_t>(s.r[2]), v);
+    return true;
+  }
+  if ((i >= 183 && i <= 190) || i == 222) {  // Get<T>ArrayElements(a, isCopy) / GetPrimitiveArrayCritical
+    const char kind = i == 222 ? java_.ArrayKind(arr) : kArrayKinds[i - 183];
+    if (kind == 0 || kind == 'L') {
+      *err = "not a primitive array";
+      return false;
+    }
+    Copy rec;
+    rec.kind = kind;
+    rec.length = java_.GetArrayLength(arr);
+    rec.bytes = static_cast<std::uint32_t>(rec.length) * ElemSize(kind);
+    std::vector<std::uint8_t> bytes(rec.bytes);
+    if (!java_.GetArrayRegion(kind, arr, 0, rec.length, bytes.data())) {
+      s.r[0] = 0;
+      return true;  // the array is not of that kind: ART would have aborted; JNI leaves the exception
+    }
+    rec.pinned = java_.NewGlobalRef(arr);
+    s.r[0] = CopyOut(bytes.data(), rec.bytes, rec, err);
+    if (s.r[0] == 0) return false;
+    if (s.r[2] != 0) {
+      const std::uint8_t one = 1;
+      memory_.Write(s.r[2], &one, 1);
+    }
+    return true;
+  }
+  if (i >= 199 && i <= 214) {  // Get/Set<T>ArrayRegion(a, start, len, buf)
+    const bool set = i >= 207;
+    const char kind = kArrayKinds[i - (set ? 207 : 199)];
+    const std::int32_t start = static_cast<std::int32_t>(s.r[2]);
+    const std::int32_t len = static_cast<std::int32_t>(s.r[3]);
+    std::uint32_t buf = 0;
+    if (!jni::ArgWord(s, memory_, 4, &buf)) {
+      *err = "the buffer argument is unreadable";
+      return false;
+    }
+    if (len <= 0 || start < 0) {
+      if (len < 0 || start < 0) {
+        ThrowNamed("java/lang/ArrayIndexOutOfBoundsException",
+                   "start " + std::to_string(start) + ", length " + std::to_string(len));
+      }
+      return true;
+    }
+    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(len) * ElemSize(kind));
+    if (set) {
+      if (!memory_.Read(buf, bytes.data(), bytes.size())) {
+        *err = "the buffer at " + Hex(buf) + " is unreadable";
+        return false;
+      }
+      java_.SetArrayRegion(kind, arr, start, len, bytes.data());  // out of range: Java's exception, pending
+      return true;
+    }
+    if (java_.GetArrayRegion(kind, arr, start, len, bytes.data()) && !memory_.Write(buf, bytes.data(), bytes.size())) {
+      *err = "the buffer at " + Hex(buf) + " is not writable";
+      return false;
+    }
+    return true;
+  }
+  *err = "not an array entry";
+  return false;
+}
+
+bool ForwardingJni::OtherEntry(std::uint32_t i, exec::MachineState& s, std::string* err) {
+  const auto ref = [&](unsigned arg, HostRef* out) {
+    *out = FromGuest(s.r[arg], err);
+    return err->empty();
+  };
+  HostRef a = 0, b = 0;
+  switch (i) {
+    case 5:  // DefineClass: ART does not support it either, and answers null
+      Note("DefineClass is not supported on Android; answered null, as ART does");
+      s.r[0] = 0;
+      return true;
+    case 7:    // FromReflectedMethod
+    case 8: {  // FromReflectedField
+      if (!ref(1, &a)) return false;
+      if (a == 0) {
+        *err = "null member";
+        return false;
+      }
+      std::string name, sig;
+      bool is_static = false;
+      const bool is_field = i == 8;
+      const HostId id = java_.FromReflected(a, is_field, &name, &sig, &is_static);
+      s.r[0] = IdHandle(id, is_field, is_static, name, sig, err);
+      return id == 0 || s.r[0] != 0;
+    }
+    case 9:     // ToReflectedMethod(cls, mid, isStatic)
+    case 12: {  // ToReflectedField(cls, fid, isStatic)
+      if (!ref(1, &a)) return false;
+      IdRec rec;
+      {
+        const IdRec* r = Id(s.r[2], err);
+        if (r == nullptr) return false;
+        rec = *r;
+      }
+      s.r[0] = ToGuestLocal(java_.ToReflected(a, rec.id, i == 12, (s.r[3] & 0xffu) != 0), err);
+      return true;
+    }
+    case 13:  // Throw(throwable)
+      if (!ref(1, &a)) return false;
+      s.r[0] = static_cast<std::uint32_t>(java_.Throw(a));
+      return true;
+    case 14: {  // ThrowNew(cls, message)
+      if (!ref(1, &a)) return false;
+      if (a == 0) {
+        *err = "null class";
+        return false;
+      }
+      std::string message;
+      if (s.r[2] != 0 && !ReadCString(s.r[2], &message, err)) return false;
+      s.r[0] = static_cast<std::uint32_t>(java_.ThrowNew(a, message));
+      return true;
+    }
+    case 15:  // ExceptionOccurred
+      s.r[0] = ToGuestLocal(java_.ExceptionOccurred(), err);
+      return true;
+    case 16:  // ExceptionDescribe
+      java_.ExceptionDescribe();
+      return true;
+    case 17:  // ExceptionClear
+      java_.ExceptionClear();
+      return true;
+    case 18: {  // FatalError: ART aborts the process; here the guest call stops, named
+      std::string message;
+      ReadCString(s.r[1], &message, nullptr);
+      *err = "the guest called FatalError(\"" + message + "\") — on a device ART aborts the process here";
+      return false;
+    }
+    case 19: {  // PushLocalFrame(capacity)
+      const std::int32_t rc = java_.PushLocalFrame(static_cast<std::int32_t>(s.r[1]));
+      if (rc == 0) PushFrame();
+      s.r[0] = static_cast<std::uint32_t>(rc);
+      return true;
+    }
+    case 20: {  // PopLocalFrame(result)
+      if (!ref(1, &a)) return false;
+      LocalTable* t = Locals(err);
+      if (t == nullptr) return false;
+      if (t->frames.empty()) {
+        *err = "PopLocalFrame without a matching PushLocalFrame";
+        return false;
+      }
+      PopFrame(0);
+      s.r[0] = ToGuestLocal(java_.PopLocalFrame(a), err);
+      return true;
+    }
+    case 215: {  // RegisterNatives(cls, const JNINativeMethod*, n)
+      if (!ref(1, &a)) return false;
+      if (a == 0) {
+        *err = "null class";
+        return false;
+      }
+      if (!binder_) {
+        *err = "no native binder is set on this JNI bridge, so a guest native cannot be bound to a Java method";
+        return false;
+      }
+      std::vector<HostJava::NativeBinding> bindings;
+      for (std::uint32_t k = 0; k < s.r[3]; ++k) {
+        std::uint32_t words[3] = {};
+        if (!memory_.Read(s.r[2] + 12 * k, words, sizeof words)) {
+          *err = "JNINativeMethod " + std::to_string(k) + " at " + Hex(s.r[2] + 12 * k) + " is unreadable";
+          return false;
+        }
+        HostJava::NativeBinding nb;
+        if (!ReadCString(words[0], &nb.name, err) || !ReadCString(words[1], &nb.sig, err)) return false;
+        nb.host_fn = binder_(words[2], nb.name, nb.sig, err);
+        if (nb.host_fn == nullptr) {
+          *err = "binding " + nb.name + nb.sig + ": " + *err;
+          return false;
+        }
+        bindings.push_back(std::move(nb));
+      }
+      s.r[0] = static_cast<std::uint32_t>(java_.RegisterNatives(a, bindings));
+      return true;
+    }
+    case 216:  // UnregisterNatives
+      if (!ref(1, &a)) return false;
+      s.r[0] = static_cast<std::uint32_t>(java_.UnregisterNatives(a));
+      return true;
+    case 217:  // MonitorEnter
+    case 218:  // MonitorExit
+      if (!ref(1, &a)) return false;
+      if (a == 0) {
+        *err = "null object";
+        return false;
+      }
+      s.r[0] = static_cast<std::uint32_t>(i == 217 ? java_.MonitorEnter(a) : java_.MonitorExit(a));
+      return true;
+    case 219: {  // GetJavaVM(JavaVM**)
+      const GuestAddr v = vm();
+      if (!memory_.Write(s.r[1], &v, 4)) {
+        *err = "the JavaVM** at " + Hex(s.r[1]) + " is not writable";
+        return false;
+      }
+      s.r[0] = 0;
+      return true;
+    }
+    case 229: {  // NewDirectByteBuffer(void* address, jlong capacity) — capacity in r2:r3
+      const std::uint64_t cap = static_cast<std::uint64_t>(s.r[2]) | (static_cast<std::uint64_t>(s.r[3]) << 32);
+      if (s.r[1] == 0 || s.r[1] >= memory_.window_bytes()) {
+        *err = Hex(s.r[1]) + " is not guest memory";
+        return false;
+      }
+      void* host = static_cast<char*>(const_cast<void*>(memory_.window_base())) + s.r[1];
+      s.r[0] = ToGuestLocal(java_.NewDirectByteBuffer(host, static_cast<std::int64_t>(cap)), err);
+      return true;
+    }
+    case 230: {  // GetDirectBufferAddress
+      if (!ref(1, &a)) return false;
+      void* p = a == 0 ? nullptr : java_.GetDirectBufferAddress(a);
+      if (p == nullptr) {
+        s.r[0] = 0;
+        return true;
+      }
+      const auto base = reinterpret_cast<std::uintptr_t>(memory_.window_base());
+      const auto at = reinterpret_cast<std::uintptr_t>(p);
+      if (at < base || at - base >= memory_.window_bytes()) {
+        *err = "the buffer's memory is host memory outside the guest window; making it visible to the guest is the "
+               "host-memory window service (M4)";
+        return false;
+      }
+      s.r[0] = static_cast<std::uint32_t>(at - base);
+      return true;
+    }
+    case 231:  // GetDirectBufferCapacity
+      if (!ref(1, &a)) return false;
+      Return64(s, static_cast<std::uint64_t>(a == 0 ? -1 : java_.GetDirectBufferCapacity(a)));
+      return true;
+    default: break;
+  }
+  (void)b;
+  *err = "entry " + std::to_string(i) + " is not forwarded";
+  return false;
+}
+
+bool ForwardingJni::VmSlot(std::uint32_t i, exec::MachineState& s, std::string* err) {
+  constexpr std::int32_t kOk = 0, kErr = -1, kDetached = -2, kVersion = -3;
+  const auto put_env = [&](GuestAddr where, GuestAddr value) {
+    if (where != 0 && !memory_.Write(where, &value, 4)) {
+      if (err != nullptr) *err = "JavaVM: the JNIEnv** at " + Hex(where) + " is not writable";
+      return false;
+    }
+    return true;
+  };
+  switch (i) {
+    case 3:  // DestroyJavaVM: an app never may
+      Note("JavaVM->DestroyJavaVM called; answered JNI_ERR (an app cannot destroy the VM it runs in)");
+      s.r[0] = static_cast<std::uint32_t>(kErr);
+      return true;
+    case 4:    // AttachCurrentThread(vm, JNIEnv**, args)
+    case 7: {  // AttachCurrentThreadAsDaemon
+      if (!java_.IsAttached() && !java_.AttachCurrentThread(i == 7)) {
+        s.r[0] = static_cast<std::uint32_t>(kErr);
+        return true;
+      }
+      if (!put_env(s.r[1], env())) return false;
+      s.r[0] = kOk;
+      return true;
+    }
+    case 5:  // DetachCurrentThread
+      java_.DetachCurrentThread();
+      s.r[0] = kOk;
+      return true;
+    case 6: {  // GetEnv(vm, void**, version)
+      const std::uint32_t v = s.r[2];
+      if (!java_.IsAttached()) {
+        if (!put_env(s.r[1], 0)) return false;
+        s.r[0] = static_cast<std::uint32_t>(kDetached);
+        return true;
+      }
+      const bool known = v == 0x00010001u || v == 0x00010002u || v == 0x00010004u || v == 0x00010006u;
+      if (!put_env(s.r[1], known ? env() : 0)) return false;
+      s.r[0] = static_cast<std::uint32_t>(known ? kOk : kVersion);
+      return true;
+    }
+    default: break;
+  }
+  if (err != nullptr) *err = "JavaVM entry " + std::to_string(i) + " is reserved";
+  return false;
+}
 }  // namespace rb::abi

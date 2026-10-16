@@ -19,9 +19,11 @@
 #include <thread>
 #include <vector>
 
+#include "bridge_rig.h"
 #include "fake_java.h"
 #include "rb/abi/abi.h"
 #include "rb/abi/jni_forward.h"
+#include "rb/runtime/ggl.h"
 #include "rb/runtime/guest_process.h"
 
 namespace {
@@ -29,6 +31,9 @@ namespace {
 using namespace rb;
 using abi::Value32;
 using test::FakeJava;
+using test::Proc;
+using test::Boot;
+using test::Bits;
 
 int checks = 0;
 int failures = 0;
@@ -51,133 +56,6 @@ void fail(const char* what, int line, const std::string& detail = {}) {
   } while (0)
 
 const char* TierName(int tier) { return tier == 2 ? "J" : "I"; }
-
-std::vector<std::uint8_t> ReadFile(const char* path) {
-  std::FILE* f = std::fopen(path, "rb");
-  if (f == nullptr) return {};
-  std::vector<std::uint8_t> out;
-  std::uint8_t buf[65536];
-  std::size_t n = 0;
-  while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) out.insert(out.end(), buf, buf + n);
-  std::fclose(f);
-  return out;
-}
-
-std::uint64_t Bits(float f) {
-  std::uint32_t b = 0;
-  std::memcpy(&b, &f, 4);
-  return b;
-}
-std::uint64_t Bits(double d) {
-  std::uint64_t b = 0;
-  std::memcpy(&b, &d, 8);
-  return b;
-}
-
-/// rb/Fixture (twice, mix, who = 1, <init>(I)V, fields i:I, d:D, static s) and rb/Sub (who = 2).
-std::unique_ptr<FakeJava> MakeJava() {
-  auto j = std::make_unique<FakeJava>();
-  j->DefineClass("java/lang/Object");
-  j->DefineClass("rb/Fixture", "java/lang/Object");
-  j->DefineClass("rb/Sub", "rb/Fixture");
-  j->DefineMethod("rb/Fixture", "twice", "(I)I", true, [](FakeJava&, int, const std::vector<std::uint64_t>& a) {
-    return static_cast<std::uint64_t>(static_cast<std::uint32_t>(2 * static_cast<std::int32_t>(a[0])));
-  });
-  // mix: exactly (5, 3 << 40, 1.5f, 2.25, true) answers 0x1234'5678'9abc; anything else names what arrived.
-  j->DefineMethod("rb/Fixture", "mix", "(IJFDZ)J", true, [](FakeJava&, int, const std::vector<std::uint64_t>& a) {
-    const bool exact = a.size() == 5 && a[0] == 5 && a[1] == (std::uint64_t{3} << 40) && a[2] == Bits(1.5f) &&
-                       a[3] == Bits(2.25) && a[4] == 1;
-    if (!exact && a.size() == 5) {
-      std::fprintf(stderr, "#   mix got %llx %llx %llx %llx %llx\n", (unsigned long long)a[0], (unsigned long long)a[1],
-                   (unsigned long long)a[2], (unsigned long long)a[3], (unsigned long long)a[4]);
-    }
-    return exact ? std::uint64_t{0x1234'5678'9abc} : std::uint64_t{0};
-  });
-  j->DefineMethod("rb/Fixture", "who", "()I", false, [](FakeJava&, int, const std::vector<std::uint64_t>&) { return 1u; });
-  j->DefineMethod("rb/Sub", "who", "()I", false, [](FakeJava&, int, const std::vector<std::uint64_t>&) { return 2u; });
-  j->DefineMethod("rb/Fixture", "<init>", "(I)V", false,
-                  [](FakeJava& f, int self, const std::vector<std::uint64_t>& a) {
-                    f.PutField(self, "i", a[0]);
-                    return 0u;
-                  });
-  j->DefineField("rb/Fixture", "i", "I", false);
-  j->DefineField("rb/Fixture", "d", "D", false);
-  j->DefineField("rb/Fixture", "s", "Ljava/lang/Object;", true);
-  return j;
-}
-
-struct Proc {
-  std::unique_ptr<FakeJava> java;
-  std::unique_ptr<runtime::GuestProcess> p;
-  std::unique_ptr<abi::ForwardingJni> fwd;
-  const loader::GuestModule* fixture = nullptr;
-  std::string err;
-};
-
-Proc Boot(int tier) {
-  Proc pr;
-  pr.java = MakeJava();
-  const auto libc = ReadFile(RB_DEVICE_LIBC_PATH);
-  const auto libm = ReadFile(RB_GUEST_LIBM_PATH);
-  const auto libz = ReadFile(RB_GUEST_LIBZ_PATH);
-  const auto fx = ReadFile(RB_JNIBRIDGE_FIXTURE_PATH);
-  if (libc.empty() || libm.empty() || libz.empty() || fx.empty()) {
-    pr.err = std::string{"missing images: "} + RB_DEVICE_LIBC_PATH + ", " + RB_GUEST_LIBM_PATH + ", " +
-             RB_GUEST_LIBZ_PATH + " or " + RB_JNIBRIDGE_FIXTURE_PATH + " (pushed by tools/run_engine_tests.sh)";
-    return pr;
-  }
-  // The dynamic-linker imports libc's constructors call, answered as guest_thread_test answers them.
-  static const char* const kDl[] = {"dlopen", "android_dlopen_ext", "dlsym", "dlclose", "dladdr", "dlerror",
-                                    "dl_unwind_find_exidx", "android_get_application_target_sdk_version"};
-  constexpr std::uint32_t kDlSlotBase = 400;
-  auto holder = std::make_shared<runtime::GuestProcess*>(nullptr);
-  runtime::GuestProcessOptions opts;
-  opts.window_bytes = 64u << 20;
-  opts.biased = true;
-  opts.unresolved_trap = 0x0bad'0000u;
-  opts.ctor_tier = tier;
-  opts.host_resolver = [holder](const std::string& name) -> std::optional<exec::GuestAddr> {
-    for (std::uint32_t i = 0; i < sizeof kDl / sizeof kDl[0]; ++i) {
-      if (name == kDl[i]) return (*holder)->abi().SlotFor(kDlSlotBase + i);
-    }
-    return std::nullopt;
-  };
-  pr.p = runtime::GuestProcess::Create(opts, &pr.err);
-  if (!pr.p) return pr;
-  *holder = pr.p.get();
-  for (std::uint32_t i = 0; i < sizeof kDl / sizeof kDl[0]; ++i) {
-    const bool sdk = std::strcmp(kDl[i], "android_get_application_target_sdk_version") == 0;
-    pr.p->abi().Bind(
-        kDlSlotBase + i,
-        [sdk](exec::MachineState& s, std::string*) {
-          s.r[0] = sdk ? 34u : 0u;
-          return true;
-        },
-        abi::AbiContext::SlotLock::kHoldsGgl);
-  }
-  if (!pr.p->LoadScope(libc, libm, libz, {}, &pr.err)) {
-    pr.p.reset();
-    return pr;
-  }
-  pr.fixture = pr.p->LoadApp(fx, "libjnibridge_fixture.so", &pr.err);
-  std::string failed;
-  if (pr.fixture == nullptr || !pr.p->RunConstructors(&failed)) {
-    if (pr.err.empty()) pr.err = "RunConstructors: " + failed;
-    pr.p.reset();
-    return pr;
-  }
-  const abi::GuestAddr page = pr.p->MapFree(mem::kGuestPage, mem::kRead | mem::kWrite, &pr.err);
-  if (page == 0) {
-    pr.p.reset();
-    return pr;
-  }
-  pr.fwd = std::make_unique<abi::ForwardingJni>(pr.p->memory(), pr.p->abi(), page, *pr.java, &pr.err);
-  if (!pr.fwd->ok()) {
-    pr.fwd.reset();
-    pr.p.reset();
-  }
-  return pr;
-}
 
 struct Result {
   abi::Ret32 ret{};
@@ -331,6 +209,177 @@ void ggl_released_during_java(int tier) {
   CHECK_CTX(Returned(b_result) && b_result.ret.i() == 42, b_result.rr.detail);
 }
 
+
+// ---------------------------------------------------------------------------------------------- Task 2 rows
+
+unsigned Fnv(const std::vector<std::uint8_t>& b) {
+  unsigned h = 2166136261u;
+  for (const std::uint8_t c : b) h = (h ^ c) * 16777619u;
+  return h;
+}
+
+/// A guest scratch page, filled with `bytes` at its start.
+abi::GuestAddr Scratch(Proc& pr, const std::vector<std::uint8_t>& bytes = {}) {
+  std::string e;
+  runtime::Ggl::Held hold(pr.p->ggl());
+  const abi::GuestAddr at = pr.p->MapFree(mem::kGuestPage, mem::kRead | mem::kWrite, &e);
+  if (at != 0 && !bytes.empty()) pr.p->memory().Write(at, bytes.data(), bytes.size());
+  return at;
+}
+
+bool HasNote(const Proc& pr, const std::string& needle) {
+  for (const std::string& n : pr.fwd->notes()) {
+    if (n.find(needle) != std::string::npos) return true;
+  }
+  return false;
+}
+
+std::string Notes(const Proc& pr) {
+  std::string out;
+  for (const std::string& n : pr.fwd->notes()) out += (out.empty() ? "" : " | ") + n;
+  return out;
+}
+
+void mutf8_round_trips(int tier) {
+  Proc pr = Boot(tier);
+  CHECK_CTX(pr.p != nullptr, pr.err);
+  if (!pr.p) return;
+  // "a\0b😀é": ART's GetStringUTFChars gives MUTF-8 — NUL as C0 80, the supplementary character as two 3-byte
+  // surrogate halves.
+  const std::u16string text{u'a', u'\0', u'b', char16_t{0xD83D}, char16_t{0xDE00}, char16_t{0xE9}};
+  const std::vector<std::uint8_t> mutf8{0x61, 0xC0, 0x80, 0x62, 0xED, 0xA0, 0xBD, 0xED, 0xB8, 0x80, 0xC3, 0xA9};
+  const abi::GuestAddr out = Scratch(pr);
+  const abi::GuestAddr s = pr.fwd->ToGuestLocal(pr.java->NewJavaString(text));
+  const Result r = Call(pr, tier, "fx_string_info", {Value32::Ptr(s), Value32::Ptr(out)});
+  CHECK_CTX(Returned(r) && r.ret.i() == 0, r.rr.detail);
+  std::int32_t got[7] = {};
+  pr.p->memory().Read(out, got, sizeof got);
+  CHECK_CTX(got[0] == 12 && got[1] == 6, "UTF length " + std::to_string(got[0]) + ", UTF-16 length " + std::to_string(got[1]));
+  CHECK_CTX(static_cast<unsigned>(got[2]) == Fnv(mutf8), "the MUTF-8 bytes the guest saw differ from ART's");
+  CHECK(got[3] == 1);
+  CHECK_CTX(got[4] == (0 | (0x62 << 16)), "GetStringRegion(1, 2) = " + std::to_string(got[4]));
+  CHECK_CTX(static_cast<unsigned>(got[5]) == Fnv({0x61, 0xC0, 0x80}), "GetStringUTFRegion(0, 2)");
+  CHECK(got[6] == 0x61);
+  // Back the other way: the same bytes through NewStringUTF give the same string.
+  std::vector<std::uint8_t> z = mutf8;
+  z.push_back(0);
+  const Result back = Call(pr, tier, "fx_new_string_utf", {Value32::Ptr(Scratch(pr, z))}, "L");
+  std::string e;
+  CHECK_CTX(Returned(back) && pr.java->StringOf(pr.java->ObjectOf(pr.fwd->FromGuest(back.ret.w(), &e))) == text,
+            back.rr.detail + e);
+  // Standard 4-byte UTF-8 becomes a surrogate pair, as ART's converter does.
+  const Result four = Call(pr, tier, "fx_new_string_utf", {Value32::Ptr(Scratch(pr, {0xF0, 0x9F, 0x98, 0x80, 0}))}, "L");
+  CHECK(Returned(four) && pr.java->StringOf(pr.java->ObjectOf(pr.fwd->FromGuest(four.ret.w(), &e))) ==
+                              std::u16string{char16_t{0xD83D}, char16_t{0xDE00}});
+  // Invalid bytes are replaced (U+FFFD) and named, never handed to Java as they are.
+  const Result bad = Call(pr, tier, "fx_new_string_utf", {Value32::Ptr(Scratch(pr, {0xFF, 0x41, 0}))}, "L");
+  CHECK_CTX((Returned(bad) && pr.java->StringOf(pr.java->ObjectOf(pr.fwd->FromGuest(bad.ret.w(), &e))) ==
+                                  std::u16string{char16_t{0xFFFD}, u'A'}),
+            bad.rr.detail);
+  CHECK_CTX(HasNote(pr, "sanitized"), Notes(pr));
+  // NewString from UTF-16 code units.
+  const std::vector<std::uint8_t> units{0x3a, 0x26, 0x78, 0x00};  // U+263A 'x', little-endian
+  const Result ns = Call(pr, tier, "fx_new_string", {Value32::Ptr(Scratch(pr, units)), Value32::S32(2)}, "L");
+  CHECK(Returned(ns) && pr.java->StringOf(pr.java->ObjectOf(pr.fwd->FromGuest(ns.ret.w(), &e))) ==
+                            std::u16string{char16_t{0x263A}, u'x'});
+}
+
+void arrays_every_kind(int tier) {
+  Proc pr = Boot(tier);
+  CHECK_CTX(pr.p != nullptr, pr.err);
+  if (!pr.p) return;
+  const abi::GuestAddr obj = pr.fwd->ToGuestLocal(pr.java->NewInstance("rb/Fixture"));
+  const Result r = Call(pr, tier, "fx_arrays", {Value32::Ptr(obj)});
+  CHECK_CTX(Returned(r) && r.ret.i() == 0x1ff, r.rr.detail + " -> bits " + std::to_string(r.ret.i()) + " of 511");
+}
+
+void pending_exception_rules(int tier) {
+  Proc pr = Boot(tier);
+  CHECK_CTX(pr.p != nullptr, pr.err);
+  if (!pr.p) return;
+  const Result r = Call(pr, tier, "fx_exceptions", {});
+  CHECK_CTX(Returned(r) && r.ret.i() == 31, r.rr.detail + " -> bits " + std::to_string(r.ret.i()) + " of 31");
+  CHECK_CTX(HasNote(pr, "while an exception is pending"), Notes(pr));
+  CHECK(pr.java->PendingClass().empty());
+}
+
+void local_frames(int tier) {
+  Proc pr = Boot(tier);
+  CHECK_CTX(pr.p != nullptr, pr.err);
+  if (!pr.p) return;
+  const Result r = Call(pr, tier, "fx_frames", {});
+  CHECK_CTX(Returned(r) && r.ret.i() == 3, r.rr.detail + " -> " + std::to_string(r.ret.i()));
+  // A local whose frame popped stays refused even after its slot is reused (the serial moved on).
+  const Result stale = Call(pr, tier, "fx_use_after_pop", {});
+  CHECK_CTX(stale.rr.reason == exec::StopReason::Fault && stale.rr.detail.find("stale local reference") != std::string::npos,
+            stale.rr.detail);
+}
+
+void monitor_pairs(int tier) {
+  Proc pr = Boot(tier);
+  CHECK_CTX(pr.p != nullptr, pr.err);
+  if (!pr.p) return;
+  const abi::HostRef o = pr.java->NewInstance("rb/Fixture");
+  const Result r = Call(pr, tier, "fx_monitor", {Value32::Ptr(pr.fwd->ToGuestLocal(o))});
+  CHECK_CTX(Returned(r) && r.ret.i() == 0, r.rr.detail);
+  CHECK(pr.java->monitor_depth(pr.java->ObjectOf(o)) == 0);
+}
+
+void register_natives_reaches_the_binder(int tier) {
+  Proc pr = Boot(tier);
+  CHECK_CTX(pr.p != nullptr, pr.err);
+  if (!pr.p) return;
+  const Result refused = Call(pr, tier, "fx_register", {});
+  CHECK_CTX(refused.rr.reason == exec::StopReason::Fault && refused.rr.detail.find("no native binder") != std::string::npos,
+            refused.rr.detail);
+  abi::GuestAddr seen_fn = 0;
+  std::string seen_name, seen_sig;
+  static int marker = 0;
+  pr.fwd->set_native_binder([&](abi::GuestAddr fn, const std::string& name, const std::string& sig, std::string*) {
+    seen_fn = fn;
+    seen_name = name;
+    seen_sig = sig;
+    return static_cast<void*>(&marker);
+  });
+  const Result r = Call(pr, tier, "fx_register", {});
+  CHECK_CTX(Returned(r) && r.ret.i() == 0, r.rr.detail);
+  const auto add = pr.fixture->FindExport("fx_native_add");
+  CHECK_CTX(add && seen_fn == add->tagged(), "binder saw " + std::to_string(seen_fn));
+  CHECK(seen_name == "nativeAdd" && seen_sig == "(II)I");
+  const auto natives = pr.java->natives("rb/Fixture");
+  CHECK(natives.size() == 1u && natives[0].name == "nativeAdd" && natives[0].sig == "(II)I" &&
+        natives[0].host_fn == static_cast<void*>(&marker));
+}
+
+void java_vm_get_env(int tier) {
+  Proc pr = Boot(tier);
+  CHECK_CTX(pr.p != nullptr, pr.err);
+  if (!pr.p) return;
+  const Result r = Call(pr, tier, "fx_vm", {});
+  CHECK_CTX(Returned(r) && r.ret.i() == 7, r.rr.detail + " -> bits " + std::to_string(r.ret.i()) + " of 7");
+}
+
+void direct_buffer_over_guest_memory(int tier) {
+  Proc pr = Boot(tier);
+  CHECK_CTX(pr.p != nullptr, pr.err);
+  if (!pr.p) return;
+  const abi::GuestAddr page = Scratch(pr);
+  const Result r = Call(pr, tier, "fx_direct", {Value32::Ptr(page)});
+  CHECK_CTX(Returned(r) && r.ret.i() == 3, r.rr.detail + " -> " + std::to_string(r.ret.i()));
+  static std::uint8_t host_only[8];
+  const abi::GuestAddr b = pr.fwd->ToGuestLocal(pr.java->NewHostDirectBuffer(host_only, 8));
+  const Result h = Call(pr, tier, "fx_direct_address", {Value32::Ptr(b)}, "L");
+  CHECK_CTX(h.rr.reason == exec::StopReason::Fault && h.rr.detail.find("host-memory window service (M4)") != std::string::npos,
+            h.rr.detail);
+}
+
+void reflection_round_trip(int tier) {
+  Proc pr = Boot(tier);
+  CHECK_CTX(pr.p != nullptr, pr.err);
+  if (!pr.p) return;
+  const Result r = Call(pr, tier, "fx_reflect", {});
+  CHECK_CTX(Returned(r) && r.ret.i() == 8, r.rr.detail + " -> " + std::to_string(r.ret.i()));
+}
 }  // namespace
 
 int main() {
@@ -345,6 +394,15 @@ int main() {
     stale_local_is_refused_by_name(tier);
     foreign_thread_local_is_refused(tier);
     ggl_released_during_java(tier);
+    mutf8_round_trips(tier);
+    arrays_every_kind(tier);
+    pending_exception_rules(tier);
+    local_frames(tier);
+    monitor_pairs(tier);
+    register_natives_reaches_the_binder(tier);
+    java_vm_get_env(tier);
+    direct_buffer_over_guest_memory(tier);
+    reflection_round_trip(tier);
   }
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;

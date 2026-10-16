@@ -7,7 +7,7 @@
 // Guest handles. The guest only ever hands a handle back to a table entry; a correct guest never dereferences one.
 // They are tokens high in the 4 GiB window, in ranges the bridge never maps, so a guest that does dereference one
 // faults by name:
-//   locals         kLocalBase  | thread << 18 | n << 2   per host thread, frames mirror Push/PopLocalFrame
+//   locals         kLocalBase  | thread << 20 | n << 6 | serial << 2   per host thread, frames mirror Push/PopLocalFrame
 //   globals        kGlobalBase + 4 n                     one table, indices reused after DeleteGlobalRef
 //   weak globals   kWeakBase   + 4 n
 //   classes        kClassBase  + 4 n                     one stable handle per class (a bijection, pinned by a
@@ -15,12 +15,15 @@
 //                                                        GetObjectClass or GetSuperclass: old games keep a jclass
 //                                                        across calls without NewGlobalRef, which works with this
 //   method/field   kIdBase     + 4 n                     a bijection with the real jmethodID/jfieldID
-// A local's slot is never reused while its thread is inside the frame that made it, so a deleted local is refused
-// as stale rather than silently aliasing a newer one. Every slot releases the Global Guest Lock.
+// A local's slot is reused (a native looping inside one call must not run out), but each reuse bumps the slot's 4-bit
+// serial, as ART's indirect references do, so a deleted local or one whose frame has popped is refused as stale
+// rather than silently aliasing a newer one. Thread numbers are recycled when a host thread exits. Every slot
+// releases the Global Guest Lock.
 #pragma once
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -43,8 +46,8 @@ class ForwardingJni {
   static constexpr GuestAddr kWeakBase = 0xD800'0000u;
   static constexpr GuestAddr kClassBase = 0xD400'0000u;
   static constexpr GuestAddr kIdBase = 0xD000'0000u;
-  static constexpr std::uint32_t kMaxThreads = 1024;      ///< host threads with a local table
-  static constexpr std::uint32_t kMaxLocals = 1u << 16;   ///< live-or-stale local slots per thread
+  static constexpr std::uint32_t kMaxThreads = 256;       ///< host threads with a local table at once (recycled)
+  static constexpr std::uint32_t kMaxLocals = 1u << 14;   ///< local slots per thread (live, or stale in a frame)
   /// Guest bytes the bridge maps at `where`: the env word, then the table.
   static constexpr std::uint32_t kBytes = 0x1000;
 
@@ -70,15 +73,42 @@ class ForwardingJni {
   void PushFrame();
   HostRef PopFrame(GuestAddr result, std::string* err = nullptr);
 
-  [[nodiscard]] std::size_t live_locals() const { return live_locals_.load(std::memory_order_relaxed); }
+  /// Guest memory for the copies JNI hands out (Get*Chars, Get*ArrayElements, the criticals): `bytes` of
+  /// readable+writable guest memory, or 0 with `err`. Called without the GGL (the callee takes it to map). The
+  /// bridge carves its blocks out of the pages it gets and reuses them; it never gives pages back.
+  using GuestAlloc = std::function<GuestAddr(std::uint32_t bytes, std::string* err)>;
+  /// A host entry point for a guest native a guest `RegisterNatives` binds (the runtime's trampoline pool).
+  using NativeBinder =
+      std::function<void*(GuestAddr guest_fn, const std::string& name, const std::string& sig, std::string* err)>;
+  /// Both set once, before any guest call.
+  void set_allocator(GuestAlloc alloc) { alloc_ = std::move(alloc); }
+  void set_native_binder(NativeBinder binder) { binder_ = std::move(binder); }
+  /// The guest `JavaVM*` (GetJavaVM answers it; the runtime passes it to a guest `JNI_OnLoad`).
+  [[nodiscard]] GuestAddr vm() const { return where_ + kVmOffset; }
+  /// Named observations that are not refusals (a call made with an exception pending, a sanitized string, an
+  /// unsupported entry answered as ART answers it), each once, at most kMaxNotes.
+  [[nodiscard]] std::vector<std::string> notes() const;
+
+  [[nodiscard]] std::size_t live_locals() const { return shared_->live.load(std::memory_order_relaxed); }
   [[nodiscard]] std::size_t live_globals() const;
   [[nodiscard]] std::size_t refusals() const { return refusals_.load(std::memory_order_relaxed); }
 
  private:
+  /// What outlives the bridge for a thread's table: the thread-number pool and the live count.
+  struct Shared {
+    std::mutex mu;
+    std::vector<std::uint32_t> free_threads;
+    std::uint32_t next_thread = 0;
+    std::atomic<std::size_t> live{0};
+  };
   struct LocalTable {
+    std::shared_ptr<Shared> shared;
     std::uint32_t thread = 0;
-    std::vector<HostRef> refs;    ///< by slot; 0 = deleted (stale until the frame that made it pops)
-    std::vector<std::size_t> frames;  ///< the refs.size() at each PushFrame
+    std::vector<HostRef> refs;          ///< by slot; 0 = free or deleted
+    std::vector<std::uint8_t> serials;  ///< by slot, never shrinks: the serial of the slot's current local
+    std::vector<std::size_t> frames;    ///< the refs.size() at each PushFrame
+    std::vector<std::vector<std::uint32_t>> free;  ///< per frame (+ the base): deleted slots of that frame
+    ~LocalTable();
   };
   struct IdRec {
     HostId id = 0;
@@ -102,6 +132,27 @@ class ForwardingJni {
 
   bool CallFamily(std::uint32_t index, exec::MachineState& s, std::string* err);
   bool FieldFamily(std::uint32_t index, exec::MachineState& s, std::string* err);
+  bool StringEntry(std::uint32_t index, exec::MachineState& s, std::string* err);
+  bool ArrayEntry(std::uint32_t index, exec::MachineState& s, std::string* err);
+  bool OtherEntry(std::uint32_t index, exec::MachineState& s, std::string* err);
+  bool VmSlot(std::uint32_t index, exec::MachineState& s, std::string* err);
+  void Note(const std::string& note);
+  bool ThrowNamed(const char* cls, const std::string& message);
+
+  /// A copy JNI handed out, by its guest address: what Release has to put back, and how big it is.
+  struct Copy {
+    HostRef pinned = 0;  ///< a global ref to the array or string, held until the final release
+    char kind = 0;       ///< the array's element kind; 0 for a string copy
+    std::int32_t length = 0;
+    std::uint32_t bytes = 0;
+  };
+  GuestAddr Alloc(std::uint32_t bytes, std::string* err);
+  void Free(GuestAddr at);
+  GuestAddr CopyOut(const void* data, std::uint32_t bytes, const Copy& rec, std::string* err);
+
+  static constexpr std::uint32_t kVmOffset = 0x400;  ///< the JavaVM word; its table follows at +0x10
+  static constexpr std::uint32_t kVmEntries = 8;
+  static constexpr std::size_t kMaxNotes = 64;
 
   mem::GuestMemory& memory_;
   AbiContext& abi_;
@@ -111,8 +162,7 @@ class ForwardingJni {
   std::string err_;
   const std::uint64_t serial_;  ///< distinguishes instances in the per-thread local-table registry
 
-  std::atomic<std::uint32_t> next_thread_{0};
-  std::atomic<std::size_t> live_locals_{0};
+  std::shared_ptr<Shared> shared_ = std::make_shared<Shared>();
   std::atomic<std::size_t> refusals_{0};
 
   mutable std::mutex globals_mu_;  ///< leaf
@@ -128,6 +178,16 @@ class ForwardingJni {
   mutable std::mutex ids_mu_;  ///< leaf
   std::vector<IdRec> ids_;
   std::map<std::pair<HostId, bool>, std::size_t> id_index_;
+
+  GuestAlloc alloc_;
+  NativeBinder binder_;
+  std::mutex arena_mu_;  ///< leaf: never held across alloc_ (which takes the GGL) — see Alloc
+  std::map<GuestAddr, std::uint32_t> block_size_;            ///< live blocks: rounded size
+  std::map<std::uint32_t, std::vector<GuestAddr>> free_by_size_;
+  GuestAddr chunk_next_ = 0, chunk_end_ = 0;
+  std::map<GuestAddr, Copy> copies_;
+  mutable std::mutex notes_mu_;  ///< leaf
+  std::vector<std::string> notes_;
 };
 
 }  // namespace rb::abi

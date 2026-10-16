@@ -139,10 +139,11 @@ PTHREAD_FIXTURE="$BUILD/libpthread_fixture.so"
   -mthumb -mfloat-abi=softfp -mfpu=neon -fPIC -shared -nostdlib -Os \
   -Wl,-soname,libpthread_fixture.so -o "$PTHREAD_FIXTURE" "$ROOT/tests/corpus/pthread_fixture.c" -lc
 
-# M3: the JNI bridge fixture, built the same way (the bridge test APK of Task 6 builds the same source natively).
+# M3: the JNI bridge fixture, built the same way (the bridge test APK of Task 6 builds the same source natively),
+# without auto-vectorization: Tier I has no NEON compare (VectorEqual32) yet, and the fixture tests the bridge.
 JNIBRIDGE_FIXTURE="$BUILD/libjnibridge_fixture.so"
 "$TC/bin/clang.exe" --target=armv7-none-linux-androideabi26 --sysroot="$TC/sysroot" \
-  -mthumb -mfloat-abi=softfp -mfpu=neon -fPIC -shared -nostdlib -Os \
+  -mthumb -mfloat-abi=softfp -mfpu=neon -fPIC -shared -nostdlib -Os -fno-vectorize -fno-slp-vectorize \
   -Wl,-soname,libjnibridge_fixture.so -o "$JNIBRIDGE_FIXTURE" "$ROOT/tests/corpus/jni_bridge_fixture.c" -lc
 
 # MSYS hands native programs /c/... paths and converts them on the way out — which is wrong for the
