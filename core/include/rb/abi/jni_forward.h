@@ -73,6 +73,12 @@ class ForwardingJni {
   /// behind `result` (the native's return value) before the frame's guest locals go.
   void PushFrame();
   HostRef PopFrame(GuestAddr result, std::string* err = nullptr);
+  /// Called once the native's arguments (`this` or its class, then its references) are in the new frame. ART
+  /// reads a native's arguments from the call's stack, unchecked without CheckJNI, so a game that keeps one past
+  /// the native's return (Gumball's `this` in a static, overwritten by a nested native's) still gets its object:
+  /// when the frame pops, each argument slot keeps a weak global ("ghost") its old handle resolves to while the
+  /// object lives, one per slot.
+  void ArgumentsIn();
 
   /// Guest memory for the copies JNI hands out (Get*Chars, Get*ArrayElements, the criticals): `bytes` of
   /// readable+writable guest memory, or 0 with `err`. Called without the GGL (the callee takes it to map). The
@@ -101,6 +107,7 @@ class ForwardingJni {
     std::vector<std::uint32_t> free_threads;
     std::uint32_t next_thread = 0;
     std::atomic<std::size_t> live{0};
+    std::vector<HostRef> orphans;  ///< ghosts of exited threads' tables, for the bridge to delete (under mu)
   };
   struct LocalTable {
     std::shared_ptr<Shared> shared;
@@ -109,6 +116,9 @@ class ForwardingJni {
     std::vector<std::uint8_t> serials;  ///< by slot, never shrinks: the serial of the slot's current local
     std::vector<std::size_t> frames;    ///< the refs.size() at each PushFrame
     std::vector<std::vector<std::uint32_t>> free;  ///< per frame (+ the base): deleted slots of that frame
+    std::vector<std::size_t> args_end;  ///< per frame: the refs.size() once its native's arguments were in
+    std::vector<HostRef> ghosts;        ///< by slot: a weak global to the argument a popped frame held there, or 0
+    std::vector<std::uint8_t> ghost_serials;  ///< by slot: the serial that argument's handle carries
     ~LocalTable();
   };
   struct IdRec {

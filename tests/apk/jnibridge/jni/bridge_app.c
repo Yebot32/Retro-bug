@@ -234,6 +234,53 @@ EXPORT jstring Java_com_retrobug_jnibridge_BridgeActivity_over__Ljava_lang_Strin
   return (*env)->NewStringUTF(env, (*env)->GetStringUTFLength(env, s) == 1 ? "string of 1" : "string?");
 }
 
+/* BridgeActivity$Surface, as libgumball's gumballJNIBegin/gumballJNIEnd do it: `this` saved in a static (and
+ * pinned by a global) on every entry, cleared only when the outermost native ends. */
+#define S(name) Java_com_retrobug_jnibridge_BridgeActivity_00024Surface_##name
+static jobject g_this, g_pin;
+static int g_depth;
+static char g_loaded[32];
+
+static void surface_begin(JNIEnv* env, jobject self) {
+  g_this = self;
+  g_pin = (*env)->NewGlobalRef(env, self);
+  g_depth++;
+}
+
+static void surface_end(JNIEnv* env) {
+  if (--g_depth != 0) return;
+  (*env)->DeleteGlobalRef(env, g_pin);
+  g_this = 0;
+}
+
+/* Calls back load(name) (which calls inner), then uses the saved `this` — by now inner's, after inner returned.
+ * ART reads it from inner's returned stack frame: right after the callback it still holds the object, but once a
+ * deeper call (label()) has run over that stack, what it reads is leftovers (IsSameObject said 0), so the row stops
+ * at the uses Gumball makes. */
+EXPORT jstring S(outer)(JNIEnv* env, jobject self, jstring name) {
+  char out[160];
+  surface_begin(env, self);
+  jclass c = (*env)->GetObjectClass(env, self);
+  jmethodID load = (*env)->GetMethodID(env, c, "load", "(Ljava/lang/String;)V");
+  (*env)->CallVoidMethod(env, self, load, name);
+  jclass c2 = (*env)->GetObjectClass(env, g_this);
+  jmethodID label = (*env)->GetMethodID(env, c2, "label", "()Ljava/lang/String;");
+  jstring l = (jstring)(*env)->CallObjectMethod(env, g_this, label);
+  const char* lc = (*env)->GetStringUTFChars(env, l, 0);
+  snprintf(out, sizeof out, "loaded %s, then %s (depth %d)", g_loaded, lc, g_depth);
+  (*env)->ReleaseStringUTFChars(env, l, lc);
+  surface_end(env);
+  return (*env)->NewStringUTF(env, out);
+}
+
+EXPORT void S(inner)(JNIEnv* env, jobject self, jstring name) {
+  surface_begin(env, self);
+  const char* n = (*env)->GetStringUTFChars(env, name, 0);
+  snprintf(g_loaded, sizeof g_loaded, "%s", n);
+  (*env)->ReleaseStringUTFChars(env, name, n);
+  surface_end(env);
+}
+
 static jint native_add(JNIEnv* env, jclass cls, jint a, jint b) {
   (void)env;
   (void)cls;

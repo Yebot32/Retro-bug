@@ -443,8 +443,8 @@ Ret32 AbiContext::CallGuest(GuestAddr fn, const Args32& args, const Shorty& shor
 }
 
 Ret32 AbiContext::CallGuestToCompletion(GuestAddr fn, const Args32& args, const Shorty& shorty, unsigned turn_budget,
-                                        exec::RunResult* outcome) {
-  return CallGuestImpl(fn, args, shorty, turn_budget, true, outcome, nullptr);
+                                        exec::RunResult* outcome, MachineState* exit_state) {
+  return CallGuestImpl(fn, args, shorty, turn_budget, true, outcome, exit_state);
 }
 
 Ret32 AbiContext::CallGuestImpl(GuestAddr fn, const Args32& args, const Shorty& shorty, unsigned max_steps,

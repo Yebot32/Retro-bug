@@ -355,7 +355,7 @@ class AbiContext : public exec::HostDispatch {
   /// process exits (a thread's own unbounded work: never for a call the host must bound). `outcome` is the last
   /// turn's.
   Ret32 CallGuestToCompletion(GuestAddr fn, const Args32& args, const Shorty& shorty, unsigned turn_budget,
-                              exec::RunResult* outcome);
+                              exec::RunResult* outcome, MachineState* exit_state = nullptr);
 
   /// The JNI-shaped entry point C09 will use: a shorty plus the values already converted. Kept next to
   /// `CallGuest` so there is one marshalling path, not one per caller.
