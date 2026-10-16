@@ -30,7 +30,10 @@ Ledger (git-ignored): `.superpowers/sdd/2026-10-15-m2-multi-entry-core/progress.
 - Launcher `RB_WAIT=100 bash tools/run_launcher_on_device.sh R52Y106BECZ gumball`: "RESULT: ran to the end — 7068
   frame(s) on tier J, final scene GumballMainMenu, no fault, drawn on screen".
 - After the TLS fix (launcher rebuilt): ABGo bootcheck again 258 constructors, 0x10006, no fault, with the `tls:` line;
-  the Gumball run was not redone — the tablet had locked (needs the human to unlock).
+  Gumball launcher run (2026-10-16 16:10): "RESULT: ran to the end — 7063 frame(s) on tier J, final scene
+  GumballMainMenu, no fault, drawn on screen". (The attempt before it stopped at 3827 frames on `eglSwapBuffers`
+  EGL_BAD_SURFACE 0x300d — the display surface went away right after the human unlocked the tablet; not an
+  emulation fault, did not repeat.)
 - `am start -S -n com.retrobug.launcher/.LauncherActivity -e bootcheck angry-birds-go`: scope booted once, 258
   constructors on Tier J, `JNI_OnLoad` 0x10006, "RESULT: startup finished with no fault"; 92 `Java_*` wait for M3.
 - `bash tools/run_java_tests.sh`: 141 + 54 checks, 0 failures.
