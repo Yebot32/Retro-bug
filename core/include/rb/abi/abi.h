@@ -241,7 +241,7 @@ class AbiContext : public exec::HostDispatch {
   /// The largest host function index `SlotFor` can name. JNI's own table is 229 entries; the rest is
   /// headroom for host-provided symbols, and `IsHostEntry` refuses anything past it rather than
   /// aliasing one slot onto another.
-  static constexpr std::uint32_t kMaxSlots = 512;
+  static constexpr std::uint32_t kMaxSlots = 1024;
   /**
    * The Linux ARM "kuser helpers": fixed addresses at the top of every 32-bit process the kernel
    * answers with tiny routines (`Documentation/arm/kernel_user_helpers.rst`). Old GCC-built code calls

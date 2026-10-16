@@ -73,7 +73,7 @@ target_link_libraries(rb_guest_thread PUBLIC rb_exec)
 # marshalling in abi/call.cpp is register arithmetic over MachineState, and the only executor coupling
 # is Run/resume around a host call or a guest syscall, so Tier J inherits the bridge unchanged
 # (docs/20 §C08).
-add_library(rb_abi STATIC abi/call.cpp abi/jni_env.cpp)
+add_library(rb_abi STATIC abi/call.cpp abi/jni_env.cpp abi/jni_args.cpp abi/jni_forward.cpp)
 target_compile_features(rb_abi PUBLIC cxx_std_20)
 target_link_libraries(rb_abi PUBLIC rb_exec rb_mem rb_syscall rb_guest_thread)
 

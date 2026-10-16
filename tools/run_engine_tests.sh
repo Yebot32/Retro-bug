@@ -42,7 +42,7 @@ ADB="$SDK/platform-tools/adb.exe"
 
 # One list for build, push and run: a suite that is missing here silently does not execute, which is
 # the least useful kind of green.
-SUITES="rb_interval_compat_tests rb_variant_compat_tests rb_guest_memory_tests rb_guest_elf_tests rb_linker_tests rb_isa_front_end_tests rb_exec_census_tests rb_exec_interp_tests rb_abi_call_tests rb_abi_jni_tests rb_exec_tier_diff_tests rb_diag_tests rb_syscall_monitor_tests rb_codecache_tests rb_profile_tests rb_guest_process_tests rb_guest_thread_tests dynarmic_tests"
+SUITES="rb_interval_compat_tests rb_variant_compat_tests rb_guest_memory_tests rb_guest_elf_tests rb_linker_tests rb_isa_front_end_tests rb_exec_census_tests rb_exec_interp_tests rb_abi_call_tests rb_abi_jni_tests rb_exec_tier_diff_tests rb_diag_tests rb_syscall_monitor_tests rb_codecache_tests rb_profile_tests rb_guest_process_tests rb_guest_thread_tests rb_jni_forward_tests dynarmic_tests"
 # Lanes that are red on purpose because every failure names a real gap (a Tier I refusal, an unlinked
 # loader step), so they cannot gate a green run. They are still built and run here: before this list
 # existed they were in no build at all, which let a stale binary report the same failure count for hours
@@ -139,6 +139,12 @@ PTHREAD_FIXTURE="$BUILD/libpthread_fixture.so"
   -mthumb -mfloat-abi=softfp -mfpu=neon -fPIC -shared -nostdlib -Os \
   -Wl,-soname,libpthread_fixture.so -o "$PTHREAD_FIXTURE" "$ROOT/tests/corpus/pthread_fixture.c" -lc
 
+# M3: the JNI bridge fixture, built the same way (the bridge test APK of Task 6 builds the same source natively).
+JNIBRIDGE_FIXTURE="$BUILD/libjnibridge_fixture.so"
+"$TC/bin/clang.exe" --target=armv7-none-linux-androideabi26 --sysroot="$TC/sysroot" \
+  -mthumb -mfloat-abi=softfp -mfpu=neon -fPIC -shared -nostdlib -Os \
+  -Wl,-soname,libjnibridge_fixture.so -o "$JNIBRIDGE_FIXTURE" "$ROOT/tests/corpus/jni_bridge_fixture.c" -lc
+
 # MSYS hands native programs /c/... paths and converts them on the way out — which is wrong for the
 # *device* path in `adb push a /data/local/tmp/b`, hence the MSYS_NO_PATHCONV=1 on every adb call
 # below. That switch also stops the conversion of the **local** path, so adb.exe is then handed a
@@ -190,6 +196,7 @@ adb push "$(to_host "$IFLIBC")" /data/local/tmp/librbifunclibc.so >/dev/null
 adb push "$(to_host "$WEAK")" /data/local/tmp/librbweak.so >/dev/null
 adb push "$(to_host "$CTORFAULT")" /data/local/tmp/librbctorfault.so >/dev/null
 adb push "$(to_host "$PTHREAD_FIXTURE")" /data/local/tmp/libpthread_fixture.so >/dev/null
+adb push "$(to_host "$JNIBRIDGE_FIXTURE")" /data/local/tmp/libjnibridge_fixture.so >/dev/null
 adb push "$(to_host "$ROOT/tests/corpus/oracle-pthread.txt")" /data/local/tmp/oracle-pthread.txt >/dev/null
 adb push "$(to_host "$FIXTURE_STRIPPED")" /data/local/tmp/librb_fixture_stripped.so >/dev/null
 adb push "$(to_host "$DEVICE_LIBC")" /data/local/tmp/rb_device_libc.so >/dev/null
