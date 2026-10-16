@@ -36,7 +36,12 @@ grep -q "RESULT: repack OK" "$OUT/repack.txt" || { cat "$OUT/repack.txt" >&2; ex
 grep -E "stub" "$OUT/repack.txt" | sed 's/^/repack: /'
 a pull "$REPACK/jnibridge.apk" "$(to_host "$OUT/jnibridge-repacked.apk")" >/dev/null
 a uninstall "$PKG" >/dev/null 2>&1 || true
-a install "$(to_host "$OUT/jnibridge-repacked.apk")" >/dev/null
+# The session API, because `adb install` silently installs nothing on the ColorOS phone (run_launcher_on_device.sh).
+a push "$(to_host "$OUT/jnibridge-repacked.apk")" /data/local/tmp/rbbridge.apk >/dev/null
+SESSION="$(a shell "pm install-create -r -S $(stat -c%s "$OUT/jnibridge-repacked.apk")" | tr -d '\r' | grep -o '[0-9]\+' | head -1)"
+a shell "pm install-write $SESSION base /data/local/tmp/rbbridge.apk" >/dev/null
+a shell "pm install-commit $SESSION" | tr -d '\r' | tail -1
+a shell "pm list packages $PKG" | grep -q "$PKG" || { echo "install: $PKG is not installed after the commit" >&2; exit 1; }
 
 a logcat -c
 a shell am start -S -n "$PKG/.BridgeActivity" >/dev/null

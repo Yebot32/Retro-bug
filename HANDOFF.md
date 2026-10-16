@@ -24,9 +24,17 @@ Tasks 1–6 done on the tablet (the OnePlus was set aside by the human; its runs
 - Task 7: GLES1 in the runtime — `HostSlots::enable_gl()` (slots 256..319, forwarded to the device driver on the
   game's own GL thread; a call that cannot be forwarded returns 0 and is named once in the live log). Tablet
   bootcheck: Gumball's unanswered imports 34 → 3 (only `__cxa_*` EH helpers left), ABGo 117 → 78, both boot clean.
-- **Waiting on the OnePlus** (the tablet has both games' originals installed natively, and a repacked copy has the
-  same package name, so it must not be installed there): `-e repack gumball`, install, launch by its icon, expect
-  `GumballMainMenu` drawn; ABGo by its icon past `isDeviceAmazon()`. Then OnePlus lanes + `run_bridge_check.sh`.
+- **OnePlus runs (2026-10-17; the human handed the OnePlus 75ff8cd3 over for good, "Stay awake" is on on both devices).**
+  Launcher at 0face6c. Lanes: `RB_SERIAL=75ff8cd3 run_engine_tests.sh arm64-v8a` — all 22 suites 0 failures (dynarmic
+  200,561 assertions / 47 cases). `run_bridge_check.sh 75ff8cd3`: **10 of 10 rows match** (the script now installs via
+  the PackageInstaller session API: `adb install` is a silent no-op on ColorOS; ColorOS shows its own "No risks found
+  — Continue installation" check). ABGo (`-e repack base` — staged as base.apk there): Play Protect "App scan
+  recommended" → Scan app → "looks safe" → Install; launched by its LAUNCHER intent: shims, boot, JNI_OnLoad clean,
+  **past `isDeviceAmazon()`**; end point on the GL thread in `ExientGLSurfaceView.nativeInitialize`
+  (`onSurfaceCreated`): `instruction fetch failed at 0xfffe0000` — an unanswered EGL/GLES2/OpenSL/AAsset import (78
+  remain; M4's work, as the plan expected). Gap: that fault does not name the import, though the design says such a
+  call "faults by name". Gumball: see the rename entry below (stale local ref in `jniInit`; fix in progress on branch
+  `m3-stale-local-ref`). Still owed for Gumball: `GumballMainMenu` drawn.
 - **Install beside the original** (branch `package-rename`, off m3-jni-bridge): `-e repack <name> -e rename 1` renames
   the package to `<orig>.rb` (`-e rename <pkg>` for another name), kept as `repack/<name>.rb.apk`. AxmlEditor.renamePackage
   expands relative class names against the ORIGINAL package (the DEX is not renamed), renames provider authorities and
