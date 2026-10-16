@@ -29,12 +29,14 @@ Ledger (git-ignored): `.superpowers/sdd/2026-10-15-m2-multi-entry-core/progress.
 **Evidence (tablet R52Y106BECZ, 2026-10-16, after the final-review fixes below).**
 - Launcher `RB_WAIT=100 bash tools/run_launcher_on_device.sh R52Y106BECZ gumball`: "RESULT: ran to the end — 7068
   frame(s) on tier J, final scene GumballMainMenu, no fault, drawn on screen".
+- After the TLS fix (launcher rebuilt): ABGo bootcheck again 258 constructors, 0x10006, no fault, with the `tls:` line;
+  the Gumball run was not redone — the tablet had locked (needs the human to unlock).
 - `am start -S -n com.retrobug.launcher/.LauncherActivity -e bootcheck angry-birds-go`: scope booted once, 258
   constructors on Tier J, `JNI_OnLoad` 0x10006, "RESULT: startup finished with no fault"; 92 `Java_*` wait for M3.
 - `bash tools/run_java_tests.sh`: 141 + 54 checks, 0 failures.
 - Engine lanes `RB_SERIAL=R52Y106BECZ bash tools/run_engine_tests.sh arm64-v8a`: exit 0, all 19 gating lanes 0 failures
-  (guest_thread 445, guest_process 139, abi_call 127, monitor 172, diff 998, dynarmic 200,561) and both advisory lanes
-  green (guest_libc 147, guest_apk 1376). The intermittent boot fault below did not occur in this run.
+  (guest_thread 445, guest_process 159, abi_call 127, monitor 172, diff 998, dynarmic 200,561) and both advisory lanes
+  green (guest_libc 147, guest_apk 1376) — after the TLS fix below.
 - Earlier (2026-10-15, OnePlus 75ff8cd3): all 19 gating lanes 0 failures on the M2 code; new launcher installed.
 
 **Final-review fixes (2026-10-16).**
@@ -46,13 +48,19 @@ Ledger (git-ignored): `.superpowers/sdd/2026-10-15-m2-multi-entry-core/progress.
 - guest_libc's `librbifunclibc` row failed on 64-bit-only phones (no `/system/lib/ld-android.so`): the script now pushes
   `build/device-libs/{libdl,ld-android}.so` (pulled from the tablet) as `/data/local/tmp/rb_device_*` and the row prefers them.
 
-**Open bug found (pre-existing, not fixed): intermittent boot fault.** About 1 run in 5–10 of `rb_guest_thread_tests`,
-a freshly created `GuestProcess` faults in libc's first constructor (`__libc_preinit`, both tiers):
-`__set_errno_internal` stores to 0x1387 because TLS slot 1 (TLS_SLOT_THREAD_ID, at TP+4 = 0x236498) holds 0x10eb
-instead of the thread (0x23a000). Measured: it is the process's own main thread, TP is right, the slot is intact
-before the constructor runs, and no syscall answer writes it — so a guest store inside `__libc_preinit` overwrites
-it (the 0x26 ENOSYS errno path is normal). Next step: watch stores to TP+4 in the interpreter's `WriteMem` on a Tier I
-failure to get the storing pc (the J failures can't be seen there). Seen once in the full lane run too.
+**Fixed: intermittent boot fault — libc's own TLS was never registered (2026-10-16).** About 1 run in 5–10 of
+`rb_guest_thread_tests`, a fresh `GuestProcess` faulted in `__libc_preinit` (`__set_errno_internal` storing to 0x1387):
+TLS_SLOT_THREAD_ID (TP+4) held 0x10eb instead of the thread. A store watch caught the writer: **GWP-ASan**
+(`GuardedPoolAllocator::init`, `gwp_asan_malloc`), which libc turns on in a random few processes, keeps its
+thread-locals in libc's own `PT_TLS` block through an initial-exec `R_ARM_TLS_TPOFF32` slot that the loader left
+unapplied (0), so they sat on bionic's TLS slots. Fix: the loader's new `LoadOptions::resolve_tls` hook answers a
+module's own TLS relocations; GuestProcess places libc's block where the device's linker does (static-TLS offset
+0xb78 = TP+0xb6c, static TLS 0xba8 — the probe's measured values), registers it as static TLS module 1 in the shared
+globals (module table, counts, generation 1; six new [image] facts) and copies its init image with libc's own
+`__init_static_tls` (main and adopted threads; `pthread_create` already does). Runtime log: `tls: libc.so is static
+TLS module 1 ...`. Test: `guest_process_test` `libc_thread_locals_live_in_libcs_own_tls_block` (libc's
+`__tls_get_addr({1, 8})` = block + 8; TP+4 intact after constructors) plus layout rows. Evidence: 30/30 clean
+`rb_guest_thread_tests` runs with a store watch on TP+4 (before the fix: a failure within 3–7 runs).
 
 **Still open for M2 acceptance (needs the OnePlus + the human for install dialogs).** Plan Task 6 steps 1–2:
 re-repack ABGo and Gumball on the OnePlus (verifies M1's "re-repack installs as an update": status=0, unchanged
