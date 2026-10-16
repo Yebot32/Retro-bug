@@ -381,6 +381,112 @@ final class AxmlEditor {
         nodes.add(end, start);
     }
 
+    // ---------------------------------------------------------------- package rename
+
+    /** Attributes holding a class name, by element; a relative one resolves against the manifest package. */
+    private static final String[][] CLASS_ATTRS = {
+            {"application", "name", "backupAgent", "manageSpaceActivity"},
+            {"activity", "name", "parentActivityName"},
+            {"activity-alias", "name", "targetActivity"},
+            {"service", "name"}, {"receiver", "name"}, {"provider", "name"}, {"instrumentation", "name"},
+    };
+    private static final String[] PERMISSION_DECLS = {"permission", "permission-tree", "permission-group"};
+    private static final String[] PERMISSION_REFS = {"name", "permission", "readPermission", "writePermission", "permissionGroup"};
+
+    private static boolean in(String s, String... set) {
+        for (String x : set) if (x.equals(s)) return true;
+        return false;
+    }
+
+    private static boolean isClassAttr(String element, String attr) {
+        for (String[] row : CLASS_ATTRS) {
+            if (!row[0].equals(element)) continue;
+            for (int i = 1; i < row.length; i++) if (row[i].equals(attr)) return true;
+        }
+        return false;
+    }
+
+    /** {@code name} as the platform resolves it against package {@code pkg} (PackageParser.buildClassName). */
+    static String fullClassName(String pkg, String name) {
+        if (name.startsWith(".")) return pkg + name;
+        return name.indexOf('.') < 0 ? pkg + "." + name : name;
+    }
+
+    /**
+     * {@code v} (an authority or a declared permission) moved from {@code old} to {@code neu}: a name under the old
+     * package keeps its tail; any other gets the new package's tail (or the whole new package) appended, because
+     * the platform refuses a second app declaring the same authority or permission whatever its prefix.
+     */
+    static String renamedName(String old, String neu, String v) {
+        if (v.equals(old) || v.startsWith(old + ".")) return neu + v.substring(old.length());
+        return v + (neu.startsWith(old + ".") ? neu.substring(old.length()) : "." + neu);
+    }
+
+    private static final java.util.regex.Pattern PACKAGE_NAME =
+            java.util.regex.Pattern.compile("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+");
+
+    /**
+     * Renames the manifest package to {@code neu} so the app installs beside the original. The DEX keeps its
+     * classes, so every class name the manifest gives relative to the old package (".Main", "Main") is written
+     * out in full against the old package first; provider authorities and declared permissions are renamed
+     * (they must be unique on the device), with every reference to a renamed permission; an intent-filter
+     * category equal to the old package (GCM/C2DM) and taskAffinity/process names under it follow the package.
+     * Returns one report line per change.
+     */
+    List<String> renamePackage(String neu) throws IOException {
+        String old = packageName();
+        if (old == null) throw new IOException("manifest has no package to rename");
+        if (!PACKAGE_NAME.matcher(neu).matches()) throw new IOException("not a valid package name: " + neu);
+        if (neu.equals(old)) throw new IOException("new package is the same as the old one: " + neu);
+        List<String> out = new ArrayList<>();
+        java.util.Map<String, String> perms = new java.util.LinkedHashMap<>();
+        for (byte[] c : nodes) {
+            if (u16(c, 0) != XML_START_ELEMENT || !in(str(s32(c, NODE_HEADER + 4)), PERMISSION_DECLS)) continue;
+            String v = stringValue(c, findAttr(c, "name"));
+            if (v != null) perms.put(v, renamedName(old, neu, v));
+        }
+        boolean renamed = false;
+        for (byte[] c : nodes) {
+            if (u16(c, 0) != XML_START_ELEMENT) continue;
+            String el = str(s32(c, NODE_HEADER + 4));
+            for (int i = 0; i < attrCount(c); i++) {
+                int a = attrOff(c, i);
+                String attr = str(s32(c, a + 4)), v = stringValue(c, a);
+                if (attr == null || v == null) continue;
+                String nv = null;
+                if ("manifest".equals(el) && "package".equals(attr)) {
+                    nv = neu;
+                    renamed = true;
+                } else if (isClassAttr(el, attr) && !v.isEmpty()) {
+                    nv = fullClassName(old, v);
+                } else if ("meta-data".equals(el) && "value".equals(attr) && v.startsWith(".")
+                        && "android.support.PARENT_ACTIVITY".equals(stringValue(c, findAttr(c, "name")))) {
+                    nv = old + v;                      // NavUtils resolves it against getPackageName()
+                } else if ("provider".equals(el) && "authorities".equals(attr)) {
+                    StringBuilder sb = new StringBuilder();
+                    for (String auth : v.split(";", -1)) {
+                        if (sb.length() > 0) sb.append(';');
+                        sb.append(auth.isEmpty() ? auth : renamedName(old, neu, auth));
+                    }
+                    nv = sb.toString();
+                } else if (perms.containsKey(v) && in(attr, PERMISSION_REFS)) {
+                    nv = perms.get(v);
+                } else if ("category".equals(el) && "name".equals(attr) && v.equals(old)) {
+                    nv = neu;
+                } else if (in(attr, "taskAffinity", "process") && (v.equals(old) || v.startsWith(old + "."))) {
+                    nv = neu + v.substring(old.length());
+                }
+                if (nv == null || nv.equals(v)) continue;
+                int idx = poolString(nv);
+                put32(c, a + 8, idx);
+                put16(c, a + 12, 8); c[a + 14] = 0; c[a + 15] = TYPE_STRING; put32(c, a + 16, idx);
+                out.add(el + " " + attr + ": " + v + " -> " + nv);
+            }
+        }
+        if (!renamed) throw new IOException("manifest package attribute not found on <manifest>");
+        return out;
+    }
+
     private static void putStringAttr(byte[] c, int a, int ns, int name, int value) {
         put32(c, a, ns); put32(c, a + 4, name); put32(c, a + 8, value);
         put16(c, a + 12, 8); c[a + 14] = 0; c[a + 15] = TYPE_STRING; put32(c, a + 16, value);

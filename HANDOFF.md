@@ -27,6 +27,13 @@ Tasks 1–6 done on the tablet (the OnePlus was set aside by the human; its runs
 - **Waiting on the OnePlus** (the tablet has both games' originals installed natively, and a repacked copy has the
   same package name, so it must not be installed there): `-e repack gumball`, install, launch by its icon, expect
   `GumballMainMenu` drawn; ABGo by its icon past `isDeviceAmazon()`. Then OnePlus lanes + `run_bridge_check.sh`.
+- **Install beside the original** (branch `package-rename`, off m3-jni-bridge): `-e repack <name> -e rename 1` renames
+  the package to `<orig>.rb` (`-e rename <pkg>` for another name), kept as `repack/<name>.rb.apk`. AxmlEditor.renamePackage
+  expands relative class names against the ORIGINAL package (the DEX is not renamed), renames provider authorities and
+  declared permissions (+ their uses), a GCM category equal to the package, taskAffinity/process under it;
+  resources.arsc's package name follows. Tablet 2026-10-16: Gumball repacked as `com.twentysixdigital.gumballlite.rb`,
+  installer offered a fresh "Install this app?", then **Play Protect blocked it** ("built for an older version of
+  Android", targetSdk 24) — not bypassed; the human's call. The original was untouched (lastUpdateTime 2025-04-28).
 - Final whole-branch review (opus) done: 5 Important findings fixed in 04c76e9 (Delete* of a stale handle
   ignored as ART does, detach frees locals, no 4 KiB NewStringUTF cap, ID records in a deque, boot teardown on
   every failure); 9 Minor deferred in the ledger. Tablet: 21 lanes 0 failures after the fixes.

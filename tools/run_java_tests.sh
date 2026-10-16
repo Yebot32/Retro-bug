@@ -34,8 +34,14 @@ rm -rf "$OUT"; mkdir -p "$OUT/classes" "$OUT/fixtures" "$OUT/scratch"
 
 for dir in "$ROOT"/tests/corpus/manifests/*/; do
   name="$(basename "$dir")"
+  # A fixture with res/ gets real resources (so resources.arsc has a package chunk, as a game's does).
+  RES=()
+  if [ -d "$dir/res" ]; then
+    "$BT/aapt2.exe" compile --dir "$(to_host "$dir/res")" -o "$(to_host "$OUT/fixtures/$name.res.zip")"
+    RES=("$(to_host "$OUT/fixtures/$name.res.zip")")
+  fi
   "$BT/aapt2.exe" link -I "$(to_host "$AJ")" --manifest "$(to_host "$dir/AndroidManifest.xml")" \
-    -o "$(to_host "$OUT/fixtures/$name.apk")"
+    -o "$(to_host "$OUT/fixtures/$name.apk")" ${RES[@]+"${RES[@]}"}
 done
 
 # Never trust a piped exit status: the source list is built into an array first, and javac runs bare.

@@ -48,9 +48,11 @@ final class ApkRepackager {
     private static final String ARM64 = "lib/arm64-v8a/";
     private static final String GUEST_DIR = "assets/rb32/";
     private static final String MANIFEST = "AndroidManifest.xml";
+    private static final String ARSC = "resources.arsc";
 
     static final class Result {
-        String packageName;
+        String packageName;      // the output's package (the new one when renamed)
+        String renamedFrom;      // the original package when renamed, else null
         int oldTargetSdk = -1;   // -1: the manifest declared none
         int newTargetSdk;
         int oldMinSdk = -1;      // -1: the manifest declared none (the platform reads that as 1)
@@ -67,10 +69,24 @@ final class ApkRepackager {
     private static IOException refused(String why) { return new IOException("refused: " + why); }
 
     static Result transform(File inApk, Map<String, byte[]> runtimeFiles, File outUnsigned) throws IOException {
+        return transform(inApk, runtimeFiles, outUnsigned, null);
+    }
+
+    /** {@code renameTo} value that appends this to the original package: the launcher's "install beside" name. */
+    static final String RENAME_SUFFIX = ".rb";
+
+    /**
+     * {@code renameTo}: null keeps the package; a value starting with '.' is appended to the original package;
+     * anything else is the new package. A renamed app installs beside the original instead of replacing it
+     * (AxmlEditor.renamePackage). resources.arsc's package name follows, so getIdentifier(..., getPackageName())
+     * still finds the app's own resources.
+     */
+    static Result transform(File inApk, Map<String, byte[]> runtimeFiles, File outUnsigned, String renameTo)
+            throws IOException {
         byte[] stub = runtimeFiles.get(STUB_KEY);
         if (stub == null) throw new IOException("runtimeFiles has no \"" + STUB_KEY + "\" entry");
         try {
-            return run(inApk, stub, runtimeFiles, outUnsigned);
+            return run(inApk, stub, runtimeFiles, outUnsigned, renameTo);
         } catch (IOException | RuntimeException e) {
             // A half-written zip must never be mistaken for a finished one by the signing step.
             Files.deleteIfExists(outUnsigned.toPath());
@@ -78,7 +94,8 @@ final class ApkRepackager {
         }
     }
 
-    private static Result run(File inApk, byte[] stub, Map<String, byte[]> runtimeFiles, File out) throws IOException {
+    private static Result run(File inApk, byte[] stub, Map<String, byte[]> runtimeFiles, File out, String renameTo)
+            throws IOException {
         Result r = new Result();
         try (ZipFile zip = new ZipFile(inApk)) {
             ZipEntry me = zip.getEntry(MANIFEST);
@@ -109,6 +126,16 @@ final class ApkRepackager {
             // arm64), and a declared minSdk below 18 makes the v1 signature's SHA-256 digest "unsupported" to
             // `apksigner verify`, which checks v1 down to the manifest's minSdk.
             boolean edited = false;
+            if (renameTo != null) {
+                if (r.packageName == null) throw refused("manifest names no package to rename");
+                String neu = renameTo.startsWith(".") ? r.packageName + renameTo : renameTo;
+                List<String> changes = ed.renamePackage(neu);
+                r.renamedFrom = r.packageName;
+                r.packageName = neu;
+                edited = true;
+                r.report.add("package " + r.renamedFrom + " -> " + neu + " (installs beside the original)");
+                for (String c : changes) r.report.add("rename: " + c);
+            }
             Integer oldMin = ed.minSdk();
             r.oldMinSdk = oldMin == null ? -1 : oldMin;
             if (oldMin != null && oldMin >= MIN_SDK_FLOOR) {
@@ -191,6 +218,15 @@ final class ApkRepackager {
                                     + ex.getMessage());
                         }
                         putBytes(zo, n, dex, e.getMethod() == ZipEntry.STORED ? ZipEntry.STORED : ZipEntry.DEFLATED);
+                        continue;
+                    }
+                    if (r.renamedFrom != null && n.equals(ARSC)) {
+                        byte[] arsc;
+                        try (InputStream in = zip.getInputStream(e)) { arsc = readFully(in); }
+                        int k = renameArscPackage(arsc, r.renamedFrom, r.packageName);
+                        r.report.add(ARSC + ": " + (k == 0 ? "no package named " + r.renamedFrom + ", left unchanged"
+                                : "package name -> " + r.packageName));
+                        putBytes(zo, n, arsc, e.getMethod() == ZipEntry.STORED ? ZipEntry.STORED : ZipEntry.DEFLATED);
                         continue;
                     }
                     copy(zip, e, zo);
@@ -284,6 +320,38 @@ final class ApkRepackager {
         r.stubExports.put(libName, names);
         return StubElfWriter.write(libName, exports);
     }
+
+    /**
+     * Renames, in place, every top-level ResTable_package chunk of {@code arsc} named {@code old} to {@code neu}
+     * (the name is a fixed char16[128] field, so nothing moves). Returns how many were renamed; a table it cannot
+     * walk is left as it is (0). Layout: frameworks/base/libs/androidfw/include/androidfw/ResourceTypes.h.
+     */
+    static int renameArscPackage(byte[] arsc, String old, String neu) throws IOException {
+        if (neu.length() > 127) throw refused("package name too long for resources.arsc: " + neu);
+        if (arsc.length < 12 || le16(arsc, 0) != 0x0002) return 0;
+        int n = 0;
+        for (int pos = le16(arsc, 2); pos + 8 <= arsc.length; ) {
+            int type = le16(arsc, pos), size = le32(arsc, pos + 4);
+            if (size < 8 || size > arsc.length - pos) break;
+            if (type == 0x0200 && size >= 12 + 256) {
+                StringBuilder name = new StringBuilder();
+                for (int i = 0; i < 128 && le16(arsc, pos + 12 + 2 * i) != 0; i++) name.append((char) le16(arsc, pos + 12 + 2 * i));
+                if (name.toString().equals(old)) {
+                    for (int i = 0; i < 128; i++) {
+                        int ch = i < neu.length() ? neu.charAt(i) : 0;
+                        arsc[pos + 12 + 2 * i] = (byte) ch;
+                        arsc[pos + 13 + 2 * i] = (byte) (ch >> 8);
+                    }
+                    n++;
+                }
+            }
+            pos += size;
+        }
+        return n;
+    }
+
+    private static int le16(byte[] b, int o) { return (b[o] & 0xff) | (b[o + 1] & 0xff) << 8; }
+    private static int le32(byte[] b, int o) { return le16(b, o) | le16(b, o + 2) << 16; }
 
     private static void claim(Set<String> names, String n) throws IOException {
         if (!names.add(n)) throw refused("duplicate output entry " + n);

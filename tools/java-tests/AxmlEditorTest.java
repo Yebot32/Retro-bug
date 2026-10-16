@@ -274,6 +274,96 @@ public class AxmlEditorTest {
         }
     }
 
+    /** aapt2's `dump xmltree` of {@code manifest} inside a copy of the {@code base} fixture APK. */
+    static String xmltree(String base, byte[] manifest, String tag) throws Exception {
+        badging(base, manifest, tag);                       // writes <tag>.apk and checks the badging parses
+        File txt = new File(scratch, tag + ".xmltree.txt");
+        int rc = new ProcessBuilder(aapt2, "dump", "xmltree", "--file", "AndroidManifest.xml",
+                new File(scratch, tag + ".apk").getPath()).redirectErrorStream(true).redirectOutput(txt).start().waitFor();
+        String t = new String(Files.readAllBytes(txt.toPath()), "UTF-8");
+        check(rc == 0, tag + ": aapt2 dump xmltree exit " + rc + ": " + t);
+        return t;
+    }
+
+    static final String A = "http://schemas.android.com/apk/res/android:";
+
+    static void renamePackage() throws Exception {
+        AxmlEditor e = AxmlEditor.parse(fixture("rename"));
+        java.util.List<String> changes = e.renamePackage("com.retrobug.fixture.rb");
+        byte[] out = e.toBytes();
+        AxmlEditor r = AxmlEditor.parse(out);
+        check("com.retrobug.fixture.rb".equals(r.packageName()), "rename: packageName re-parses: " + r.packageName());
+        check(changes.contains("manifest package: com.retrobug.fixture -> com.retrobug.fixture.rb"), "rename: change list: " + changes);
+        String b = badging("rename", out, "rename");
+        check(b.contains("package: name='com.retrobug.fixture.rb'"), "rename: badging reports the new package: " + b);
+        check(b.contains("launchable-activity: name='com.retrobug.fixture.Main'"),
+                "rename: launchable activity is the original package's class: " + b);
+        String t = xmltree("rename", out, "rename-x");
+        String[] want = {
+                "package=\"com.retrobug.fixture.rb\"",
+                // class names, expanded against the ORIGINAL package (the DEX is not renamed)
+                A + "name(0x01010003)=\"com.retrobug.fixture.App\"",
+                A + "backupAgent(0x0101027f)=\"com.retrobug.fixture.Backup\"",
+                A + "name(0x01010003)=\"com.retrobug.fixture.Main\"",
+                A + "parentActivityName(0x010103a7)=\"com.retrobug.fixture.Main\"",
+                A + "name(0x01010003)=\"com.retrobug.fixture.Alias\"",
+                A + "targetActivity(0x01010202)=\"com.retrobug.fixture.Main\"",
+                A + "name(0x01010003)=\"com.retrobug.fixture.sub.Svc\"",
+                A + "name(0x01010003)=\"com.retrobug.fixture.Recv\"",
+                A + "name(0x01010003)=\"com.retrobug.fixture.Prov\"",
+                A + "name(0x01010003)=\"com.thirdparty.AdActivity\"",
+                // unique-per-device names follow the package
+                A + "authorities(0x01010018)=\"com.retrobug.fixture.rb.files;com.facebook.app.FacebookContentProvider123.rb\"",
+                A + "name(0x01010003)=\"com.retrobug.fixture.rb.permission.C2D_MESSAGE\"",
+                A + "name(0x01010003)=\"org.other.permission.SHARED.rb\"",
+                A + "permission(0x01010006)=\"org.other.permission.SHARED.rb\"",
+                A + "readPermission(0x01010007)=\"com.retrobug.fixture.rb.permission.C2D_MESSAGE\"",
+                A + "name(0x01010003)=\"com.retrobug.fixture.rb\"",                     // GCM category
+                A + "taskAffinity(0x01010012)=\"com.retrobug.fixture.rb.main\"",
+                // untouched
+                A + "name(0x01010003)=\"android.permission.INTERNET\"",
+                A + "name(0x01010003)=\"android.intent.category.LAUNCHER\"",
+                A + "name(0x01010003)=\"com.google.android.c2dm.intent.RECEIVE\"",
+        };
+        for (String w : want) check(t.contains(w), "rename: aapt2 xmltree has " + w + "\n" + t);
+        check(!t.contains("\".Main\"") && !t.contains("\"Backup\"") && !t.contains("\".sub.Svc\""),
+                "rename: no relative class name left: " + t);
+        check(!t.contains("\"com.retrobug.fixture.permission.C2D_MESSAGE\"") && !t.contains("\"com.retrobug.fixture.files"),
+                "rename: no old permission or authority left: " + t);
+        check(t.indexOf("C2D_MESSAGE\"") != t.lastIndexOf("C2D_MESSAGE\""), "rename: the declared permission and its uses agree");
+
+        // The other edits still work on a renamed manifest (the repackager renames first, then raises the SDKs).
+        AxmlEditor r2 = AxmlEditor.parse(out);
+        r2.setTargetSdk(24);
+        r2.addProvider("com.retrobug.shim.RbShimProvider", "com.retrobug.fixture.rb.rbshim", Integer.MAX_VALUE);
+        String t2 = xmltree("rename", r2.toBytes(), "rename-then-edit");
+        check(t2.contains("package=\"com.retrobug.fixture.rb\"") && t2.contains("targetSdkVersion(0x01010270)=24")
+                && t2.contains(A + "name(0x01010003)=\"com.retrobug.fixture.Main\""), "rename then edit: " + t2);
+
+        check("a.b.C".equals(AxmlEditor.fullClassName("p.q", "a.b.C")) && "p.q.C".equals(AxmlEditor.fullClassName("p.q", "C"))
+                && "p.q.x.C".equals(AxmlEditor.fullClassName("p.q", ".x.C")), "fullClassName follows buildClassName");
+        check("p.q2".equals(AxmlEditor.renamedName("p.q", "p.q2", "p.q")) && "p.qq.x.y".equals(AxmlEditor.renamedName("p.q", "x.y", "p.qq")),
+                "renamedName: a prefix match is whole segments only");
+        check("x.y.a".equals(AxmlEditor.renamedName("p.q", "x.y", "p.q.a")) && "o.a.x.y".equals(AxmlEditor.renamedName("p.q", "x.y", "o.a")),
+                "renamedName with an unrelated new package");
+
+        for (String bad : new String[] {"com.retrobug.fixture", "nodots", "com..x", "1com.x", "com.x-y", ""}) {
+            try {
+                AxmlEditor.parse(fixture("rename")).renamePackage(bad);
+                check(false, "rename to '" + bad + "' should be refused");
+            } catch (IOException ex) {
+                checks++;
+            }
+        }
+        // A manifest with nothing but a package: only the package changes.
+        AxmlEditor m = AxmlEditor.parse(fixture("min_only"));
+        java.util.List<String> c2 = m.renamePackage("org.example.other");
+        String t3 = xmltree("min_only", m.toBytes(), "rename-min");
+        check(t3.contains("package=\"org.example.other\"") && t3.contains("\"com.retrobug.fixture.Main\""),
+                "min_only rename: package and expanded activity: " + t3);
+        check(c2.size() == 2, "min_only rename: package + one activity changed: " + c2);
+    }
+
     public static void main(String[] a) throws Exception {
         fixtures = new File(a[0]); scratch = new File(a[1]); aapt2 = a[2];
         minOnlyReadsBack();
@@ -285,6 +375,7 @@ public class AxmlEditorTest {
         refusesLyingFields();
         rewriteTargetSdk();
         readsExtractNativeLibs();
+        renamePackage();
         refusesGarbage();
         System.out.println(checks + " checks, " + failures + " failures");
         System.exit(failures == 0 ? 0 : 1);

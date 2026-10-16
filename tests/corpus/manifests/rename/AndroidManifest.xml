@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Everything the package rename has to follow (AxmlEditor.renamePackage): relative and bare class names,
+     a declared permission and its uses (ABGo's C2D_MESSAGE shape), provider authorities with and without the
+     package prefix (ABGo's Facebook provider has none), a GCM category equal to the package. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.retrobug.fixture">
+    <uses-sdk android:minSdkVersion="8"/>
+    <permission android:name="com.retrobug.fixture.permission.C2D_MESSAGE" android:protectionLevel="signature"/>
+    <permission android:name="org.other.permission.SHARED" android:protectionLevel="signature"/>
+    <uses-permission android:name="com.retrobug.fixture.permission.C2D_MESSAGE"/>
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <application android:label="@string/app_name" android:name=".App" android:backupAgent="Backup">
+        <activity android:name=".Main" android:exported="true" android:taskAffinity="com.retrobug.fixture.main">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+        <activity android:name="com.thirdparty.AdActivity" android:parentActivityName=".Main"/>
+        <activity-alias android:name=".Alias" android:targetActivity=".Main"/>
+        <service android:name=".sub.Svc"/>
+        <receiver android:name=".Recv" android:permission="org.other.permission.SHARED">
+            <intent-filter>
+                <action android:name="com.google.android.c2dm.intent.RECEIVE"/>
+                <category android:name="com.retrobug.fixture"/>
+            </intent-filter>
+        </receiver>
+        <provider android:name=".Prov" android:authorities="com.retrobug.fixture.files;com.facebook.app.FacebookContentProvider123"
+            android:readPermission="com.retrobug.fixture.permission.C2D_MESSAGE" android:exported="false"/>
+    </application>
+</manifest>

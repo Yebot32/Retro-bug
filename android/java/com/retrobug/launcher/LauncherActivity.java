@@ -145,6 +145,8 @@ public class LauncherActivity extends Activity {
          * `-e repack <name>` runs the library row's "Make installable" on the first matching game: rewrite,
          * sign, keep the result under getExternalFilesDir(null)/repack/, then hand it to the installer.
          * `-e install 0` stops after signing (scripted checks of the artifact without an installer dialog).
+         * `-e rename 1` renames the package to `<original>.rb` (`-e rename <pkg>`: that name) so the result installs
+         * beside a natively installed original; it is kept as `<name>.rb.apk` (or `<name>.<pkg>.apk`).
          */
         /*
          * `-e shimcheck 1` checks the targetSdk compatibility shims in this process (ShimCheck; driven by
@@ -159,7 +161,10 @@ public class LauncherActivity extends Activity {
         if (repack != null && !repack.isEmpty()) {
             for (File f : games()) {
                 if (f.getName().toLowerCase().contains(repack.toLowerCase())) {
-                    repackGame(f, !"0".equals(getIntent().getStringExtra("install")));
+                    String rename = getIntent().getStringExtra("rename");
+                    repackGame(f, !"0".equals(getIntent().getStringExtra("install")),
+                            rename == null || rename.equals("0") ? null
+                                    : rename.equals("1") ? ApkRepackager.RENAME_SUFFIX : rename);
                     return;
                 }
             }
@@ -335,7 +340,7 @@ public class LauncherActivity extends Activity {
         }), weight(1f));
         row.addView(buttons);
         row.addView(button("Make installable", new Runnable() {
-            @Override public void run() { repackGame(apk, true); }
+            @Override public void run() { repackGame(apk, true, null); }
         }));
 
         View divider = new View(this);
@@ -717,13 +722,15 @@ public class LauncherActivity extends Activity {
 
     /// "Make installable": rewrite the game for a 64-bit-only phone, sign it with the phone's repack key,
     /// keep it (and its report) under getExternalFilesDir(null)/repack/, then offer it to the installer.
-    private void repackGame(final File apk, final boolean install) {
+    private void repackGame(final File apk, final boolean install, final String renameTo) {
         if (repacking_) {
             Toast.makeText(this, "A repack is already running", Toast.LENGTH_SHORT).show();
             return;
         }
         repacking_ = true;
-        final String label = apk.getName().replaceAll("\\.apk$", "");
+        // A renamed repack is kept apart from the same-package one, which bootcheck boots in a staged original's place.
+        final String label = apk.getName().replaceAll("\\.apk$", "")
+                + (renameTo == null ? "" : renameTo.startsWith(".") ? renameTo : "." + renameTo);
         reportTitle_ = "make installable: " + label;
         currentReport_ = "repacking " + apk.getName() + " ...";
         show(Screen.REPORT);
@@ -741,8 +748,9 @@ public class LauncherActivity extends Activity {
                     out.append("repack: ").append(apk.getName()).append(" (").append(apk.length())
                             .append(" bytes)\n");
                     java.util.Map<String, byte[]> runtime = readRepackRuntime(out);
-                    ApkRepackager.Result r = ApkRepackager.transform(apk, runtime, unsigned);
-                    out.append("package: ").append(r.packageName).append('\n');
+                    ApkRepackager.Result r = ApkRepackager.transform(apk, runtime, unsigned, renameTo);
+                    out.append("package: ").append(r.packageName)
+                            .append(r.renamedFrom == null ? "" : " (renamed from " + r.renamedFrom + ")").append('\n');
                     out.append("minSdk: ").append(r.oldMinSdk < 0 ? "absent" : String.valueOf(r.oldMinSdk))
                             .append(" -> ").append(r.newMinSdk).append('\n');
                     out.append("targetSdk: ").append(r.oldTargetSdk < 0 ? "absent" : String.valueOf(r.oldTargetSdk))
