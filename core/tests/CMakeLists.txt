@@ -144,3 +144,14 @@ target_compile_definitions(rb_jni_forward_tests PRIVATE
   RB_GUEST_LIBM_PATH="/data/local/tmp/libm.so"
   RB_GUEST_LIBZ_PATH="/data/local/tmp/libz.so"
   RB_JNIBRIDGE_FIXTURE_PATH="/data/local/tmp/libjnibridge_fixture.so")
+
+# M3 Task 3: Java calling guest natives through the inbound trampolines (arm64 hosts).
+if(TARGET rb_inbound)
+  add_executable(rb_inbound_tests inbound_test.cpp fake_java.cpp)
+  target_link_libraries(rb_inbound_tests PRIVATE rb_inbound rb_runtime rb_abi)
+  target_compile_definitions(rb_inbound_tests PRIVATE
+    RB_DEVICE_LIBC_PATH="/data/local/tmp/rb_device_libc.so"
+    RB_GUEST_LIBM_PATH="/data/local/tmp/libm.so"
+    RB_GUEST_LIBZ_PATH="/data/local/tmp/libz.so"
+    RB_JNIBRIDGE_FIXTURE_PATH="/data/local/tmp/libjnibridge_fixture.so")
+endif()
