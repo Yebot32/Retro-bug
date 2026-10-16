@@ -10,10 +10,12 @@ import java.util.GregorianCalendar;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Enumeration;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.zip.CRC32;
 import java.util.zip.ZipEntry;
@@ -55,6 +57,7 @@ final class ApkRepackager {
         int newMinSdk;
         List<String> guestLibs = new ArrayList<>();
         List<String> stubs = new ArrayList<>();
+        Map<String, List<String>> stubExports = new TreeMap<>();  // generated stubs: lib -> exported symbols
         List<String> report = new ArrayList<>();
         List<String> shims = new ArrayList<>();   // targetSdk compatibility shims added (ShimPlan ids)
         String shimDex;                           // classesN.dex entry carrying them, or null
@@ -156,6 +159,8 @@ final class ApkRepackager {
             List<String> sigDropped = new ArrayList<>();
             Set<String> names = new HashSet<>();
             Set<String> refs = new TreeSet<>();
+            Map<String, NativeMethods.Native> natives = new TreeMap<>();  // every classesN.dex's, by JNI name
+            Map<String, byte[]> libBytes = new HashMap<>();
             try (ZipOutputStream zo = new ZipOutputStream(Files.newOutputStream(out.toPath()))) {
                 putBytes(zo, MANIFEST, manifest, ZipEntry.DEFLATED);
                 names.add(MANIFEST);
@@ -179,6 +184,12 @@ final class ApkRepackager {
                         } catch (IOException ex) {
                             r.report.add("risk scan: " + n + " unreadable — " + ex.getMessage());
                         }
+                        try {
+                            natives.putAll(NativeMethods.natives(dex));
+                        } catch (IOException ex) {
+                            r.report.add("natives: " + n + " unreadable (its natives get no generated stub export) — "
+                                    + ex.getMessage());
+                        }
                         putBytes(zo, n, dex, e.getMethod() == ZipEntry.STORED ? ZipEntry.STORED : ZipEntry.DEFLATED);
                         continue;
                     }
@@ -197,7 +208,10 @@ final class ApkRepackager {
                     r.guestLibs.add(name);
                     String dest = GUEST_DIR + name;
                     claim(names, dest);
-                    try (InputStream in = zip.getInputStream(e)) { putBytes(zo, dest, readFully(in), ZipEntry.DEFLATED); }
+                    byte[] lib;
+                    try (InputStream in = zip.getInputStream(e)) { lib = readFully(in); }
+                    putBytes(zo, dest, lib, ZipEntry.DEFLATED);
+                    libBytes.put(name, lib);
                     // Only .so files are loaded by name through the linker; anything else (gdbserver, data
                     // blobs) is carried along for the guest but gets no stub the platform would try to load.
                     if (name.endsWith(".so") && name.indexOf('/') < 0) stubs.add(name);
@@ -206,7 +220,7 @@ final class ApkRepackager {
                 Collections.sort(stubs);
                 for (String s : stubs) {
                     claim(names, ARM64 + s);
-                    putBytes(zo, ARM64 + s, stub, ZipEntry.DEFLATED);
+                    putBytes(zo, ARM64 + s, stubFor(s, libBytes.get(s), natives, stub, r), ZipEntry.DEFLATED);
                 }
                 r.stubs = stubs;
 
@@ -233,6 +247,42 @@ final class ApkRepackager {
             }
         }
         return r;
+    }
+
+    /**
+     * The 64-bit stand-in for {@code lib}: a generated stub (StubElfWriter) exporting every {@code Java_*} name the
+     * library defines that a DEX native carries, so ART binds them by its own lookup; or the prebuilt stub (which
+     * only boots the library) when the library exports none and no {@code JNI_OnLoad}, or cannot be read.
+     */
+    static byte[] stubFor(String libName, byte[] lib, Map<String, NativeMethods.Native> natives, byte[] prebuilt,
+                          Result r) {
+        List<String> report = r.report;
+        Set<String> defined;
+        try {
+            defined = StubElfWriter.jniExportsOf(lib);
+        } catch (IOException ex) {
+            report.add(libName + ": prebuilt stub (its exports are unreadable: " + ex.getMessage() + ")");
+            return prebuilt;
+        }
+        List<StubElfWriter.Export> exports = new ArrayList<>();
+        int unbound = 0;
+        for (String sym : defined) {
+            if (sym.equals(StubElfWriter.ONLOAD)) continue;
+            NativeMethods.Native n = natives.get(sym);
+            if (n == null) { unbound++; continue; }  // no Java declaration names it: ART never looks it up
+            exports.add(new StubElfWriter.Export(sym, NativeMethods.shortyOf(n.descriptor), n.isStatic));
+        }
+        if (exports.isEmpty() && !defined.contains(StubElfWriter.ONLOAD)) {
+            report.add(libName + ": prebuilt stub (no Java_* the DEX declares, no JNI_OnLoad)");
+            return prebuilt;
+        }
+        report.add(libName + ": generated stub, " + exports.size() + " Java_* export(s) + JNI_OnLoad"
+                + (unbound == 0 ? "" : "; " + unbound + " Java_* with no native declaration in the DEX left out"));
+        List<String> names = new ArrayList<>();
+        names.add(StubElfWriter.ONLOAD);
+        for (StubElfWriter.Export e : exports) names.add(e.symbol);
+        r.stubExports.put(libName, names);
+        return StubElfWriter.write(libName, exports);
     }
 
     private static void claim(Set<String> names, String n) throws IOException {

@@ -236,6 +236,30 @@ public class ApkRepackagerTest {
         check(!reportHas(r, "libgumball.so", "dropped"), "armeabi-only lib is not reported dropped: " + r.report);
     }
 
+    /** A real 32-bit library and a DEX declaring three of its natives: a generated stub exporting exactly those. */
+    static void generatesStubs() throws IOException {
+        File so = new File(fixtures, "libjnibridge_fixture.so");
+        if (!so.isFile()) { System.out.println("ApkRepackagerTest: no " + so + " — generated-stub row skipped"); return; }
+        Map<String, byte[]> x = new LinkedHashMap<>();
+        x.put("classes.dex", Files.readAllBytes(new File(fixtures, "JniFixture.dex").toPath()));
+        x.put("lib/armeabi-v7a/libjnibridge_fixture.so", Files.readAllBytes(so.toPath()));
+        x.put("lib/armeabi-v7a/libplain.so", b("not an ELF"));
+        File in = build("min_only", null, "genstub", x);
+        File out = new File(scratch, "genstub.out.apk");
+        ApkRepackager.Result r = ApkRepackager.transform(in, runtime(), out);
+        Map<String, byte[]> o = readAll(out);
+        byte[] stub = o.get("lib/arm64-v8a/libjnibridge_fixture.so");
+        check(stub != null && !Arrays.equals(stub, STUB) && stub[4] == 2 && stub[18] == (byte) 183,
+              "the ELF library gets a generated AArch64 stub");
+        String s = stub == null ? "" : new String(stub, java.nio.charset.StandardCharsets.ISO_8859_1);
+        check(s.contains("Java_rb_Fixture_mix\0") && s.contains("Java_rb_Fixture_half\0")
+              && s.contains("Java_rb_Fixture_echoObject\0") && s.contains("JIJFDIJFDIIIIFFDDFD\0"), "declared natives exported");
+        check(!s.contains("Java_rb_Fixture_third") && !s.contains("Java_rb_Fixture_fails"), "undeclared Java_* left out");
+        check(reportHas(r, "libjnibridge_fixture.so", "generated stub, 3 Java_*"), "report: " + r.report);
+        check(Arrays.equals(o.get("lib/arm64-v8a/libplain.so"), STUB) && reportHas(r, "libplain.so", "prebuilt stub"),
+              "an unreadable library keeps the prebuilt stub: " + r.report);
+    }
+
     interface Throwing { void run() throws IOException; }
 
     static void refuses(String what, Throwing t) {
@@ -370,6 +394,7 @@ public class ApkRepackagerTest {
         raisesTarget22();
         neverLowersTarget();
         armeabiOnlyWorks();
+        generatesStubs();
         refusals();
         System.out.println(checks + " checks, " + failures + " failures");
         System.exit(failures == 0 ? 0 : 1);

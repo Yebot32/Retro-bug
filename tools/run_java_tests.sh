@@ -46,7 +46,7 @@ javac -encoding UTF-8 -nowarn -Xlint:-options -d "$(to_host "$OUT/classes")" "${
 
 # DEX fixtures for the risk scan: real javac + d8 output, as in a game's classes.dex. Compiled against
 # android.jar so the references are the platform's own descriptors; never loaded or run.
-for f in RiskyFixture CleanFixture; do
+for f in RiskyFixture CleanFixture NativeFixture JniFixture; do
   mkdir -p "$OUT/dexsrc/$f" "$OUT/dexout/$f"
   javac -encoding UTF-8 -nowarn -Xlint:-options --release 8 -classpath "$(to_host "$AJ")" \
     -d "$(to_host "$OUT/dexsrc/$f")" "$(to_host "$ROOT/tools/java-tests/dexfixtures/$f.java")"
@@ -56,6 +56,13 @@ for f in RiskyFixture CleanFixture; do
   cp "$OUT/dexout/$f/classes.dex" "$OUT/fixtures/$f.dex"
 done
 
+# A real 32-bit library with Java_rb_Fixture_* exports, for the generated-stub rows (skipped without the NDK).
+NDK_BIN="$SDK/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64/bin"
+FX32="$OUT/fixtures/libjnibridge_fixture.so"
+"$NDK_BIN/clang.exe" --target=armv7-none-linux-androideabi26 --sysroot="$(to_host "$NDK_BIN/../sysroot")" -mthumb \
+  -mfloat-abi=softfp -fPIC -shared -nostdlib -Os -fno-vectorize -fno-slp-vectorize \
+  -o "$(to_host "$FX32")" "$(to_host "$ROOT/tests/corpus/jni_bridge_fixture.c")" -lc 2>/dev/null || FX32=""
+
 java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ShimPlanTest "$(to_host "$OUT/fixtures")"
 
 java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.AxmlEditorTest \
@@ -63,3 +70,10 @@ java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.AxmlEditorTest \
 
 java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ApkRepackagerTest \
   "$(to_host "$OUT/fixtures")" "$(to_host "$OUT/scratch")" "$(to_host "$BT/aapt2.exe")"
+
+# Generated stubs (M3 Task 5). The game rows read the human's own Gumball / ABGo files from build/games
+# (gumball-lite.apk, angry-birds-go-1.10.1.apk; never committed), read in memory, and skip without them.
+java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.NativeMethodsTest \
+  "$(to_host "$OUT/fixtures")" "$(to_host "$ROOT/build/games")"
+java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.StubElfWriterTest \
+  "$(to_host "$OUT/scratch")" "$(to_host "$NDK_BIN/llvm-readelf.exe")" "${FX32:+$(to_host "$FX32")}"

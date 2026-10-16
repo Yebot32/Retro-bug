@@ -114,6 +114,8 @@ public class LauncherActivity extends Activity {
     /// as the repackager lays one out (`assets/rb32/<lib>`, `assets/rb32sys/*`) and returns what it did.
     /// The report itself goes to logcat tag RBRUNTIME and to files/rb-report.txt.
     private static native String nativeBootCheck(String apkPath, String libName);
+    /// `-e stubcheck`: dlopen one generated stub here and check each of `symbols` reaches rb_stub_capture.
+    private static native String nativeStubCheck(String stubPath, String[] symbols);
 
     private enum Screen { HOME, LIBRARY, SETTINGS, DIAGNOSTICS, REPORT, RUN }
 
@@ -163,6 +165,19 @@ public class LauncherActivity extends Activity {
             }
             Log.w(TAG, "repack: no game matching '" + repack + "'");
             Toast.makeText(this, "no game matching '" + repack + "'", Toast.LENGTH_LONG).show();
+            return;
+        }
+        // `-e stubcheck <name>`: repack the game (no install, nothing signed), then dlopen each generated stub in
+        // this process and check every export resolves to the dispatch entry (nativeStubCheck).
+        final String stubcheck = getIntent() == null ? null : getIntent().getStringExtra("stubcheck");
+        if (stubcheck != null && !stubcheck.isEmpty()) {
+            for (File f : games()) {
+                if (f.getName().toLowerCase().contains(stubcheck.toLowerCase())) {
+                    stubCheck(f);
+                    return;
+                }
+            }
+            Log.w(TAG, "stubcheck: no game matching '" + stubcheck + "'");
             return;
         }
         final String bootcheck = getIntent() == null ? null : getIntent().getStringExtra("bootcheck");
@@ -793,6 +808,49 @@ public class LauncherActivity extends Activity {
     }
 
     /// The stub, the engine and the guest libraries, read out of this launcher's own installed APK.
+    /// The `-e stubcheck` run, on a worker thread: ApkRepackager.transform into the cache, each generated stub
+    /// written to the code cache (an exec-allowed app directory) and checked by nativeStubCheck; one line per stub.
+    private void stubCheck(final File apk) {
+        reportTitle_ = "stubcheck " + apk.getName();
+        currentReport_ = "stubcheck " + apk.getName() + " ...";
+        show(Screen.REPORT);
+        new Thread(new Runnable() {
+            @Override public void run() {
+                final StringBuilder out = new StringBuilder();
+                File unsigned = new File(getCacheDir(), "stubcheck.unsigned.apk");
+                try {
+                    ApkRepackager.Result r = ApkRepackager.transform(apk, readRepackRuntime(out), unsigned);
+                    for (String line : r.report) if (line.contains("stub")) out.append(line).append('\n');
+                    File dir = new File(getCodeCacheDir(), "stubcheck");
+                    if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("could not create " + dir);
+                    try (java.util.zip.ZipFile z = new java.util.zip.ZipFile(unsigned)) {
+                        for (java.util.Map.Entry<String, List<String>> e : r.stubExports.entrySet()) {
+                            File so = new File(dir, e.getKey());
+                            try (InputStream in = z.getInputStream(z.getEntry("lib/arm64-v8a/" + e.getKey()));
+                                 OutputStream os = new FileOutputStream(so)) {
+                                byte[] buf = new byte[65536];
+                                for (int k; (k = in.read(buf)) > 0; ) os.write(buf, 0, k);
+                            }
+                            out.append(nativeStubCheck(so.getAbsolutePath(), e.getValue().toArray(new String[0])))
+                               .append('\n');
+                        }
+                    }
+                    if (r.stubExports.isEmpty()) out.append("stubcheck: no generated stub (every library kept the prebuilt one)\n");
+                } catch (Throwable t) {
+                    out.append("stubcheck: FAILED — ").append(t).append('\n');
+                    Log.e(TAG, "stubcheck failed", t);
+                } finally {
+                    if (unsigned.exists() && !unsigned.delete()) Log.w(TAG, "stubcheck: could not delete " + unsigned);
+                }
+                final String text = out.toString();
+                Log.i(TAG, text);
+                runOnUiThread(new Runnable() {
+                    @Override public void run() { saveAndShow("stubcheck", text); }
+                });
+            }
+        }, "rb-stubcheck").start();
+    }
+
     private java.util.Map<String, byte[]> readRepackRuntime(StringBuilder out) throws IOException {
         java.util.Map<String, byte[]> files = new java.util.LinkedHashMap<>();
         try (java.util.zip.ZipFile self = new java.util.zip.ZipFile(getApplicationInfo().sourceDir)) {
