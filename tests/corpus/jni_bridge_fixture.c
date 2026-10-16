@@ -352,3 +352,15 @@ __attribute__((visibility("default"))) jint Java_rb_Fixture_fails(JNIEnv* env, j
   (void)cls;
   return *(volatile jint*)0;
 }
+
+/* Re-entry on one thread: native -> Java (rb.Fixture.callsNative) -> native (twiceNative). Result 2n + 1. */
+__attribute__((visibility("default"))) jint Java_rb_Fixture_twiceNative(JNIEnv* env, jclass cls, jint x) {
+  (void)env;
+  (void)cls;
+  return x * 2;
+}
+__attribute__((visibility("default"))) jint Java_rb_Fixture_callJava(JNIEnv* env, jclass cls, jint n) {
+  jmethodID m = (*env)->GetStaticMethodID(env, cls, "callsNative", "(I)I");
+  if (m == 0) return -1;
+  return (*env)->CallStaticIntMethod(env, cls, m, n) + 1;
+}

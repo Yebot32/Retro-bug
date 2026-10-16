@@ -522,3 +522,29 @@ __attribute__((visibility("default"))) int pt_syscall_storm(int n) {
   if (pthread_join(t, &r) != 0) return -3;
   return (int)(intptr_t)r;
 }
+
+/* ---- pt_tls_dtor_*: a thread-exit destructor registered the way a C++ `thread_local` object's is
+ * (__cxa_thread_atexit_impl, bionic's), counted when it runs. pt_tls_dtor_on_thread: a pthread registers one
+ * and exits; the count after the join. Result 1. (M3 Task 4: an adopted ART thread must run them at its exit.) */
+extern int __cxa_thread_atexit_impl(void (*dtor)(void*), void* obj, void* dso_handle);
+static int g_tls_dtor_runs;
+static void tls_dtor(void* p) {
+  (void)p;
+  __sync_fetch_and_add(&g_tls_dtor_runs, 1);
+}
+__attribute__((visibility("default"))) int pt_tls_dtor_register(void) {
+  return __cxa_thread_atexit_impl(tls_dtor, &g_tls_dtor_runs, 0);
+}
+__attribute__((visibility("default"))) int pt_tls_dtor_count(void) { return g_tls_dtor_runs; }
+static void* tls_dtor_thread(void* arg) {
+  (void)arg;
+  pt_tls_dtor_register();
+  return 0;
+}
+__attribute__((visibility("default"))) int pt_tls_dtor_on_thread(void) {
+  const int before = g_tls_dtor_runs;
+  pthread_t t;
+  if (pthread_create(&t, 0, tls_dtor_thread, 0) != 0) return -2;
+  if (pthread_join(t, 0) != 0) return -3;
+  return g_tls_dtor_runs - before;
+}

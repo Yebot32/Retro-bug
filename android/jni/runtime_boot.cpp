@@ -35,7 +35,11 @@
 #include <string>
 #include <vector>
 
+#include "art_java.h"
 #include "host_slots.h"
+#include "rb/abi/jni_forward.h"
+#include "rb/runtime/ggl.h"
+#include "rb/runtime/inbound.h"
 #include "rb/runtime/guest_process.h"
 
 namespace {
@@ -229,6 +233,12 @@ int TargetSdk() {
 struct Runtime {
   std::unique_ptr<GuestProcess> proc;
   std::unique_ptr<rb::launcher::HostSlots> slots;
+  // M3: the JNI bridge — real Java (the VM the first stub handed in), the guest JNIEnv/JavaVM over it, and the
+  // dispatcher Java calls guest natives through.
+  JavaVM* vm = nullptr;
+  std::unique_ptr<rb::launcher::ArtJava> java;
+  std::unique_ptr<rb::abi::ForwardingJni> fwd;
+  std::unique_ptr<rb::runtime::Inbound> inbound;
   std::map<std::string, const rb::loader::GuestModule*> loaded;  ///< soname -> module (apps, libstdc++)
   std::set<std::string> booted;                                  ///< libraries whose boot succeeded
   std::string* report = nullptr;                                 ///< the boot in progress's report
@@ -266,6 +276,153 @@ void SetReport(Runtime& rt, std::string* report) {
 /// nothing that holds the GGL — no host slot, no guest call — takes g_mu.
 std::mutex g_mu;
 
+/// What natives and rb_runtime_process reach without g_mu (which a boot holds for its whole length — and a guest
+/// JNI_OnLoad that makes Java call one of an earlier library's natives would otherwise deadlock on it). A leaf lock:
+/// held only to read or publish, never across a guest call.
+std::mutex g_published_mu;
+GuestProcess* g_published_proc = nullptr;
+std::map<std::string, const rb::loader::GuestModule*> g_published_libs;  ///< booted libraries by file name
+
+/// The JNI bridge over the scope just booted: ArtJava on the VM the stub handed in, the forwarding JNIEnv/JavaVM
+/// in one guest page, its copy arena, and the inbound dispatcher (natives on Tier J). Guest RegisterNatives binds
+/// through the dispatcher's trampoline pool; a guest exit inside a native exits the process, as on a device.
+bool BootBridge(Runtime& rt, std::string* out) {
+  if (rt.vm == nullptr) {
+    Line(out, "FATAL: rb_runtime_boot: no JavaVM was handed in, so the JNI bridge cannot reach Java");
+    return false;
+  }
+  GuestProcess& p = *rt.proc;
+  std::string err;
+  rb::exec::GuestAddr page = 0;
+  {
+    rb::runtime::Ggl::Held hold(p.ggl());
+    page = p.MapFree(rb::mem::kGuestPage, rb::mem::kRead | rb::mem::kWrite, &err);
+  }
+  if (page == 0) {
+    Line(out, "FATAL: rb_runtime_boot: no guest page for the JNI bridge: " + err);
+    return false;
+  }
+  rt.java = std::make_unique<rb::launcher::ArtJava>(rt.vm);
+  rt.fwd = std::make_unique<rb::abi::ForwardingJni>(p.memory(), p.abi(), page, *rt.java, &err);
+  if (!rt.fwd->ok()) {
+    Line(out, "FATAL: rb_runtime_boot: " + err);
+    return false;
+  }
+  rt.fwd->set_allocator([&p](std::uint32_t bytes, std::string* e) {
+    rb::runtime::Ggl::Held hold(p.ggl());
+    return p.MapFree(bytes, rb::mem::kRead | rb::mem::kWrite, e);
+  });
+  rt.inbound = std::make_unique<rb::runtime::Inbound>(p, *rt.fwd, *rt.java, kTier);
+  rt.fwd->set_native_binder([](rb::exec::GuestAddr fn, const std::string& name, const std::string& sig, std::string* e) -> void* {
+    const std::string shorty = rb::runtime::ShortyOf(sig);
+    if (shorty.empty()) {
+      if (e != nullptr) *e = "'" + sig + "' is not a JNI method signature";
+      return nullptr;
+    }
+    return R().inbound->BindPool(rb::runtime::InboundTarget{fn, shorty, name + sig}, e);
+  });
+  rt.inbound->set_on_exit([](int status) {
+    __android_log_print(ANDROID_LOG_INFO, kTag, "jni: a guest native called exit(%d); the app exits, as on a device",
+                        status);
+    ::_exit(status);
+  });
+  Line(out, "jni: forwarding JNI bridge up — JNIEnv at " + Hex(rt.fwd->env()) + ", JavaVM at " + Hex(rt.fwd->vm()) +
+                ", natives on Tier " + (kTier == 2 ? "J" : "I"));
+  return true;
+}
+
+/// A generated stub's descriptor table (written by StubElfWriter at repackage time), in the stub's own memory.
+struct RbStubEntry {
+  std::uint32_t name_off;    ///< from the table's start: the exported symbol (Java_..., JNI_OnLoad)
+  std::uint32_t shorty_off;  ///< from the table's start: the JNI shorty after (env, this/class)
+  std::uint32_t flags;
+};
+struct RbStubTable {
+  std::uint32_t magic;  ///< kStubMagic
+  std::uint32_t version;
+  std::uint32_t lib_off;  ///< from the table's start: the 32-bit library's file name
+  std::uint32_t count;
+  RbStubEntry entries[1];
+};
+constexpr std::uint32_t kStubMagic = 0x54534252u;  // "RBST"
+constexpr std::uint32_t kStubOnLoad = 1u;
+
+/// The APK a stub was installed from: `<sourceDir>/lib/arm64/libX.so` -> `<sourceDir>/base.apk`.
+std::string ApkOfStub(const void* addr_in_stub, std::string* lib) {
+  Dl_info info{};
+  if (dladdr(addr_in_stub, &info) == 0 || info.dli_fname == nullptr) return {};
+  std::string path = info.dli_fname;
+  // Loaded straight from the APK (extractNativeLibs=false): "<sourceDir>/base.apk!/lib/arm64-v8a/libX.so".
+  if (const auto bang = path.find("!/"); bang != std::string::npos) {
+    if (lib != nullptr) *lib = path.substr(path.rfind('/') + 1);
+    return path.substr(0, bang);
+  }
+  const auto slash = path.rfind('/');
+  if (lib != nullptr) *lib = slash == std::string::npos ? path : path.substr(slash + 1);
+  for (int i = 0; i < 3 && !path.empty(); ++i) path.erase(path.rfind('/') == std::string::npos ? 0 : path.rfind('/'));
+  return path.empty() ? std::string{} : path + "/base.apk";
+}
+
+}  // namespace
+
+/// Where every export of a generated stub lands (through rb_stub_capture). JNI_OnLoad boots the library; a
+/// Java_* entry runs its guest function through the inbound dispatcher.
+extern "C" __attribute__((visibility("default"))) std::uint64_t rb_stub_dispatch(const void* tag, std::uint32_t index,
+                                                                                 rb::runtime::CapturedArgs* args) {
+  const auto* t = static_cast<const RbStubTable*>(tag);
+  const char* base = static_cast<const char*>(tag);
+  if (t == nullptr || t->magic != kStubMagic || t->version != 1 || index >= t->count) {
+    __android_log_print(ANDROID_LOG_ERROR, kTag, "stub: export %u reached rb_stub_dispatch with a bad table", index);
+    return 0;
+  }
+  const RbStubEntry& e = t->entries[index];
+  const std::string lib = base + t->lib_off;
+  const std::string name = base + e.name_off;
+  if ((e.flags & kStubOnLoad) != 0) {  // JNI_OnLoad(JavaVM*, void*)
+    const std::string apk = ApkOfStub(tag, nullptr);
+    return static_cast<std::uint32_t>(rb_runtime_boot(reinterpret_cast<JavaVM*>(args->x[0]), apk.c_str(), lib.c_str()));
+  }
+  // Resolve once per export; the result is kept (stubs never unload).
+  static std::mutex cache_mu;
+  static std::map<std::pair<const void*, std::uint32_t>, rb::runtime::InboundTarget> cache;
+  rb::runtime::InboundTarget target;
+  bool have = false;
+  {
+    std::lock_guard<std::mutex> lk(cache_mu);
+    const auto it = cache.find({tag, index});
+    if (it != cache.end()) {
+      target = it->second;
+      have = true;
+    }
+  }
+  if (!have) {
+    const rb::loader::GuestModule* m = nullptr;
+    {
+      std::lock_guard<std::mutex> lk(g_published_mu);
+      const auto it = g_published_libs.find(lib);
+      if (it != g_published_libs.end()) m = it->second;
+    }
+    const auto at = m != nullptr ? m->FindExport(name) : std::nullopt;
+    if (!at || !R().inbound) {
+      // ART only calls a native after its library loaded; a library whose boot failed is not published, so this is
+      // the native that would have run in it — said by name, in the Java caller's stack trace.
+      const std::string why = m == nullptr ? lib + " did not boot (its rb-report.txt says why)"
+                                           : lib + " exports no " + name;
+      __android_log_print(ANDROID_LOG_ERROR, kTag, "stub: %s: %s", name.c_str(), why.c_str());
+      JNIEnv* env = reinterpret_cast<JNIEnv*>(args->x[0]);
+      jclass c = env->FindClass("java/lang/UnsatisfiedLinkError");
+      if (c != nullptr) env->ThrowNew(c, ("RetroBug: " + name + ": " + why).c_str());
+      return 0;
+    }
+    target = rb::runtime::InboundTarget{at->tagged(), base + e.shorty_off, name};
+    std::lock_guard<std::mutex> lk(cache_mu);
+    cache[{tag, index}] = target;
+  }
+  return R().inbound->Dispatch(target, *args);
+}
+
+namespace {
+
 bool BootScope(Runtime& rt, ApkZip& zip, std::string* out) {
   rb::runtime::GuestProcessOptions o;
   o.window_bytes = kWindowBytes;
@@ -286,6 +443,7 @@ bool BootScope(Runtime& rt, ApkZip& zip, std::string* out) {
   rt.proc = std::move(proc);
   rt.slots = std::make_unique<rb::launcher::HostSlots>(*rt.proc, TargetSdk(),
                                                        [](const std::string& s) { Live(s); });
+  if (!BootBridge(rt, out)) return false;
   // Boot-only: no asset or file is served yet (M3). A provider that answers nothing makes every guest
   // openat an ENOENT the monitor's notes name, rather than ENOSYS.
   rt.proc->monitor().set_file_provider([](const std::string&) -> std::optional<std::vector<std::uint8_t>> {
@@ -436,12 +594,16 @@ bool BootOne(Runtime& rt, const std::string& apk, const std::string& lib, std::s
                   " has no JNI_OnLoad). Boot-only: nothing drives the game yet");
     return true;
   }
-  // vm = 0, as M1: there is no guest JavaVM yet (M3).
+  // The guest JNI_OnLoad gets the bridge's JavaVM, synchronously on this (the loading) thread, inside a local frame
+  // of its own as ART gives one.
+  Line(out, "JNI_OnLoad: guest JavaVM at " + Hex(rt.fwd->vm()) + ", JNIEnv at " + Hex(rt.fwd->env()));
   p.abi().set_executor(p.engine(kTier));
   rb::exec::RunResult rr{};
   rb::exec::MachineState exit{};
-  const rb::abi::Ret32 ret = p.abi().CallGuest(onload->tagged(), {rb::abi::Value32::Ptr(0), rb::abi::Value32::Ptr(0)},
+  rt.fwd->PushFrame();
+  const rb::abi::Ret32 ret = p.abi().CallGuest(onload->tagged(), {rb::abi::Value32::Ptr(rt.fwd->vm()), rb::abi::Value32::Ptr(0)},
                                                rb::abi::Shorty::For("II"), GuestProcess::kCallBudget, &rr, &exit);
+  rt.fwd->PopFrame(0);
   if (rr.reason != rb::exec::StopReason::Returned) {
     Line(out, "JNI_OnLoad: did not return on Tier J after " + std::to_string(rr.instructions_executed) +
                   " steps: " + rr.detail + "; pc " + Hex(exit.pc) + " lr " + Hex(exit.r[14]));
@@ -469,13 +631,18 @@ void Tallies(Runtime& rt, std::string* out) {
 
 }  // namespace
 
-rb::runtime::GuestProcess* rb_runtime_process() { return R().proc.get(); }
+rb::runtime::GuestProcess* rb_runtime_process() {
+  // Defined during a boot too: null until a scope finished booting, never waiting for the boot in progress.
+  std::lock_guard<std::mutex> lk(g_published_mu);
+  return g_published_proc;
+}
 
-extern "C" int rb_runtime_boot(JavaVM* /*vm*/, const char* apk_path, const char* lib_name) {
+extern "C" int rb_runtime_boot(JavaVM* vm, const char* apk_path, const char* lib_name) {
   const std::string lib = lib_name != nullptr ? lib_name : "";
   const std::string apk = apk_path != nullptr ? apk_path : "";
   std::lock_guard<std::mutex> lock(g_mu);  // held until return: one boot at a time
   Runtime& rt = R();
+  if (rt.vm == nullptr) rt.vm = vm;  // one VM per process: the first stub's
   if (rt.booted.count(lib) != 0) {
     __android_log_print(ANDROID_LOG_INFO, kTag, "rb_runtime_boot: %s already booted in this process", lib.c_str());
     return JNI_VERSION_1_6;
@@ -508,6 +675,9 @@ extern "C" int rb_runtime_boot(JavaVM* /*vm*/, const char* apk_path, const char*
     }
     if (ok) {
       rt.booted.insert(lib);
+      std::lock_guard<std::mutex> lk(g_published_mu);
+      g_published_proc = rt.proc.get();
+      g_published_libs[lib] = rt.loaded[lib];
     } else if (rt.touched && rt.proc) {
       // Guest state changed before the failure: nothing in this process may run guest code again.
       rt.poisoned = lib + ": " + (rt.failure.empty() ? std::string{"see its report"} : rt.failure);

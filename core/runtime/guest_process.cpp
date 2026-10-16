@@ -1132,16 +1132,23 @@ void GuestProcess::RetireAdopted(GuestThread* t) {
     fault = who + " exited while its guest thread was bound to another host thread: its TLS-key destructors did "
                   "not run and it was not unlinked";
   } else {
-    // pthread_exit's guest-visible half: the TLS-key destructors (run to completion, re-entered across turns),
-    // then the unlink — attempted even when a destructor failed, so the list never keeps a node whose memory goes.
+    // pthread_exit's guest-visible half, in its order: the C++ thread_local destructors (__cxa_thread_finalize),
+    // the TLS-key destructors (run to completion, re-entered across turns), then the unlink — attempted even when a
+    // destructor failed, so the list never keeps a node whose memory goes — and the dynamic TLS blocks.
     std::string e;
+    if (!CallOn(*t, "__cxa_thread_finalize", {}, nullptr, &e)) {
+      fault = who + ": a thread_local destructor did not complete — " + e;
+    }
     if (!CallOn(*t, "pthread_key_clean_all", {}, nullptr, &e)) {
-      fault = who + ": a TLS-key destructor did not complete — pthread_key_clean_all: " + e;
+      fault += (fault.empty() ? who + ": " : "; ") + std::string{"a TLS-key destructor did not complete — "} + e;
     }
     if (!CallOn(*t, "__pthread_internal_remove", {abi::Value32::Ptr(t->pthread_struct)}, nullptr, &e)) {
       fault += (fault.empty() ? who + ": " : "; ") + std::string{"__pthread_internal_remove: "} + e;
+    } else if (!CallOn(*t, "_Z18__free_dynamic_tlsP10bionic_tcb",
+                       {abi::Value32::Ptr(t->state.tp - kTpOffsetInTcb)}, nullptr, &e)) {
+      fault += (fault.empty() ? who + ": " : "; ") + std::string{"__free_dynamic_tls: "} + e;
     }
-    if (fault.empty()) note += ": key destructors ran, unlinked from g_thread_list";
+    if (fault.empty()) note += ": thread_local and key destructors ran, unlinked from g_thread_list, dynamic TLS freed";
   }
   monitor_->ReleaseThreadId(t->tid);
   // Free the memory only when the struct is certainly off the list (or the process is over: no guest code runs

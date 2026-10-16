@@ -138,6 +138,29 @@ void a_guest_fault_is_a_java_error_naming_it(int tier) {
   CHECK(half != nullptr && half(nullptr, reinterpret_cast<void*>(b.cls), 1.0f) == 0.5);
 }
 
+/// native -> Java -> native on one host thread: the inner native runs while the outer one waits in a forwarded
+/// CallStaticIntMethod (GGL released), on the same guest thread, and both return.
+void reentrant_call_through_java(int tier) {
+  Bound b = Make(tier);
+  CHECK_CTX(b.pr.p != nullptr, b.pr.err);
+  if (!b.pr.p) return;
+  using IntFn = std::int32_t (*)(void*, void*, std::int32_t);
+  auto twice = reinterpret_cast<IntFn>(Bind(b, "Java_rb_Fixture_twiceNative", "II"));
+  auto outer = reinterpret_cast<IntFn>(Bind(b, "Java_rb_Fixture_callJava", "II"));
+  CHECK(twice != nullptr && outer != nullptr);
+  if (twice == nullptr || outer == nullptr) return;
+  const abi::HostRef cls = b.cls;
+  b.pr.java->DefineMethod("rb/Fixture", "callsNative", "(I)I", true,
+                          [twice, cls](test::FakeJava&, int, const std::vector<std::uint64_t>& a) {
+                            return static_cast<std::uint64_t>(static_cast<std::uint32_t>(
+                                twice(nullptr, reinterpret_cast<void*>(cls), static_cast<std::int32_t>(a[0]))));
+                          });
+  const std::int32_t got = outer(nullptr, reinterpret_cast<void*>(cls), 5);
+  CHECK_CTX(got == 11, std::string{"Tier "} + (tier == 2 ? "J" : "I") + ": callJava(5) = " + std::to_string(got));
+  CHECK_CTX(b.pr.java->PendingClass().empty(), "pending: '" + b.pr.java->PendingClass() + "'");
+  CHECK(outer(nullptr, reinterpret_cast<void*>(cls), -3) == -5);  // and again: nothing was left half-unwound
+}
+
 void a_bad_shorty_is_refused_by_name(int tier) {
   Bound b = Make(tier);
   CHECK_CTX(b.pr.p != nullptr, b.pr.err);
@@ -156,6 +179,7 @@ int main() {
     float_and_double_results_come_back_in_s0_and_d0(tier);
     a_returned_object_is_the_callers_and_the_frame_is_gone(tier);
     a_guest_fault_is_a_java_error_naming_it(tier);
+    reentrant_call_through_java(tier);
     a_bad_shorty_is_refused_by_name(tier);
   }
   std::printf("%d checks, %d failures\n", checks, failures);

@@ -1109,6 +1109,31 @@ void slow_key_destructor_completes(int tier) {
   CHECK(pr.p->kept_mappings() == 0u && pr.p->adopted_threads() == 0u);
 }
 
+/// A C++ `thread_local` destructor (__cxa_thread_atexit_impl) registered on an adopted thread runs at its exit, as
+/// pthread_exit's __cxa_thread_finalize runs it on a device; the thread's dynamic TLS is freed after the unlink.
+void adopted_exit_runs_thread_finalizers(int tier) {
+  const std::string name = std::string{"adopted_exit_runs_thread_finalizers/"} + TierName(tier);
+  Watchdog wd(name, std::chrono::seconds(60));
+  Proc pr = BootPthreads(tier);
+  CHECK_CTX(pr.p != nullptr, pr.err);
+  if (!pr.p) return;
+  int reg = -1;
+  std::uint32_t self = 0;
+  std::thread a([&] {
+    reg = CallFixture(pr, tier, "pt_tls_dtor_register", {}).ret.i();
+    self = CallFixture(pr, tier, "pt_self", {}).ret.w();
+  });
+  a.join();
+  const int runs = CallFixture(pr, tier, "pt_tls_dtor_count", {}).ret.i();
+  std::fprintf(stderr, "#   %s: register %d, destructor runs %d, faults: %s\n", name.c_str(), reg, runs,
+               Joined(pr.p->adoption_faults()).c_str());
+  CHECK(reg == 0);
+  CHECK_CTX(runs == 1, name + ": pt_tls_dtor_count() = " + std::to_string(runs));
+  CHECK_CTX(pr.p->adoption_faults().empty(), Joined(pr.p->adoption_faults()));
+  CHECK(!Has(ThreadList(*pr.p), self));
+  CHECK(pr.p->kept_mappings() == 0u && pr.p->adopted_threads() == 0u);
+}
+
 /// A TLS-key destructor that faults: the exit is reported by name, the thread is still unlinked (so its mapping
 /// can go), and the process carries on.
 void faulting_key_destructor_is_named(int tier, const std::map<std::string, std::string>& oracle) {
@@ -1227,6 +1252,7 @@ void guest_pthreads(int tier) {
   // More syscalls in one guest thread than a turn's cap: the turn boundary lands on a syscall, which must be
   // answered, not skipped (final-review finding 1).
   PthreadRow(pr, tier, oracle, "pt_syscall_storm(150000)", "pt_syscall_storm", {V::S32(150000)});
+  PthreadRow(pr, tier, oracle, "pt_tls_dtor_on_thread()", "pt_tls_dtor_on_thread", {});
   std::fprintf(stderr, "#   Tier %s: %zu guest threads started; futex: %llu blocked, %llu woken, %llu timed out; "
                        "%llu contended slices\n",
                TierName(tier), pr.p->threads_started(), static_cast<unsigned long long>(pr.p->futex().blocked()),
@@ -1244,6 +1270,7 @@ void guest_pthreads(int tier) {
   adopted_thread_outlives_process(tier);
   adoption_after_exit_is_refused(tier);
   slow_key_destructor_completes(tier);
+  adopted_exit_runs_thread_finalizers(tier);
   faulting_key_destructor_is_named(tier, oracle);
   unlinkable_exit_keeps_the_mapping(tier, oracle);
 }
