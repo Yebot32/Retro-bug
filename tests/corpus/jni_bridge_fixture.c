@@ -143,9 +143,10 @@ __attribute__((visibility("default"))) int fx_string_info(JNIEnv* env, jstring s
   jchar region[2] = {0xffff, 0xffff};
   (*env)->GetStringRegion(env, s, 1, 2, region);
   out[4] = region[0] | (region[1] << 16);
-  char utf_region[16] = {0};
+  char utf_region[16];
+  for (int k = 0; k < 16; k++) utf_region[k] = 0x55; /* so the byte after the region says whether a NUL was written */
   (*env)->GetStringUTFRegion(env, s, 0, 2, utf_region);
-  out[5] = (int)fnv((const unsigned char*)utf_region, cstrlen(utf_region));
+  out[5] = (int)fnv((const unsigned char*)utf_region, 4);
   const jchar* chars = (*env)->GetStringChars(env, s, 0);
   out[6] = chars[0];
   (*env)->ReleaseStringChars(env, s, chars);

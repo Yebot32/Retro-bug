@@ -78,14 +78,20 @@ bool FieldKind(const std::string& sig, char* kind) {
   return true;
 }
 
-/// UTF-16 to Modified UTF-8, exactly as ART's GetStringUTFChars gives it: U+0000 as C0 80, a supplementary
-/// character as its two surrogate halves, each a 3-byte sequence.
+/// UTF-16 to the bytes ART's GetStringUTFChars gives (tests/corpus/oracle-jnibridge.txt, the device's own ART):
+/// U+0000 as C0 80, a well-formed surrogate pair as one 4-byte UTF-8 sequence, a lone surrogate as its 3-byte form.
 std::string Mutf8(const char16_t* s, std::size_t n) {
   std::string out;
   out.reserve(n);
   for (std::size_t i = 0; i < n; ++i) {
     const std::uint32_t c = s[i];
-    if (c != 0 && c < 0x80) {
+    if (c >= 0xD800 && c < 0xDC00 && i + 1 < n && s[i + 1] >= 0xDC00 && s[i + 1] < 0xE000) {
+      const std::uint32_t cp = 0x10000 + ((c - 0xD800) << 10) + (static_cast<std::uint32_t>(s[++i]) - 0xDC00);
+      out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+      out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+      out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+      out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else if (c != 0 && c < 0x80) {
       out.push_back(static_cast<char>(c));
     } else if (c < 0x800) {
       out.push_back(static_cast<char>(0xC0 | (c >> 6)));
@@ -997,8 +1003,9 @@ bool ForwardingJni::StringEntry(std::uint32_t i, exec::MachineState& s, std::str
       if (i == 220) {
         wrote = len == 0 || memory_.Write(buf, chars.data() + start, static_cast<std::size_t>(len) * 2);
       } else {
+        // Then a NUL, as the device's ART writes one (oracle-jnibridge.txt's strings row; the JNI spec is silent).
         const std::string m = Mutf8(chars.data() + start, static_cast<std::size_t>(len));
-        wrote = m.empty() || memory_.Write(buf, m.data(), m.size());  // no NUL, as ART writes none
+        wrote = memory_.Write(buf, m.c_str(), m.size() + 1);
       }
       if (!wrote) {
         *err = "the buffer at " + Hex(buf) + " is not writable";

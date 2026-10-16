@@ -244,21 +244,22 @@ void mutf8_round_trips(int tier) {
   Proc pr = Boot(tier);
   CHECK_CTX(pr.p != nullptr, pr.err);
   if (!pr.p) return;
-  // "a\0b😀é": ART's GetStringUTFChars gives MUTF-8 — NUL as C0 80, the supplementary character as two 3-byte
-  // surrogate halves.
+  // "a\0b😀é": the device ART's GetStringUTFChars (tests/corpus/oracle-jnibridge.txt, SM-X710 Android 16) gives NUL as
+  // C0 80 and a well-formed surrogate pair as one 4-byte UTF-8 sequence: 10 bytes, FNV-1a 0x379bd93b.
   const std::u16string text{u'a', u'\0', u'b', char16_t{0xD83D}, char16_t{0xDE00}, char16_t{0xE9}};
-  const std::vector<std::uint8_t> mutf8{0x61, 0xC0, 0x80, 0x62, 0xED, 0xA0, 0xBD, 0xED, 0xB8, 0x80, 0xC3, 0xA9};
+  const std::vector<std::uint8_t> mutf8{0x61, 0xC0, 0x80, 0x62, 0xF0, 0x9F, 0x98, 0x80, 0xC3, 0xA9};
   const abi::GuestAddr out = Scratch(pr);
   const abi::GuestAddr s = pr.fwd->ToGuestLocal(pr.java->NewJavaString(text));
   const Result r = Call(pr, tier, "fx_string_info", {Value32::Ptr(s), Value32::Ptr(out)});
   CHECK_CTX(Returned(r) && r.ret.i() == 0, r.rr.detail);
   std::int32_t got[7] = {};
   pr.p->memory().Read(out, got, sizeof got);
-  CHECK_CTX(got[0] == 12 && got[1] == 6, "UTF length " + std::to_string(got[0]) + ", UTF-16 length " + std::to_string(got[1]));
-  CHECK_CTX(static_cast<unsigned>(got[2]) == Fnv(mutf8), "the MUTF-8 bytes the guest saw differ from ART's");
+  CHECK_CTX(got[0] == 10 && got[1] == 6, "UTF length " + std::to_string(got[0]) + ", UTF-16 length " + std::to_string(got[1]));
+  CHECK_CTX(static_cast<unsigned>(got[2]) == Fnv(mutf8) && Fnv(mutf8) == 0x379bd93bu, "the MUTF-8 bytes the guest saw differ from ART's");
   CHECK(got[3] == 1);
   CHECK_CTX(got[4] == (0 | (0x62 << 16)), "GetStringRegion(1, 2) = " + std::to_string(got[4]));
-  CHECK_CTX(static_cast<unsigned>(got[5]) == Fnv({0x61, 0xC0, 0x80}), "GetStringUTFRegion(0, 2)");
+  // The device ART writes a NUL after the region (oracle-jnibridge.txt's strings row; the JNI spec is silent).
+  CHECK_CTX(static_cast<unsigned>(got[5]) == Fnv({0x61, 0xC0, 0x80, 0x00}), "GetStringUTFRegion(0, 2) and its NUL");
   CHECK(got[6] == 0x61);
   // Back the other way: the same bytes through NewStringUTF give the same string.
   std::vector<std::uint8_t> z = mutf8;

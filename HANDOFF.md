@@ -6,6 +6,23 @@ hand-written IR interpreter = "Tier I"). Engine in `core/`, on-device launcher a
 (`android/jni/launcher.cpp` + `android/jni/gl_forward.cpp` + `android/java/.../LauncherActivity.java`).
 Everything below this section is older, detailed session history — read it only when you need depth.
 
+## M3 — JNI bridge (2026-10-16, branch `m3-jni-bridge`, in progress) — newest state
+
+Plan `docs/superpowers/plans/2026-10-16-m3-jni-bridge.md`; ledger (rulings) `.superpowers/sdd/2026-10-16-m3-jni-bridge/progress.md`.
+Tasks 1–6 done on the tablet (the OnePlus was set aside by the human; its runs are owed before merge).
+- Forwarding JNIEnv/JavaVM (`core/abi/jni_forward.*`), inbound trampolines (`core/runtime/inbound.*`), real ART
+  (`android/jni/art_java.*`), generated stubs at repack (`NativeMethods`, `StubElfWriter`, `rb_stub_capture`).
+- Bridge test app (ours, never shipped): `bash tools/build_bridge_apk.sh`; native oracle on the tablet
+  `bash tools/run_bridge_oracle.sh` → `tests/corpus/oracle-jnibridge.txt`; bridged check
+  `bash tools/run_bridge_check.sh R52Y106BECZ` (needs `jnibridge.apk` staged once via the launcher's "Add a game"
+  picker from /sdcard/Download): **10 of 10 rows match** (strings, arrays, callbacks, exceptions, globals, threads,
+  register_natives, fields, overloads). The first run differed only in strings: ART gives 4-byte UTF-8 for a
+  surrogate pair and writes a NUL after GetStringUTFRegion — the bridge now does both.
+- `-e stubcheck <game>` in the launcher: Gumball 13/13, ABGo 93/93 exports resolve to rb_stub_capture.
+- Play Protect blocks a repacked app with an old targetSdk ("built for an older version of Android"); the test
+  app targets 34. Real games keep their target ≥ 24 — watch for this on Gumball/ABGo installs.
+- Next: Task 7 (GLES1 in the runtime, Gumball running its own Java, docs), then the final review.
+
 ## targetSdk compatibility shims (2026-10-16, branch `targetsdk-shims`, not merged, not pushed) — newest state
 
 **Problem.** The repackager raises targetSdk to 24 (install floor), which switches on every behaviour change the platform

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
+     The JNI bridge test app (M3 Task 6): 32-bit only (lib/armeabi-v7a/libjnibridge.so), run natively on a
+     32-bit-capable device for the oracle and repacked through the launcher for the bridged run. targetSdk 34: Play Protect blocks
+     an old target ("built for an older version of Android"), and nothing JNI depends on it. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.retrobug.jnibridge">
+    <uses-sdk android:minSdkVersion="19" android:targetSdkVersion="34" />
+    <application android:label="RB JNI bridge" android:extractNativeLibs="true" android:hasCode="true">
+        <activity android:name=".BridgeActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
