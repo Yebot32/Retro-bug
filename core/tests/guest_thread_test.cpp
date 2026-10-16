@@ -1224,6 +1224,9 @@ void guest_pthreads(int tier) {
   PthreadRow(pr, tier, oracle, "pt_errno_per_thread()", "pt_errno_per_thread", {});
   PthreadRow(pr, tier, oracle, "pt_timeouts()", "pt_timeouts", {});
   PthreadRow(pr, tier, oracle, "pt_sleeps()", "pt_sleeps", {});
+  // More syscalls in one guest thread than a turn's cap: the turn boundary lands on a syscall, which must be
+  // answered, not skipped (final-review finding 1).
+  PthreadRow(pr, tier, oracle, "pt_syscall_storm(150000)", "pt_syscall_storm", {V::S32(150000)});
   std::fprintf(stderr, "#   Tier %s: %zu guest threads started; futex: %llu blocked, %llu woken, %llu timed out; "
                        "%llu contended slices\n",
                TierName(tier), pr.p->threads_started(), static_cast<unsigned long long>(pr.p->futex().blocked()),

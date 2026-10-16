@@ -678,6 +678,18 @@ void a_guest_syscall_in_a_jni_call_is_answered() {
                  mon.TallyText().c_str());
   }
   CHECK_CTX(mon.tally().size() == 1u && mon.TallyText() == "getpid x2", mon.TallyText());
+
+  // Re-entered across many small turns, the syscall is still answered every time. (The turn-boundary-at-a-syscall
+  // case itself is the syscall cap, covered by guest_thread_test's pt_syscall_storm row: a tier ends a turn
+  // before an SVC, not on it.)
+  for (unsigned turn = 1; turn <= 64; ++turn) {
+    exec::RunResult out{};
+    const auto ret =
+        rig.abi_ctx->CallGuestToCompletion(probe->tagged(), args(), abi::Shorty::For("IILLI"), turn, &out);
+    CHECK_CTX(out.reason == exec::StopReason::Returned && ret.i() == 4243,
+              "turn budget " + std::to_string(turn) + ": guest saw " + std::to_string(ret.i()) + " (" + out.detail +
+                  ")");
+  }
 }
 
 /// `exit_group` ends the instance, so the bridge has to stop rather than resume: a guest that asked to

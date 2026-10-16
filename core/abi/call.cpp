@@ -571,17 +571,9 @@ exec::RunResult AbiContext::RunThread(runtime::GuestThread& thread, unsigned bud
                      "nobody produced";
         break;
       }
-      if (remaining == 0) {
-        run.reason = exec::StopReason::Budget;
-        run.detail = "call budget exhausted inside a syscall";
-        break;
-      }
-      if (++syscalls > kMaxSyscallsPerCall) {
-        run.reason = exec::StopReason::Budget;
-        run.detail = "more than " + std::to_string(kMaxSyscallsPerCall) +
-                     " syscalls in one call, which is a loop rather than a program";
-        break;
-      }
+      // The budget and the syscall cap are checked only *after* this syscall is answered: the tier already
+      // stepped past the SVC, so a Budget stop here would have a re-entered turn (ThreadMain,
+      // CallGuestToCompletion) resume after it with r0 still holding arg0 — a silently skipped syscall.
       syscall::Outcome o = monitor_->Begin(state, run.svc_number, &thread);
       if (o.verdict == syscall::Verdict::kBlocking) {
         // The wait runs with the GGL released, so other guest threads run meanwhile; the answer is recorded
@@ -606,6 +598,17 @@ exec::RunResult AbiContext::RunThread(runtime::GuestThread& thread, unsigned bud
         // `exit` (1): this guest thread is finished; the process and its other threads carry on.
         run.reason = exec::StopReason::Exited;
         run.detail = o.detail;
+        break;
+      }
+      if (remaining == 0) {
+        run.reason = exec::StopReason::Budget;
+        run.detail = "call budget exhausted at a syscall (answered; the state is past it)";
+        break;
+      }
+      if (++syscalls > kMaxSyscallsPerCall) {
+        run.reason = exec::StopReason::Budget;
+        run.detail = "more than " + std::to_string(kMaxSyscallsPerCall) +
+                     " syscalls in one call, which is a loop rather than a program (the last was answered)";
         break;
       }
       continue;

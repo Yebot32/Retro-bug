@@ -501,3 +501,24 @@ __attribute__((visibility("default"))) int pt_clone_storm_exit(int code) {
   pthread_join(cloner, 0);
   return -1;
 }
+
+/* ---- pt_syscall_storm(n): a created thread makes n raw getpid syscalls, each given a marker argument a skipped
+ * syscall would hand back unchanged in r0, and counts the answers equal to the first (the pid). More syscalls
+ * than one engine turn's cap (100,000) put a turn boundary at a syscall: none may be skipped. Result n. */
+#include <sys/syscall.h>
+
+static void* storm(void* arg) {
+  const int n = (int)(intptr_t)arg;
+  const long pid = syscall(__NR_getpid, 0x5eed);
+  int same = 0;
+  for (int i = 0; i < n; ++i) same += syscall(__NR_getpid, 0x5eed) == pid && pid != 0x5eed;
+  return (void*)(intptr_t)same;
+}
+
+__attribute__((visibility("default"))) int pt_syscall_storm(int n) {
+  pthread_t t;
+  if (pthread_create(&t, 0, storm, (void*)(intptr_t)n) != 0) return -2;
+  void* r = 0;
+  if (pthread_join(t, &r) != 0) return -3;
+  return (int)(intptr_t)r;
+}
