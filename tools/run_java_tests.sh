@@ -44,6 +44,20 @@ SRCS+=("$ROOT"/tools/java-tests/*.java)
 HOST_SRCS=(); for s in "${SRCS[@]}"; do HOST_SRCS+=("$(to_host "$s")"); done
 javac -encoding UTF-8 -nowarn -Xlint:-options -d "$(to_host "$OUT/classes")" "${HOST_SRCS[@]}"
 
+# DEX fixtures for the risk scan: real javac + d8 output, as in a game's classes.dex. Compiled against
+# android.jar so the references are the platform's own descriptors; never loaded or run.
+for f in RiskyFixture CleanFixture; do
+  mkdir -p "$OUT/dexsrc/$f" "$OUT/dexout/$f"
+  javac -encoding UTF-8 -nowarn -Xlint:-options --release 8 -classpath "$(to_host "$AJ")" \
+    -d "$(to_host "$OUT/dexsrc/$f")" "$(to_host "$ROOT/tools/java-tests/dexfixtures/$f.java")"
+  (cd "$OUT/dexsrc/$f" && jar -cf "$(to_host "$OUT/dexsrc/$f.jar")" .)
+  "$BT/d8.bat" --lib "$(to_host "$AJ")" --min-api 24 --output "$(to_host "$OUT/dexout/$f")" \
+    "$(to_host "$OUT/dexsrc/$f.jar")" >/dev/null
+  cp "$OUT/dexout/$f/classes.dex" "$OUT/fixtures/$f.dex"
+done
+
+java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ShimPlanTest "$(to_host "$OUT/fixtures")"
+
 java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.AxmlEditorTest \
   "$(to_host "$OUT/fixtures")" "$(to_host "$OUT/scratch")" "$(to_host "$BT/aapt2.exe")"
 

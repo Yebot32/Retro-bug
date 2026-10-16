@@ -165,7 +165,7 @@ APKSIG="$OUT/apksig.jar"
 (cd "$OUT/apksig" && jar -cf "$(to_host "$APKSIG")" com/android/apksig)
 [ -s "$APKSIG" ] || { echo "could not build $APKSIG from $APKSIG_SRC" >&2; exit 1; }
 JAVA_SRCS=()
-for s in "$SRC"/java/com/retrobug/launcher/*.java; do JAVA_SRCS+=("$(to_host "$s")"); done
+for s in "$SRC"/java/com/retrobug/launcher/*.java "$SRC"/shim/com/retrobug/shim/*.java; do JAVA_SRCS+=("$(to_host "$s")"); done
 set +e
 javac_out="$(javac -encoding UTF-8 -nowarn -source 8 -target 8 -bootclasspath "$(to_host "$AJ")" \
   -classpath "$(to_host "$APKSIG")" \
@@ -186,6 +186,15 @@ fi
 if [ -e "$OUT/dex/classes2.dex" ]; then
   echo "d8 produced more than one dex; this script packages only classes.dex" >&2; exit 1
 fi
+# The targetSdk compatibility shims (android/shim) are also dexed on their own: the repackager adds this dex
+# to a game as an extra classesN.dex (ShimPlan). The launcher's classes.dex carries the same classes for its
+# own `-e shimcheck`. --min-api 24 because that is the lowest minSdk a repackaged game declares.
+mkdir -p "$OUT/shim-classes" "$OUT/shim-dex"
+(cd "$OUT/classes" && jar -cf "$(to_host "$OUT/shim-classes.jar")" com/retrobug/shim)
+"$BT/d8.bat" --lib "$(to_host "$AJ")" --min-api 24 --output "$(to_host "$OUT/shim-dex")" \
+  "$(to_host "$OUT/shim-classes.jar")" >/dev/null
+[ -s "$OUT/shim-dex/classes.dex" ] || { echo "d8 produced no shim classes.dex" >&2; exit 1; }
+cp "$OUT/shim-dex/classes.dex" "$OUT/stage/assets/rbshim.dex"
 
 # ---- package
 # `aapt2 link` takes *compiled* resources, so the icon tree is compiled first. Until the icon the launcher

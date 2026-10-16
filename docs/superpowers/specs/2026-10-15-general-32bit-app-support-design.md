@@ -112,6 +112,9 @@ written for: implicit service intents throw (`Service Intent must be explicit`; 
 hit this on the OnePlus), background-service limits at 26+, and others. Approach to be designed; candidate is an
 injected DEX/Application-level shim set chosen per detected API use at repackage time. The repack report should
 list the detected risky calls. Scheduled before M3's acceptance (Gumball needs it to reach its activity).
+*DONE 2026-10-16 (branch `targetsdk-shims`)*: a repackage-time plan (`ShimPlan`) adds a provider + shim dex that restores the
+original targetSdk in-process, relaxes StrictMode network / file-URI and asks for dangerous permissions; the repack report
+lists risky DEX calls. Gumball now passes its first-run billing bind on the OnePlus — see HANDOFF.md.
 
 ## Milestones (*review*: threads before the JNI bridge — ART calls natives from UI and GL threads on frame 1)
 

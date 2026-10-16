@@ -4,6 +4,7 @@ package com.retrobug.launcher;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.GregorianCalendar;
 import java.util.ArrayList;
@@ -13,6 +14,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.zip.CRC32;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -22,7 +24,10 @@ import java.util.zip.ZipOutputStream;
  * Rewrites a 32-bit game's APK so a 64-bit-only device will install it: the 32-bit libs move to
  * {@code assets/rb32/} (where the runtime reads them), each is replaced by a 64-bit stub under
  * {@code lib/arm64-v8a/} (the platform picks the app's ABI from that directory, and the stub's job is to boot
- * the guest engine), and targetSdk is raised to the install floor. The result is unsigned: signing is a
+ * the guest engine), and targetSdk is raised to the install floor. Because that raise switches on behaviour
+ * changes the old Java was not written for, the targetSdk compatibility shims (ShimPlan) are added: a provider in
+ * the manifest, its classes as the next classesN.dex, its config under {@code assets/rb32/}; the report names
+ * the risky calls found in the game's DEX. The result is unsigned: signing is a
  * separate step, and the old signature files are dropped because they would no longer verify.
  *
  * Pure java.util.zip and no android.* imports, so it is host-testable.
@@ -51,6 +56,9 @@ final class ApkRepackager {
         List<String> guestLibs = new ArrayList<>();
         List<String> stubs = new ArrayList<>();
         List<String> report = new ArrayList<>();
+        List<String> shims = new ArrayList<>();   // targetSdk compatibility shims added (ShimPlan ids)
+        String shimDex;                           // classesN.dex entry carrying them, or null
+        List<String> risks = new ArrayList<>();   // ShimPlan.riskReport lines (also in report)
     }
 
     private static IOException refused(String why) { return new IOException("refused: " + why); }
@@ -127,11 +135,27 @@ final class ApkRepackager {
                 r.newTargetSdk = floorT;
                 r.report.add("targetSdk " + (oldT == null ? "absent" : oldT) + " -> " + floorT);
             }
+            // targetSdk compatibility shims (ShimPlan): decided from the target the original ran on.
+            ShimPlan plan = ShimPlan.of(ShimPlan.effectiveTarget(oldT, oldMin), r.newTargetSdk);
+            byte[] shimDex = runtimeFiles.get(ShimPlan.SHIM_DEX_KEY);
+            boolean addShims = false;
+            if (plan.shims.isEmpty()) {
+                r.report.add("shims: none needed (original target " + plan.originalTarget + ")");
+            } else if (Boolean.FALSE.equals(ed.hasCode())) {
+                r.report.add("shims: NOT added — application hasCode=\"false\" (no Java to run them); needed: " + plan.shims);
+            } else if (shimDex == null) {
+                r.report.add("shims: NOT added — this launcher build has no shim dex; needed: " + plan.shims);
+            } else {
+                ed.addProvider(ShimPlan.PROVIDER_CLASS, r.packageName + ShimPlan.AUTHORITY_SUFFIX, Integer.MAX_VALUE);
+                edited = true;
+                addShims = true;
+            }
             if (edited) manifest = ed.toBytes();
 
             List<ZipEntry> guest = new ArrayList<>();
             List<String> sigDropped = new ArrayList<>();
             Set<String> names = new HashSet<>();
+            Set<String> refs = new TreeSet<>();
             try (ZipOutputStream zo = new ZipOutputStream(Files.newOutputStream(out.toPath()))) {
                 putBytes(zo, MANIFEST, manifest, ZipEntry.DEFLATED);
                 names.add(MANIFEST);
@@ -147,8 +171,21 @@ final class ApkRepackager {
                         continue;
                     }
                     claim(names, n);
+                    if (n.matches("classes\\d*\\.dex")) {
+                        byte[] dex;
+                        try (InputStream in = zip.getInputStream(e)) { dex = readFully(in); }
+                        try {
+                            refs.addAll(DexScanner.methodRefs(dex));
+                        } catch (IOException ex) {
+                            r.report.add("risk scan: " + n + " unreadable — " + ex.getMessage());
+                        }
+                        putBytes(zo, n, dex, e.getMethod() == ZipEntry.STORED ? ZipEntry.STORED : ZipEntry.DEFLATED);
+                        continue;
+                    }
                     copy(zip, e, zo);
                 }
+                r.risks = plan.riskReport(refs, addShims ? plan.shims : Collections.<String>emptyList());
+                r.report.addAll(r.risks);
                 if (guest.isEmpty()) throw refused("no 32-bit ARM native libs (lib/armeabi-v7a or lib/armeabi)");
                 if (!sigDropped.isEmpty())
                     r.report.add("dropped " + sigDropped.size() + " META-INF entries (old signature no longer valid): "
@@ -173,8 +210,23 @@ final class ApkRepackager {
                 }
                 r.stubs = stubs;
 
+                if (addShims) {
+                    // The next free classesN.dex: the platform loads classes.dex, classes2.dex, ... up to the
+                    // first gap, so the shim's must continue the run.
+                    String dexName = "classes.dex";
+                    for (int i = 2; names.contains(dexName); i++) dexName = "classes" + i + ".dex";
+                    claim(names, dexName);
+                    putBytes(zo, dexName, shimDex, ZipEntry.DEFLATED);
+                    claim(names, ShimPlan.CONFIG_ENTRY);
+                    putBytes(zo, ShimPlan.CONFIG_ENTRY, plan.config().getBytes(StandardCharsets.UTF_8), ZipEntry.DEFLATED);
+                    r.shims = new ArrayList<>(plan.shims);
+                    r.shimDex = dexName;
+                    r.report.add("shims: " + plan.shims + " (in-process targetSdk " + plan.originalTarget + ") — provider "
+                            + ShimPlan.PROVIDER_CLASS + " in " + dexName);
+                }
+
                 for (Map.Entry<String, byte[]> f : runtimeFiles.entrySet()) {
-                    if (f.getKey().equals(STUB_KEY)) continue;
+                    if (f.getKey().equals(STUB_KEY) || f.getKey().equals(ShimPlan.SHIM_DEX_KEY)) continue;
                     claim(names, f.getKey());
                     putBytes(zo, f.getKey(), f.getValue(), ZipEntry.DEFLATED);
                 }

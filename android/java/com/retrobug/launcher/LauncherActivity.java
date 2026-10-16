@@ -144,6 +144,15 @@ public class LauncherActivity extends Activity {
          * sign, keep the result under getExternalFilesDir(null)/repack/, then hand it to the installer.
          * `-e install 0` stops after signing (scripted checks of the artifact without an installer dialog).
          */
+        /*
+         * `-e shimcheck 1` checks the targetSdk compatibility shims in this process (ShimCheck; driven by
+         * tools/run_shimcheck.sh). The shims stay applied to the process afterwards, so the script restarts
+         * the launcher for it and force-stops it after.
+         */
+        if (getIntent() != null && getIntent().getStringExtra("shimcheck") != null) {
+            saveAndShow("targetSdk shim check", ShimCheck.run(this).trim());
+            return;
+        }
         final String repack = getIntent() == null ? null : getIntent().getStringExtra("repack");
         if (repack != null && !repack.isEmpty()) {
             for (File f : games()) {
@@ -682,6 +691,7 @@ public class LauncherActivity extends Activity {
     private static final String[][] REPACK_RUNTIME = {
             {"lib/arm64-v8a/librbstub.so", ApkRepackager.STUB_KEY},
             {"lib/arm64-v8a/librbguest.so", "lib/arm64-v8a/librbguest.so"},
+            {"assets/rbshim.dex", ShimPlan.SHIM_DEX_KEY},
             {"assets/guest/libc.so", "assets/rb32sys/libc.so"},
             {"assets/guest/libm.so", "assets/rb32sys/libm.so"},
             {"assets/guest/libz.so", "assets/rb32sys/libz.so"},
