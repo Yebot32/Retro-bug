@@ -383,6 +383,57 @@ void reflection_round_trip(int tier) {
 }
 }  // namespace
 
+// ---- final-review rows
+
+/// Deleting a global, weak global or local twice: release ART logs it and carries on, so the native runs to its
+/// end; the bridge names it in a note.
+void double_delete_is_tolerated(int tier) {
+  Proc pr = Boot(tier);
+  CHECK_CTX(pr.p != nullptr, pr.err);
+  if (!pr.p) return;
+  const abi::GuestAddr o = pr.fwd->ToGuestLocal(pr.java->NewInstance("rb/Fixture"));
+  const Result r = Call(pr, tier, "fx_double_delete", {Value32::Ptr(o)});
+  CHECK_CTX(Returned(r) && r.ret.i() == 7, r.rr.detail + " / " + Notes(pr));
+  CHECK_CTX(pr.java->PendingClass().empty(), "pending: '" + pr.java->PendingClass() + "'");
+  CHECK_CTX(HasNote(pr, "already deleted"), Notes(pr));
+}
+
+/// Attach, make a local, detach — without DeleteLocalRef, as detach frees a thread's locals on ART: 20000 events
+/// (past the 16384-slot table) leave no live local behind.
+void detach_frees_the_threads_locals(int tier) {
+  Proc pr = Boot(tier);
+  CHECK_CTX(pr.p != nullptr, pr.err);
+  if (!pr.p) return;
+  const std::size_t before = pr.fwd->live_locals();
+  const Result r = Call(pr, tier, "fx_attach_cycles", {Value32::Ptr(pr.fwd->vm()), Value32::S32(20000)});
+  CHECK_CTX(Returned(r) && r.ret.i() == 0, "fx_attach_cycles = " + std::to_string(r.ret.i()) + " " + r.rr.detail +
+                                               " / " + Notes(pr));
+  CHECK_CTX(pr.fwd->live_locals() <= before, std::to_string(pr.fwd->live_locals()) + " live locals after, " +
+                                                 std::to_string(before) + " before");
+}
+
+/// NewStringUTF of a 6000-byte string (a game's JSON or save blob): no length cap of the bridge's own.
+void long_new_string_utf(int tier) {
+  Proc pr = Boot(tier);
+  CHECK_CTX(pr.p != nullptr, pr.err);
+  if (!pr.p) return;
+  std::vector<std::uint8_t> big(6000, 'x');
+  big.push_back(0);
+  std::string e;
+  abi::GuestAddr at = 0;
+  {
+    runtime::Ggl::Held hold(pr.p->ggl());
+    at = pr.p->MapFree(3 * mem::kGuestPage, mem::kRead | mem::kWrite, &e);
+    pr.p->memory().Write(at, big.data(), big.size());
+  }
+  const Result r = Call(pr, tier, "fx_new_string_utf", {Value32::Ptr(at)}, "L");
+  CHECK_CTX(Returned(r) && r.ret.w() != 0, r.rr.detail + " / " + Notes(pr));
+  if (Returned(r) && r.ret.w() != 0) {
+    const std::u16string got = pr.java->StringOf(pr.java->ObjectOf(pr.fwd->FromGuest(r.ret.w(), &e)));
+    CHECK_CTX(got.size() == 6000u, std::to_string(got.size()) + " chars");
+  }
+}
+
 int main() {
   for (int tier : {1, 2}) {
     find_class_and_static_call(tier);
@@ -404,6 +455,9 @@ int main() {
     java_vm_get_env(tier);
     direct_buffer_over_guest_memory(tier);
     reflection_round_trip(tier);
+    double_delete_is_tolerated(tier);
+    detach_frees_the_threads_locals(tier);
+    long_new_string_utf(tier);
   }
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;

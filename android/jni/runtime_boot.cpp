@@ -423,6 +423,16 @@ extern "C" __attribute__((visibility("default"))) std::uint64_t rb_stub_dispatch
 
 namespace {
 
+/// A scope that did not boot leaves nothing worth keeping; the next call starts over. Torn down users first: the
+/// dispatcher and the bridge bind and unbind slots on the process's AbiContext, so they go before it does.
+void DropScope(Runtime& rt) {
+  rt.inbound.reset();
+  rt.fwd.reset();
+  rt.java.reset();
+  rt.slots.reset();
+  rt.proc.reset();
+}
+
 bool BootScope(Runtime& rt, ApkZip& zip, std::string* out) {
   rb::runtime::GuestProcessOptions o;
   o.window_bytes = kWindowBytes;
@@ -445,7 +455,10 @@ bool BootScope(Runtime& rt, ApkZip& zip, std::string* out) {
                                                        [](const std::string& s) { Live(s); });
   // The game's own GLSurfaceView makes its GLES1 context current on its GL thread, where its natives call gl*.
   rt.slots->enable_gl();
-  if (!BootBridge(rt, out)) return false;
+  if (!BootBridge(rt, out)) {
+    DropScope(rt);
+    return false;
+  }
   // Boot-only: no asset or file is served yet (M3). A provider that answers nothing makes every guest
   // openat an ENOENT the monitor's notes name, rather than ENOSYS.
   rt.proc->monitor().set_file_provider([](const std::string&) -> std::optional<std::vector<std::uint8_t>> {
@@ -458,8 +471,7 @@ bool BootScope(Runtime& rt, ApkZip& zip, std::string* out) {
     auto bytes = zip.Read(entry, &err);
     if (!bytes) {
       Line(out, "FATAL: rb_runtime_boot: " + entry + ": " + err);
-      rt.slots.reset();
-      rt.proc.reset();
+      DropScope(rt);
       return false;
     }
     sys[i] = std::move(*bytes);
@@ -467,9 +479,7 @@ bool BootScope(Runtime& rt, ApkZip& zip, std::string* out) {
   }
   if (!rt.proc->LoadScope(sys[0], sys[1], sys[2], {}, &err)) {
     Line(out, "FATAL: " + err);
-    // A scope that did not boot leaves nothing worth keeping; the next call starts over.
-    rt.slots.reset();
-    rt.proc.reset();
+    DropScope(rt);
     return false;
   }
   Line(out, "scope: booted once — libc.so, libm.so, libz.so in a 4 GiB biased window, unresolved imports"

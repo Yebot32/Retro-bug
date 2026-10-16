@@ -442,21 +442,30 @@ const ForwardingJni::IdRec* ForwardingJni::Id(GuestAddr h, std::string* err) {
     if (err != nullptr) *err = Hex(h) + " is not a method or field ID this bridge handed out";
     return nullptr;
   }
-  return &ids_[(h - kIdBase) / 4u];  // std::vector of records: stable only while ids_ does not grow — copied by callers
+  return &ids_[(h - kIdBase) / 4u];  // a deque element: never moved or freed while the bridge lives
 }
 
 bool ForwardingJni::ReadCString(GuestAddr at, std::string* out, std::string* err) const {
+  // No length cap of the bridge's own (ART has none: a game's NewStringUTF of a JSON blob is fine): read in
+  // 256-byte chunks to the NUL, a chunk that crosses into unreadable memory byte by byte, so the refusal names
+  // the first unreadable byte.
   out->clear();
-  for (std::uint32_t n = 0; n < 4096; ++n) {
-    char c = 0;
-    if (!memory_.Read(at + n, &c, 1)) {
-      if (err != nullptr) *err = "the string at " + Hex(at) + " is unreadable at byte " + std::to_string(n);
-      return false;
+  char chunk[256];
+  for (std::uint64_t n = 0; at + n < memory_.window_bytes();) {
+    const std::size_t want = static_cast<std::size_t>(std::min<std::uint64_t>(sizeof chunk, memory_.window_bytes() - (at + n)));
+    std::size_t got = want;
+    if (!memory_.Read(static_cast<GuestAddr>(at + n), chunk, want)) {
+      for (got = 0; got < want && memory_.Read(static_cast<GuestAddr>(at + n + got), chunk + got, 1); ++got) {
+      }
     }
-    if (c == '\0') return true;
-    out->push_back(c);
+    for (std::size_t k = 0; k < got; ++k) {
+      if (chunk[k] == '\0') return true;
+      out->push_back(chunk[k]);
+    }
+    n += got;
+    if (got < want) break;
   }
-  if (err != nullptr) *err = "the string at " + Hex(at) + " has no NUL in 4096 bytes";
+  if (err != nullptr) *err = "the string at " + Hex(at) + " is unreadable at byte " + std::to_string(out->size()) + " (no NUL before it)";
   return false;
 }
 
@@ -686,13 +695,22 @@ bool ForwardingJni::Slot(std::uint32_t i, exec::MachineState& s, std::string* er
       const bool weak = i == 227;
       const GuestAddr base = weak ? kWeakBase : kGlobalBase;
       const GuestAddr end = weak ? kGlobalBase : kLocalBase;
-      if (h < base || h >= end) return refuse(Hex(h) + (weak ? " is not a weak global reference" : " is not a global reference"));
+      // A bad handle to a Delete* is noted and ignored, as release ART logs "failed to find entry" and carries on
+      // (a double delete is a common, harmless bug in old games); only a *use* of a bad handle is refused.
+      const std::string what = "JNIEnv->" + EntryName(i) + "(" + Hex(h) + "): ";
+      if (h < base || h >= end) {
+        Note(what + (weak ? "not a weak global reference" : "not a global reference") + " — ignored, as ART does");
+        return true;
+      }
       HostRef r = 0;
       {
         std::lock_guard<std::mutex> lk(globals_mu_);
         std::vector<HostRef>& table = weak ? weaks_ : globals_;
         const std::size_t n = (h - base) / 4u;
-        if (n >= table.size() || table[n] == 0) return refuse(Hex(h) + " is already deleted");
+        if (n >= table.size() || table[n] == 0) {
+          Note(what + "already deleted — ignored, as ART does");
+          return true;
+        }
         r = table[n];
         table[n] = 0;
         (weak ? weak_free_ : global_free_).push_back(n);
@@ -707,7 +725,10 @@ bool ForwardingJni::Slot(std::uint32_t i, exec::MachineState& s, std::string* er
     case 23: {  // DeleteLocalRef
       const GuestAddr h = s.r[1];
       if (h < kLocalBase) return true;  // null, a class handle, or (a guest bug ART also tolerates) a global
-      if (!ref(1, &a)) return refuse(why);
+      if (!ref(1, &a)) {  // deleted, stale, or another thread's: noted and ignored, as ART does
+        Note("JNIEnv->DeleteLocalRef(" + Hex(h) + "): " + why + " — ignored, as ART does");
+        return true;
+      }
       LocalTable* t = Locals(&why);
       if (t == nullptr) return refuse(why);
       const std::uint32_t n = (h >> 6) & 0x3fffu;
@@ -1343,10 +1364,25 @@ bool ForwardingJni::VmSlot(std::uint32_t i, exec::MachineState& s, std::string* 
       s.r[0] = kOk;
       return true;
     }
-    case 5:  // DetachCurrentThread
+    case 5: {  // DetachCurrentThread
+      const bool was = java_.IsAttached();
       java_.DetachCurrentThread();
+      // A detach that happened frees the thread's locals on ART, so a worker may attach/make locals/detach per
+      // event without DeleteLocalRef: empty this thread's table (its serials stay, so its old handles are stale).
+      std::string e;
+      if (was && !java_.IsAttached()) {
+        if (LocalTable* t = Locals(&e)) {
+          std::size_t live = 0;
+          for (const HostRef r : t->refs) live += r != 0;
+          t->refs.clear();
+          t->frames.clear();
+          t->free.assign(1, {});
+          shared_->live.fetch_sub(live, std::memory_order_relaxed);
+        }
+      }
       s.r[0] = kOk;
       return true;
+    }
     case 6: {  // GetEnv(vm, void**, version)
       const std::uint32_t v = s.r[2];
       if (!java_.IsAttached()) {

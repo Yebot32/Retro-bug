@@ -365,3 +365,31 @@ __attribute__((visibility("default"))) jint Java_rb_Fixture_callJava(JNIEnv* env
   if (m == 0) return -1;
   return (*env)->CallStaticIntMethod(env, cls, m, n) + 1;
 }
+
+/* Final-review rows. Deleting a reference twice (a harmless bug in old games): release ART logs and carries on.
+ * Result 7 when the native ran to its end. */
+__attribute__((visibility("default"))) int fx_double_delete(JNIEnv* env, jobject o) {
+  jobject g = (*env)->NewGlobalRef(env, o);
+  (*env)->DeleteGlobalRef(env, g);
+  (*env)->DeleteGlobalRef(env, g);
+  jweak w = (*env)->NewWeakGlobalRef(env, o);
+  (*env)->DeleteWeakGlobalRef(env, w);
+  (*env)->DeleteWeakGlobalRef(env, w);
+  jobject l = (*env)->NewLocalRef(env, o);
+  (*env)->DeleteLocalRef(env, l);
+  (*env)->DeleteLocalRef(env, l);
+  return 7;
+}
+
+/* A worker that attaches, makes a local, and detaches per event without deleting it (legal: detach frees a
+ * thread's locals). Result 0, or the failing step. */
+__attribute__((visibility("default"))) int fx_attach_cycles(JNIEnv* env, JavaVM* vm, int n) {
+  (void)env;
+  for (int i = 0; i < n; i++) {
+    JNIEnv* e = 0;
+    if ((*vm)->AttachCurrentThread(vm, &e, 0) != JNI_OK || e == 0) return -1;
+    if ((*e)->NewStringUTF(e, "event") == 0) return -2;
+    if ((*vm)->DetachCurrentThread(vm) != JNI_OK) return -3;
+  }
+  return 0;
+}

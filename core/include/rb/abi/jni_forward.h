@@ -24,6 +24,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -176,7 +177,7 @@ class ForwardingJni {
   std::map<std::string, std::size_t> class_by_name_;
 
   mutable std::mutex ids_mu_;  ///< leaf
-  std::vector<IdRec> ids_;
+  std::deque<IdRec> ids_;  ///< a deque: a record never moves when another is added, so Id()'s pointer stays valid unlocked
   std::map<std::pair<HostId, bool>, std::size_t> id_index_;
 
   GuestAlloc alloc_;
