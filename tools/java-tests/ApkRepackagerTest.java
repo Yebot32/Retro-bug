@@ -263,8 +263,105 @@ public class ApkRepackagerTest {
         check(!new File(scratch, "nolibs.out.apk").exists(), "a refusal leaves no output file behind");
     }
 
+    // ---- targetSdk compatibility shims
+
+    static final byte[] SHIMDEX = b("dex\n035\0SHIM-DEX-BYTES");
+
+    static Map<String, byte[]> runtimeWithShims() {
+        Map<String, byte[]> m = runtime();
+        m.put(ShimPlan.SHIM_DEX_KEY, SHIMDEX);
+        return m;
+    }
+
+    static String xmltree(File apk) throws IOException, InterruptedException {
+        File txt = new File(scratch, apk.getName() + ".xmltree.txt");
+        int rc = new ProcessBuilder(aapt2, "dump", "xmltree", "--file", "AndroidManifest.xml", apk.getPath())
+                .redirectErrorStream(true).redirectOutput(txt).start().waitFor();
+        String t = new String(Files.readAllBytes(txt.toPath()), StandardCharsets.UTF_8);
+        check(rc == 0, apk.getName() + ": aapt2 dump xmltree exit " + rc + ": " + t);
+        return t;
+    }
+
+    static void addsShims() throws Exception {
+        byte[] risky = Files.readAllBytes(new File(fixtures, "RiskyFixture.dex").toPath());
+        Map<String, byte[]> x = new LinkedHashMap<>();
+        x.put("classes.dex", risky);
+        x.put("lib/armeabi/libgumball.so", b("ARM-gum"));
+        File in = build("min_only", null, "shims", x);
+        File out = new File(scratch, "shims.out.apk");
+        ApkRepackager.Result r = ApkRepackager.transform(in, runtimeWithShims(), out);
+        Map<String, byte[]> o = readAll(out);
+        check(Arrays.equals(o.get("classes.dex"), risky), "the game's classes.dex is unchanged");
+        check(Arrays.equals(o.get("classes2.dex"), SHIMDEX), "shim dex added as classes2.dex");
+        check(!o.containsKey(ShimPlan.SHIM_DEX_KEY), "the shimdex key is not itself an entry");
+        check("classes2.dex".equals(r.shimDex), "r.shimDex: " + r.shimDex);
+        check(r.shims.equals(Arrays.asList("target-sdk", "strict-network", "file-uri", "permissions")), "r.shims: " + r.shims);
+        String cfg = o.containsKey(ShimPlan.CONFIG_ENTRY) ? new String(o.get(ShimPlan.CONFIG_ENTRY), StandardCharsets.UTF_8) : null;
+        check(("targetSdk=8\nshims=target-sdk,strict-network,file-uri,permissions\n").equals(cfg), "config: " + cfg);
+        AxmlEditor e = AxmlEditor.parse(o.get("AndroidManifest.xml"));
+        check("com.retrobug.fixture.rbshim".equals(e.stringAttrOf("provider", ShimPlan.PROVIDER_CLASS, "authorities")),
+                "provider authorities: " + e.stringAttrOf("provider", ShimPlan.PROVIDER_CLASS, "authorities"));
+        check(e.attrNames("provider").equals(Arrays.asList("name", "exported", "authorities", "initOrder")),
+                "provider attributes in resource-id order: " + e.attrNames("provider"));
+        check(Integer.valueOf(24).equals(e.targetSdk()) && Integer.valueOf(24).equals(e.minSdk()), "sdk still raised");
+        // aapt2 is the judge of the bytes: the provider must read back with the platform's attribute ids.
+        String t = xmltree(out);
+        check(t.contains("E: provider"), "aapt2 sees <provider>");
+        check(t.contains("name(0x01010003)=\"com.retrobug.shim.RbShimProvider\""), "aapt2: provider name");
+        check(t.contains("exported(0x01010010)=false"), "aapt2: exported=false");
+        check(t.contains("authorities(0x01010018)=\"com.retrobug.fixture.rbshim\""), "aapt2: authorities");
+        check(t.contains("initOrder(0x0101001a)=2147483647"), "aapt2: initOrder");
+        check(t.indexOf("E: provider") > t.indexOf("E: activity"), "provider is a child after the activity");
+        check(t.contains("name(0x01010003)=\".Main\""), "aapt2: the existing activity name survives the pool shift");
+        check(reportHas(r, "shims: [target-sdk", "classes2.dex"), "report names the shims: " + r.report);
+        check(reportHas(r, "risk: implicit service", "covered by shim target-sdk"), "report names bindService risk: " + r.report);
+        check(r.risks.size() == 3, "three risks from the fixture dex: " + r.risks);
+
+        // A game with classes2.dex already: the shim continues the run as classes3.dex.
+        Map<String, byte[]> y = new LinkedHashMap<>(x);
+        y.put("classes2.dex", risky);
+        File in2 = build("min_only", null, "shims2", y);
+        ApkRepackager.Result r2 = ApkRepackager.transform(in2, runtimeWithShims(), new File(scratch, "shims2.out.apk"));
+        Map<String, byte[]> o2 = readAll(new File(scratch, "shims2.out.apk"));
+        check("classes3.dex".equals(r2.shimDex) && Arrays.equals(o2.get("classes3.dex"), SHIMDEX)
+                && Arrays.equals(o2.get("classes2.dex"), risky), "shim dex goes to classes3.dex: " + r2.shimDex);
+    }
+
+    static void shimsWhenNotNeededOrImpossible() throws Exception {
+        Map<String, byte[]> x = new LinkedHashMap<>();
+        x.put("classes.dex", Files.readAllBytes(new File(fixtures, "RiskyFixture.dex").toPath()));
+        x.put("lib/armeabi-v7a/libfoo.so", b("V7A"));
+        // Target 30 is left at 30: no behaviour change, so no shim, no provider, no risk lines.
+        File t30 = build("min_only", minOnlyManifestWithTarget(30), "shims30", x);
+        ApkRepackager.Result r = ApkRepackager.transform(t30, runtimeWithShims(), new File(scratch, "shims30.out.apk"));
+        Map<String, byte[]> o = readAll(new File(scratch, "shims30.out.apk"));
+        check(!o.containsKey("classes2.dex") && !o.containsKey(ShimPlan.CONFIG_ENTRY), "target 30: no shim entries");
+        check(AxmlEditor.parse(o.get("AndroidManifest.xml")).attrNames("provider").isEmpty(), "target 30: no provider");
+        check(r.shims.isEmpty() && r.risks.isEmpty() && reportHas(r, "shims: none needed", "30"), "target 30 report: " + r.report);
+        // A launcher build without the shim dex: named, nothing half-added.
+        File m = build("min_only", null, "noshimdex", x);
+        ApkRepackager.Result r2 = ApkRepackager.transform(m, runtime(), new File(scratch, "noshimdex.out.apk"));
+        Map<String, byte[]> o2 = readAll(new File(scratch, "noshimdex.out.apk"));
+        check(reportHas(r2, "shims: NOT added", "no shim dex"), "missing shim dex reported: " + r2.report);
+        check(!o2.containsKey("classes2.dex") && !o2.containsKey(ShimPlan.CONFIG_ENTRY)
+                && AxmlEditor.parse(o2.get("AndroidManifest.xml")).attrNames("provider").isEmpty(), "missing shim dex: nothing added");
+        check(reportHas(r2, "risk: implicit service", "NOT covered"), "risk says not covered without shims: " + r2.report);
+        // hasCode="false": no Java runs in the process, so a provider would never load.
+        Map<String, byte[]> z = new LinkedHashMap<>();
+        z.put("lib/armeabi-v7a/libnative.so", b("V7A"));
+        File nc = build("no_code", null, "nocode", z);
+        ApkRepackager.Result r3 = ApkRepackager.transform(nc, runtimeWithShims(), new File(scratch, "nocode.out.apk"));
+        Map<String, byte[]> o3 = readAll(new File(scratch, "nocode.out.apk"));
+        check(reportHas(r3, "shims: NOT added", "hasCode"), "hasCode=false reported: " + r3.report);
+        check(!o3.containsKey("classes.dex") && !o3.containsKey(ShimPlan.CONFIG_ENTRY), "hasCode=false: no dex added");
+    }
+
+    static String aapt2;
+
     public static void main(String[] a) throws Exception {
-        fixtures = new File(a[0]); scratch = new File(a[1]);
+        fixtures = new File(a[0]); scratch = new File(a[1]); aapt2 = a[2];
+        addsShims();
+        shimsWhenNotNeededOrImpossible();
         movesV7aAndStubs();
         reportsDroppedAndUnstubbed();
         bumpsTarget();

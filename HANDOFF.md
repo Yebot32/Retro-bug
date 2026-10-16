@@ -6,7 +6,53 @@ hand-written IR interpreter = "Tier I"). Engine in `core/`, on-device launcher a
 (`android/jni/launcher.cpp` + `android/jni/gl_forward.cpp` + `android/java/.../LauncherActivity.java`).
 Everything below this section is older, detailed session history — read it only when you need depth.
 
-## M2 — multi-entry core (2026-10-16, ACCEPTED on the tablet and the OnePlus) — newest state, read first
+## targetSdk compatibility shims (2026-10-16, branch `targetsdk-shims`, not merged, not pushed) — newest state
+
+**Problem.** The repackager raises targetSdk to 24 (install floor), which switches on every behaviour change the platform
+gates on targetSdk between the game's own target and 24. Gumball Lite (effective target 8) does an implicit
+`bindService(com.android.vending.billing.MarketBillingService.BIND)` on its **first run only** (`isFirstRun` →
+`InAppPurchase.restoreTransactions`), which threw `IllegalArgumentException: Service Intent must be explicit` in
+`onCreate`. That is why later runs reached the GL `UnsatisfiedLinkError` instead: reproduce with
+`adb shell pm clear com.twentysixdigital.gumballlite` before launching.
+
+**Design.** Decided at repackage time (`ShimPlan`, host-tested), executed in the game's process:
+- `ApkRepackager` adds `<provider com.retrobug.shim.RbShimProvider authorities=<pkg>.rbshim exported=false
+  initOrder=MAX>` (`AxmlEditor.addProvider`), the shim classes as the next free `classesN.dex` (launcher ships them as
+  `assets/rbshim.dex`, built by `tools/build_launcher_apk.sh` from `android/shim/`), and `assets/rb32/rbshim.properties`
+  (`targetSdk=<original>`, `shims=<ids>`). Providers are created before `Application.onCreate` and any activity/service.
+- Shims (`android/shim/.../Shims.java`; each logs `shim <id>: ...` or `shim <id> FAILED: ...` on tag `RBSHIM`):
+  `target-sdk` (orig < new): the process's shared `ApplicationInfo.targetSdkVersion` set back to the original — the
+  in-process checks read that field (implicit service intents 21, MODE_WORLD_* 24, @JavascriptInterface 17, legacy menu
+  key 14, View compat); re-asserted on config changes / activity creation. `strict-network` (orig < 11): main-thread
+  network allowed again. `file-uri` (orig < 24): VmPolicy LAX. `permissions` (orig < 23): declared dangerous
+  permissions not held are requested from the first activity (`requestPermissions`).
+- Not shimmed, named in the report: removed APIs (`Notification.setLatestEventInfo` → NoSuchMethodError). Not needed at
+  24: background-service limits (26), package visibility (30), Apache HTTP (platform keeps it below 28). Server-side
+  checks still see 24 (that is why runtime permissions need their own shim). Not covered: AsyncTask's parallel default
+  executor for targets <= 12 (only hidden API).
+- The repack report lists risky calls from the game's DEX (`DexScanner` + `ShimPlan.riskReport`), each "covered by
+  shim X" or "NOT covered"; "shims: NOT added — ..." when the launcher has no shim dex or the app has `hasCode="false"`.
+
+**Tests.** `bash tools/run_java_tests.sh`: ShimPlanTest 30, AxmlEditorTest 141, ApkRepackagerTest 83 checks, 0 failures
+(fixture DEXes built with javac + d8; aapt2 `dump xmltree` judges the provider; mutations of a threshold and of
+`exported` each fail a row). On-device both-ways check in the launcher process (targets 34):
+`tools/run_shimcheck.sh <serial>` — "before" rows must see IAE / SecurityException / NetworkOnMainThreadException /
+FileUriExposedException, "after" rows (shims applied, target 8) must not: **12 rows, 0 failures on the tablet
+R52Y106BECZ and on the OnePlus 75ff8cd3**. (The network probe is a DNS lookup of an `.invalid` name: the launcher has no
+INTERNET permission, so a socket is refused before StrictMode looks.)
+
+**Evidence (OnePlus 75ff8cd3, 2026-10-16, human confirmed both installs).** Launcher updated 18:53:49. Gumball
+`-e repack gumball`: report lists six risks, all covered, "shims: [target-sdk, strict-network, file-uri, permissions]
+(in-process targetSdk 8) — provider ... in classes2.dex"; `install: status=0`, firstInstallTime still 2026-10-15
+14:40:19, lastUpdateTime 18:54:19, arm64-v8a. `pm clear` + launch by icon, pid 30495: the five RBSHIM lines (permissions
+asked: CAMERA, WRITE_EXTERNAL_STORAGE and the platform's split READ_MEDIA_* set), RBRUNTIME "startup finished with no
+fault", then `Gumball: Binding to market service.` → `ContextImpl: Implicit intents with startService are not safe`
+(the platform's pre-21 path) → `Gumball: Billing - Could not bind to service.` → `onCreate activity` completes; end point
+`UnsatisfiedLinkError` at `JNIGLSurface.jniClearTextures()` on the GL thread (M3 adds the `Java_*` exports).
+
+**Next:** M3 JNI bridge. The permission dialog now appears on a repacked game's first launch (expected).
+
+## M2 — multi-entry core (2026-10-16, ACCEPTED on the tablet and the OnePlus)
 
 Branch `m2-multi-entry-core` (not merged, not pushed). Plan: `docs/superpowers/plans/2026-10-15-m2-multi-entry-core.md`.
 Ledger (git-ignored): `.superpowers/sdd/2026-10-15-m2-multi-entry-core/progress.md`. Newest notes: `NEXT-AI-HANDOFF.txt`.
@@ -92,7 +138,7 @@ TLS module 1 ...`. Test: `guest_process_test` `libc_thread_locals_live_in_libcs_
 After the fixes: all lanes green on the tablet and the OnePlus (guest_thread 457, abi_call 191, guest_process 161);
 launcher reinstalled on the OnePlus, ABGo bootcheck: 258 constructors, 0x10006, no fault. Ready to merge to `main`.
 
-**Next after M2:** targetSdk compatibility shims (Gumball's implicit `bindService`) → M3 JNI bridge (see the M3 MUST
+**Next after M2:** targetSdk compatibility shims (DONE, see the section above) → M3 JNI bridge (see the M3 MUST
 list in `NEXT-AI-HANDOFF.txt`).
 
 ## M1 — on-device repackager + stub boot (2026-10-15, ACCEPTED)
