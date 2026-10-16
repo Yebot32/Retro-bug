@@ -27,6 +27,11 @@ Tasks 1–6 done on the tablet (the OnePlus was set aside by the human; its runs
 - **Waiting on the OnePlus** (the tablet has both games' originals installed natively, and a repacked copy has the
   same package name, so it must not be installed there): `-e repack gumball`, install, launch by its icon, expect
   `GumballMainMenu` drawn; ABGo by its icon past `isDeviceAmazon()`. Then OnePlus lanes + `run_bridge_check.sh`.
+- Final whole-branch review (opus) done: 5 Important findings fixed in 04c76e9 (Delete* of a stale handle
+  ignored as ART does, detach frees locals, no 4 KiB NewStringUTF cap, ID records in a deque, boot teardown on
+  every failure); 9 Minor deferred in the ledger. Tablet: 21 lanes 0 failures after the fixes.
+- The OnePlus is often in the human's hands: start OnePlus work only when they say it is free, and stop it if
+  they ask. `build/brokenscope/brokenscope.apk` (staged in the tablet's launcher) is the boot-failure test APK.
 
 ## targetSdk compatibility shims (2026-10-16, branch `targetsdk-shims`, not merged, not pushed) — newest state
 
