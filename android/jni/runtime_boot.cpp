@@ -41,6 +41,7 @@
 #include "art_java.h"
 #include "host_slots.h"
 #include "thunks_android.h"
+#include "thunks_sles.h"
 #include "rb/abi/jni_forward.h"
 #include "rb/runtime/ggl.h"
 #include "rb/runtime/inbound.h"
@@ -238,6 +239,7 @@ int TargetSdk() {
 struct Runtime {
   std::unique_ptr<GuestProcess> proc;
   std::unique_ptr<rb::launcher::HostSlots> slots;
+  std::unique_ptr<rb::launcher::Sles> sles;  ///< OpenSL ES (M4 Task 4); uses slots' handles and proc's memory
   // M3: the JNI bridge — real Java (the VM the first stub handed in), the guest JNIEnv/JavaVM over it, and the
   // dispatcher Java calls guest natives through.
   JavaVM* vm = nullptr;
@@ -431,6 +433,7 @@ namespace {
 /// A scope that did not boot leaves nothing worth keeping; the next call starts over. Torn down users first: the
 /// dispatcher and the bridge bind and unbind slots on the process's AbiContext, so they go before it does.
 void DropScope(Runtime& rt) {
+  rt.sles.reset();
   rt.inbound.reset();
   rt.fwd.reset();
   rt.java.reset();
@@ -466,6 +469,44 @@ bool BootScope(Runtime& rt, ApkZip& zip, std::string* out) {
   }
   // libandroid and jnigraphics calls that take a Java object need the bridge (M4 Task 3).
   rb::launcher::RegisterAndroidThunks(*rt.slots, *rt.fwd, rt.vm);
+  // OpenSL ES (M4 Task 4): engines, output mixes, players and their buffer queues, as guest objects whose vtables are
+  // host slots. Callbacks come back on the host's audio threads, which are adopted to call the guest there.
+  {
+    GuestProcess& p = *rt.proc;
+    rb::launcher::HostSlots* slots = rt.slots.get();
+    rb::launcher::SlesHost h;
+    h.mem = &p.memory();
+    h.handles = &slots->handles();
+    h.alloc = [&p](std::size_t bytes) -> std::uint32_t {
+      std::string e;
+      return p.MapFree(bytes, rb::mem::kRead | rb::mem::kWrite, &e);
+    };
+    h.bind = [slots](const std::string& name, rb::launcher::SlesHost::Method fn) -> std::uint32_t {
+      slots->AddSpecial(name, std::move(fn));
+      const auto at = slots->Resolve(name);
+      return at ? *at : 0u;
+    };
+    h.call_guest = [&p](std::uint32_t fn, const std::vector<std::uint32_t>& args) {
+      std::vector<rb::abi::Value32> v;
+      for (std::uint32_t a : args) v.push_back(rb::abi::Value32::U32(a));
+      rb::exec::RunResult rr{};
+      p.abi().CallGuestToCompletion(fn, rb::abi::Args32{v}, rb::abi::Shorty::For("V"), GuestProcess::kThreadTurnBudget,
+                                    &rr);
+      if (rr.reason != rb::exec::StopReason::Returned) {
+        char b[32];
+        std::snprintf(b, sizeof b, "0x%x", static_cast<unsigned>(fn));
+        Live(std::string{"sles: guest callback "} + b + " did not return: " + rr.detail);
+      }
+    };
+    h.unlocked = [&p](const std::function<void()>& f) {
+      rb::runtime::Ggl::Released off(p.abi().ggl());
+      f();
+    };
+    h.say = [](const std::string& s) { Live(s); };
+    rt.sles = std::make_unique<rb::launcher::Sles>(std::move(h));
+    rb::launcher::Sles* sles = rt.sles.get();
+    slots->AddResolver([sles](const std::string& n) { return sles->Resolve(n); });
+  }
   // Files and sockets are the host's (M4 Task 3b): the game reads and writes its own sandbox and talks to the network
   // with the app's permissions, as its native code does on a device. No path is virtualized yet.
   rt.proc->monitor().set_file_provider([](const std::string&) -> std::optional<std::vector<std::uint8_t>> {

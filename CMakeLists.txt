@@ -68,7 +68,7 @@ endif()
 # which is the only way it gets built.
 if(RB_BUILD_LAUNCHER)
   add_library(rbguest SHARED EXCLUDE_FROM_ALL android/jni/launcher.cpp android/jni/gl_forward.cpp
-              android/jni/runtime_boot.cpp android/jni/host_slots.cpp android/jni/thunks.cpp android/jni/thunks_android.cpp
+              android/jni/runtime_boot.cpp android/jni/host_slots.cpp android/jni/thunks.cpp android/jni/thunks_android.cpp android/jni/thunks_sles.cpp
               android/jni/art_java.cpp android/jni/stub_entry_aarch64.S)
   # The same set `rb_guest_apk_tests` links (`core/tests/CMakeLists.txt`), because this target does the
   # same sequence: memory, loader, linker, executors, bridge. `rb_mem` is already implied by the others,

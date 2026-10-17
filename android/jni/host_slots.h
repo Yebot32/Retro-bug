@@ -81,6 +81,11 @@ class HostSlots {
   void enable_thunks();
   /// Registers a hand-written thunk for `name` (before the guest's libraries are loaded). Wins over a table entry.
   void AddSpecial(const std::string& name, Special fn) { specials_[name] = std::move(fn); }
+  /// Another source of answers, asked (in the order added) for a name with no special and no table entry while the
+  /// thunks are on: a module whose names are not a flat list (OpenSL ES: `slCreateEngine` and the `SL_IID_*` data
+  /// imports, which answer a guest data address, not a slot). It may bind slots itself (`AddSpecial` + `Resolve`).
+  using Resolver = std::function<std::optional<std::uint32_t>(const std::string& name)>;
+  void AddResolver(Resolver r) { resolvers_.push_back(std::move(r)); }
   /// Host pointers the guest holds (EGL objects, AAsset*, OpenSL objects, ...), shared by every thunk.
   abi::HandleTable& handles() { return handles_; }
   runtime::GuestProcess& process() { return p_; }
@@ -109,6 +114,7 @@ class HostSlots {
   bool thunks_on_ = false;
   abi::HandleTable handles_;
   std::map<std::string, Special> specials_;
+  std::vector<Resolver> resolvers_;
   std::deque<ThunkCall> thunk_calls_;  ///< a deque: a running thunk holds a reference while eglGetProcAddress or
                                       ///< dlsym may add another
   std::map<std::string, std::uint32_t> guest_strings_;  ///< GuestString's copies

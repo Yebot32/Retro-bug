@@ -396,7 +396,12 @@ std::optional<std::uint32_t> HostSlots::Resolve(const std::string& name) {
   }
   const auto special = specials_.find(name);
   const ThunkEntry* entry = special == specials_.end() ? FindThunk(name) : nullptr;
-  if (special == specials_.end() && entry == nullptr) return std::nullopt;  // no thunk: stays trapped, by name
+  if (special == specials_.end() && entry == nullptr) {
+    for (const Resolver& r : resolvers_) {
+      if (auto at = r(name)) return at;
+    }
+    return std::nullopt;  // no thunk: stays trapped, by name
+  }
   if (thunk_calls_.size() >= kThunkSlots) {
     if (live_log_) live_log_("thunks: no slot left for " + name + " (" + std::to_string(kThunkSlots) + " in use)");
     return std::nullopt;

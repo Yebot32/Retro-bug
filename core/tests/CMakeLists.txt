@@ -164,3 +164,9 @@ target_link_libraries(rb_thunk_tests PRIVATE rb_abi rb_mem)
 # M4 Task 3b: host file and socket pass-through (Monitor::set_host_io).
 add_executable(rb_host_io_tests host_io_test.cpp)
 target_link_libraries(rb_host_io_tests PRIVATE rb_syscall rb_mem)
+
+# M4 Task 4: the OpenSL ES thunks against the device's own libOpenSLES (the module lives with the other Android
+# thunks; it depends on HandleTable/ThunkCaller and the OpenSL ES headers only, not on the launcher).
+add_executable(rb_sles_tests sles_test.cpp "${CMAKE_SOURCE_DIR}/android/jni/thunks_sles.cpp")
+target_include_directories(rb_sles_tests PRIVATE "${CMAKE_SOURCE_DIR}/android/jni")
+target_link_libraries(rb_sles_tests PRIVATE rb_abi rb_mem OpenSLES dl)
