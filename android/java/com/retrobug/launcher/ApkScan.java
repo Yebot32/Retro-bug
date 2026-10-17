@@ -41,8 +41,26 @@ final class ApkScan {
 
         /** Built for 32-bit ARM only: what RetroBug is for. A 64-bit build in the same APK runs natively instead. */
         boolean is32BitOnly() {
-            return (abis.contains("armeabi") || abis.contains("armeabi-v7a")) && !abis.contains("arm64-v8a");
+            return ApkScan.is32BitOnly(abis);
         }
+    }
+
+    /** The ABIs under lib/ from entry names alone (the zip's central directory): cheap enough for a whole library. */
+    static Set<String> abis(File apk) throws IOException {
+        Set<String> abis = new TreeSet<>();
+        try (ZipFile zip = new ZipFile(apk)) {
+            for (Enumeration<? extends ZipEntry> en = zip.entries(); en.hasMoreElements(); ) {
+                String n = en.nextElement().getName();
+                if (!n.startsWith("lib/")) continue;
+                int slash = n.indexOf('/', 4);
+                if (slash > 4) abis.add(n.substring(4, slash));
+            }
+        }
+        return abis;
+    }
+
+    static boolean is32BitOnly(Set<String> abis) {
+        return (abis.contains("armeabi") || abis.contains("armeabi-v7a")) && !abis.contains("arm64-v8a");
     }
 
     static Info scan(File apk) throws IOException {

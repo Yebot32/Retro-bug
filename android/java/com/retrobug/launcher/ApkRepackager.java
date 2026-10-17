@@ -57,6 +57,16 @@ final class ApkRepackager {
     private static final String GUEST_DIR = "assets/rb32/";
     private static final String MANIFEST = "AndroidManifest.xml";
     private static final String ARSC = "resources.arsc";
+    /** The runtime generation a converted copy was made by, carried as its versionName suffix `-rb<N>`. Raise it when
+     *  the runtime changes in a way copies must be re-made for; the library then shows "Update available". */
+    static final int RUNTIME_STAMP = 1;
+
+    /** The stamp in a versionName (`2.5-rb3` or `rb3`), -1 when there is none. */
+    static int stampOf(String versionName) {
+        if (versionName == null) return -1;
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("(?:^|-)rb(\\d+)$").matcher(versionName);
+        return m.find() ? Integer.parseInt(m.group(1)) : -1;
+    }
 
     static final class Result {
         String packageName;      // the output's package (the new one when renamed)
@@ -208,6 +218,13 @@ final class ApkRepackager {
                     && ed.addUsesLibrary("org.apache.http.legacy", false)) {
                 edited = true;
                 r.report.add("uses-library: org.apache.http.legacy (required=false), on the classpath before API 28");
+            }
+            {
+                String v = ed.versionName();
+                String stamped = (v == null || v.isEmpty() ? "" : v + "-") + "rb" + RUNTIME_STAMP;
+                ed.setVersionName(stamped);
+                edited = true;
+                r.report.add("versionName: " + (v == null ? "absent" : v) + " -> " + stamped);
             }
             if (edited) manifest = ed.toBytes();
 

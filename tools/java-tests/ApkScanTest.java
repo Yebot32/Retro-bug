@@ -92,6 +92,8 @@ public class ApkScanTest {
         Map<String, byte[]> d = new LinkedHashMap<>();
         d.put("classes.dex", new byte[] {1});
         check(!ApkScan.scan(zip("nolib.apk", d)).is32BitOnly(), "no lib/ is not a 32-bit game");
+        check(ApkScan.is32BitOnly(ApkScan.abis(zip("v7a2.apk", a))) && !ApkScan.is32BitOnly(ApkScan.abis(zip("both2.apk", b))),
+                "abis() from entry names agrees with scan()");
     }
 
     static void images() throws IOException {

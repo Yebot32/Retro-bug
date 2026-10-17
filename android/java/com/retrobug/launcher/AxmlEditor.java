@@ -396,6 +396,38 @@ final class AxmlEditor {
         put32(c, off + 8, -1);  // no raw string value
     }
 
+    private static final int ATTR_VERSION_NAME = 0x0101021c;
+
+    /** {@code <manifest android:versionName>}, or null when absent or not a string. */
+    String versionName() {
+        int m = findElement("manifest");
+        if (m < 0) return null;
+        byte[] c = nodes.get(m);
+        return stringValue(c, findAttr(c, "versionName"));
+    }
+
+    /** Sets {@code <manifest android:versionName>} (added when absent). */
+    void setVersionName(String value) throws IOException {
+        int m = findElement("manifest");
+        if (m < 0) throw new IOException("manifest has no <manifest> element");
+        byte[] c = nodes.get(m);
+        int off = findAttr(c, "versionName");
+        if (off < 0) {
+            int nameIdx = ensureAttrName("versionName", ATTR_VERSION_NAME);  // first: it may insert into the pool
+            int androidNs = indexOf(ANDROID_NS);
+            if (androidNs < 0) throw new IOException("manifest declares no android namespace");
+            c = withAttribute(nodes.get(findElement("manifest")), androidNs, nameIdx, ATTR_VERSION_NAME, 0);
+            nodes.set(m, c);
+            off = findAttr(c, "versionName");
+        }
+        int idx = poolString(value);  // appended at the end: no index shifts
+        put32(c, off + 8, idx);
+        put16(c, off + 12, 8);
+        c[off + 14] = 0;
+        c[off + 15] = TYPE_STRING;
+        put32(c, off + 16, idx);
+    }
+
     private static final int ATTR_NAME = 0x01010003;
     private static final int ATTR_EXPORTED = 0x01010010;
     private static final int ATTR_AUTHORITIES = 0x01010018;

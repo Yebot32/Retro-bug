@@ -469,6 +469,32 @@ public class ApkRepackagerTest {
         }
     }
 
+    /** The aapt2-built fixture's binary manifest. */
+    static byte[] fixture(String base) throws IOException {
+        try (ZipFile z = new ZipFile(new File(fixtures, base + ".apk"));
+             InputStream in = z.getInputStream(z.getEntry("AndroidManifest.xml"))) {
+            return in.readAllBytes();
+        }
+    }
+
+    /** A converted copy's versionName carries the runtime stamp the library reads back (Ready vs Update available). */
+    static void stampsVersionName() throws Exception {
+        File in = build("min_only", null, "stamp-none", fullExtras());
+        File out = new File(scratch, "stamp-none.out.apk");
+        ApkRepackager.transform(in, runtime(), out);
+        String none = AxmlEditor.parse(readAll(out).get("AndroidManifest.xml")).versionName();
+        check(("rb" + ApkRepackager.RUNTIME_STAMP).equals(none), "no versionName -> rb<stamp>: " + none);
+        AxmlEditor ed = AxmlEditor.parse(fixture("min_only"));
+        ed.setVersionName("2.5");
+        File in2 = build("min_only", ed.toBytes(), "stamp-25", fullExtras());
+        File out2 = new File(scratch, "stamp-25.out.apk");
+        ApkRepackager.transform(in2, runtime(), out2);
+        String v = AxmlEditor.parse(readAll(out2).get("AndroidManifest.xml")).versionName();
+        check(("2.5-rb" + ApkRepackager.RUNTIME_STAMP).equals(v), "2.5 -> 2.5-rb<stamp>: " + v);
+        check(ApkRepackager.stampOf("2.5-rb7") == 7 && ApkRepackager.stampOf("rb3") == 3, "stampOf reads the stamp");
+        check(ApkRepackager.stampOf("2.5") == -1 && ApkRepackager.stampOf(null) == -1, "stampOf: no stamp is -1");
+    }
+
     public static void main(String[] a) throws Exception {
         fixtures = new File(a[0]); scratch = new File(a[1]); aapt2 = a[2];
         addsShims();
@@ -485,6 +511,7 @@ public class ApkRepackagerTest {
         generatesStubs();
         refusals();
         storesCompressedArsc();
+        stampsVersionName();
         System.out.println(checks + " checks, " + failures + " failures");
         System.exit(failures == 0 ? 0 : 1);
     }

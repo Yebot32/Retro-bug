@@ -7,8 +7,9 @@
 
   Deliberately absent, and each absence is a decision rather than an omission:
 
-    - One permission only: REQUEST_INSTALL_PACKAGES, which "Make installable" needs to hand a repackaged
-      game to PackageInstaller. It is an app-op the user grants in "Install unknown apps", not a runtime
+    - Two permissions only: REQUEST_INSTALL_PACKAGES, which "Make installable" needs to hand a repackaged
+      game to PackageInstaller, and REQUEST_DELETE_PACKAGES, for the library's "Remove the playable copy"
+      (Android's own uninstall prompt). It is an app-op the user grants in "Install unknown apps", not a runtime
       grant, and changes nothing about the process's SELinux domain or seccomp state. Every other
       permission stays out: each is a reason the process could be in a different domain than the app
       RetroBug eventually ships, and the answers this launcher exists to produce are about that domain.
@@ -33,6 +34,16 @@
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />
 
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
+    <!-- The library's "Remove the playable copy": Android's own uninstall prompt for a converted .rb copy. -->
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES"/>
+
+    <!-- The library finds installed games through the public launcher-app query; no QUERY_ALL_PACKAGES. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
 
     <application android:label="RetroBug" android:icon="@mipmap/ic_launcher"
         android:debuggable="false">
