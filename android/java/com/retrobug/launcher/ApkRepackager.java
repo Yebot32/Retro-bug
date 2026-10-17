@@ -44,6 +44,9 @@ final class ApkRepackager {
     static final String STUB_KEY = "stub";
     /** Diagnostics: the next transform marks the output debuggable (`-e debuggable 1`). Never set by the UI. */
     static volatile boolean debuggable = false;
+    /** Diagnostics: the next transform is a native control (`-e native 1`): renamed and re-signed like a repack, but the
+     *  32-bit libraries stay in lib/ and no runtime is added, so a 32-bit-capable device runs the same APK natively. */
+    static volatile boolean nativeControl = false;
 
     private static final String V7A = "lib/armeabi-v7a/";
     private static final String ARM = "lib/armeabi/";
@@ -154,6 +157,8 @@ final class ApkRepackager {
             r.oldTargetSdk = oldT == null ? -1 : oldT;
             // Never below the install floor nor below the (new) minSdk; never lowered.
             int floorT = Math.max(INSTALL_FLOOR_SDK, r.newMinSdk);
+            // A native control is a diagnostic install on a device whose Play Protect blocks old targets: current.
+            if (nativeControl) floorT = Math.max(floorT, 33);  // 34 makes registerReceiver without RECEIVER_* fatal
             if (oldT == null && oldMin != null && oldMin >= floorT) {
                 // An absent targetSdk means "= minSdk"; writing the floor here would lower it.
                 r.newTargetSdk = oldMin;
@@ -187,6 +192,13 @@ final class ApkRepackager {
                 edited = true;
                 r.report.add("debuggable: android:debuggable=\"true\" set for diagnostics (profiling, run-as) — not for players");
             }
+            if (r.newTargetSdk >= 31) {  // API 31+ refuses an intent-filtered component with no explicit exported
+                int n = ed.setExportedDefaults();
+                if (n > 0) {
+                    edited = true;
+                    r.report.add("exported: " + n + " component(s) with intent filters given android:exported=\"true\" (their default before API 31)");
+                }
+            }
             if (edited) manifest = ed.toBytes();
 
             List<ZipEntry> guest = new ArrayList<>();
@@ -203,6 +215,11 @@ final class ApkRepackager {
                     String n = e.getName();
                     if (e.isDirectory() || n.equals(MANIFEST)) continue;
                     if (n.startsWith("META-INF/")) { sigDropped.add(n); continue; }
+                    if (nativeControl && n.startsWith("lib/")) {  // the control run keeps the 32-bit libraries as they are
+                        claim(names, n);
+                        copy(zip, e, zo);
+                        continue;
+                    }
                     if (n.startsWith("lib/")) {
                         if (n.startsWith(guestDir)) { guest.add(e); continue; }
                         r.report.add("dropped " + n + (n.startsWith(ARM) ? " (lib/armeabi-v7a/ supplies the 32-bit set)"
@@ -240,7 +257,9 @@ final class ApkRepackager {
                 }
                 r.risks = plan.riskReport(refs, addShims ? plan.shims : Collections.<String>emptyList());
                 r.report.addAll(r.risks);
-                if (guest.isEmpty()) throw refused("no 32-bit ARM native libs (lib/armeabi-v7a or lib/armeabi)");
+                if (nativeControl) {
+                    r.report.add("native control: 32-bit libraries kept in lib/, no RetroBug runtime — runs natively on a 32-bit-capable device only");
+                } else if (guest.isEmpty()) throw refused("no 32-bit ARM native libs (lib/armeabi-v7a or lib/armeabi)");
                 if (!sigDropped.isEmpty())
                     r.report.add("dropped " + sigDropped.size() + " META-INF entries (old signature no longer valid): "
                             + sigDropped);
@@ -283,6 +302,7 @@ final class ApkRepackager {
                 }
 
                 for (Map.Entry<String, byte[]> f : runtimeFiles.entrySet()) {
+                    if (nativeControl && (f.getKey().startsWith("lib/") || f.getKey().startsWith("assets/rb32"))) continue;
                     if (f.getKey().equals(STUB_KEY) || f.getKey().equals(ShimPlan.SHIM_DEX_KEY)) continue;
                     claim(names, f.getKey());
                     putBytes(zo, f.getKey(), f.getValue(), ZipEntry.DEFLATED);

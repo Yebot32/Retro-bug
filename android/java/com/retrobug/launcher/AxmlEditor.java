@@ -329,6 +329,49 @@ final class AxmlEditor {
         nodes.add(manifest + 1, withAttribute(start, androidNs, nameIdx, resId, value));
     }
 
+    /**
+     * Targeting API 31+ requires an explicit {@code android:exported} on every activity, activity-alias, service and
+     * receiver that has an intent filter; before 31 such a component was exported by default. This writes that old
+     * default, {@code exported="true"}, onto each one that lacks the attribute, so raising the target does not change
+     * which components other apps can reach (and the platform does not refuse the install). Returns how many.
+     */
+    int setExportedDefaults() throws IOException {
+        final java.util.Set<String> kinds = new java.util.HashSet<>(
+                java.util.Arrays.asList("activity", "activity-alias", "service", "receiver"));
+        int changed = 0;
+        java.util.ArrayDeque<Integer> open = new java.util.ArrayDeque<>();
+        java.util.Set<Integer> needs = new java.util.LinkedHashSet<>();
+        for (int i = 0; i < nodes.size(); i++) {
+            byte[] c = nodes.get(i);
+            int type = u16(c, 0);
+            if (type == XML_START_ELEMENT) {
+                String name = str(s32(c, NODE_HEADER + 4));
+                if (name.equals("intent-filter") && !open.isEmpty()) {
+                    int parent = open.peek();
+                    byte[] p = nodes.get(parent);
+                    if (kinds.contains(str(s32(p, NODE_HEADER + 4))) && findAttr(p, "exported") < 0) needs.add(parent);
+                }
+                open.push(i);
+            } else if (type == XML_END_ELEMENT && !open.isEmpty()) {
+                open.pop();
+            }
+        }
+        if (needs.isEmpty()) return 0;
+        int nameIdx = ensureAttrName("exported", ATTR_EXPORTED);  // first: it may insert into the pool
+        int androidNs = indexOf(ANDROID_NS);
+        if (androidNs < 0) throw new IOException("manifest declares no android namespace");
+        for (int idx : needs) {
+            byte[] c = withAttribute(nodes.get(idx), androidNs, nameIdx, ATTR_EXPORTED, -1);
+            int off = findAttr(c, "exported");
+            c[off + 15] = TYPE_INT_BOOLEAN;
+            put32(c, off + 16, -1);
+            put32(c, off + 8, -1);
+            nodes.set(idx, c);
+            changed++;
+        }
+        return changed;
+    }
+
     private static final int ATTR_DEBUGGABLE = 0x0101000f;
 
     /**

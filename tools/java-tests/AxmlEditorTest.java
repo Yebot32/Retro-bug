@@ -248,6 +248,23 @@ public class AxmlEditorTest {
         }
     }
 
+    /** API 31+: every intent-filtered component gets the old default exported="true"; one that sets it keeps its value. */
+    static void setsExportedDefaults() throws Exception {
+        AxmlEditor ed = AxmlEditor.parse(fixture("filters"));
+        int n = ed.setExportedDefaults();
+        String tree = xmltree("filters", ed.toBytes(), "filters-exported");
+        check(n == 1, "filters: " + n + " components changed (want 1: the activity)");
+        int act = tree.indexOf("E: activity"), svc = tree.indexOf("E: service"), rx = tree.indexOf("E: receiver");
+        check(act >= 0 && svc > act && rx > svc, "filters: element order in\n" + tree);
+        if (act >= 0 && svc > act && rx > svc) {
+            check(tree.substring(act, svc).contains("exported(0x01010010)=true"), "activity exported=true in\n" + tree);
+            check(tree.substring(svc, rx).contains("exported(0x01010010)=false"), "service keeps exported=false in\n" + tree);
+            check(!tree.substring(rx).contains("exported"), "the filterless receiver is untouched in\n" + tree);
+        }
+        AxmlEditor again = AxmlEditor.parse(ed.toBytes());
+        check(again.setExportedDefaults() == 0, "a second pass changes nothing");
+    }
+
     static void refusesGarbage() {
         try {
             AxmlEditor.parse(new byte[]{1, 2, 3});
@@ -388,6 +405,7 @@ public class AxmlEditorTest {
         renamePackage();
         refusesGarbage();
         setsDebuggable();
+        setsExportedDefaults();
         System.out.println(checks + " checks, " + failures + " failures");
         System.exit(failures == 0 ? 0 : 1);
     }

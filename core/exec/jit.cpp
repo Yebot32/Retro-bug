@@ -853,6 +853,7 @@ std::uint64_t JitExecutor::GetTicksRemaining() {
 }
 
 bool JitExecutor::PreCodeReadHook(bool is_thumb, GuestAddr pc, Dynarmic::A32::IREmitter& ir) {
+  translated_.fetch_add(1, std::memory_order_relaxed);
   /**
    * The ARM64 back end cannot represent `Term::Interpret`, so the six declined encodings have to be
    * stopped before the translator reaches it — see `docs/30` §Step 20a for the SIGABRT this replaces.
@@ -951,6 +952,7 @@ void JitExecutor::Invalidate(GuestAddr from, GuestAddr to) {
   if (!ok() || to <= from) return;
   // Real work, unlike Tier I's no-op: this tier has compiled code that a guest write can invalidate, and
   // AD-7's self-modifying-code story depends on this call reaching the cache that holds it.
+  invalidations_.fetch_add(1, std::memory_order_relaxed);
   jit_->InvalidateCacheRange(from, to - from);
 }
 

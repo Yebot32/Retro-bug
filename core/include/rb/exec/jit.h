@@ -26,6 +26,7 @@
  */
 #pragma once
 
+#include <atomic>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -222,11 +223,15 @@ class JitExecutor : public Executor, public Dynarmic::A32::UserCallbacks {
   /// checked callbacks, which name a fault. Kept current by a GuestMemory observer.
   std::vector<std::uint8_t*> page_table_;
   int page_observer_ = 0;
+  std::atomic<std::uint64_t> translated_{0}, invalidations_{0};
   void RefreshPages(std::uint32_t at, std::size_t len);
 
  public:
   /// Pages compiled code reaches inline (a test hook).
   [[nodiscard]] std::size_t inline_pages() const;
+  /// Diagnostics: guest instructions translated (compiled) and cache invalidations, since construction.
+  [[nodiscard]] std::uint64_t translated() const { return translated_.load(std::memory_order_relaxed); }
+  [[nodiscard]] std::uint64_t invalidations() const { return invalidations_.load(std::memory_order_relaxed); }
 
  private:
   GuestAddr return_address_;

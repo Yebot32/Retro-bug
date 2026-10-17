@@ -44,6 +44,7 @@
 #include "rb/abi/jni_forward.h"
 #include "rb/runtime/ggl.h"
 #include "rb/runtime/inbound.h"
+#include "rb/exec/jit.h"
 #include "rb/runtime/guest_process.h"
 
 namespace {
@@ -485,7 +486,9 @@ bool BootScope(Runtime& rt, ApkZip& zip, std::string* out) {
       ++prof->hits[pc & ~0x3fu];
       ++prof->slices;
     });
-    std::thread([prof] {
+    auto* jit = dynamic_cast<rb::exec::JitExecutor*>(&rt.proc->engine(2));
+    std::thread([prof, jit] {
+      std::uint64_t last_t = 0, last_i = 0;
       for (int round = 0; round < 60; ++round) {
         std::this_thread::sleep_for(std::chrono::seconds(10));
         std::vector<std::pair<std::uint32_t, std::uint32_t>> top;
@@ -501,6 +504,12 @@ bool BootScope(Runtime& rt, ApkZip& zip, std::string* out) {
         std::string line = "prof: " + std::to_string(slices) + " slices (" + std::to_string(slices * 200'000 / 10'000'000) +
                            " M guest instr/s) top:";
         for (std::size_t i = 0; i < top.size() && i < 15; ++i) line += " " + Hex(top[i].first) + "x" + std::to_string(top[i].second);
+        if (jit != nullptr) {
+          const std::uint64_t t = jit->translated(), inv = jit->invalidations();
+          line += " | translated " + std::to_string(t - last_t) + " instr, " + std::to_string(inv - last_i) + " invalidations";
+          last_t = t;
+          last_i = inv;
+        }
         if (slices != 0) Live(line);
       }
     }).detach();

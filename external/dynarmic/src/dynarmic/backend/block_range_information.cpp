@@ -14,26 +14,46 @@ namespace Dynarmic::Backend {
 
 template<typename ProgramCounterType>
 void BlockRangeInformation<ProgramCounterType>::AddRange(boost::icl::discrete_interval<ProgramCounterType> range, IR::LocationDescriptor location) {
-    block_ranges.add(std::make_pair(range, std::set<IR::LocationDescriptor>{location}));
+    if (range.empty()) {
+        return;
+    }
+    const ProgramCounterType first = range.lower() >> kPageBits;
+    const ProgramCounterType last = range.upper() >> kPageBits;
+    for (ProgramCounterType page = first;; ++page) {
+        by_page[page].push_back(location);
+        if (page == last) {
+            break;
+        }
+    }
 }
 
 template<typename ProgramCounterType>
 void BlockRangeInformation<ProgramCounterType>::ClearCache() {
-    block_ranges.clear();
+    by_page.clear();
 }
 
 template<typename ProgramCounterType>
 tsl::robin_set<IR::LocationDescriptor> BlockRangeInformation<ProgramCounterType>::InvalidateRanges(const boost::icl::interval_set<ProgramCounterType>& ranges) {
     tsl::robin_set<IR::LocationDescriptor> erase_locations;
     for (auto invalidate_interval : ranges) {
-        auto pair = block_ranges.equal_range(invalidate_interval);
-        for (auto it = pair.first; it != pair.second; ++it) {
-            for (const auto& descriptor : it->second) {
-                erase_locations.insert(descriptor);
+        if (invalidate_interval.empty()) {
+            continue;
+        }
+        const ProgramCounterType first = invalidate_interval.lower() >> kPageBits;
+        const ProgramCounterType last = invalidate_interval.upper() >> kPageBits;
+        for (ProgramCounterType page = first;; ++page) {
+            const auto it = by_page.find(page);
+            if (it != by_page.end()) {
+                for (const auto& descriptor : it->second) {
+                    erase_locations.insert(descriptor);
+                }
+                by_page.erase(it);  // the blocks recorded here are being erased; a recompile records them again
+            }
+            if (page == last) {
+                break;
             }
         }
     }
-    // TODO: EFFICIENCY: Remove ranges that are to be erased.
     return erase_locations;
 }
 
