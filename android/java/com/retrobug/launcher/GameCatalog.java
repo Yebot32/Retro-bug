@@ -55,7 +55,9 @@ final class GameCatalog {
                 Map<String, Game> seen = new LinkedHashMap<>();
                 PackageManager pm = ctx.getPackageManager();
                 Intent launcher = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
-                for (ResolveInfo ri : pm.queryIntentActivities(launcher, 0)) {
+                String shows = SettingsScreen.libraryShows(ctx);  // Settings > Library shows
+                for (ResolveInfo ri : shows.equals("added") ? java.util.Collections.<ResolveInfo>emptyList()
+                        : pm.queryIntentActivities(launcher, 0)) {
                     String pkg = ri.activityInfo.packageName;
                     // RetroBug's own apps (this launcher, test probes) and converted copies are not games to offer.
                     if (seen.containsKey(pkg) || pkg.startsWith("com.retrobug.") || pkg.endsWith(ApkRepackager.RENAME_SUFFIX))
@@ -65,7 +67,7 @@ final class GameCatalog {
                     seen.put(pkg, g);
                     post(l, g);
                 }
-                File[] files = gamesDir(ctx).listFiles();
+                File[] files = shows.equals("installed") ? null : gamesDir(ctx).listFiles();
                 if (files != null) {
                     java.util.Arrays.sort(files);
                     for (File f : files) {

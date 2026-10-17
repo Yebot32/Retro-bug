@@ -117,7 +117,7 @@ public class LauncherActivity extends Activity {
     /// `-e stubcheck`: dlopen one generated stub here and check each of `symbols` reaches rb_stub_capture.
     private static native String nativeStubCheck(String stubPath, String[] symbols);
 
-    private enum Screen { HOME, DEV, LIBRARY, SETTINGS, DIAGNOSTICS, REPORT, RUN }
+    private enum Screen { HOME, PREFS, DEV, LIBRARY, SETTINGS, DIAGNOSTICS, REPORT, RUN }
 
     private Screen screen_ = Screen.HOME;
     private String reportTitle_ = "";
@@ -284,6 +284,7 @@ public class LauncherActivity extends Activity {
         switch (which) {
             case HOME: setContentView(library()); break;
             case DEV: setContentView(homeScreen()); break;
+            case PREFS: setContentView(prefs()); break;
             case LIBRARY: setContentView(libraryScreen()); break;
             case SETTINGS: setContentView(settingsScreen()); break;
             case DIAGNOSTICS: setContentView(diagnosticsScreen()); break;
@@ -301,11 +302,21 @@ public class LauncherActivity extends Activity {
     private View library() {
         library_ = new LibraryScreen(this, bg_, new LibraryScreen.Host() {
             @Override public void addApk() { pickApk(); }
-            @Override public void openSettings() { show(Screen.DEV); }
+            @Override public void openSettings() { show(Screen.PREFS); }
         });
         return library_;
     }
 
+    private View prefs() {
+        return new SettingsScreen(this, new SettingsScreen.Host() {
+            @Override public void back() { show(Screen.HOME); }
+            @Override public void openDeveloper() { show(Screen.DEV); }
+            @Override public void restyle() { show(Screen.PREFS); }
+        });
+    }
+
+    /// The developer corner (Settings > Developer tools, revealed by seven taps on the version): the engine self-test,
+    /// the file-picker library with its scripted run modes, reports and diagnostics, as they were before the redesign.
     private View homeScreen() {
         LinearLayout root = column();
         root.addView(title("RetroBug", 26f, true));

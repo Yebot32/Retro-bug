@@ -6,7 +6,27 @@ hand-written IR interpreter = "Tier I"). Engine in `core/`, on-device launcher a
 (`android/jni/launcher.cpp` + `android/jni/gl_forward.cpp` + `android/java/.../LauncherActivity.java`).
 Everything below this section is older, detailed session history — read it only when you need depth.
 
-## M4 — thunk layer (2026-10-18, branch `m4-thunks`, DONE on the tablet and the OnePlus) — newest state
+## Launcher redesign — Holo era (2026-10-18, branch `ui-holo` off `main`) — newest state
+
+Spec `docs/superpowers/specs/2026-10-18-holo-launcher-ui-design.md`; plan `docs/superpowers/plans/2026-10-18-holo-launcher-ui.md`;
+ledger `.superpowers/sdd/2026-10-18-holo-launcher-ui/progress.md` (every ruling).
+
+The launcher is now a player's app in Android's Holo look (Theme.Holo, Roboto, Holo blue/green/orange/purple accents):
+a boot sweep, then a library of every installed 32-bit game plus added APKs with their own icons (`GameCatalog`,
+`ApkScan`, `ArtCache`). **Tap** a tile: not converted → converted and installed (`ConvertJob`; one Android prompt); ready
+→ the game opens. **Long press**: the game's menu (`GameMenu`) — its best artwork from the APK (`ArtPicker`) blurred
+behind the icon and title, and four tabs: Settings (Permissions, CPU mode Fast/Safe, Android target, performance
+overlay, clear data via Android's storage page, Resolution "coming with M6"), Mods and Patches (empty until M6), Delete
+(the `.rb` copy via Android's uninstall prompt, or the added APK; never the original). Per-game settings reach the game
+at start: the copy's shim asks the launcher's `SettingsProvider` (answers only that copy, signed with this device's
+repack key) and saves them for the runtime (`cpu=safe` → Tier I; overlay drawn by the shim). App Settings: accent,
+library contents, About; seven taps on the version reveal the old developer screens. Copies carry `-rb<N>` in their
+versionName (`ApkRepackager.RUNTIME_STAMP`) so the library knows "Update available".
+
+Known: an install from the library goes through Android's installer, where Play Protect asks to "Scan app" (upload the
+copy to Google) — the human's choice; the scripted `-e repack` path installs over adb and is not asked.
+
+## M4 — thunk layer (2026-10-18, branch `m4-thunks`, DONE on the tablet and the OnePlus)
 
 Plan `docs/superpowers/plans/2026-10-17-m4-thunk-layer.md`; ledger `.superpowers/sdd/2026-10-17-m4-thunk-layer/progress.md`
 (every ruling is there). Nothing merged to `main`, nothing pushed — both wait for the human.
