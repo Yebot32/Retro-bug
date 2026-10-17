@@ -253,6 +253,16 @@ void the_rest_of_a_games_first_run() {
   const std::uint32_t ts = r.Zero(8);
   CHECK(r.Sys(263 /*clock_gettime*/, 6, ts) == 0);
   CHECK(r.Sys(172 /*prctl*/, 0x53564d41u, 0, 0, 0, 0) == 0);
+  // The CPU-time clocks (bionic's clock() is CLOCK_PROCESS_CPUTIME_ID): answered, and the thread clock advances
+  // across real work. Fruit Ninja's loader budgets each frame by clock(); refused, it never loaded a thing.
+  const std::uint32_t c0 = r.Zero(8), c1 = r.Zero(8), p = r.Zero(8);
+  CHECK(r.Sys(263, 3 /*CLOCK_THREAD_CPUTIME_ID*/, c0) == 0);
+  volatile std::uint64_t spin = 0;
+  for (std::uint64_t i = 0; i < 20'000'000; ++i) spin += i;
+  CHECK(r.Sys(263, 3, c1) == 0);
+  const auto ns = [&](std::uint32_t at) { return std::uint64_t{r.U32(at)} * 1'000'000'000u + r.U32(at + 4); };
+  CHECK_CTX(ns(c1) > ns(c0), std::to_string(ns(c0)) + " -> " + std::to_string(ns(c1)));
+  CHECK(r.Sys(263, 2 /*CLOCK_PROCESS_CPUTIME_ID*/, p) == 0 && ns(p) >= ns(c1));
 }
 
 }  // namespace

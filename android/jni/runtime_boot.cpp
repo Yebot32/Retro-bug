@@ -565,8 +565,14 @@ bool BootScope(Runtime& rt, ApkZip& zip, std::string* out) {
       const bool routine = line.find("fstatat64") != std::string::npos || line.find("nr:0x18d") != std::string::npos ||
                            line.find("getdents64") != std::string::npos || 
                            line.find("host close ") != std::string::npos || line.find("host fstat64 ") != std::string::npos ||
-                           line.find("host nr:0x148") != std::string::npos;
-      if ((error || !routine) && left->fetch_sub(1) > 0) Live("io: " + line);
+                           line.find("host nr:0x148") != std::string::npos ||
+                           line.find("host read(") != std::string::npos || line.find("host nr:0x8c(") != std::string::npos;
+      // A search-path probe that misses (a game looking for a file in each of its directories) is routine too: one
+      // asset can cost a dozen of them, and they spent the whole budget in a minute of Fruit Ninja's loading.
+      const bool probe_miss = line.find(" = -2") != std::string::npos &&
+                              (line.find("fstatat64(") != std::string::npos || line.find("openat(") != std::string::npos ||
+                               line.find("faccessat(") != std::string::npos);
+      if (((error && !probe_miss) || !routine) && left->fetch_sub(1) > 0) Live("io: " + line);
     });
   }
   std::vector<std::uint8_t> sys[3];

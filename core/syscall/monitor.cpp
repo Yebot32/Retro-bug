@@ -36,14 +36,15 @@ std::string ProtText(std::uint32_t prot) {
   return out;
 }
 
-/// The host's own clocks, and the only place in this file that asks the host anything. `CLOCK_REALTIME`
-/// and `CLOCK_MONOTONIC` are facts a process can have; the process-CPU clocks are not answered here
-/// because a guest's "CPU time" measured by the emulator's host would be a different quantity wearing the
-/// right name, and a named refusal is better than a plausible wrong number.
+/// The host's own clocks, and the only place in this file that asks the host anything. The wall and monotonic
+/// clocks are facts a process can have. The CPU-time clocks are answered from the host too: the calling host thread
+/// is the one running this guest thread, so its CPU time is that thread's work (plus the emulator's, which makes it
+/// larger, never smaller or stuck). They were refused until M4: games budget work by clock() (CLOCK_PROCESS_CPUTIME_ID)
+/// and a refusal stalled Fruit Ninja's loader for good.
 bool HostClock(std::int32_t clock_id, std::int64_t* nanos) {
-  // The wall and monotonic clocks and their raw/coarse/boot variants (0, 1, 4, 5, 6, 7) — the same answer the guest's
-  // kernel would give. The CPU-time clocks (2, 3) stay refused: the host's would be the emulator's time.
-  const clockid_t id = (clock_id == 0 || clock_id == 1 || (clock_id >= 4 && clock_id <= 7)) ? clock_id : -1;
+  // The wall and monotonic clocks and their raw/coarse/boot variants (0, 1, 4..7) — the guest kernel's answer — and
+  // the process and thread CPU clocks (2, 3). A clock id encoding a pid or tid (negative) is not answered.
+  const clockid_t id = (clock_id >= 0 && clock_id <= 7) ? clock_id : -1;
   if (id < 0) return false;
   timespec ts{};
   if (::clock_gettime(id, &ts) != 0) return false;
@@ -720,9 +721,9 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
       if (!have) {
         return Outcome::Refused(err::kEnosys,
                                 call + "(" + std::to_string(id) +
-                                    ") has no fact to answer from: this build answers CLOCK_REALTIME "
-                                    "(0) and CLOCK_MONOTONIC (1) only, and a CPU-time clock measured on "
-                                    "the host would be the emulator's time under the guest's name");
+                                    ") has no fact to answer from: this build answers clock ids 0..7 "
+                                    "(wall, monotonic and CPU time); per-process or per-thread clock ids "
+                                    "of another pid/tid are not mapped");
       }
       std::int64_t sec = nanos / 1'000'000'000;
       std::int64_t nsec = nanos % 1'000'000'000;
