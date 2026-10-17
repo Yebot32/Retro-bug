@@ -170,3 +170,8 @@ target_link_libraries(rb_host_io_tests PRIVATE rb_syscall rb_mem)
 add_executable(rb_sles_tests sles_test.cpp "${CMAKE_SOURCE_DIR}/android/jni/thunks_sles.cpp")
 target_include_directories(rb_sles_tests PRIVATE "${CMAKE_SOURCE_DIR}/android/jni")
 target_link_libraries(rb_sles_tests PRIVATE rb_abi rb_mem OpenSLES dl)
+
+# M4 Task 2: the GL/EGL thunk table against the device's driver on an offscreen pbuffer.
+add_executable(rb_gl_thunk_tests gl_thunk_test.cpp "${CMAKE_SOURCE_DIR}/android/jni/thunks.cpp")
+target_include_directories(rb_gl_thunk_tests PRIVATE "${CMAKE_SOURCE_DIR}/android/jni")
+target_link_libraries(rb_gl_thunk_tests PRIVATE rb_abi rb_mem EGL GLESv2 dl)
