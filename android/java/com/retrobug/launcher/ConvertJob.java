@@ -134,23 +134,32 @@ final class ConvertJob {
                             out.toString());
                     if (signed != null) {
                         handedToInstaller = true;
+                        final AtomicBoolean finished = new AtomicBoolean(false);
+                        final RepackInstaller.Callback status = new RepackInstaller.Callback() {
+                            @Override public void onStatus(final String line, boolean done) {
+                                Log.i(TAG, line);
+                                out.append(line).append('\n');
+                                if (!done) {
+                                    post(main, cb, line);
+                                    return;
+                                }
+                                if (!finished.compareAndSet(false, true)) return;  // one verdict per conversion
+                                RepackInstaller.pendingConfirm = null;
+                                release();
+                                final boolean ok = line.contains("(SUCCESS)");
+                                main.post(new Runnable() {
+                                    @Override public void run() { cb.onDone(ok, out.toString()); }
+                                });
+                            }
+                        };
                         main.post(new Runnable() {
                             @Override public void run() {
-                                RepackInstaller.install(app, signed, new RepackInstaller.Callback() {
-                                    @Override public void onStatus(final String line, boolean done) {
-                                        Log.i(TAG, line);
-                                        out.append(line).append('\n');
-                                        if (!done) {
-                                            post(main, cb, line);
-                                            return;
-                                        }
-                                        release();
-                                        final boolean ok = line.contains("(SUCCESS)");
-                                        main.post(new Runnable() {
-                                            @Override public void run() { cb.onDone(ok, out.toString()); }
-                                        });
-                                    }
-                                });
+                                try {
+                                    RepackInstaller.install(app, signed, status);
+                                } catch (RuntimeException e) {
+                                    // The slot is released whatever the installer does; a game never stays "Getting ready".
+                                    status.onStatus("install: could not start: " + e, true);
+                                }
                             }
                         });
                     }

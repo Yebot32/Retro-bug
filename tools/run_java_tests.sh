@@ -88,3 +88,4 @@ java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.StubElfWriterTest \
 java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ApkScanTest "$(to_host "$OUT/scratch")"
 java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ArtPickerTest
 java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.GameSettingsTest
+java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.LibraryRulesTest

@@ -2,8 +2,8 @@
 //
 // A game's icon and backdrop, decoded once and kept: in memory for this run, and as PNGs under getCacheDir()/art/
 // keyed by package and version, so the next start shows them without opening the APK again. Decoding happens on the
-// executor it is given; results arrive on the main thread. Images are decoded at a reduced sample size (never larger
-// than the screen for a backdrop, 192 px for an icon), so a 4096-pixel texture cannot run the launcher out of memory.
+// executor it is given; results arrive on the main thread. Images are decoded at a reduced sample size (at most 640 px
+// for a backdrop, which is blurred here too; 192 px for an icon), so a 4096-pixel texture cannot run it out of memory.
 package com.retrobug.launcher;
 
 import android.content.Context;
@@ -52,9 +52,9 @@ final class ArtCache {
         load(g, "icon", done);
     }
 
-    /** The backdrop: the best large image in the APK (ArtPicker), else the icon. */
+    /** The backdrop, already softened: the best large image in the APK (ArtPicker), else the icon. */
     void backdrop(final Game g, final Consumer<Bitmap> done) {
-        load(g, "art", done);
+        load(g, "backdrop", done);  // "art" was the unsoftened cache of the first build: not reused
     }
 
     private void load(final Game g, final String kind, final Consumer<Bitmap> done) {
@@ -71,7 +71,8 @@ final class ArtCache {
                 try {
                     if (cached.isFile()) b = BitmapFactory.decodeFile(cached.getAbsolutePath());
                     if (b == null) {
-                        b = kind.equals("icon") ? decodeIcon(g) : decodeBackdrop(g);
+                        // The blur is the slow part, so it runs here and the cache keeps its result.
+                        b = kind.equals("icon") ? decodeIcon(g) : soft(decodeBackdrop(g));
                         if (b != null) save(cached, b);
                     }
                 } catch (Throwable t) {
@@ -105,15 +106,13 @@ final class ArtCache {
         return render(d, ICON_PX);
     }
 
+    private static Bitmap soft(Bitmap b) { return b == null ? null : GameMenu.soften(b); }
+
     private Bitmap decodeBackdrop(Game g) throws Exception {
         ApkScan.Image best = ArtPicker.pick(ApkScan.scan(g.apk).images);
         if (best == null) return decodeIcon(g);  // the caller blurs it into a backdrop
-        int maxSide = Math.max(ctx.getResources().getDisplayMetrics().widthPixels,
-                ctx.getResources().getDisplayMetrics().heightPixels);
-        int sample = 1;
-        while (Math.max(best.width, best.height) / (sample * 2) >= maxSide) sample *= 2;
         BitmapFactory.Options o = new BitmapFactory.Options();
-        o.inSampleSize = sample;
+        o.inSampleSize = LibraryRules.backdropSample(best.width, best.height);  // it is only ever shown blurred
         try (ZipFile z = new ZipFile(g.apk)) {
             ZipEntry e = z.getEntry(best.path);
             if (e == null) return decodeIcon(g);

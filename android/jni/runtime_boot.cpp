@@ -862,21 +862,26 @@ extern "C" int rb_runtime_boot(JavaVM* vm, const char* apk_path, const char* lib
 
 /// The performance overlay's numbers (the repack's shim, com.retrobug.shim.Overlay, asks once a second): frames since
 /// the last call, counted at eglSwapBuffers, and the guest instruction rate from the slice count (kSliceSteps per
-/// slice). Racy reads of plain counters, which is all a readout needs.
+/// slice). The thunk counts are read under HostSlots' counters lock (CallsOf); the slice count is a plain racy read,
+/// which is all a readout needs.
 extern "C" JNIEXPORT jstring JNICALL Java_com_retrobug_shim_Overlay_nativeStats(JNIEnv* env, jclass) {
   static std::uint64_t last_frames = 0, last_slices = 0;
+  static bool last_swapped = false;
   static auto last = std::chrono::steady_clock::now();
   Runtime& r = R();
   // Frames: the guest's eglSwapBuffers when it swaps itself; a game drawn through Java's GLSurfaceView swaps in Java,
   // so its glClear calls stand in (games clear once per frame, nearly always).
   std::uint64_t frames = 0, swaps = 0, clears = 0, slices = 0;
   if (r.slots) {
-    for (const auto& c : r.slots->thunk_calls()) {
-      if (c.name == "eglSwapBuffers") swaps = c.calls;
-      if (c.name == "glClear") clears = c.calls;
-    }
+    swaps = r.slots->CallsOf("eglSwapBuffers");
+    clears = r.slots->CallsOf("glClear");
   }
-  frames = swaps != 0 ? swaps : clears;
+  const bool swapped = swaps != 0;
+  frames = swapped ? swaps : clears;
+  // The count switched from glClear to eglSwapBuffers (the game's first own swap): a new baseline, not a negative
+  // or a wild difference between two unrelated counters.
+  if (swapped != last_swapped || frames < last_frames) last_frames = frames;
+  last_swapped = swapped;
   if (r.proc) slices = r.proc->abi().slices();
   const auto now = std::chrono::steady_clock::now();
   const double dt = std::max(0.001, std::chrono::duration<double>(now - last).count());

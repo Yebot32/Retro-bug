@@ -129,10 +129,21 @@ public class LauncherActivity extends Activity {
         getWindow().setNavigationBarColor(0xFF000000);
         boolean scripted = getIntent() != null && getIntent().getExtras() != null && !getIntent().getExtras().isEmpty();
         if (saved == null && !scripted) {
-            // A player's start: the boot animation, then the library. Scripted starts (`-e ...`) skip it.
-            setContentView(new BootScreen(this, new Runnable() {
-                @Override public void run() { show(Screen.HOME); }
-            }));
+            // A player's start: the boot animation over the library, which is already scanning under it; the animation
+            // lifts off when it ends. Scripted starts (`-e ...`) skip it.
+            final android.widget.FrameLayout stack = new android.widget.FrameLayout(this);
+            stack.addView(library());
+            final View[] boot = new View[1];
+            boot[0] = new BootScreen(this, new Runnable() {
+                @Override public void run() {
+                    boot[0].animate().alpha(0f).setDuration(200).withEndAction(new Runnable() {
+                        @Override public void run() { stack.removeView(boot[0]); }
+                    });
+                }
+            });
+            stack.addView(boot[0]);
+            screen_ = Screen.HOME;
+            setContentView(stack);
         } else {
             show(Screen.HOME);
         }

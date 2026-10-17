@@ -19,6 +19,15 @@ final class Game {
     final boolean installed;
     final boolean added;
     volatile State state;
+    /** The APK the player added for this game, when there is one (found by the scan, so the menu never looks). */
+    File addedFile;
+    /**
+     * False for a game with no Java code of its own (hasCode="false"): its copy carries no settings provider, so the
+     * per-game CPU and overlay settings cannot reach it.
+     */
+    boolean hasCode = true;
+    /** Why an UNREADABLE game cannot be offered, in the player's words; null for the plain "can't read this file". */
+    String why;
 
     Game(String key, String packageName, String label, long versionCode, File apk, boolean installed, boolean added,
          State state) {
@@ -30,6 +39,15 @@ final class Game {
         this.installed = installed;
         this.added = added;
         this.state = state;
+    }
+
+    /** The sentence an UNREADABLE tile and its tap show. */
+    String reason() { return why != null ? why : "Can't read this file"; }
+
+    Game unplayable(String why) {
+        this.state = State.UNREADABLE;
+        this.why = why;
+        return this;
     }
 
     /** The converted copy's package. */

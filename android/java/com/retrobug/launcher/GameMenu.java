@@ -97,7 +97,7 @@ final class GameMenu {
         shade.setBackgroundColor(0x99000000);  // dimmed so the title reads over any art
         h.addView(shade, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         art.backdrop(game, new Consumer<Bitmap>() {
-            @Override public void accept(Bitmap b) { if (b != null) backdrop.setImageBitmap(soften(b)); }
+            @Override public void accept(Bitmap b) { if (b != null) backdrop.setImageBitmap(b); }  // softened by ArtCache
         });
 
         LinearLayout row = new LinearLayout(c);
@@ -162,24 +162,30 @@ final class GameMenu {
             details.setVisibility(View.GONE);
             return;
         }
-        StringBuilder s = new StringBuilder();
-        s.append("package   ").append(game.packageName).append('\n');
-        s.append("version   ").append(game.versionCode).append('\n');
-        s.append("size      ").append(game.apk.length() >> 20).append(" MB").append('\n');
-        s.append("source    ").append(game.installed ? "installed on this device" : "added APK").append('\n');
-        try {
-            Set<String> abis = ApkScan.abis(game.apk);
-            s.append("libraries ").append(abis).append('\n');
-        } catch (Exception e) {
-            s.append("libraries unreadable\n");
-        }
-        File report = new File(new File(c.getExternalFilesDir(null), "repack"), game.copyPackage() + ".txt");
-        if (report.isFile()) {
-            String text = readTail(report, 1200);
-            s.append("\nlast conversion\n").append(text);
-        }
-        details.setText(s.toString().trim());
+        details.setText("Reading…");
         details.setVisibility(View.VISIBLE);
+        final File reportDir = new File(c.getExternalFilesDir(null), "repack");
+        new Thread(new Runnable() {  // the APK's zip directory can be large: read off the UI thread
+            @Override public void run() {
+                StringBuilder s = new StringBuilder();
+                s.append("package   ").append(game.packageName).append('\n');
+                s.append("version   ").append(game.versionCode).append('\n');
+                s.append("size      ").append(game.apk.length() >> 20).append(" MB").append('\n');
+                s.append("source    ").append(game.installed ? "installed on this device" : "added APK").append('\n');
+                try {
+                    Set<String> abis = ApkScan.abis(game.apk);
+                    s.append("libraries ").append(abis).append('\n');
+                } catch (Exception e) {
+                    s.append("libraries unreadable\n");
+                }
+                File report = new File(reportDir, game.copyPackage() + ".txt");
+                if (report.isFile()) s.append("\nlast conversion\n").append(readTail(report, 1200));
+                final String text = s.toString().trim();
+                details.post(new Runnable() {
+                    @Override public void run() { details.setText(text); }
+                });
+            }
+        }, "rb-details").start();
     }
 
     private static String readTail(File f, int max) {
@@ -252,7 +258,7 @@ final class GameMenu {
             case READY: return "Ready to play";
             case UPDATE: return "A newer RetroBug can update this game's copy";
             case CONVERTING: return "Getting ready…";
-            case UNREADABLE: return "Can't read this file";
+            case UNREADABLE: return game.reason();
             default: return game.installed ? "Installed on this device · not playable yet" : "Added APK · not playable yet";
         }
     }
@@ -321,6 +327,12 @@ final class GameMenu {
                 : "Make the game playable first", copy, new View.OnClickListener() {
             @Override public void onClick(View v) { appInfo(); }
         }));
+        if (!game.hasCode) {
+            // No Java code of its own, so its copy has no settings provider: these two cannot reach it (Fast, no overlay).
+            String why = "This game has no Java code, so RetroBug can't pass this setting to it";
+            list.addView(row("CPU mode", why, false, null));
+            list.addView(row("Performance overlay", why, false, null));
+        }
         final TextView[] cpuValue = new TextView[1];
         View cpu = valueRow("CPU mode", cpuText(), "Fast uses the JIT; Safe is slower and useful when a game misbehaves",
                 cpuValue, new View.OnClickListener() {
@@ -330,7 +342,7 @@ final class GameMenu {
                         cpuValue[0].setText(cpuText());
                     }
                 });
-        list.addView(cpu);
+        if (game.hasCode) list.addView(cpu);
         final TextView[] targetValue = new TextView[1];
         list.addView(valueRow("Android target", "Android " + version(settings.target),
                 "Older targets avoid some newer Android rules; Play Protect may block them. Changing it updates the copy.",
@@ -344,13 +356,15 @@ final class GameMenu {
                         library.refresh();  // the copy now reads "Update available"
                     }
                 }));
-        list.addView(switchRow("Performance overlay", "Frames per second and CPU speed over the game", settings.overlay,
-                new CompoundButton.OnCheckedChangeListener() {
-                    @Override public void onCheckedChanged(CompoundButton b, boolean on) {
-                        settings.overlay = on;
-                        store.put(game.packageName, settings);
-                    }
-                }));
+        if (game.hasCode) {
+            list.addView(switchRow("Performance overlay", "Frames per second and CPU speed over the game", settings.overlay,
+                    new CompoundButton.OnCheckedChangeListener() {
+                        @Override public void onCheckedChanged(CompoundButton b, boolean on) {
+                            settings.overlay = on;
+                            store.put(game.packageName, settings);
+                        }
+                    }));
+        }
         list.addView(row("Clear game data", copy ? "Opens the game's app info, where Storage has Android's own Clear storage"
                 : "Make the game playable first", copy, new View.OnClickListener() {
             @Override public void onClick(View v) { appInfo(); }
@@ -444,20 +458,9 @@ final class GameMenu {
         return scroll(list);
     }
 
-    /** The added APK in the library folder for this game (the installed game's own APK is never offered here). */
+    /** The added APK in the library folder for this game, as the scan found it (never the installed game's own APK). */
     private File addedFile() {
-        if (!game.installed) return game.apk;
-        File[] files = GameCatalog.gamesDir(c).listFiles();
-        if (files == null) return null;
-        for (File f : files) {
-            try {
-                android.content.pm.PackageInfo pi = c.getPackageManager().getPackageArchiveInfo(f.getAbsolutePath(), 0);
-                if (pi != null && game.packageName.equals(pi.packageName)) return f;
-            } catch (Exception ignored) {
-                // an unreadable file is not this game's
-            }
-        }
-        return null;
+        return game.addedFile != null ? game.addedFile : game.installed ? null : game.apk;
     }
 
     private void confirm(String title, String body, String yes, final Runnable then) {

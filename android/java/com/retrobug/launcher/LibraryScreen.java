@@ -38,6 +38,8 @@ final class LibraryScreen extends LinearLayout {
     private final ArtCache art;
     private final GameSettingsStore settings;
     private final List<Game> games = new ArrayList<>();
+    /** The keys of the games being converted: a rescan's fresh Game objects learn it from here, not from the old ones. */
+    private final java.util.Set<String> converting = new java.util.HashSet<>();
     private final Adapter adapter = new Adapter();
     private final TextView empty;
     private final GridView grid;
@@ -131,10 +133,7 @@ final class LibraryScreen extends LinearLayout {
             }
 
             @Override public void onDone(List<Game> all) {
-                for (Game g : all) {  // a conversion in flight outlives the rescan its install triggers
-                    Game was = find(g.key);
-                    if (was != null && was.state == Game.State.CONVERTING) g.state = Game.State.CONVERTING;
-                }
+                LibraryRules.keepConverting(all, converting);  // a conversion in flight outlives the rescans it triggers
                 games.clear();
                 games.addAll(all);
                 adapter.notifyDataSetChanged();
@@ -168,10 +167,13 @@ final class LibraryScreen extends LinearLayout {
                 return;
             }
             case UNREADABLE:
-                Toast.makeText(c, "Can't read this file", Toast.LENGTH_SHORT).show();
+                Toast.makeText(c, g.reason(), Toast.LENGTH_LONG).show();
                 return;
             case CONVERTING:
-                Toast.makeText(c, "Already getting " + g.label + " ready", Toast.LENGTH_SHORT).show();
+                // Backed out of Android's install prompt? This brings it back; the conversion is waiting on it.
+                if (!RepackInstaller.reconfirm(c)) {
+                    Toast.makeText(c, "Already getting " + g.label + " ready", Toast.LENGTH_SHORT).show();
+                }
                 return;
             default:
                 convert(g);
@@ -181,11 +183,14 @@ final class LibraryScreen extends LinearLayout {
     void convert(final Game g) {
         final Context c = getContext();
         final Game.State before = g.state;
+        final String key = g.key;
         boolean started = ConvertJob.start(c, g, settings.get(g.packageName), new ConvertJob.Callback() {
             @Override public void onProgress(String line) {}
 
             @Override public void onDone(boolean ok, String report) {
-                g.state = ok ? Game.State.READY : before;
+                converting.remove(key);
+                Game now = find(key);  // a rescan during the conversion replaced the Game object the tap started with
+                if (now != null) now.state = ok ? Game.State.READY : before;
                 adapter.notifyDataSetChanged();
                 if (!ok) {
                     Toast.makeText(c, "Couldn't make " + g.label + " playable. Long press it for details.",
@@ -198,6 +203,7 @@ final class LibraryScreen extends LinearLayout {
             Toast.makeText(c, "Another game is getting ready. Try again in a moment.", Toast.LENGTH_SHORT).show();
             return;
         }
+        converting.add(key);
         g.state = Game.State.CONVERTING;
         adapter.notifyDataSetChanged();
     }

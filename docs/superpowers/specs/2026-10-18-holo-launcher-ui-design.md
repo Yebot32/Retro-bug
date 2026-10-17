@@ -96,7 +96,11 @@ image. Changes in the system (a game installed, a copy converted) refresh the ca
 - No large art: the menu header uses the icon over a blurred copy of itself.
 - Conversion or install failure: a plain sentence in the menu header ("Couldn't convert: …"), with the full report under
   Details.
-- Settings provider unreachable from a converted game: the runtime uses its defaults and logs one line.
+- Settings provider unreachable from a converted game: the runtime uses the settings it last saved (its defaults when
+  it never saved any) and logs one line.
+- A game that cannot be offered gets a tile that says why: its 32-bit code is only in a split APK, or an added file is
+  64-bit or has no native code. A game with no Java code (hasCode="false") shows CPU mode and the overlay disabled,
+  with the reason.
 
 ## Out of scope
 

@@ -26,6 +26,12 @@ versionName (`ApkRepackager.RUNTIME_STAMP`) so the library knows "Update availab
 Known: an install from the library goes through Android's installer, where Play Protect asks to "Scan app" (upload the
 copy to Google) — the human's choice; the scripted `-e repack` path installs over adb and is not asked.
 
+Final-review fix pass: the library's decisions live in the host-tested `LibraryRules` (converting state across rescans,
+the target a copy really gets — shared with `ApkRepackager` — split/ABI classification, backdrop sample size). Split
+installs and non-32-bit added APKs get a tile that says why; hasCode="false" games show CPU/overlay disabled; a tap on
+"Getting ready" re-shows a waiting install prompt; the overlay reads thunk counts under the counters lock
+(`HostSlots::CallsOf`). The 12 deferred minors are in the ledger.
+
 ## M4 — thunk layer (2026-10-18, branch `m4-thunks`, DONE on the tablet and the OnePlus)
 
 Plan `docs/superpowers/plans/2026-10-17-m4-thunk-layer.md`; ledger `.superpowers/sdd/2026-10-17-m4-thunk-layer/progress.md`

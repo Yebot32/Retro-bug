@@ -87,49 +87,101 @@ final class GameCatalog {
         });
     }
 
-    /** An installed original, when its base APK is built for 32-bit ARM only; null otherwise. */
+    /**
+     * An installed original built for 32-bit ARM only. One whose 32-bit code sits in a split APK gets a tile that says
+     * so; a 64-bit or Java-only app, one whose APK cannot be read, or one that vanished mid-scan, is null.
+     */
     private Game installed(PackageManager pm, String pkg) {
+        ApplicationInfo ai;
+        PackageInfo pi;
         try {
-            ApplicationInfo ai = pm.getApplicationInfo(pkg, 0);
-            if ((ai.flags & ApplicationInfo.FLAG_SYSTEM) != 0) return null;
-            File apk = new File(ai.sourceDir);
-            if (!ApkScan.is32BitOnly(ApkScan.abis(apk))) return null;
-            PackageInfo pi = pm.getPackageInfo(pkg, 0);
-            String label = String.valueOf(ai.loadLabel(pm));
-            return new Game(pkg, pkg, label, versionCode(pi), apk, true, false, stateOf(pm, pkg));
+            ai = pm.getApplicationInfo(pkg, 0);
+            pi = pm.getPackageInfo(pkg, 0);
         } catch (Exception e) {
-            return null;  // a package that vanished mid-scan, or an APK this app cannot read: not a game we can offer
+            return null;  // vanished mid-scan
+        }
+        if ((ai.flags & ApplicationInfo.FLAG_SYSTEM) != 0) return null;
+        File apk = new File(ai.sourceDir);
+        String label = String.valueOf(ai.loadLabel(pm));
+        Game g = new Game(pkg, pkg, label, versionCode(pi), apk, true, false, Game.State.NOT_CONVERTED);
+        g.hasCode = (ai.flags & ApplicationInfo.FLAG_HAS_CODE) != 0;
+        java.util.Set<String> base, splits = new java.util.TreeSet<>();
+        try {
+            base = ApkScan.abis(apk);
+            if (ai.splitSourceDirs != null) for (String s : ai.splitSourceDirs) splits.addAll(ApkScan.abis(new File(s)));
+        } catch (Exception e) {
+            // Unreadable, so not known to be a game at all: a tile would put ordinary apps in the library. Logged.
+            Log.w(TAG, "library: cannot read " + pkg + "'s APK, not listed: " + e);
+            return null;
+        }
+        switch (LibraryRules.classify(base, splits)) {
+            case GAME:
+                g.state = stateOf(pm, pi);
+                return g;
+            case SPLIT:
+                return g.unplayable("This game was installed in parts (split APKs); RetroBug can only convert a single "
+                        + "APK for now. Add the game's full APK instead.");
+            default:
+                return null;
         }
     }
 
     /** An added APK; joins the installed game of the same package when there is one. */
     private Game added(PackageManager pm, File f, Map<String, Game> seen) {
         try {
-            if (!ApkScan.is32BitOnly(ApkScan.abis(f))) return null;
+            java.util.Set<String> abis = ApkScan.abis(f);
             PackageInfo pi = pm.getPackageArchiveInfo(f.getAbsolutePath(), 0);
             if (pi == null || pi.applicationInfo == null) throw new IllegalStateException("not a package");
             pi.applicationInfo.sourceDir = f.getAbsolutePath();
             pi.applicationInfo.publicSourceDir = f.getAbsolutePath();
             String pkg = pi.packageName;
             if (pkg.startsWith("com.retrobug.")) return null;  // RetroBug's own test APKs (the JNI bridge app) are not games
-            Game have = seen.get(pkg);
-            if (have != null) {
-                return new Game(pkg, pkg, have.label, have.versionCode, have.apk, true, true, have.state);
+            if (!ApkScan.is32BitOnly(abis)) {
+                if (seen.containsKey(pkg)) return null;  // the installed 32-bit game keeps its tile
+                // The player chose this file: say why it is not playable here rather than drop it.
+                String label = String.valueOf(pi.applicationInfo.loadLabel(pm));
+                Game g = new Game(pkg, pkg, label, versionCode(pi), f, false, true, Game.State.NOT_CONVERTED);
+                g.addedFile = f;
+                return g.unplayable(abis.contains("arm64-v8a")
+                                ? "This APK has 64-bit code, so this phone runs it as it is: install it normally."
+                                : "This APK has no 32-bit ARM code for RetroBug to run: install it normally.");
             }
-            String label = String.valueOf(pi.applicationInfo.loadLabel(pm));
-            return new Game(pkg, pkg, label, versionCode(pi), f, false, true, stateOf(pm, pkg));
+            boolean hasCode = (pi.applicationInfo.flags & ApplicationInfo.FLAG_HAS_CODE) != 0;
+            Game have = seen.get(pkg);
+            Game g;
+            if (have != null && have.state == Game.State.UNREADABLE) {
+                // A split install's tile: the added full APK is what a conversion reads.
+                g = new Game(pkg, pkg, have.label, have.versionCode, f, true, true, stateOf(pm, pi));
+            } else if (have != null) {
+                g = new Game(pkg, pkg, have.label, have.versionCode, have.apk, true, true, have.state);
+                hasCode = have.hasCode;
+            } else {
+                String label = String.valueOf(pi.applicationInfo.loadLabel(pm));
+                g = new Game(pkg, pkg, label, versionCode(pi), f, false, true, stateOf(pm, pi));
+            }
+            g.addedFile = f;
+            g.hasCode = hasCode;
+            return g;
         } catch (Exception e) {
             String name = f.getName().replaceAll("\\.apk$", "");
-            return new Game("file:" + f.getName(), name, name, 0, f, false, true, Game.State.UNREADABLE);
+            Game g = new Game("file:" + f.getName(), name, name, 0, f, false, true, Game.State.UNREADABLE);
+            g.addedFile = f;
+            return g;
         }
     }
 
-    /** NOT_CONVERTED, READY, or UPDATE (made by an older runtime, or for another target than the game's setting). */
-    Game.State stateOf(PackageManager pm, String pkg) {
+    /**
+     * NOT_CONVERTED, READY, or UPDATE (made by an older runtime, or for another target than a conversion would give it
+     * now: the game's setting, raised by the repackager's floors and never below the original's own target).
+     */
+    Game.State stateOf(PackageManager pm, PackageInfo original) {
         try {
+            String pkg = original.packageName;
             PackageInfo copy = pm.getPackageInfo(pkg + ApkRepackager.RENAME_SUFFIX, 0);
             int stamp = ApkRepackager.stampOf(copy.versionName);
-            int wantTarget = settings.get(pkg).target;
+            ApplicationInfo oa = original.applicationInfo;
+            int wantTarget = oa == null ? settings.get(pkg).target
+                    : LibraryRules.outputTarget(oa.targetSdkVersion, oa.minSdkVersion, settings.get(pkg).target);
             boolean current = stamp == ApkRepackager.RUNTIME_STAMP && copy.applicationInfo != null
                     && copy.applicationInfo.targetSdkVersion == wantTarget;
             return current ? Game.State.READY : Game.State.UPDATE;

@@ -168,18 +168,18 @@ final class ApkRepackager {
 
             Integer oldT = ed.targetSdk();
             r.oldTargetSdk = oldT == null ? -1 : oldT;
-            // Never below the install floor nor below the (new) minSdk; never lowered.
-            int floorT = Math.max(INSTALL_FLOOR_SDK, r.newMinSdk);
-            // A native control is a diagnostic install on a device whose Play Protect blocks old targets: current.
-            if (nativeControl) floorT = Math.max(floorT, 33);  // 34 makes registerReceiver without RECEIVER_* fatal
-            floorT = Math.max(floorT, targetFloor);
-            if (oldT == null && oldMin != null && oldMin >= floorT) {
+            // Never below the install floor nor below the (new) minSdk; never lowered (LibraryRules, shared with the
+            // library, which must know the target a copy will get). A native control is a diagnostic install on a
+            // device whose Play Protect blocks old targets: current (34 makes registerReceiver without RECEIVER_* fatal).
+            int setting = Math.max(targetFloor, nativeControl ? 33 : 0);
+            int floorT = LibraryRules.outputTarget(oldT, oldMin, setting);
+            if (oldT == null && oldMin != null && floorT == oldMin) {
                 // An absent targetSdk means "= minSdk"; writing the floor here would lower it.
                 r.newTargetSdk = oldMin;
                 r.report.add("targetSdk absent (defaults to minSdk " + oldMin + "), left unchanged");
-            } else if (oldT != null && oldT >= floorT) {
+            } else if (oldT != null && floorT == oldT) {
                 r.newTargetSdk = oldT;
-                r.report.add("targetSdk " + oldT + " already >= " + floorT + ", left unchanged");
+                r.report.add("targetSdk " + oldT + " already high enough, left unchanged");
             } else {
                 ed.setTargetSdk(floorT);
                 edited = true;

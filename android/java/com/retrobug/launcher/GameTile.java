@@ -81,7 +81,7 @@ final class GameTile extends LinearLayout {
                 badge.setTextColor(HoloTheme.TEXT_2);
                 break;
             case UNREADABLE:
-                badge.setText("Can't read this file");
+                badge.setText(game.why != null ? "Can't play here" : "Can't read this file");
                 badge.setTextColor(0xFFFF4444);
                 break;
             default:
