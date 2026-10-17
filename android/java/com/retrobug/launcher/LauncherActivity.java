@@ -157,12 +157,31 @@ public class LauncherActivity extends Activity {
             saveAndShow("targetSdk shim check", ShimCheck.run(this).trim());
             return;
         }
+        /*
+         * `-e stage <file.apk>` adds getExternalFilesDir(null)/<file.apk> (where `adb push` can put it) to the
+         * library before anything else in this intent runs: the scripted twin of "Add game". It copies on this
+         * thread, which is fine for a scripted run and would not be for the picker.
+         */
+        final String stage = getIntent() == null ? null : getIntent().getStringExtra("stage");
+        if (stage != null && !stage.isEmpty()) {
+            File src = new File(getExternalFilesDir(null), new File(stage).getName());
+            File dest = new File(gamesDir(), src.getName().replaceAll("[^A-Za-z0-9._-]", "_"));
+            try (InputStream in = new java.io.FileInputStream(src); OutputStream out = new FileOutputStream(dest)) {
+                byte[] buf = new byte[1 << 16];
+                for (int n = in.read(buf); n > 0; n = in.read(buf)) out.write(buf, 0, n);
+                Log.i(TAG, "stage: added " + dest + " (" + dest.length() + " bytes)");
+            } catch (IOException e) {
+                Log.e(TAG, "stage: could not copy " + src + ": " + e.getMessage());
+            }
+        }
         final String repack = getIntent() == null ? null : getIntent().getStringExtra("repack");
         if (repack != null && !repack.isEmpty()) {
             for (File f : games()) {
                 if (f.getName().toLowerCase().contains(repack.toLowerCase())) {
                     ApkRepackager.debuggable = "1".equals(getIntent().getStringExtra("debuggable"));
                     ApkRepackager.nativeControl = "1".equals(getIntent().getStringExtra("native"));
+                    String target = getIntent().getStringExtra("target");
+                    ApkRepackager.targetFloor = target == null ? 0 : Integer.parseInt(target);
                     String rename = getIntent().getStringExtra("rename");
                     repackGame(f, !"0".equals(getIntent().getStringExtra("install")),
                             rename == null || rename.equals("0") ? null

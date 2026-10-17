@@ -47,6 +47,9 @@ final class ApkRepackager {
     /** Diagnostics: the next transform is a native control (`-e native 1`): renamed and re-signed like a repack, but the
      *  32-bit libraries stay in lib/ and no runtime is added, so a 32-bit-capable device runs the same APK natively. */
     static volatile boolean nativeControl = false;
+    /** Diagnostics: the next transform targets at least this SDK (`-e target N`; 0 = the install floor). Play Protect
+     *  now blocks "built for an older Android" installs at the floor on some devices, and a modern target installs. */
+    static volatile int targetFloor = 0;
 
     private static final String V7A = "lib/armeabi-v7a/";
     private static final String ARM = "lib/armeabi/";
@@ -159,6 +162,7 @@ final class ApkRepackager {
             int floorT = Math.max(INSTALL_FLOOR_SDK, r.newMinSdk);
             // A native control is a diagnostic install on a device whose Play Protect blocks old targets: current.
             if (nativeControl) floorT = Math.max(floorT, 33);  // 34 makes registerReceiver without RECEIVER_* fatal
+            floorT = Math.max(floorT, targetFloor);
             if (oldT == null && oldMin != null && oldMin >= floorT) {
                 // An absent targetSdk means "= minSdk"; writing the floor here would lower it.
                 r.newTargetSdk = oldMin;
