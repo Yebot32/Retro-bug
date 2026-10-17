@@ -353,6 +353,11 @@ class Monitor {
   /// Where a guest `openat` is answered from. Unset is a named refusal, not an empty file.
   void set_file_provider(FileProvider provider) { files_ = std::move(provider); }
 
+  /// M4: file and socket syscalls on real paths and host descriptors go to the host kernel (host_io.h), with the
+  /// app's own permissions; the provider still answers its own paths first, and its descriptors keep their handlers.
+  void set_host_io(bool on) { host_io_ = on; }
+  [[nodiscard]] bool host_io() const { return host_io_; }
+
   /// Overrides the host-clock default, for a test that needs a value it can assert and for a launcher
   /// that wants the guest to see its own notion of time.
   void set_clock(ClockSource clock) { clock_ = std::move(clock); }
@@ -497,6 +502,10 @@ class Monitor {
   ClockSource clock_;
   RandomSource random_;
   std::vector<ServedFile> served_;
+  bool host_io_ = false;
+  /// Whether this monitor answers `f` itself even with host I/O on: a descriptor it served, console output, or a
+  /// path its provider serves.
+  bool ServesItself(const Frame& f);
   // `rt_sigprocmask`'s mask (the kernel's arm32 sigset is 8 bytes, so a u64 is the whole of it; no signal is
   // ever delivered by this build), `set_tid_address`'s clear-child-tid pointer, `set_robust_list`'s head and
   // `prctl(PR_SET_NAME)`'s name are per-thread: they live in the calling `runtime::GuestThread`.

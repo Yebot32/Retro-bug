@@ -87,7 +87,7 @@ target_include_directories(rb_diag PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 # rb::syscall (C07): the monitor. It consumes an executor's state and a diag recorder, and owns no memory
 # of its own — which is the shape that keeps "no syscall reaches the host kernel except through the
 # allowlist" reviewable in one file rather than grep'd across the engine.
-add_library(rb_syscall STATIC syscall/monitor.cpp)
+add_library(rb_syscall STATIC syscall/monitor.cpp syscall/host_io.cpp)
 target_compile_features(rb_syscall PUBLIC cxx_std_20)
 target_link_libraries(rb_syscall PUBLIC rb_exec rb_diag rb_guest_thread)
 

@@ -2,6 +2,10 @@
  * RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
  */
 #include "rb/syscall/monitor.h"
+#include "rb/syscall/host_io.h"
+
+#include <fcntl.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <chrono>
@@ -375,8 +379,32 @@ std::uint32_t Monitor::FindFreeRun(std::uint32_t hint, std::uint32_t size) const
   return 0;
 }
 
+bool Monitor::ServesItself(const Frame& f) {
+  if (HostIo::TakesFd(f.number)) {
+    const std::int32_t fd = static_cast<std::int32_t>(f.arg[0]);
+    if ((f.number == nr::kWrite || f.number == nr::kWritev) && (fd == 1 || fd == 2)) return true;  // the console
+    for (const ServedFile& s : served_) {
+      if (s.fd == fd) return true;
+    }
+    return false;
+  }
+  unsigned index = 0;
+  // Only the path calls this monitor has handlers for consult the provider (its virtual files).
+  if (files_ && memory_ != nullptr && HostIo::TakesPath(f.number, &index) &&
+      (f.number == nr::kOpenat || f.number == nr::kFstatat64 || f.number == nr::kFaccessat ||
+       f.number == nr::kReadlinkat)) {
+    std::string path;
+    if (ReadGuestPath(*memory_, f.arg[index], &path) != PathStatus::kOk) return false;
+    return files_(path).has_value();
+  }
+  return false;
+}
+
 Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::GuestThread* thread) {
   runtime::GuestThread& th = thread != nullptr ? *thread : *main_;
+  if (host_io_ && memory_ != nullptr && HostIo::Handles(f.number) && !ServesItself(f)) {
+    return HostIo::Serve(f, *memory_);
+  }
   switch (f.number) {
     case nr::kGetpid:
     case nr::kGettid: {
@@ -922,7 +950,10 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
                                                           "descriptor table is full (" +
                                                    std::to_string(kMaxServedFds) + ")");
       }
-      const std::int32_t fd = NextFd();
+      // With host I/O on, a served descriptor holds a real host descriptor number (an open /dev/null), so a host fd
+      // the guest opens later can never be given the same number.
+      const std::int32_t fd = host_io_ ? ::open("/dev/null", O_RDONLY | O_CLOEXEC) : NextFd();
+      if (fd < 0) return Outcome::Answered(err::kEmfile, "openat('" + path + "'): no host descriptor left to reserve");
       served_.push_back(ServedFile{path, std::move(*bytes), 0, fd});
       const std::string why = "openat('" + path + "') -> fd " + std::to_string(fd) + " (" +
                               std::to_string(served_.back().bytes.size()) +
@@ -935,6 +966,7 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
       const std::int32_t fd = static_cast<std::int32_t>(f.arg[0]);
       for (auto it = served_.begin(); it != served_.end(); ++it) {
         if (it->fd == fd) {
+          if (host_io_) ::close(fd);  // the reserved host number goes back
           served_.erase(it);
           return Outcome::Emulated(0, "close(" + std::to_string(fd) + ") -> 0");
         }

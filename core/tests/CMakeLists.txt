@@ -160,3 +160,7 @@ endif()
 # M4 Task 1: the generic AAPCS32-softfp -> AAPCS64 thunk caller and handle table (host functions called directly).
 add_executable(rb_thunk_tests thunk_test.cpp)
 target_link_libraries(rb_thunk_tests PRIVATE rb_abi rb_mem)
+
+# M4 Task 3b: host file and socket pass-through (Monitor::set_host_io).
+add_executable(rb_host_io_tests host_io_test.cpp)
+target_link_libraries(rb_host_io_tests PRIVATE rb_syscall rb_mem)

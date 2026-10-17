@@ -462,11 +462,12 @@ bool BootScope(Runtime& rt, ApkZip& zip, std::string* out) {
   }
   // libandroid and jnigraphics calls that take a Java object need the bridge (M4 Task 3).
   rb::launcher::RegisterAndroidThunks(*rt.slots, *rt.fwd, rt.vm);
-  // Boot-only: no asset or file is served yet (M3). A provider that answers nothing makes every guest
-  // openat an ENOENT the monitor's notes name, rather than ENOSYS.
+  // Files and sockets are the host's (M4 Task 3b): the game reads and writes its own sandbox and talks to the network
+  // with the app's permissions, as its native code does on a device. No path is virtualized yet.
   rt.proc->monitor().set_file_provider([](const std::string&) -> std::optional<std::vector<std::uint8_t>> {
     return std::nullopt;
   });
+  rt.proc->monitor().set_host_io(true);
   std::vector<std::uint8_t> sys[3];
   const char* const names[3] = {"libc.so", "libm.so", "libz.so"};
   for (int i = 0; i < 3; ++i) {

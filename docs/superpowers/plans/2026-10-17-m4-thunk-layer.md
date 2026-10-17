@@ -104,3 +104,19 @@ moved here from gl_forward.cpp), `android/jni/host_slots.cpp` (Resolve answers `
   app's player active / the buffer-queue callback count in the report).
 - [ ] All lanes, Java tests, bridge check on both devices; final whole-branch review on the most capable model; one
   fix pass; HANDOFF/spec/NEXT-AI-HANDOFF updated; commit "M4 accepted: Angry Birds Go title screen with sound".
+
+### Task 3b (added 2026-10-17 from the ABGo run): host file and socket pass-through
+
+ABGo's native code (libcurl/OpenSSL, `io::AppDataFileSystem`) needs real files in its sandbox and sockets; the runtime's
+monitor served neither (its provider answers nothing; no socket syscalls). **Files:** `core/syscall/host_io.{h,cpp}`
+(opt-in `Monitor::set_host_io(true)`): a guest syscall on a path or a host fd goes to the host kernel with the app's
+own permissions — numbers mapped ARM EABI → AArch64, structs whose layout differs translated (stat64, statfs64,
+timeval, timespec, iovec, msghdr + cmsg, flock64 command numbers), pointers translated (the kernel reports EFAULT for
+an unmapped guest page). Calls that can block run with the GGL released. The provider still answers first for the
+paths the runtime virtualizes (`/proc/cpuinfo`, …); a served virtual fd takes a reserved host fd number so the two
+never collide.
+- [ ] Rows in `rb_syscall_monitor_tests` (host files under /data/local/tmp): open/creat/write/read/_llseek/pread64/
+  fstat64 fields/getdents64/unlinkat/mkdirat/renameat; pipe2 read/write; socketpair + sendmsg/recvmsg with two iovecs;
+  a TCP connect to a host listener on 127.0.0.1 with send/recv/poll/_newselect (timeval); SO_RCVTIMEO round trip;
+  mmap2 of a file (private copy); a served virtual fd and a host fd never share a number.
+- [ ] Runtime: enabled in `runtime_boot.cpp`; ABGo's download proceeds.
