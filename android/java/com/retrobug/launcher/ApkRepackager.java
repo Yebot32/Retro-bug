@@ -42,6 +42,8 @@ final class ApkRepackager {
     /** minSdk the output declares at least (never lowered); RepackSigner signs for the same level. */
     static final int MIN_SDK_FLOOR = 24;
     static final String STUB_KEY = "stub";
+    /** Diagnostics: the next transform marks the output debuggable (`-e debuggable 1`). Never set by the UI. */
+    static volatile boolean debuggable = false;
 
     private static final String V7A = "lib/armeabi-v7a/";
     private static final String ARM = "lib/armeabi/";
@@ -179,6 +181,11 @@ final class ApkRepackager {
                 ed.addProvider(ShimPlan.PROVIDER_CLASS, r.packageName + ShimPlan.AUTHORITY_SUFFIX, Integer.MAX_VALUE);
                 edited = true;
                 addShims = true;
+            }
+            if (debuggable) {  // diagnostics only (`-e debuggable 1`): simpleperf and run-as on the repack
+                ed.setDebuggable();
+                edited = true;
+                r.report.add("debuggable: android:debuggable=\"true\" set for diagnostics (profiling, run-as) — not for players");
             }
             if (edited) manifest = ed.toBytes();
 

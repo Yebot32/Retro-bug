@@ -161,6 +161,7 @@ public class LauncherActivity extends Activity {
         if (repack != null && !repack.isEmpty()) {
             for (File f : games()) {
                 if (f.getName().toLowerCase().contains(repack.toLowerCase())) {
+                    ApkRepackager.debuggable = "1".equals(getIntent().getStringExtra("debuggable"));
                     String rename = getIntent().getStringExtra("rename");
                     repackGame(f, !"0".equals(getIntent().getStringExtra("install")),
                             rename == null || rename.equals("0") ? null

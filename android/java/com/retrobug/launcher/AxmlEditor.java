@@ -329,6 +329,30 @@ final class AxmlEditor {
         nodes.add(manifest + 1, withAttribute(start, androidNs, nameIdx, resId, value));
     }
 
+    private static final int ATTR_DEBUGGABLE = 0x0101000f;
+
+    /**
+     * Sets {@code <application android:debuggable="true">} — a diagnostics option (profiling with simpleperf,
+     * {@code run-as} for the app's files), never a default: a debuggable app is slower and exposes its data.
+     */
+    void setDebuggable() throws IOException {
+        int app = findElement("application");
+        if (app < 0) throw new IOException("manifest has no <application> element");
+        byte[] c = nodes.get(app);
+        int off = findAttr(c, "debuggable");
+        if (off < 0) {
+            int nameIdx = ensureAttrName("debuggable", ATTR_DEBUGGABLE);  // first: it may insert into the pool
+            int androidNs = indexOf(ANDROID_NS);
+            if (androidNs < 0) throw new IOException("manifest declares no android namespace");
+            c = withAttribute(nodes.get(findElement("application")), androidNs, nameIdx, ATTR_DEBUGGABLE, -1);
+            nodes.set(app, c);
+            off = findAttr(c, "debuggable");
+        }
+        c[off + 15] = TYPE_INT_BOOLEAN;
+        put32(c, off + 16, -1);
+        put32(c, off + 8, -1);  // no raw string value
+    }
+
     private static final int ATTR_NAME = 0x01010003;
     private static final int ATTR_EXPORTED = 0x01010010;
     private static final int ATTR_AUTHORITIES = 0x01010018;

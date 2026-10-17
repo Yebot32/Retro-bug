@@ -112,6 +112,7 @@ class HostSlots {
   std::deque<ThunkCall> thunk_calls_;  ///< a deque: a running thunk holds a reference while eglGetProcAddress or
                                       ///< dlsym may add another
   std::map<std::string, std::uint32_t> guest_strings_;  ///< GuestString's copies
+  std::mutex counters_mu_;  ///< leaf: the thunk counters, which slots that release the GGL also touch
 };
 
 }  // namespace rb::launcher

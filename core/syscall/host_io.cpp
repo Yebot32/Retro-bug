@@ -586,7 +586,32 @@ Outcome HostIo::Serve(const Frame& f, mem::GuestMemory& mem) {
       case a32::kGetegid32: r = ::getegid(); break;
       default: r = -ENOSYS; break;
     }
-    const std::string why = "host " + Describe(fr.number) + (p1.empty() ? "" : "('" + p1 + "')") + " = " + std::to_string(r);
+    // Diagnostics only: a connect's IPv4 address, and the printable start of a short write (a netd request names
+    // the host it resolves).
+    std::string extra;
+    if (fr.number == a32::kConnect && a[2] >= 8) {
+      std::uint8_t sa[8] = {};
+      if (m.Read(a[1], sa, 8) && sa[0] == AF_INET) {
+        char b[48];
+        std::snprintf(b, sizeof b, " [%u.%u.%u.%u:%u]", sa[4], sa[5], sa[6], sa[7], (sa[2] << 8) | sa[3]);
+        extra = b;
+      }
+    } else if ((fr.number == a32::kWrite || fr.number == a32::kSend) && r > 96 && r < 4096) {
+      std::uint8_t h[48] = {};
+      if (m.Read(a[1], h, sizeof h)) {
+        char b[160];
+        int n = 0;
+        for (unsigned i = 0; i < sizeof h; ++i) n += std::snprintf(b + n, sizeof b - n, "%02x", h[i]);
+        extra = std::string{" [hex "} + b + "]";
+      }
+    } else if ((fr.number == a32::kWrite || fr.number == a32::kSend || fr.number == a32::kSendto) && r > 0 && r <= 96) {
+      std::string text(static_cast<std::size_t>(r), '\0');
+      if (m.Read(a[1], text.data(), text.size())) {
+        for (char& c : text) c = (c >= 32 && c < 127) ? c : '.';
+        extra = " [" + text + "]";
+      }
+    }
+    const std::string why = "host " + Describe(fr.number) + (p1.empty() ? (TakesFd(fr.number) || fr.number == a32::kSend || fr.number == a32::kRecv || fr.number == a32::kSendto || fr.number == a32::kRecvfrom ? "(fd " + std::to_string(fd) + ")" : std::string{}) : "('" + p1 + "')") + " = " + std::to_string(r) + extra;
     return r < 0 && r >= -4095 ? Outcome::Answered(static_cast<std::uint32_t>(-r), why)
                                : Outcome::Emulated(static_cast<std::int32_t>(r), why);
   };

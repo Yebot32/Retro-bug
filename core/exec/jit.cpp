@@ -49,7 +49,7 @@ static_assert(sizeof(JitExtRegs) == 64 * sizeof(std::uint32_t),
 /// an arm64 host, the ceiling being how far an arm64 jump can reach). The low end is used because this is
 /// a per-instance allocation in a design where a user can have several guest instances alive, not because
 /// 8 MiB is enough for a big app — `RbCodeCache` (C04) is where sizing policy belongs.
-constexpr std::size_t kCodeCacheBytes = 8u << 20;
+constexpr std::size_t kCodeCacheBytes = 64u << 20;  // M4: Angry Birds Go's hot code outgrew 8 MiB (whole-cache clears)
 
 /**
  * The size in bytes of the instruction at `pc`.
@@ -407,6 +407,18 @@ JitExecutor::JitExecutor(mem::GuestMemory& memory, GuestAddr return_address,
   // the same thing here that it claims to.
   conf.enable_cycle_counting = true;
   conf.code_cache_size = kCodeCacheBytes;
+  // M4: a page table instead of a callback per access. Mapped readable pages are loaded and stored inline;
+  // everything else (unmapped, guard, out-of-line pages, and an access straddling a page boundary) still takes
+  // the checked callbacks below, so a fault is still recorded and named. The one difference from the callbacks:
+  // a store to a read-only page succeeds inline — a write a device would have killed the process for.
+  page_table_.assign(Dynarmic::A32::UserConfig::NUM_PAGE_TABLE_ENTRIES, nullptr);
+  RefreshPages(0, memory_.window_bytes());
+  page_observer_ = memory_.AddObserver([this](std::uint32_t at, std::size_t len) { RefreshPages(at, len); });
+  conf.page_table = reinterpret_cast<std::array<std::uint8_t*, Dynarmic::A32::UserConfig::NUM_PAGE_TABLE_ENTRIES>*>(
+      page_table_.data());
+  conf.absolute_offset_page_table = false;
+  conf.detect_misaligned_access_via_page_table = 16 | 32 | 64 | 128;
+  conf.only_detect_misalignment_via_page_table_on_page_boundary = true;
   // A diagnostic, not a feature: the exclusive-load disagreement in `docs/30` §Step 30 has to be
   // attributed to either Dynarmic's IR optimizations or its AArch64 code generation before anything is
   // "fixed", and this is the only way to ask that question without editing the vendored tree.
@@ -442,7 +454,24 @@ JitExecutor::JitExecutor(mem::GuestMemory& memory, GuestAddr return_address,
   fallback_interp_ = std::make_unique<InterpExecutor>(memory_, return_address, dispatch);
 }
 
-JitExecutor::~JitExecutor() = default;
+JitExecutor::~JitExecutor() {
+  if (page_observer_ != 0) memory_.RemoveObserver(page_observer_);
+}
+
+void JitExecutor::RefreshPages(std::uint32_t at, std::size_t len) {
+  const std::uint64_t end = std::min<std::uint64_t>(std::uint64_t{at} + len, memory_.window_bytes());
+  for (std::uint64_t a = at & ~std::uint64_t{mem::kGuestPage - 1}; a < end; a += mem::kGuestPage) {
+    const auto g = static_cast<std::uint32_t>(a);
+    void* host = (memory_.ProtAt(g) & mem::kRead) != 0 ? memory_.Host(g) : nullptr;
+    page_table_[a >> mem::kGuestPageShift] = static_cast<std::uint8_t*>(host);
+  }
+}
+
+std::size_t JitExecutor::inline_pages() const {
+  std::size_t n = 0;
+  for (const std::uint8_t* p : page_table_) n += p != nullptr;
+  return n;
+}
 
 JitExecutor::CoprocSite* JitExecutor::CoprocSiteFor(bool tp_read, bool tp_write, std::string detail) {
   // One site per distinct access, because the pointer is compiled into every block that mentions the

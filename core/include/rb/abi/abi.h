@@ -333,6 +333,8 @@ class AbiContext : public exec::HostDispatch {
   /// contiguously from `slot_base`, which is what lets a JNI table be filled by arithmetic — and why
   /// no page is mapped for them.
   GuestAddr SlotFor(std::uint32_t slot) const { return slot_base_ + slot * 4u; }
+  /// A statistical profile hook: the guest pc each time a thread reaches a slice boundary (every kSliceSteps).
+  void set_slice_probe(std::function<void(std::uint32_t pc)> probe) { slice_probe_ = std::move(probe); }
   static constexpr std::uint32_t kInvalidSlot = 0xffff'ffffu;
 
   bool IsHostEntry(GuestAddr pc, std::uint32_t* slot) const override;
@@ -416,6 +418,8 @@ class AbiContext : public exec::HostDispatch {
   std::unordered_map<std::uint32_t, SlotRef> bound_;  ///< GGL-protected
   runtime::Ggl ggl_;
   runtime::GuestThread main_;
+  /// Diagnostics (M4 profiling): told the guest pc at every slice boundary, with the GGL held. Unset: nothing runs.
+  std::function<void(std::uint32_t pc)> slice_probe_;
   std::atomic<std::uint64_t> slices_{0};
   std::atomic<std::uint64_t> contended_slices_{0};
   GuestAddr slot_base_;

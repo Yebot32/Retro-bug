@@ -11,6 +11,8 @@
 #include <unistd.h>
 
 #include <cctype>
+#include <mutex>
+#include <set>
 #include <cstdio>
 #include <cstring>
 
@@ -373,6 +375,18 @@ HostSlots::HostSlots(runtime::GuestProcess& p, int target_sdk, std::function<voi
   }
 }
 
+namespace {
+/// Calls that wait (a vsync, a context switch, the GPU draining) and read no guest memory the GGL protects: run with
+/// the lock released, or every other guest thread (a game's loader and network threads) waits out each frame.
+bool Waits(const std::string& name) {
+  static const std::set<std::string> k = {"eglSwapBuffers", "eglMakeCurrent", "eglInitialize", "eglTerminate",
+                                          "eglWaitGL", "eglWaitClient", "eglWaitNative", "eglSwapInterval",
+                                          "eglCreateWindowSurface", "eglDestroySurface", "eglDestroyContext",
+                                          "glFinish", "glFlush"};
+  return k.count(name) != 0;
+}
+}  // namespace
+
 std::optional<std::uint32_t> HostSlots::Resolve(const std::string& name) {
   if (const auto dl = DlSlotIndex(name)) return p_.abi().SlotFor(kDlSlotBase + static_cast<std::uint32_t>(*dl));
   if (const auto lg = LogSlotIndex(name)) return p_.abi().SlotFor(kLogSlotBase + static_cast<std::uint32_t>(*lg));
@@ -411,16 +425,22 @@ std::optional<std::uint32_t> HostSlots::Resolve(const std::string& name) {
   p_.abi().Bind(kThunkSlotBase + static_cast<std::uint32_t>(index), [this, index, fn](exec::MachineState& s,
                                                                                        std::string*) {
     ThunkCall& c = thunk_calls_[index];
-    ++c.calls;
+    {
+      std::lock_guard<std::mutex> lk(counters_mu_);
+      ++c.calls;
+    }
     std::string why;
     if (fn(s, &why)) return true;
     s.r[0] = 0;
-    if (c.refusals++ == 0) {
-      c.refused = why;
-      if (live_log_) live_log_("thunks: " + c.name + " refused: " + why);
+    bool first = false;
+    {
+      std::lock_guard<std::mutex> lk(counters_mu_);
+      first = c.refusals++ == 0;
+      if (first) c.refused = why;
     }
+    if (first && live_log_) live_log_("thunks: " + c.name + " refused: " + why);
     return true;
-  }, abi::AbiContext::SlotLock::kHoldsGgl);
+  }, Waits(name) ? abi::AbiContext::SlotLock::kReleasesGgl : abi::AbiContext::SlotLock::kHoldsGgl);
   return p_.abi().SlotFor(kThunkSlotBase + static_cast<std::uint32_t>(index));
 }
 

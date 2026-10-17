@@ -15,6 +15,8 @@
 
 #include "runtime_boot.h"
 
+#include <chrono>
+#include <thread>
 #include <atomic>
 #include <android/log.h>
 #include <dlfcn.h>
@@ -470,14 +472,48 @@ bool BootScope(Runtime& rt, ApkZip& zip, std::string* out) {
   });
   rt.proc->monitor().set_host_io(true);
   {
+    // A statistical guest profile (M4 performance work): the pc at every slice boundary (each 200k guest
+    // instructions), bucketed by 64 bytes; every 10 s the top buckets and the instruction rate go to logcat.
+    struct Profile {
+      std::mutex mu;
+      std::map<std::uint32_t, std::uint32_t> hits;
+      std::uint64_t slices = 0;
+    };
+    auto prof = std::make_shared<Profile>();
+    rt.proc->abi().set_slice_probe([prof](std::uint32_t pc) {
+      std::lock_guard<std::mutex> lk(prof->mu);
+      ++prof->hits[pc & ~0x3fu];
+      ++prof->slices;
+    });
+    std::thread([prof] {
+      for (int round = 0; round < 60; ++round) {
+        std::this_thread::sleep_for(std::chrono::seconds(10));
+        std::vector<std::pair<std::uint32_t, std::uint32_t>> top;
+        std::uint64_t slices = 0;
+        {
+          std::lock_guard<std::mutex> lk(prof->mu);
+          top.assign(prof->hits.begin(), prof->hits.end());
+          slices = prof->slices;
+          prof->hits.clear();
+          prof->slices = 0;
+        }
+        std::sort(top.begin(), top.end(), [](const auto& x, const auto& y) { return x.second > y.second; });
+        std::string line = "prof: " + std::to_string(slices) + " slices (" + std::to_string(slices * 200'000 / 10'000'000) +
+                           " M guest instr/s) top:";
+        for (std::size_t i = 0; i < top.size() && i < 15; ++i) line += " " + Hex(top[i].first) + "x" + std::to_string(top[i].second);
+        if (slices != 0) Live(line);
+      }
+    }).detach();
+  }
+  {
     // The first host-I/O answers go to logcat as they happen: what a game's file and network code did is otherwise
     // invisible after boot. Capped so a long run does not flood the log.
-    auto left = std::make_shared<std::atomic<int>>(1500);
+    auto left = std::make_shared<std::atomic<int>>(6000);
     rt.proc->monitor().set_host_io_trace([left](const std::string& line) {
       // Errors and everything but the routine file walk (stat, getdents, read, close) of a successful call.
       const bool error = line.find(" = -") != std::string::npos;
       const bool routine = line.find("fstatat64") != std::string::npos || line.find("nr:0x18d") != std::string::npos ||
-                           line.find("getdents64") != std::string::npos || line.find("host read ") != std::string::npos ||
+                           line.find("getdents64") != std::string::npos || 
                            line.find("host close ") != std::string::npos || line.find("host fstat64 ") != std::string::npos ||
                            line.find("host nr:0x148") != std::string::npos;
       if ((error || !routine) && left->fetch_sub(1) > 0) Live("io: " + line);

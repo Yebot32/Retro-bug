@@ -2886,6 +2886,44 @@ void packed_media_rows_agree_with_the_arm64_recipes() {
 /// libc's constructor once the guest heap existed, SM-X710, 2026-10-10). Two rows, because one alone
 /// cannot fail both ways: an overflowing `smlabb` must set Q on both tiers, and a non-overflowing one
 /// must leave it clear — a writer that always set (or never set) Q passes one row and fails the other.
+/// M4: Tier J reaches mapped pages through a page table kept current by GuestMemory's observer. A block compiled
+/// while its data page was mapped loads it inline; once the page is unmapped the same compiled block takes the
+/// checked path and faults by name — it never reads through a stale pointer.
+void the_page_table_follows_every_mapping_change() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  std::string err;
+  constexpr exec::GuestAddr kData = 0x0200'0000u, kCode = 0x0210'0000u;
+  const std::size_t before = rig.jit->inline_pages();
+  CHECK_CTX(rig.mem->Map(kData, mem::kGuestPage, kRead | kWrite, &err), "");
+  CHECK_CTX(rig.jit->inline_pages() == before + 1, std::to_string(rig.jit->inline_pages()) + " vs " + std::to_string(before));
+  const std::uint32_t value = 0x1234'5678u;
+  rig.mem->Write(kData + 8, &value, 4);
+  // ldr r0, [r1, #8] ; bx lr  (A32)
+  const std::uint32_t code[2] = {0xE5910008u, 0xE12FFF1Eu};
+  CHECK_CTX(rig.mem->Map(kCode, mem::kGuestPage, kRead | kWrite | kExec, &err), "");
+  rig.mem->Write(kCode, code, sizeof code);
+  exec::MachineState s{};
+  s.r[1] = kData;
+  s.r[13] = kStackTop;
+  s.r[14] = kReturnAddress;
+  s.pc = kCode;
+  s.mode = isa::Mode::Arm;
+  exec::RunResult rr = rig.jit->Run(s, 100);
+  CHECK_CTX(rr.reason == exec::StopReason::Returned && s.r[0] == value, rr.detail);
+  CHECK_CTX(rig.mem->Protect(kData, mem::kGuestPage, kNone, &err), err);  // no longer readable: out of the table
+  CHECK_CTX(rig.jit->inline_pages() == before + 1, "");  // the code page is still in
+  CHECK_CTX(rig.mem->Unmap(kData, mem::kGuestPage, &err), "");
+  exec::MachineState t{};
+  t.r[1] = kData;
+  t.r[13] = kStackTop;
+  t.r[14] = kReturnAddress;
+  t.pc = kCode;
+  t.mode = isa::Mode::Arm;
+  rr = rig.jit->Run(t, 100);
+  CHECK_CTX(rr.reason == exec::StopReason::Fault && rr.detail.find("0x2000008") != std::string::npos, rr.detail);
+}
+
 void the_dsp_multiplies_publish_q_on_both_tiers() {
   Rig rig = build();
   if (!rig.ok) return;
@@ -3018,6 +3056,7 @@ int main(int argc, char** argv) {
   exclusive_access_rows_match_hardware_rule_and_each_other();
   packed_media_rows_agree_with_the_arm64_recipes();
   invalidation_reaches_the_compiled_code();
+  the_page_table_follows_every_mapping_change();
   both_tiers_stop_at_the_same_svc();
   a_guest_cacheflush_reaches_the_tier_that_owns_the_cache();
   unmapped_code_faults_in_both_tiers();

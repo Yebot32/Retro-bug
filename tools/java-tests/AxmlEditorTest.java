@@ -238,6 +238,16 @@ public class AxmlEditorTest {
                 "min_only extractNativeLibs should be absent");
     }
 
+    /** Diagnostics option: android:debuggable="true" on <application>, inserted when absent; aapt2 reads it back. */
+    static void setsDebuggable() throws Exception {
+        for (String base : new String[] {"min_only", "target22"}) {
+            AxmlEditor ed = AxmlEditor.parse(fixture(base));
+            ed.setDebuggable();
+            String tree = xmltree(base, ed.toBytes(), base + "-debuggable");
+            check(tree.contains("android:debuggable") && tree.contains("=true"), base + ": debuggable not true in\n" + tree);
+        }
+    }
+
     static void refusesGarbage() {
         try {
             AxmlEditor.parse(new byte[]{1, 2, 3});
@@ -377,6 +387,7 @@ public class AxmlEditorTest {
         readsExtractNativeLibs();
         renamePackage();
         refusesGarbage();
+        setsDebuggable();
         System.out.println(checks + " checks, " + failures + " failures");
         System.exit(failures == 0 ? 0 : 1);
     }

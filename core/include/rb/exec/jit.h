@@ -217,6 +217,18 @@ class JitExecutor : public Executor, public Dynarmic::A32::UserCallbacks {
   bool SurfaceNonCodeDestination(GuestAddr pc);
 
   mem::GuestMemory& memory_;
+  /// Dynarmic's page table (M4): the host address of every mapped, readable guest page whose backing is directly
+  /// addressable, so compiled code loads and stores it inline; nullptr pages (unmapped, guard, out-of-line) take the
+  /// checked callbacks, which name a fault. Kept current by a GuestMemory observer.
+  std::vector<std::uint8_t*> page_table_;
+  int page_observer_ = 0;
+  void RefreshPages(std::uint32_t at, std::size_t len);
+
+ public:
+  /// Pages compiled code reaches inline (a test hook).
+  [[nodiscard]] std::size_t inline_pages() const;
+
+ private:
   GuestAddr return_address_;
   const HostDispatch* dispatch_;
 

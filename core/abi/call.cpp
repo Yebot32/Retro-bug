@@ -542,6 +542,7 @@ exec::RunResult AbiContext::RunThread(runtime::GuestThread& thread, unsigned bud
       // budget, exactly as it does at the end of any call's budget — and both tiers start every Run with
       // no exclusive reservation, so an LL/SC sequence split by the switch fails its strex and retries.
       slices_.fetch_add(1, std::memory_order_relaxed);
+      if (slice_probe_) slice_probe_(state.pc);
       if (ggl_.waiters() > 0) contended_slices_.fetch_add(1, std::memory_order_relaxed);
       {
         runtime::Ggl::Released off(ggl_);
