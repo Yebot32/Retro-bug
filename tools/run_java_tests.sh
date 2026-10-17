@@ -83,3 +83,6 @@ java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.NativeMethodsTest \
   "$(to_host "$OUT/fixtures")" "$(to_host "$ROOT/build/games")"
 java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.StubElfWriterTest \
   "$(to_host "$OUT/scratch")" "$(to_host "$NDK_BIN/llvm-readelf.exe")" "${FX32:+$(to_host "$FX32")}"
+
+# The Holo launcher's pure parts (docs/superpowers/plans/2026-10-18-holo-launcher-ui.md).
+java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ApkScanTest "$(to_host "$OUT/scratch")"
