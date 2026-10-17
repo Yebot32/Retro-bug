@@ -6,7 +6,18 @@ hand-written IR interpreter = "Tier I"). Engine in `core/`, on-device launcher a
 (`android/jni/launcher.cpp` + `android/jni/gl_forward.cpp` + `android/java/.../LauncherActivity.java`).
 Everything below this section is older, detailed session history — read it only when you need depth.
 
-## M3 — JNI bridge (2026-10-16, branch `m3-jni-bridge`, in progress) — newest state
+## M4 — thunk layer (2026-10-17, branch `m3-integration`, in progress) — newest state
+
+Plan `docs/superpowers/plans/2026-10-17-m4-thunk-layer.md`; ledger `.superpowers/sdd/2026-10-17-m4-thunk-layer/progress.md`.
+Target: Angry Birds Go title screen with sound on the OnePlus (first missing import today: `AAssetManager_fromJava`).
+
+## M3 — JNI bridge (ACCEPTED 2026-10-17 on both devices; all work on branch `m3-integration`)
+
+**Accepted:** repacked Gumball launched by its icon reaches GumballMainMenu and plays Karate Chop on the OnePlus
+(own package) and the tablet (renamed `.rb` copy beside the original). The last blocker was mmap placement: the
+monitor now places guest mmaps top-down like Linux (6ff6eb2) — Gumball's `cLanguage::read` over-reads its buffer.
+Lanes and bridge check (11/11) green on both devices. Branch `m3-integration` = m3-jni-bridge + package-rename +
+m3-stale-local-ref + vigilant-cannon (trap names) + the mmap fix; not merged to main, not pushed.
 
 Plan `docs/superpowers/plans/2026-10-16-m3-jni-bridge.md`; ledger (rulings) `.superpowers/sdd/2026-10-16-m3-jni-bridge/progress.md`.
 Tasks 1–6 done on the tablet (the OnePlus was set aside by the human; its runs are owed before merge).
