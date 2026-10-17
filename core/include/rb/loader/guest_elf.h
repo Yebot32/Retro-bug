@@ -229,6 +229,10 @@ struct LoadOptions {
    * non-zero trap there faulted the first guarded static initialiser. 0 (the default) means "no trap".
    */
   std::uint32_t unresolved_trap = 0;
+  /// How many bytes from `unresolved_trap` are trap addresses: a resolver that binds each miss to its own
+  /// address (`GuestProcess`: one 4-byte slot per name, so a fault names its import) answers anywhere in
+  /// `[unresolved_trap, unresolved_trap + unresolved_trap_span)`. 1 (the default): the one address.
+  std::uint32_t unresolved_trap_span = 1;
   /**
    * When false — the default — a relocation this loader cannot apply **fails the load**, naming every
    * slot involved.

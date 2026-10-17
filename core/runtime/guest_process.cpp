@@ -287,7 +287,9 @@ std::unique_ptr<GuestProcess> GuestProcess::Create(const GuestProcessOptions& op
   mem::GuestMemory& m = *p->mem_;
 
   // The host-entry window (return sentinel + slot table): reserved so no placement lands on it.
-  if (!m.Map(kReturnAddress, 0x2000, mem::kNone, &e)) return fail("reserving the host-entry window: " + e);
+  // The sentinel page, then the slot table (`AbiContext::SlotFor`: kMaxSlots four-byte entries).
+  constexpr std::size_t kHostWindow = 0x1000u + std::size_t{abi::AbiContext::kMaxSlots} * 4u;
+  if (!m.Map(kReturnAddress, kHostWindow, mem::kNone, &e)) return fail("reserving the host-entry window: " + e);
   // Nothing at or above kAllocCeiling: reserved outright when the window reaches it, so neither this
   // allocator, the loader's placement scan nor the monitor's mmap2 can hand it out.
   p->ceiling_ = static_cast<GuestAddr>(std::min<std::size_t>(options.window_bytes, kAllocCeiling));
@@ -295,10 +297,14 @@ std::unique_ptr<GuestProcess> GuestProcess::Create(const GuestProcessOptions& op
       !m.Map(kAllocCeiling, options.window_bytes - kAllocCeiling, mem::kNone, &e)) {
     return fail("reserving the window above " + Hex(kAllocCeiling) + ": " + e);
   }
-  const GuestAddr trap = options.unresolved_trap & ~(mem::kGuestPage - 1u);
-  if (options.unresolved_trap != 0 && trap < p->ceiling_ && !m.IsMapped(trap) &&
-      !m.Map(trap, mem::kGuestPage, mem::kNone, &e)) {
-    return fail("reserving the unresolved-import trap page " + Hex(trap) + ": " + e);
+  if (options.unresolved_trap != 0) {
+    const std::uint64_t end = std::uint64_t{options.unresolved_trap} + kTrapSpan;
+    for (std::uint64_t at = options.unresolved_trap & ~(mem::kGuestPage - 1u); at < end; at += mem::kGuestPage) {
+      const auto page = static_cast<GuestAddr>(at);
+      if (page < p->ceiling_ && !m.IsMapped(page) && !m.Map(page, mem::kGuestPage, mem::kNone, &e)) {
+        return fail("reserving the unresolved-import trap page " + Hex(page) + ": " + e);
+      }
+    }
   }
   // The main thread's stack, 1 MiB below the ceiling, with a guard page under it.
   p->stack_top_ = p->ceiling_ - 0x0010'0000u;
@@ -322,6 +328,8 @@ std::unique_ptr<GuestProcess> GuestProcess::Create(const GuestProcessOptions& op
     p->monitor_->set_thread_spawner([owner](std::unique_ptr<GuestThread> t) { return owner->Spawn(std::move(t)); });
     // Adopted ART threads (Task 5): a host thread with no binding that calls in gets a guest thread of its own.
     p->abi_->set_adopter([owner](std::string* why) { return owner->AdoptCurrentHostThread(why); });
+    // A fault at a trap slot names the import bound there, whichever thread made the call.
+    p->abi_->set_fault_namer([owner](GuestAddr pc) { return owner->TrapName(pc); });
   }
 
   // The JNIEnv maps its own table and arena from a page-aligned base; a free run is found for it now,
@@ -425,13 +433,28 @@ std::optional<std::uint32_t> GuestProcess::ResolveImport(const std::string& name
   if (name == "__loader_shared_globals" && stub_ != 0) return stub_;
   if (opts_.host_resolver) {
     const auto h = opts_.host_resolver(name);
-    if (h && (opts_.unresolved_trap == 0 || *h != opts_.unresolved_trap)) return h;
+    if (h && (opts_.unresolved_trap == 0 || *h - opts_.unresolved_trap >= kTrapSpan)) return h;
   }
-  if (std::find(unanswered_.begin(), unanswered_.end(), name) == unanswered_.end()) {
-    unanswered_.push_back(name);
+  auto it = std::find(unanswered_.begin(), unanswered_.end(), name);
+  if (it == unanswered_.end()) it = unanswered_.insert(unanswered_.end(), name);
+  if (opts_.unresolved_trap == 0) return std::nullopt;
+  // Its own slot, so a call names it (TrapName); one shared address named nothing (ABGo, 2026-10-17).
+  const auto slot =
+      std::min<std::size_t>(static_cast<std::size_t>(it - unanswered_.begin()), kTrapSpan / kTrapSlot - 1u);
+  return opts_.unresolved_trap + static_cast<std::uint32_t>(kTrapSlot * slot);
+}
+
+std::string GuestProcess::TrapName(GuestAddr pc) const {
+  if (opts_.unresolved_trap == 0 || pc - opts_.unresolved_trap >= kTrapSpan) return {};
+  const std::size_t slot = (pc - opts_.unresolved_trap) / kTrapSlot;
+  const GuestAddr at = opts_.unresolved_trap + static_cast<GuestAddr>(slot * kTrapSlot);
+  if (slot >= unanswered_.size()) return "an unresolved-import trap slot no import is bound to (" + Hex(at) + ")";
+  if (slot == kTrapSpan / kTrapSlot - 1u && unanswered_.size() > kTrapSpan / kTrapSlot) {
+    return "one of the unanswered imports from " + unanswered_[slot] + " on (" +
+           std::to_string(unanswered_.size() - slot) + " names share the trap's last slot " + Hex(at) + ")";
   }
-  if (opts_.unresolved_trap != 0) return opts_.unresolved_trap;
-  return std::nullopt;
+  return "called the unanswered import " + unanswered_[slot] + " (nothing answers it; bound to trap slot " +
+         Hex(at) + ")";
 }
 
 loader::GuestModule* GuestProcess::LoadOne(const std::vector<std::uint8_t>& image, const std::string& soname,
@@ -441,6 +464,7 @@ loader::GuestModule* GuestProcess::LoadOne(const std::vector<std::uint8_t>& imag
   // recorded in `unsupported_relocs`). An app does not: a refused relocation fails its load by name.
   opts.tolerate_unresolved_relocs = scope;
   opts.unresolved_trap = opts_.unresolved_trap;
+  opts.unresolved_trap_span = kTrapSpan;
   opts.resolve = [this](const std::string& name) { return ResolveImport(name); };
   opts.resolve_ifunc = [this](const loader::IfuncSlot& s) { return RunIfunc(s); };
   if (scope && soname == "libc.so") {
@@ -1132,16 +1156,23 @@ void GuestProcess::RetireAdopted(GuestThread* t) {
     fault = who + " exited while its guest thread was bound to another host thread: its TLS-key destructors did "
                   "not run and it was not unlinked";
   } else {
-    // pthread_exit's guest-visible half: the TLS-key destructors (run to completion, re-entered across turns),
-    // then the unlink — attempted even when a destructor failed, so the list never keeps a node whose memory goes.
+    // pthread_exit's guest-visible half, in its order: the C++ thread_local destructors (__cxa_thread_finalize),
+    // the TLS-key destructors (run to completion, re-entered across turns), then the unlink — attempted even when a
+    // destructor failed, so the list never keeps a node whose memory goes — and the dynamic TLS blocks.
     std::string e;
+    if (!CallOn(*t, "__cxa_thread_finalize", {}, nullptr, &e)) {
+      fault = who + ": a thread_local destructor did not complete — " + e;
+    }
     if (!CallOn(*t, "pthread_key_clean_all", {}, nullptr, &e)) {
-      fault = who + ": a TLS-key destructor did not complete — pthread_key_clean_all: " + e;
+      fault += (fault.empty() ? who + ": " : "; ") + std::string{"a TLS-key destructor did not complete — "} + e;
     }
     if (!CallOn(*t, "__pthread_internal_remove", {abi::Value32::Ptr(t->pthread_struct)}, nullptr, &e)) {
       fault += (fault.empty() ? who + ": " : "; ") + std::string{"__pthread_internal_remove: "} + e;
+    } else if (!CallOn(*t, "_Z18__free_dynamic_tlsP10bionic_tcb",
+                       {abi::Value32::Ptr(t->state.tp - kTpOffsetInTcb)}, nullptr, &e)) {
+      fault += (fault.empty() ? who + ": " : "; ") + std::string{"__free_dynamic_tls: "} + e;
     }
-    if (fault.empty()) note += ": key destructors ran, unlinked from g_thread_list";
+    if (fault.empty()) note += ": thread_local and key destructors ran, unlinked from g_thread_list, dynamic TLS freed";
   }
   monitor_->ReleaseThreadId(t->tid);
   // Free the memory only when the struct is certainly off the list (or the process is over: no guest code runs

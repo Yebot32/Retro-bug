@@ -5,6 +5,8 @@
  */
 #pragma once
 
+#include <map>
+#include <functional>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -102,6 +104,12 @@ class GuestMemory {
   bool IsFastmem(std::uint32_t at) const;
   unsigned ProtAt(std::uint32_t at) const;
 
+  /// Told the page range ([at, at + len), page-rounded) after every Map, MapFile, Protect and Unmap, so a cache of
+  /// translations (Tier J's page table) never outlives a mapping. Returns an id for RemoveObserver.
+  using Observer = std::function<void(std::uint32_t at, std::size_t len)>;
+  int AddObserver(Observer fn);
+  void RemoveObserver(int id);
+
   std::size_t window_bytes() const { return window_bytes_; }
   const void* window_base() const { return window_base_; }
   AddressModel::Kind model_kind() const { return kind_; }
@@ -140,6 +148,11 @@ class GuestMemory {
   };
 
   GuestMemory() = default;
+
+  std::map<int, Observer> observers_;
+  int next_observer_ = 1;
+  /// Tells every observer about [at, at + len) widened to whole host granules (a rebalance moves the granule's pages).
+  void Notify(std::uint32_t at, std::size_t len) const;
 
   bool Contains(std::uint32_t at) const { return at < window_bytes_; }
   std::size_t PageIndex(std::uint32_t at) const { return at >> kGuestPageShift; }

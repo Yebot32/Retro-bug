@@ -25,6 +25,7 @@ int pt_sleeps(void);
 int pt_exit_group_from_thread(int code);
 int pt_clone_storm_exit(int code);
 int pt_syscall_storm(int n);
+int pt_tls_dtor_on_thread(void);
 
 
 /* M2 Task 5: the native counterpart of the lane's adopted-thread row. On a device every ART thread is a real
@@ -87,6 +88,7 @@ int main(int argc, char** argv) {
   printf("pt_timeouts()=%d\n", pt_timeouts());
   printf("pt_sleeps()=%d\n", pt_sleeps());
   printf("pt_syscall_storm(150000)=%d\n", pt_syscall_storm(150000));
+  printf("pt_tls_dtor_on_thread()=%d\n", pt_tls_dtor_on_thread());
   printf("adopted_thread_keys()=%d\n", adopted_thread_keys());
   return 0;
 }

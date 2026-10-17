@@ -8,6 +8,7 @@
 
 #include <android/log.h>
 #include <dlfcn.h>
+#include <unistd.h>
 #include <jni.h>
 
 #include <string>
@@ -63,16 +64,23 @@ std::string ApkPath(JavaVM* vm) {
 }  // namespace
 
 extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
-  // Our own file's basename: the copy's name is the name of the 32-bit library it stands in for.
-  std::string lib;
+  // Our own path names both what we stand in for (the basename) and the APK: `<sourceDir>/lib/arm64/libX.so`, or
+  // `<sourceDir>/base.apk!/lib/arm64-v8a/libX.so` when loaded straight from the APK. The hidden ActivityThread
+  // API is only the fallback for a path of neither shape.
+  std::string lib, apk;
   Dl_info self{};
   if (dladdr(reinterpret_cast<void*>(&JNI_OnLoad), &self) != 0 && self.dli_fname != nullptr) {
-    lib = self.dli_fname;
-    const auto slash = lib.rfind('/');
-    if (slash != std::string::npos) lib.erase(0, slash + 1);
+    const std::string path = self.dli_fname;
+    const auto slash = path.rfind('/');
+    lib = slash == std::string::npos ? path : path.substr(slash + 1);
+    if (const auto bang = path.find("!/"); bang != std::string::npos) {
+      apk = path.substr(0, bang);
+    } else if (const auto at = path.rfind("/lib/"); at != std::string::npos) {
+      apk = path.substr(0, at) + "/base.apk";
+    }
   } else {
     __android_log_print(ANDROID_LOG_WARN, kTag, "stub: dladdr could not name this library");
   }
-  const std::string apk = ApkPath(vm);
+  if (apk.empty() || ::access(apk.c_str(), R_OK) != 0) apk = ApkPath(vm);
   return rb_runtime_boot(vm, apk.c_str(), lib.c_str());
 }

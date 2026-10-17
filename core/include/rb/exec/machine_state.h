@@ -88,6 +88,17 @@ static_assert(sizeof(GuestAddr) == 4, "guest addresses are 32-bit by definition"
 #endif
 }
 
+/**
+ * `mrc p15, #0, rT, c9, c13, #0` — PMCCNTR, the PMU cycle counter — answered as a running 32-bit count, as a kernel
+ * with user PMU access enabled answers it. Older OpenSSL's `_armv7_tick` probes it under a SIGILL guard; a real
+ * arm64 kernel traps it and OpenSSL marks the tick missing, but this build delivers no signals, so the honest
+ * choices were a running count or a stop that kills the static initialiser. The low word of the CNTVCT count.
+ */
+[[nodiscard]] inline bool IsCycleCounterRead(unsigned coproc, bool two, unsigned opc1, unsigned crn, unsigned crm,
+                                             unsigned opc2) {
+  return coproc == 15 && !two && opc1 == 0 && crn == 9 && crm == 13 && opc2 == 0;
+}
+
 [[nodiscard]] inline std::uint8_t ItStateFromCpsr(std::uint32_t cpsr) {
   return static_cast<std::uint8_t>(((cpsr >> 8) & 0xFCu) | ((cpsr >> 25) & 0x03u));
 }

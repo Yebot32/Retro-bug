@@ -1210,6 +1210,10 @@ bool BlockRunner::Step(const Inst* inst) {
     case Opcode::A32CoprocGetOneWord: {
       if (!HasArgs(inst, 1)) return false;
       const auto info = inst->GetArg(0).GetCoprocInfo();
+      if (IsCycleCounterRead(info[0], info[1] != 0, info[2], info[3], info[4], info[5])) {
+        Put(inst, V{static_cast<std::uint32_t>(HostVirtualCounter()), 0});
+        return true;
+      }
       if (!IsThreadPointerAccess(info)) {
         return Fail(inst, CoprocName("MRC", info) + " is not modelled");
       }

@@ -1109,6 +1109,31 @@ void slow_key_destructor_completes(int tier) {
   CHECK(pr.p->kept_mappings() == 0u && pr.p->adopted_threads() == 0u);
 }
 
+/// A C++ `thread_local` destructor (__cxa_thread_atexit_impl) registered on an adopted thread runs at its exit, as
+/// pthread_exit's __cxa_thread_finalize runs it on a device; the thread's dynamic TLS is freed after the unlink.
+void adopted_exit_runs_thread_finalizers(int tier) {
+  const std::string name = std::string{"adopted_exit_runs_thread_finalizers/"} + TierName(tier);
+  Watchdog wd(name, std::chrono::seconds(60));
+  Proc pr = BootPthreads(tier);
+  CHECK_CTX(pr.p != nullptr, pr.err);
+  if (!pr.p) return;
+  int reg = -1;
+  std::uint32_t self = 0;
+  std::thread a([&] {
+    reg = CallFixture(pr, tier, "pt_tls_dtor_register", {}).ret.i();
+    self = CallFixture(pr, tier, "pt_self", {}).ret.w();
+  });
+  a.join();
+  const int runs = CallFixture(pr, tier, "pt_tls_dtor_count", {}).ret.i();
+  std::fprintf(stderr, "#   %s: register %d, destructor runs %d, faults: %s\n", name.c_str(), reg, runs,
+               Joined(pr.p->adoption_faults()).c_str());
+  CHECK(reg == 0);
+  CHECK_CTX(runs == 1, name + ": pt_tls_dtor_count() = " + std::to_string(runs));
+  CHECK_CTX(pr.p->adoption_faults().empty(), Joined(pr.p->adoption_faults()));
+  CHECK(!Has(ThreadList(*pr.p), self));
+  CHECK(pr.p->kept_mappings() == 0u && pr.p->adopted_threads() == 0u);
+}
+
 /// A TLS-key destructor that faults: the exit is reported by name, the thread is still unlinked (so its mapping
 /// can go), and the process carries on.
 void faulting_key_destructor_is_named(int tier, const std::map<std::string, std::string>& oracle) {
@@ -1202,6 +1227,66 @@ void adoption_after_exit_is_refused(int tier) {
   CHECK(pr.p->threads_adopted() == 0u);
 }
 
+/// An import nothing answers faults *by name* when called, on the main thread and on an adopted host thread
+/// alike (Angry Birds Go, 2026-10-17: `nativeInitialize` on its GL thread stopped at "instruction fetch failed
+/// at 0xfffe0000" and nothing said which of 78 unanswered imports that was). Each unanswered import is bound to
+/// its own trap address, and the run loop names the one a fault stopped on — beta as beta, not as the
+/// first-bound alpha.
+void unresolved_import_faults_by_name(int tier) {
+  const std::string name = std::string{"unresolved_import_faults_by_name/"} + TierName(tier);
+  Watchdog wd(name, std::chrono::seconds(60));
+  const std::vector<std::uint8_t> image = ReadFile(RB_UNRESOLVED_FIXTURE_PATH);
+  CHECK_CTX(!image.empty(), std::string{"missing "} + RB_UNRESOLVED_FIXTURE_PATH);
+  if (image.empty()) return;
+  Proc pr = BootPthreads(tier);
+  CHECK_CTX(pr.p != nullptr, pr.err);
+  if (!pr.p) return;
+  std::string e;
+  const loader::GuestModule* lib = pr.p->LoadApp(image, "librbunresolved.so", &e);
+  CHECK_CTX(lib != nullptr, e);
+  if (lib == nullptr) return;
+  {
+    runtime::Ggl::Held hold(pr.p->ggl());
+    const auto& un = pr.p->unanswered();
+    CHECK(std::find(un.begin(), un.end(), "rb_never_defined_alpha") != un.end());
+    CHECK(std::find(un.begin(), un.end(), "rb_never_defined_beta") != un.end());
+  }
+  const auto call = [&](const char* fn) {
+    exec::RunResult rr{};
+    const auto at = lib->FindExport(fn);
+    if (!at) {
+      rr.reason = exec::StopReason::Internal;
+      rr.detail = std::string{"no export "} + fn;
+      return rr;
+    }
+    pr.p->abi().set_executor(pr.p->engine(tier));
+    pr.p->abi().CallGuest(at->tagged(), {abi::Value32::S32(5)}, abi::Shorty::For("II"), 1'000'000u, &rr);
+    return rr;
+  };
+  const auto names = [](const exec::RunResult& rr, const char* want, const char* not_want) {
+    return rr.reason == exec::StopReason::Fault && rr.detail.find(want) != std::string::npos &&
+           rr.detail.find(not_want) == std::string::npos;
+  };
+  const exec::RunResult main_beta = call("uc_call_beta");
+  CHECK_CTX(names(main_beta, "rb_never_defined_beta", "rb_never_defined_alpha"),
+            name + " main thread: " + main_beta.detail);
+  exec::RunResult adopted_alpha{}, adopted_beta{};
+  bool adopted = false;
+  std::thread t([&] {
+    adopted_alpha = call("uc_call_alpha");
+    GuestThread* g = runtime::CurrentGuestThread();
+    adopted = g != nullptr && g->adopted;
+    adopted_beta = call("uc_call_beta");
+  });
+  t.join();
+  CHECK_CTX(adopted, name + ": the second host thread was not adopted");
+  CHECK_CTX(names(adopted_alpha, "rb_never_defined_alpha", "rb_never_defined_beta"),
+            name + " adopted thread: " + adopted_alpha.detail);
+  CHECK_CTX(names(adopted_beta, "rb_never_defined_beta", "rb_never_defined_alpha"),
+            name + " adopted thread: " + adopted_beta.detail);
+  std::fprintf(stderr, "#   %s: %s\n", name.c_str(), adopted_beta.detail.c_str());
+}
+
 void guest_pthreads(int tier) {
   const auto oracle = Oracle();
   CHECK_CTX(!oracle.empty(), std::string{"no oracle rows at "} + RB_PTHREAD_ORACLE_PATH);
@@ -1227,6 +1312,7 @@ void guest_pthreads(int tier) {
   // More syscalls in one guest thread than a turn's cap: the turn boundary lands on a syscall, which must be
   // answered, not skipped (final-review finding 1).
   PthreadRow(pr, tier, oracle, "pt_syscall_storm(150000)", "pt_syscall_storm", {V::S32(150000)});
+  PthreadRow(pr, tier, oracle, "pt_tls_dtor_on_thread()", "pt_tls_dtor_on_thread", {});
   std::fprintf(stderr, "#   Tier %s: %zu guest threads started; futex: %llu blocked, %llu woken, %llu timed out; "
                        "%llu contended slices\n",
                TierName(tier), pr.p->threads_started(), static_cast<unsigned long long>(pr.p->futex().blocked()),
@@ -1244,8 +1330,10 @@ void guest_pthreads(int tier) {
   adopted_thread_outlives_process(tier);
   adoption_after_exit_is_refused(tier);
   slow_key_destructor_completes(tier);
+  adopted_exit_runs_thread_finalizers(tier);
   faulting_key_destructor_is_named(tier, oracle);
   unlinkable_exit_keeps_the_mapping(tier, oracle);
+  unresolved_import_faults_by_name(tier);
 }
 
 }  // namespace

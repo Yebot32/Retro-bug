@@ -1119,6 +1119,36 @@ void the_virtual_counter_reads_the_host_count_on_both_tiers() {
   }
 }
 
+/// PMCCNTR (`mrc p15, #0, rT, c9, c13, #0`), the PMU cycle counter, read as a running count on both tiers — what a
+/// kernel with user PMU access enabled gives. Older OpenSSL's `_armv7_tick` reads it under a SIGILL guard (Looney
+/// Tunes Dash's libToonRunner, in a static initialiser); this build delivers no signals, so a refusal stopped the
+/// constructor for good. It is answered from the same host count as CNTVCT, low word. Encoding (ARM state):
+///   mrc p15,#0,r0,c9,c13,#0 ; mrc p15,#0,r1,c9,c13,#0 ; bx lr  → ee190f1d ee191f1d e12fff1e
+void the_cycle_counter_reads_a_running_count_on_both_tiers() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  constexpr exec::GuestAddr kBlob = 0x0070'9000u;
+  constexpr std::uint32_t kCode[] = {0xEE190F1D, 0xEE191F1D, 0xE12FFF1E};
+  std::string err;
+  if (!rig.mem->Map(kBlob, mem::kGuestPage, kRead | kWrite | kExec, &err)) {
+    fail("could not map the cycle-counter page", __LINE__, err);
+    return;
+  }
+  CHECK_CTX(rig.mem->Write(kBlob, kCode, sizeof(kCode)), "could not plant the cycle-counter blob");
+  for (const bool jit : {false, true}) {
+    const char* tier = jit ? "J" : "I";
+    exec::Executor& engine = jit ? static_cast<exec::Executor&>(*rig.jit) : static_cast<exec::Executor&>(*rig.interp);
+    exec::MachineState s = EntryState(kBlob, 0, 0, false);
+    const std::uint64_t before = exec::HostVirtualCounter();
+    const exec::RunResult r = engine.Run(s, 1000);
+    const std::uint64_t after = exec::HostVirtualCounter();
+    CHECK_CTX(r.reason == exec::StopReason::Returned, std::string{"Tier "} + tier + ": " + r.detail);
+    // A 32-bit count: the two reads are in order (modulo the wrap) and no further apart than the host's span.
+    CHECK_CTX(s.r[0] != 0 && static_cast<std::uint32_t>(s.r[1] - s.r[0]) <= after - before,
+              std::string{"Tier "} + tier + ": counts " + Hex(s.r[0]) + "/" + Hex(s.r[1]));
+  }
+}
+
 /// The same rule one coprocessor number over — and until the wrapper registered a refusing object for
 /// every slot, this row could not even run: with `Config::coprocessors[14]` empty, the AArch64 back end
 /// compiled this `mrc p14` into `EmitCoprocessorException()`, which is `ASSERT_FALSE` and not
@@ -2886,6 +2916,44 @@ void packed_media_rows_agree_with_the_arm64_recipes() {
 /// libc's constructor once the guest heap existed, SM-X710, 2026-10-10). Two rows, because one alone
 /// cannot fail both ways: an overflowing `smlabb` must set Q on both tiers, and a non-overflowing one
 /// must leave it clear — a writer that always set (or never set) Q passes one row and fails the other.
+/// M4: Tier J reaches mapped pages through a page table kept current by GuestMemory's observer. A block compiled
+/// while its data page was mapped loads it inline; once the page is unmapped the same compiled block takes the
+/// checked path and faults by name — it never reads through a stale pointer.
+void the_page_table_follows_every_mapping_change() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  std::string err;
+  constexpr exec::GuestAddr kData = 0x0200'0000u, kCode = 0x0210'0000u;
+  const std::size_t before = rig.jit->inline_pages();
+  CHECK_CTX(rig.mem->Map(kData, mem::kGuestPage, kRead | kWrite, &err), "");
+  CHECK_CTX(rig.jit->inline_pages() == before + 1, std::to_string(rig.jit->inline_pages()) + " vs " + std::to_string(before));
+  const std::uint32_t value = 0x1234'5678u;
+  rig.mem->Write(kData + 8, &value, 4);
+  // ldr r0, [r1, #8] ; bx lr  (A32)
+  const std::uint32_t code[2] = {0xE5910008u, 0xE12FFF1Eu};
+  CHECK_CTX(rig.mem->Map(kCode, mem::kGuestPage, kRead | kWrite | kExec, &err), "");
+  rig.mem->Write(kCode, code, sizeof code);
+  exec::MachineState s{};
+  s.r[1] = kData;
+  s.r[13] = kStackTop;
+  s.r[14] = kReturnAddress;
+  s.pc = kCode;
+  s.mode = isa::Mode::Arm;
+  exec::RunResult rr = rig.jit->Run(s, 100);
+  CHECK_CTX(rr.reason == exec::StopReason::Returned && s.r[0] == value, rr.detail);
+  CHECK_CTX(rig.mem->Protect(kData, mem::kGuestPage, kNone, &err), err);  // no longer readable: out of the table
+  CHECK_CTX(rig.jit->inline_pages() == before + 1, "");  // the code page is still in
+  CHECK_CTX(rig.mem->Unmap(kData, mem::kGuestPage, &err), "");
+  exec::MachineState t{};
+  t.r[1] = kData;
+  t.r[13] = kStackTop;
+  t.r[14] = kReturnAddress;
+  t.pc = kCode;
+  t.mode = isa::Mode::Arm;
+  rr = rig.jit->Run(t, 100);
+  CHECK_CTX(rr.reason == exec::StopReason::Fault && rr.detail.find("0x2000008") != std::string::npos, rr.detail);
+}
+
 void the_dsp_multiplies_publish_q_on_both_tiers() {
   Rig rig = build();
   if (!rig.ok) return;
@@ -3018,6 +3086,7 @@ int main(int argc, char** argv) {
   exclusive_access_rows_match_hardware_rule_and_each_other();
   packed_media_rows_agree_with_the_arm64_recipes();
   invalidation_reaches_the_compiled_code();
+  the_page_table_follows_every_mapping_change();
   both_tiers_stop_at_the_same_svc();
   a_guest_cacheflush_reaches_the_tier_that_owns_the_cache();
   unmapped_code_faults_in_both_tiers();
@@ -3025,6 +3094,7 @@ int main(int argc, char** argv) {
   a_kuser_helper_call_is_answered_on_both_tiers();
   an_unmodelled_coprocessor_access_stops_both_tiers();
   the_virtual_counter_reads_the_host_count_on_both_tiers();
+  the_cycle_counter_reads_a_running_count_on_both_tiers();
   an_unmodelled_coprocessor_number_stops_both_tiers();
   the_thumb_acquire_byte_and_half_rows_execute_on_both_tiers();
   the_dsp_multiplies_publish_q_on_both_tiers();

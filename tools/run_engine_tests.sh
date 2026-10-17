@@ -42,7 +42,7 @@ ADB="$SDK/platform-tools/adb.exe"
 
 # One list for build, push and run: a suite that is missing here silently does not execute, which is
 # the least useful kind of green.
-SUITES="rb_interval_compat_tests rb_variant_compat_tests rb_guest_memory_tests rb_guest_elf_tests rb_linker_tests rb_isa_front_end_tests rb_exec_census_tests rb_exec_interp_tests rb_abi_call_tests rb_abi_jni_tests rb_exec_tier_diff_tests rb_diag_tests rb_syscall_monitor_tests rb_codecache_tests rb_profile_tests rb_guest_process_tests rb_guest_thread_tests dynarmic_tests"
+SUITES="rb_interval_compat_tests rb_variant_compat_tests rb_guest_memory_tests rb_guest_elf_tests rb_linker_tests rb_isa_front_end_tests rb_exec_census_tests rb_exec_interp_tests rb_abi_call_tests rb_abi_jni_tests rb_exec_tier_diff_tests rb_diag_tests rb_syscall_monitor_tests rb_codecache_tests rb_profile_tests rb_guest_process_tests rb_guest_thread_tests rb_jni_forward_tests rb_inbound_tests rb_thunk_tests rb_host_io_tests rb_sles_tests rb_gl_thunk_tests dynarmic_tests"
 # Lanes that are red on purpose because every failure names a real gap (a Tier I refusal, an unlinked
 # loader step), so they cannot gate a green run. They are still built and run here: before this list
 # existed they were in no build at all, which let a stale binary report the same failure count for hours
@@ -132,12 +132,25 @@ CTORFAULT="$BUILD/librbctorfault.so"
   -mthumb -mfloat-abi=softfp -mfpu=neon -fPIC -shared -nostdlib -Os \
   -Wl,-soname,librbctorfault.so -o "$CTORFAULT" "$ROOT/tests/corpus/ctor_fault.c"
 
+# Two strong imports nothing defines: a call to either must fault naming that import (guest_thread_test).
+UNRESOLVED="$BUILD/librbunresolved.so"
+"$TC/bin/clang.exe" --target=armv7-none-linux-androideabi26 --sysroot="$TC/sysroot" \
+  -mthumb -mfloat-abi=softfp -mfpu=neon -fPIC -shared -nostdlib -Os \
+  -Wl,-soname,librbunresolved.so -o "$UNRESOLVED" "$ROOT/tests/corpus/unresolved_call.c"
+
 # M2 Task 4: guest pthreads. Built exactly as tools/run_pthread_oracle.sh builds the copy it runs natively
 # (keep the two lines in step), linked against the NDK stub libc for its DT_NEEDED.
 PTHREAD_FIXTURE="$BUILD/libpthread_fixture.so"
 "$TC/bin/clang.exe" --target=armv7-none-linux-androideabi26 --sysroot="$TC/sysroot" \
   -mthumb -mfloat-abi=softfp -mfpu=neon -fPIC -shared -nostdlib -Os \
   -Wl,-soname,libpthread_fixture.so -o "$PTHREAD_FIXTURE" "$ROOT/tests/corpus/pthread_fixture.c" -lc
+
+# M3: the JNI bridge fixture, built the same way (the bridge test APK of Task 6 builds the same source natively),
+# without auto-vectorization: Tier I has no NEON compare (VectorEqual32) yet, and the fixture tests the bridge.
+JNIBRIDGE_FIXTURE="$BUILD/libjnibridge_fixture.so"
+"$TC/bin/clang.exe" --target=armv7-none-linux-androideabi26 --sysroot="$TC/sysroot" \
+  -mthumb -mfloat-abi=softfp -mfpu=neon -fPIC -shared -nostdlib -Os -fno-vectorize -fno-slp-vectorize \
+  -Wl,-soname,libjnibridge_fixture.so -o "$JNIBRIDGE_FIXTURE" "$ROOT/tests/corpus/jni_bridge_fixture.c" -lc
 
 # MSYS hands native programs /c/... paths and converts them on the way out — which is wrong for the
 # *device* path in `adb push a /data/local/tmp/b`, hence the MSYS_NO_PATHCONV=1 on every adb call
@@ -189,7 +202,9 @@ adb push "$(to_host "$IFUSER")" /data/local/tmp/librbifuncuser.so >/dev/null
 adb push "$(to_host "$IFLIBC")" /data/local/tmp/librbifunclibc.so >/dev/null
 adb push "$(to_host "$WEAK")" /data/local/tmp/librbweak.so >/dev/null
 adb push "$(to_host "$CTORFAULT")" /data/local/tmp/librbctorfault.so >/dev/null
+adb push "$(to_host "$UNRESOLVED")" /data/local/tmp/librbunresolved.so >/dev/null
 adb push "$(to_host "$PTHREAD_FIXTURE")" /data/local/tmp/libpthread_fixture.so >/dev/null
+adb push "$(to_host "$JNIBRIDGE_FIXTURE")" /data/local/tmp/libjnibridge_fixture.so >/dev/null
 adb push "$(to_host "$ROOT/tests/corpus/oracle-pthread.txt")" /data/local/tmp/oracle-pthread.txt >/dev/null
 adb push "$(to_host "$FIXTURE_STRIPPED")" /data/local/tmp/librb_fixture_stripped.so >/dev/null
 adb push "$(to_host "$DEVICE_LIBC")" /data/local/tmp/rb_device_libc.so >/dev/null

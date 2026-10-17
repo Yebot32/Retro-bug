@@ -491,6 +491,24 @@ void a_slot_range_misalignment_is_not_a_host_call() {
   CHECK_CTX(slot == 229, "slot " + std::to_string(slot));
 }
 
+/// M4's thunk tables (GLES2, EGL, OpenSL ES, libandroid) need more than 1024 host functions: slot 4000 binds,
+/// is recognised, and a guest call to it reaches its host function and returns.
+void a_slot_past_1024_is_reachable() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  CHECK(abi::AbiContext::kMaxSlots >= 4096u);
+  std::uint32_t slot = 0;
+  CHECK(rig.abi_ctx->IsHostEntry(rig.abi_ctx->SlotFor(4000), &slot) && slot == 4000);
+  rig.abi_ctx->Bind(4000, [](exec::MachineState& s, std::string*) {
+    s.r[0] = s.r[0] * 3 + 1;
+    return true;
+  });
+  exec::RunResult outcome{};
+  const abi::Ret32 r = rig.abi_ctx->CallGuest(rig.abi_ctx->SlotFor(4000), {abi::Value32::S32(14)},
+                                              abi::Shorty::For("II"), 1000, &outcome);
+  CHECK_CTX(outcome.reason == exec::StopReason::Returned && r.i() == 43, outcome.detail);
+}
+
 /// The Linux ARM kuser helpers (fixed addresses the kernel answers), which Angry Birds Go's constructors
 /// branch to: a fetch at 0xffff0fa0 faulted the 248th static initialiser before this. Each is called
 /// directly, as a guest's `blx` to the constant would reach it, and each row can fail: a cmpxchg that
@@ -736,6 +754,7 @@ int main() {
   a_refused_host_call_is_a_fault_naming_the_slot();
   an_unbound_slot_says_so_and_which_one_it_was();
   a_slot_range_misalignment_is_not_a_host_call();
+  a_slot_past_1024_is_reachable();
   the_kuser_helpers_answer_like_the_kernel();
   guest_functions_called_through_the_bridge_match_hardware();
   the_bridge_leaves_the_guest_stack_where_it_found_it();

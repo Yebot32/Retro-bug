@@ -114,6 +114,8 @@ public class LauncherActivity extends Activity {
     /// as the repackager lays one out (`assets/rb32/<lib>`, `assets/rb32sys/*`) and returns what it did.
     /// The report itself goes to logcat tag RBRUNTIME and to files/rb-report.txt.
     private static native String nativeBootCheck(String apkPath, String libName);
+    /// `-e stubcheck`: dlopen one generated stub here and check each of `symbols` reaches rb_stub_capture.
+    private static native String nativeStubCheck(String stubPath, String[] symbols);
 
     private enum Screen { HOME, LIBRARY, SETTINGS, DIAGNOSTICS, REPORT, RUN }
 
@@ -143,6 +145,8 @@ public class LauncherActivity extends Activity {
          * `-e repack <name>` runs the library row's "Make installable" on the first matching game: rewrite,
          * sign, keep the result under getExternalFilesDir(null)/repack/, then hand it to the installer.
          * `-e install 0` stops after signing (scripted checks of the artifact without an installer dialog).
+         * `-e rename 1` renames the package to `<original>.rb` (`-e rename <pkg>`: that name) so the result installs
+         * beside a natively installed original; it is kept as `<name>.rb.apk` (or `<name>.<pkg>.apk`).
          */
         /*
          * `-e shimcheck 1` checks the targetSdk compatibility shims in this process (ShimCheck; driven by
@@ -153,16 +157,53 @@ public class LauncherActivity extends Activity {
             saveAndShow("targetSdk shim check", ShimCheck.run(this).trim());
             return;
         }
+        /*
+         * `-e stage <file.apk>` adds getExternalFilesDir(null)/<file.apk> (where `adb push` can put it) to the
+         * library before anything else in this intent runs: the scripted twin of "Add game". It copies on this
+         * thread, which is fine for a scripted run and would not be for the picker.
+         */
+        final String stage = getIntent() == null ? null : getIntent().getStringExtra("stage");
+        if (stage != null && !stage.isEmpty()) {
+            File src = new File(getExternalFilesDir(null), new File(stage).getName());
+            File dest = new File(gamesDir(), src.getName().replaceAll("[^A-Za-z0-9._-]", "_"));
+            try (InputStream in = new java.io.FileInputStream(src); OutputStream out = new FileOutputStream(dest)) {
+                byte[] buf = new byte[1 << 16];
+                for (int n = in.read(buf); n > 0; n = in.read(buf)) out.write(buf, 0, n);
+                Log.i(TAG, "stage: added " + dest + " (" + dest.length() + " bytes)");
+            } catch (IOException e) {
+                Log.e(TAG, "stage: could not copy " + src + ": " + e.getMessage());
+            }
+        }
         final String repack = getIntent() == null ? null : getIntent().getStringExtra("repack");
         if (repack != null && !repack.isEmpty()) {
             for (File f : games()) {
                 if (f.getName().toLowerCase().contains(repack.toLowerCase())) {
-                    repackGame(f, !"0".equals(getIntent().getStringExtra("install")));
+                    ApkRepackager.debuggable = "1".equals(getIntent().getStringExtra("debuggable"));
+                    ApkRepackager.nativeControl = "1".equals(getIntent().getStringExtra("native"));
+                    String target = getIntent().getStringExtra("target");
+                    ApkRepackager.targetFloor = target == null ? 0 : Integer.parseInt(target);
+                    String rename = getIntent().getStringExtra("rename");
+                    repackGame(f, !"0".equals(getIntent().getStringExtra("install")),
+                            rename == null || rename.equals("0") ? null
+                                    : rename.equals("1") ? ApkRepackager.RENAME_SUFFIX : rename);
                     return;
                 }
             }
             Log.w(TAG, "repack: no game matching '" + repack + "'");
             Toast.makeText(this, "no game matching '" + repack + "'", Toast.LENGTH_LONG).show();
+            return;
+        }
+        // `-e stubcheck <name>`: repack the game (no install, nothing signed), then dlopen each generated stub in
+        // this process and check every export resolves to the dispatch entry (nativeStubCheck).
+        final String stubcheck = getIntent() == null ? null : getIntent().getStringExtra("stubcheck");
+        if (stubcheck != null && !stubcheck.isEmpty()) {
+            for (File f : games()) {
+                if (f.getName().toLowerCase().contains(stubcheck.toLowerCase())) {
+                    stubCheck(f);
+                    return;
+                }
+            }
+            Log.w(TAG, "stubcheck: no game matching '" + stubcheck + "'");
             return;
         }
         final String bootcheck = getIntent() == null ? null : getIntent().getStringExtra("bootcheck");
@@ -320,7 +361,7 @@ public class LauncherActivity extends Activity {
         }), weight(1f));
         row.addView(buttons);
         row.addView(button("Make installable", new Runnable() {
-            @Override public void run() { repackGame(apk, true); }
+            @Override public void run() { repackGame(apk, true, null); }
         }));
 
         View divider = new View(this);
@@ -702,13 +743,15 @@ public class LauncherActivity extends Activity {
 
     /// "Make installable": rewrite the game for a 64-bit-only phone, sign it with the phone's repack key,
     /// keep it (and its report) under getExternalFilesDir(null)/repack/, then offer it to the installer.
-    private void repackGame(final File apk, final boolean install) {
+    private void repackGame(final File apk, final boolean install, final String renameTo) {
         if (repacking_) {
             Toast.makeText(this, "A repack is already running", Toast.LENGTH_SHORT).show();
             return;
         }
         repacking_ = true;
-        final String label = apk.getName().replaceAll("\\.apk$", "");
+        // A renamed repack is kept apart from the same-package one, which bootcheck boots in a staged original's place.
+        final String label = apk.getName().replaceAll("\\.apk$", "")
+                + (renameTo == null ? "" : renameTo.startsWith(".") ? renameTo : "." + renameTo);
         reportTitle_ = "make installable: " + label;
         currentReport_ = "repacking " + apk.getName() + " ...";
         show(Screen.REPORT);
@@ -726,8 +769,9 @@ public class LauncherActivity extends Activity {
                     out.append("repack: ").append(apk.getName()).append(" (").append(apk.length())
                             .append(" bytes)\n");
                     java.util.Map<String, byte[]> runtime = readRepackRuntime(out);
-                    ApkRepackager.Result r = ApkRepackager.transform(apk, runtime, unsigned);
-                    out.append("package: ").append(r.packageName).append('\n');
+                    ApkRepackager.Result r = ApkRepackager.transform(apk, runtime, unsigned, renameTo);
+                    out.append("package: ").append(r.packageName)
+                            .append(r.renamedFrom == null ? "" : " (renamed from " + r.renamedFrom + ")").append('\n');
                     out.append("minSdk: ").append(r.oldMinSdk < 0 ? "absent" : String.valueOf(r.oldMinSdk))
                             .append(" -> ").append(r.newMinSdk).append('\n');
                     out.append("targetSdk: ").append(r.oldTargetSdk < 0 ? "absent" : String.valueOf(r.oldTargetSdk))
@@ -793,6 +837,49 @@ public class LauncherActivity extends Activity {
     }
 
     /// The stub, the engine and the guest libraries, read out of this launcher's own installed APK.
+    /// The `-e stubcheck` run, on a worker thread: ApkRepackager.transform into the cache, each generated stub
+    /// written to the code cache (an exec-allowed app directory) and checked by nativeStubCheck; one line per stub.
+    private void stubCheck(final File apk) {
+        reportTitle_ = "stubcheck " + apk.getName();
+        currentReport_ = "stubcheck " + apk.getName() + " ...";
+        show(Screen.REPORT);
+        new Thread(new Runnable() {
+            @Override public void run() {
+                final StringBuilder out = new StringBuilder();
+                File unsigned = new File(getCacheDir(), "stubcheck.unsigned.apk");
+                try {
+                    ApkRepackager.Result r = ApkRepackager.transform(apk, readRepackRuntime(out), unsigned);
+                    for (String line : r.report) if (line.contains("stub")) out.append(line).append('\n');
+                    File dir = new File(getCodeCacheDir(), "stubcheck");
+                    if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("could not create " + dir);
+                    try (java.util.zip.ZipFile z = new java.util.zip.ZipFile(unsigned)) {
+                        for (java.util.Map.Entry<String, List<String>> e : r.stubExports.entrySet()) {
+                            File so = new File(dir, e.getKey());
+                            try (InputStream in = z.getInputStream(z.getEntry("lib/arm64-v8a/" + e.getKey()));
+                                 OutputStream os = new FileOutputStream(so)) {
+                                byte[] buf = new byte[65536];
+                                for (int k; (k = in.read(buf)) > 0; ) os.write(buf, 0, k);
+                            }
+                            out.append(nativeStubCheck(so.getAbsolutePath(), e.getValue().toArray(new String[0])))
+                               .append('\n');
+                        }
+                    }
+                    if (r.stubExports.isEmpty()) out.append("stubcheck: no generated stub (every library kept the prebuilt one)\n");
+                } catch (Throwable t) {
+                    out.append("stubcheck: FAILED — ").append(t).append('\n');
+                    Log.e(TAG, "stubcheck failed", t);
+                } finally {
+                    if (unsigned.exists() && !unsigned.delete()) Log.w(TAG, "stubcheck: could not delete " + unsigned);
+                }
+                final String text = out.toString();
+                Log.i(TAG, text);
+                runOnUiThread(new Runnable() {
+                    @Override public void run() { saveAndShow("stubcheck", text); }
+                });
+            }
+        }, "rb-stubcheck").start();
+    }
+
     private java.util.Map<String, byte[]> readRepackRuntime(StringBuilder out) throws IOException {
         java.util.Map<String, byte[]> files = new java.util.LinkedHashMap<>();
         try (java.util.zip.ZipFile self = new java.util.zip.ZipFile(getApplicationInfo().sourceDir)) {

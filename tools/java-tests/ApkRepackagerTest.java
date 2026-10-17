@@ -236,6 +236,30 @@ public class ApkRepackagerTest {
         check(!reportHas(r, "libgumball.so", "dropped"), "armeabi-only lib is not reported dropped: " + r.report);
     }
 
+    /** A real 32-bit library and a DEX declaring three of its natives: a generated stub exporting exactly those. */
+    static void generatesStubs() throws IOException {
+        File so = new File(fixtures, "libjnibridge_fixture.so");
+        if (!so.isFile()) { System.out.println("ApkRepackagerTest: no " + so + " — generated-stub row skipped"); return; }
+        Map<String, byte[]> x = new LinkedHashMap<>();
+        x.put("classes.dex", Files.readAllBytes(new File(fixtures, "JniFixture.dex").toPath()));
+        x.put("lib/armeabi-v7a/libjnibridge_fixture.so", Files.readAllBytes(so.toPath()));
+        x.put("lib/armeabi-v7a/libplain.so", b("not an ELF"));
+        File in = build("min_only", null, "genstub", x);
+        File out = new File(scratch, "genstub.out.apk");
+        ApkRepackager.Result r = ApkRepackager.transform(in, runtime(), out);
+        Map<String, byte[]> o = readAll(out);
+        byte[] stub = o.get("lib/arm64-v8a/libjnibridge_fixture.so");
+        check(stub != null && !Arrays.equals(stub, STUB) && stub[4] == 2 && stub[18] == (byte) 183,
+              "the ELF library gets a generated AArch64 stub");
+        String s = stub == null ? "" : new String(stub, java.nio.charset.StandardCharsets.ISO_8859_1);
+        check(s.contains("Java_rb_Fixture_mix\0") && s.contains("Java_rb_Fixture_half\0")
+              && s.contains("Java_rb_Fixture_echoObject\0") && s.contains("JIJFDIJFDIIIIFFDDFD\0"), "declared natives exported");
+        check(!s.contains("Java_rb_Fixture_third") && !s.contains("Java_rb_Fixture_fails"), "undeclared Java_* left out");
+        check(reportHas(r, "libjnibridge_fixture.so", "generated stub, 3 Java_*"), "report: " + r.report);
+        check(Arrays.equals(o.get("lib/arm64-v8a/libplain.so"), STUB) && reportHas(r, "libplain.so", "prebuilt stub"),
+              "an unreadable library keeps the prebuilt stub: " + r.report);
+    }
+
     interface Throwing { void run() throws IOException; }
 
     static void refuses(String what, Throwing t) {
@@ -356,12 +380,100 @@ public class ApkRepackagerTest {
         check(!o3.containsKey("classes.dex") && !o3.containsKey(ShimPlan.CONFIG_ENTRY), "hasCode=false: no dex added");
     }
 
+    static String dumpResources(File apk) throws IOException, InterruptedException {
+        File txt = new File(scratch, apk.getName() + ".resources.txt");
+        int rc = new ProcessBuilder(aapt2, "dump", "resources", apk.getPath())
+                .redirectErrorStream(true).redirectOutput(txt).start().waitFor();
+        String t = new String(Files.readAllBytes(txt.toPath()), StandardCharsets.UTF_8);
+        check(rc == 0, apk.getName() + ": aapt2 dump resources exit " + rc + ": " + t);
+        return t;
+    }
+
+    static void renamesPackage() throws Exception {
+        Map<String, byte[]> x = new LinkedHashMap<>();
+        x.put("classes.dex", Files.readAllBytes(new File(fixtures, "RiskyFixture.dex").toPath()));
+        x.put("lib/armeabi-v7a/libfoo.so", b("V7A-foo"));
+        File in = build("rename", null, "rename", x);
+        File out = new File(scratch, "rename.out.apk");
+        ApkRepackager.Result r = ApkRepackager.transform(in, runtimeWithShims(), out, ApkRepackager.RENAME_SUFFIX);
+        check("com.retrobug.fixture.rb".equals(r.packageName) && "com.retrobug.fixture".equals(r.renamedFrom),
+                "rename: result names both packages: " + r.packageName + " / " + r.renamedFrom);
+        check(reportHas(r, "package com.retrobug.fixture -> com.retrobug.fixture.rb", "beside the original"), "rename reported: " + r.report);
+        check(reportHas(r, "rename: activity name: .Main", "com.retrobug.fixture.Main"), "class expansion reported: " + r.report);
+        check(reportHas(r, "resources.arsc", "package name -> com.retrobug.fixture.rb"), "arsc rename reported: " + r.report);
+        String t = xmltree(out);
+        check(t.contains("package=\"com.retrobug.fixture.rb\""), "aapt2: output package is renamed: " + t);
+        check(t.contains("name(0x01010003)=\"com.retrobug.fixture.Main\"") && !t.contains("\".Main\""),
+                "aapt2: activity expanded against the original package");
+        check(t.contains("authorities(0x01010018)=\"com.retrobug.fixture.rb.files;com.facebook.app.FacebookContentProvider123.rb\""),
+                "aapt2: game provider authorities renamed");
+        // The shim provider is added after the rename, so its authority is under the new package.
+        check(t.contains("authorities(0x01010018)=\"com.retrobug.fixture.rb.rbshim\""), "aapt2: shim authority under the new package");
+        check(t.contains("name(0x01010003)=\"com.retrobug.fixture.rb.permission.C2D_MESSAGE\""), "aapt2: declared permission renamed");
+        check(t.contains("targetSdkVersion(0x01010270)=24"), "aapt2: targetSdk still raised");
+        String res = dumpResources(out);
+        check(res.contains("Package name=com.retrobug.fixture.rb id=7f") && res.contains("string/app_name"),
+                "aapt2: resources.arsc package renamed: " + res);
+        check(methodOf(out, "resources.arsc") == ZipEntry.STORED, "renamed resources.arsc stays STORED");
+
+        // Without a rename: arsc byte-identical, package unchanged, no rename lines.
+        File plain = new File(scratch, "rename.plain.apk");
+        ApkRepackager.Result p = ApkRepackager.transform(in, runtimeWithShims(), plain);
+        check(p.renamedFrom == null && "com.retrobug.fixture".equals(p.packageName), "no rename: package kept");
+        check(Arrays.equals(readAll(plain).get("resources.arsc"), readAll(in).get("resources.arsc")), "no rename: arsc untouched");
+        check(!reportHas(p, "rename", "") && !reportHas(p, "resources.arsc", ""), "no rename: no rename lines: " + p.report);
+
+        // A full new name; a bad one is refused and leaves no output behind.
+        File full = new File(scratch, "rename.full.apk");
+        ApkRepackager.Result f = ApkRepackager.transform(in, runtimeWithShims(), full, "org.example.side");
+        check("org.example.side".equals(f.packageName) && xmltree(full).contains("package=\"org.example.side\""), "full rename");
+        File bad = new File(scratch, "rename.bad.apk");
+        try {
+            ApkRepackager.transform(in, runtimeWithShims(), bad, "not a package");
+            check(false, "bad rename should throw");
+        } catch (IOException ex) {
+            check(!bad.exists(), "bad rename leaves no output");
+        }
+
+        // renameArscPackage: only a package chunk with exactly the old name; a non-table is left alone.
+        byte[] arsc = readAll(in).get("resources.arsc");
+        check(ApkRepackager.renameArscPackage(arsc.clone(), "com.retrobug.fix", "x.y") == 0, "arsc: no prefix match");
+        check(ApkRepackager.renameArscPackage(b("not a resource table"), "a.b", "c.d") == 0, "arsc: garbage left alone");
+    }
+
     static String aapt2;
+
+    /** Targeting API 30+ refuses a compressed resources.arsc (Where's My Mickey ships one): the output stores it. */
+    static void storesCompressedArsc() throws IOException {
+        File plain = build("min_only", null, "arsc-src", fullExtras());
+        File in = new File(scratch, "arsc-deflated.apk");
+        try (ZipFile src = new ZipFile(plain); ZipOutputStream zo = new ZipOutputStream(Files.newOutputStream(in.toPath()))) {
+            for (Enumeration<? extends ZipEntry> en = src.entries(); en.hasMoreElements(); ) {
+                ZipEntry se = en.nextElement();
+                byte[] data;
+                try (InputStream s = src.getInputStream(se)) { data = s.readAllBytes(); }
+                zo.putNextEntry(new ZipEntry(se.getName()));  // everything DEFLATED, resources.arsc included
+                zo.write(data);
+                zo.closeEntry();
+            }
+        }
+        check(methodOf(in, "resources.arsc") == ZipEntry.DEFLATED, "fixture precondition: resources.arsc is DEFLATED");
+        File out = new File(scratch, "arsc-deflated.out.apk");
+        ApkRepackager.transform(in, runtime(), out);
+        try (ZipFile z = new ZipFile(out); ZipFile p = new ZipFile(plain)) {
+            check(z.getEntry("resources.arsc").getMethod() == ZipEntry.STORED, "compressed resources.arsc is written STORED");
+            byte[] want, got;
+            try (InputStream s = p.getInputStream(p.getEntry("resources.arsc"))) { want = s.readAllBytes(); }
+            try (InputStream s = z.getInputStream(z.getEntry("resources.arsc"))) { got = s.readAllBytes(); }
+            check(Arrays.equals(want, got), "resources.arsc bytes unchanged");
+        }
+    }
 
     public static void main(String[] a) throws Exception {
         fixtures = new File(a[0]); scratch = new File(a[1]); aapt2 = a[2];
         addsShims();
         shimsWhenNotNeededOrImpossible();
+        renamesPackage();
         movesV7aAndStubs();
         reportsDroppedAndUnstubbed();
         bumpsTarget();
@@ -370,7 +482,9 @@ public class ApkRepackagerTest {
         raisesTarget22();
         neverLowersTarget();
         armeabiOnlyWorks();
+        generatesStubs();
         refusals();
+        storesCompressedArsc();
         System.out.println(checks + " checks, " + failures + " failures");
         System.exit(failures == 0 ? 0 : 1);
     }

@@ -44,6 +44,7 @@
 #include <jni.h>
 
 #include <android/log.h>
+#include <dlfcn.h>
 #include <fcntl.h>
 
 #include <unistd.h>
@@ -128,7 +129,7 @@ constexpr std::size_t kWindowBytes = 64u << 20;
 /// that with a guard reservation, because an *unreserved* window is a loaded library that ends past
 /// 12 MiB: the loader's free-space scan would place a module over the sentinel and the slots, and a
 /// guest branch to a 4-aligned address inside the range would then report a bogus host call.
-constexpr std::size_t kHostWindowBytes = 0x2000u;
+constexpr std::size_t kHostWindowBytes = 0x1000u + std::size_t{abi::AbiContext::kMaxSlots} * 4u;
 /// One guest call's instruction budget, the same figure the APK lane uses. Tier I counts IR ops and Tier
 /// J guest encodings, so this bounds the two differently — it exists to stop a runaway guest, not to
 /// measure it.
@@ -2586,4 +2587,53 @@ Java_com_retrobug_launcher_LauncherActivity_nativeBootCheck(JNIEnv* env, jclass 
     if (u >= 0x80 || (u < 0x20 && c != '\n')) c = '?';
   }
   return env->NewStringUTF(report.c_str());
+}
+
+/// `-e stubcheck`: dlopen one generated stub (RTLD_NOW, in this process, where librbguest.so is already loaded), then
+/// for each export: dlsym it, decode its `ldr x16, <GOT>` and check the slot the linker filled is rb_stub_capture.
+/// Never calls an export. One line: "stubcheck: <lib>: N exports resolved, dispatch at 0x…", or what failed.
+extern "C" JNIEXPORT jstring JNICALL Java_com_retrobug_launcher_LauncherActivity_nativeStubCheck(JNIEnv* env,
+                                                                                               jclass /*clazz*/,
+                                                                                               jstring path,
+                                                                                               jobjectArray symbols) {
+  const char* p = env->GetStringUTFChars(path, nullptr);
+  const std::string file = p != nullptr ? p : "";
+  if (p != nullptr) env->ReleaseStringUTFChars(path, p);
+  const std::string lib = file.substr(file.rfind('/') + 1);
+  std::string out = "stubcheck: " + lib + ": ";
+  const auto done = [&](const std::string& tail) {
+    out += tail;
+    __android_log_print(ANDROID_LOG_INFO, "RBLAUNCH", "%s", out.c_str());
+    return env->NewStringUTF(out.c_str());
+  };
+  void* const capture = dlsym(RTLD_DEFAULT, "rb_stub_capture");
+  if (capture == nullptr) return done("FAIL: rb_stub_capture is not loaded in this process");
+  void* h = dlopen(file.c_str(), RTLD_NOW | RTLD_LOCAL);
+  if (h == nullptr) return done(std::string{"FAIL: dlopen: "} + dlerror());
+  const jsize n = env->GetArrayLength(symbols);
+  int resolved = 0;
+  std::string bad;
+  for (jsize i = 0; i < n; ++i) {
+    auto s = static_cast<jstring>(env->GetObjectArrayElement(symbols, i));
+    const char* c = env->GetStringUTFChars(s, nullptr);
+    const std::string name = c != nullptr ? c : "";
+    if (c != nullptr) env->ReleaseStringUTFChars(s, c);
+    env->DeleteLocalRef(s);
+    const auto* code = static_cast<const std::uint32_t*>(dlsym(h, name.c_str()));
+    if (code == nullptr) {
+      bad += " " + name + " (not found)";
+      continue;
+    }
+    const std::uint32_t ldr = code[2];
+    const std::int32_t imm19 = static_cast<std::int32_t>((ldr >> 5 & 0x7ffffu) << 13) >> 13;
+    void* const slot = *reinterpret_cast<void* const*>(reinterpret_cast<const char*>(&code[2]) + 4 * imm19);
+    if ((ldr & 0xff00001fu) != 0x58000010u || slot != capture) {
+      bad += " " + name + " (GOT slot is not rb_stub_capture)";
+      continue;
+    }
+    ++resolved;
+  }
+  char head[96];
+  std::snprintf(head, sizeof head, "%d of %d exports resolved, dispatch at %p", resolved, static_cast<int>(n), capture);
+  return done(std::string{head} + (bad.empty() ? "" : "; FAIL:" + bad));
 }

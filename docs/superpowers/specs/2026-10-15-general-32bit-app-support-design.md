@@ -128,11 +128,11 @@ lists risky DEX calls. Gumball now passes its first-run billing bind on the OneP
 2. **M2 Multi-entry core.** *(DONE 2026-10-16, branch `m2-multi-entry-core`: accepted on the tablet and the OnePlus — see HANDOFF.md.)* Thread contexts, GGL, clone/futex/exit, adopted ART threads with synthesized
    guest pthreads. *Tests*: fixture rows (pthread create/join, mutex contention, condvar, TLS keys and
    destructors) on both tiers, expected values from the tablet running the same `.so` natively.
-3. **M3 JNI bridge.** Forwarding env/VM, handle tables, trampolines from stub exports, guest
+3. **M3 JNI bridge.** *(DONE 2026-10-17, branch `m3-integration`: Gumball launched by its icon reaches GumballMainMenu and plays Karate Chop on the OnePlus and the tablet; bridge check 11/11 and all lanes green on both — see HANDOFF.md.)* Forwarding env/VM, handle tables, trampolines from stub exports, guest
    RegisterNatives. *Acceptance*: Gumball runs from its own `JNIGLSurface` with no profile (GLES1 thunks).
    *Tests*: an instrumented test APK whose Java calls a 32-bit fixture `.so` through the bridge (strings,
    arrays, callbacks, exceptions, globals, threads), expectations from the tablet natively.
-4. **M4 Thunk layer.** Generic caller + GLES2/3/EGL, libandroid, OpenSL ES, jnigraphics, host-memory
+4. **M4 Thunk layer.** *(DONE 2026-10-18 on the tablet and the OnePlus, branch `m4-thunks`: Fruit Ninja vs Skittles plays with sound, Android KitKat Challenge plays with OpenSL ES sound, Looney Tunes Dash / Where's My Mickey boot to their first screens. Angry Birds Go stops at its own "Download failed" (server content); the human moved the acceptance to other games. Per-game profiles are out of the product path and stay in the launcher as diagnostics. See HANDOFF.md.)* Generic caller + GLES2/3/EGL, libandroid, OpenSL ES, jnigraphics, host-memory
    window service. *Acceptance*: Angry Birds Go reaches its title screen with sound. Retire per-game
    profiles from the launcher (keep it as a diagnostics tool).
 5. **M5 Breadth.** (targetSdk compatibility shims land earlier, before M3 acceptance.) Run the tablet's 31 installed 32-bit apps through the repackager; fix what each names;

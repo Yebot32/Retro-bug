@@ -443,8 +443,8 @@ Ret32 AbiContext::CallGuest(GuestAddr fn, const Args32& args, const Shorty& shor
 }
 
 Ret32 AbiContext::CallGuestToCompletion(GuestAddr fn, const Args32& args, const Shorty& shorty, unsigned turn_budget,
-                                        exec::RunResult* outcome) {
-  return CallGuestImpl(fn, args, shorty, turn_budget, true, outcome, nullptr);
+                                        exec::RunResult* outcome, MachineState* exit_state) {
+  return CallGuestImpl(fn, args, shorty, turn_budget, true, outcome, exit_state);
 }
 
 Ret32 AbiContext::CallGuestImpl(GuestAddr fn, const Args32& args, const Shorty& shorty, unsigned max_steps,
@@ -542,6 +542,7 @@ exec::RunResult AbiContext::RunThread(runtime::GuestThread& thread, unsigned bud
       // budget, exactly as it does at the end of any call's budget — and both tiers start every Run with
       // no exclusive reservation, so an LL/SC sequence split by the switch fails its strex and retries.
       slices_.fetch_add(1, std::memory_order_relaxed);
+      if (slice_probe_) slice_probe_(state.pc);
       if (ggl_.waiters() > 0) contended_slices_.fetch_add(1, std::memory_order_relaxed);
       {
         runtime::Ggl::Released off(ggl_);
@@ -671,6 +672,10 @@ exec::RunResult AbiContext::RunThread(runtime::GuestThread& thread, unsigned bud
     }
   }
 
+  if (run.reason == exec::StopReason::Fault && fault_namer_) {
+    const std::string what = fault_namer_(state.pc);
+    if (!what.empty()) run.detail += (run.detail.empty() ? "" : ": ") + what;
+  }
   // The whole call's count, not the last segment's: `run` is the slice after the final host call or
   // syscall, so a call that made any reported only its tail — Gumball's jniRun read "38 steps" every frame
   // while issuing 17 GL calls. Nested calls a host function makes run on their own budgets and are not

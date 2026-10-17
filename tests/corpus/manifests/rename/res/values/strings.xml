@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- One resource so resources.arsc has a package chunk for the rename to follow. -->
+<resources>
+    <string name="app_name">fixture</string>
+</resources>

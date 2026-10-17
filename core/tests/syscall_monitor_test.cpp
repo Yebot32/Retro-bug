@@ -482,7 +482,7 @@ void mmap2_in_a_4gib_window_stays_below_the_ceiling() {
   const sc::Outcome few = mmap(0, 4 * mem::kGuestPage);
   CHECK_CTX(few.verdict == sc::Verdict::kEmulated, few.detail);
   const std::uint32_t at = static_cast<std::uint32_t>(few.r0);
-  CHECK_CTX(few.r0 > 0 && static_cast<std::uint64_t>(at) + 4 * mem::kGuestPage <= kCeiling &&
+  CHECK_CTX(!(few.r0 < 0 && few.r0 >= -4095) && at != 0 && static_cast<std::uint64_t>(at) + 4 * mem::kGuestPage <= kCeiling &&
                 window->IsMapped(at),
             "few pages -> 0x" + std::to_string(at));
   // A hint straddling the ceiling is not honoured (the kernel may ignore a hint); the answer lands below.
@@ -493,6 +493,56 @@ void mmap2_in_a_4gib_window_stays_below_the_ceiling() {
   // Fits in the 4 GiB window, not below the ceiling: ENOMEM.
   const sc::Outcome big = mmap(0, kCeiling);
   CHECK_CTX(big.r0 == -static_cast<std::int32_t>(sc::err::kEnomem), "len=0xfff00000: " + big.detail);
+}
+
+/// Anonymous mappings are placed top-down, as Linux places them (mmap_base under the stack, each new mapping
+/// in the highest gap below): the first lands just under the ceiling, the next directly below it, and a freed
+/// gap at the top is reused first. A guest that reads a little past the end of its newest heap region (Gumball's
+/// cLanguage::read scans past its last string for a non-zero byte) then reads the older region above it, as
+/// on a device, instead of running off the end of the window's used space.
+std::string Hex(std::uint32_t v) {
+  char b[16];
+  std::snprintf(b, sizeof b, "%x", v);
+  return b;
+}
+
+void mmap2_places_top_down_like_the_kernel() {
+  mem::AddressModel model;
+  model.kind = mem::AddressModel::kBiased;
+  const long host_page = sysconf(_SC_PAGESIZE);
+  model.host_page_shift = mem::kGuestPageShift;
+  while (host_page > 0 && (1L << model.host_page_shift) < host_page) ++model.host_page_shift;
+  std::string err;
+  auto window = mem::GuestMemory::Create(std::size_t{1} << 32, model, &err);
+  CHECK_CTX(window != nullptr, "a 4 GiB biased window: " + err);
+  if (!window) return;
+  constexpr std::uint32_t kCeiling = 0xfff0'0000u;
+  sc::Monitor m;
+  m.set_memory(window.get());
+  m.set_alloc_ceiling(kCeiling);
+  const auto mmap = [&](std::uint32_t len) {
+    exec::MachineState s = State(sc::nr::kMmap2);
+    s.r[1] = len;
+    s.r[2] = 3;
+    s.r[3] = 0x22;
+    s.r[4] = 0xffff'ffffu;
+    return static_cast<std::uint32_t>(m.Handle(s, 0).r0);
+  };
+  const std::uint32_t a = mmap(4 * mem::kGuestPage);
+  const std::uint32_t b = mmap(2 * mem::kGuestPage);
+  CHECK_CTX(a == kCeiling - 4 * mem::kGuestPage, "first at 0x" + Hex(a));
+  CHECK_CTX(b == a - 2 * mem::kGuestPage, "second at 0x" + Hex(b) + ", first at 0x" + Hex(a));
+  // Free the top one: a mapping that fits there goes back to the highest gap.
+  exec::MachineState u = State(sc::nr::kMunmap);
+  u.r[0] = a;
+  u.r[1] = 4 * mem::kGuestPage;
+  m.Handle(u, 0);
+  const std::uint32_t c = mmap(mem::kGuestPage);
+  CHECK_CTX(c == kCeiling - mem::kGuestPage, "after freeing the top, 0x" + Hex(c));
+  const std::uint32_t d = mmap(8 * mem::kGuestPage);  // does not fit above b: goes below it
+  CHECK_CTX(d == b - 8 * mem::kGuestPage, "a larger one at 0x" + Hex(d) + ", b at 0x" + Hex(b));
+  // An address above 0x80000000 is a negative int32 but not an error (only -4095..-1 are): never a refusal.
+  CHECK_CTX(m.refusals() == 0u, std::to_string(m.refusals()) + " refusals counted for successful mappings");
 }
 
 /// `munmap` releases what `mmap2` served: the pages stop being mapped, the call answers 0 whether or
@@ -533,8 +583,10 @@ void mremap_grows_moves_and_shrinks_like_a_kernel() {
   auto window = Window();
   if (!window) return;
   m.set_memory(window.get());
-  const auto mmap = [&](std::uint32_t len) {
+  // Placed by hint: the rows need room above a mapping, and anonymous mappings are placed top-down.
+  const auto mmap = [&](std::uint32_t len, std::uint32_t hint) {
     exec::MachineState s = State(sc::nr::kMmap2);
+    s.r[0] = hint;
     s.r[1] = len;
     s.r[2] = 3;
     s.r[3] = 0x22;
@@ -549,7 +601,7 @@ void mremap_grows_moves_and_shrinks_like_a_kernel() {
     s.r[3] = flags;
     return m.Handle(s, 0);
   };
-  const std::uint32_t a = mmap(0x1000);
+  const std::uint32_t a = mmap(0x1000, 0x4000);
   CHECK(a != 0);
   const std::uint32_t magic = 0xa7e7'1700u;
   CHECK(window->Write(a + 0x10, &magic, 4));
@@ -558,7 +610,7 @@ void mremap_grows_moves_and_shrinks_like_a_kernel() {
   CHECK_CTX(o.verdict == sc::Verdict::kEmulated && static_cast<std::uint32_t>(o.r0) == a, o.detail);
   CHECK_CTX(window->IsMapped(a + 0x1000), "grown in place, but the new page is not mapped");
 
-  const std::uint32_t blocker = mmap(0x1000);  // lands right after: mmap2 keeps arenas consecutive
+  const std::uint32_t blocker = mmap(0x1000, a + 0x2000);  // right after it, by hint
   CHECK_CTX(blocker == a + 0x2000, "the blocker landed at " + std::to_string(blocker));
   o = mremap(a, 0x2000, 0x3000, 0);
   CHECK_CTX(o.r0 == -static_cast<std::int32_t>(sc::err::kEnomem), "no MAYMOVE, no room: " + o.detail);
@@ -736,6 +788,7 @@ int main() {
   the_tally_is_per_monitor_and_in_first_seen_order();
   mmap2_serves_real_anonymous_pages();
   mmap2_in_a_4gib_window_stays_below_the_ceiling();
+  mmap2_places_top_down_like_the_kernel();
   munmap_releases_served_pages();
   mremap_grows_moves_and_shrinks_like_a_kernel();
   console_writes_are_captured_and_answered_as_written();

@@ -134,4 +134,44 @@ target_compile_definitions(rb_guest_thread_tests PRIVATE
   RB_GUEST_LIBM_PATH="/data/local/tmp/libm.so"
   RB_GUEST_LIBZ_PATH="/data/local/tmp/libz.so"
   RB_PTHREAD_FIXTURE_PATH="/data/local/tmp/libpthread_fixture.so"
-  RB_PTHREAD_ORACLE_PATH="/data/local/tmp/oracle-pthread.txt")
+  RB_PTHREAD_ORACLE_PATH="/data/local/tmp/oracle-pthread.txt"
+  RB_UNRESOLVED_FIXTURE_PATH="/data/local/tmp/librbunresolved.so")
+
+# M3 Task 1: the forwarding JNI bridge over a fake Java, driven by tests/corpus/jni_bridge_fixture.c.
+add_executable(rb_jni_forward_tests jni_forward_test.cpp fake_java.cpp)
+target_link_libraries(rb_jni_forward_tests PRIVATE rb_runtime rb_abi)
+target_compile_definitions(rb_jni_forward_tests PRIVATE
+  RB_DEVICE_LIBC_PATH="/data/local/tmp/rb_device_libc.so"
+  RB_GUEST_LIBM_PATH="/data/local/tmp/libm.so"
+  RB_GUEST_LIBZ_PATH="/data/local/tmp/libz.so"
+  RB_JNIBRIDGE_FIXTURE_PATH="/data/local/tmp/libjnibridge_fixture.so")
+
+# M3 Task 3: Java calling guest natives through the inbound trampolines (arm64 hosts).
+if(TARGET rb_inbound)
+  add_executable(rb_inbound_tests inbound_test.cpp fake_java.cpp)
+  target_link_libraries(rb_inbound_tests PRIVATE rb_inbound rb_runtime rb_abi)
+  target_compile_definitions(rb_inbound_tests PRIVATE
+    RB_DEVICE_LIBC_PATH="/data/local/tmp/rb_device_libc.so"
+    RB_GUEST_LIBM_PATH="/data/local/tmp/libm.so"
+    RB_GUEST_LIBZ_PATH="/data/local/tmp/libz.so"
+    RB_JNIBRIDGE_FIXTURE_PATH="/data/local/tmp/libjnibridge_fixture.so")
+endif()
+
+# M4 Task 1: the generic AAPCS32-softfp -> AAPCS64 thunk caller and handle table (host functions called directly).
+add_executable(rb_thunk_tests thunk_test.cpp)
+target_link_libraries(rb_thunk_tests PRIVATE rb_abi rb_mem)
+
+# M4 Task 3b: host file and socket pass-through (Monitor::set_host_io).
+add_executable(rb_host_io_tests host_io_test.cpp)
+target_link_libraries(rb_host_io_tests PRIVATE rb_syscall rb_mem)
+
+# M4 Task 4: the OpenSL ES thunks against the device's own libOpenSLES (the module lives with the other Android
+# thunks; it depends on HandleTable/ThunkCaller and the OpenSL ES headers only, not on the launcher).
+add_executable(rb_sles_tests sles_test.cpp "${CMAKE_SOURCE_DIR}/android/jni/thunks_sles.cpp")
+target_include_directories(rb_sles_tests PRIVATE "${CMAKE_SOURCE_DIR}/android/jni")
+target_link_libraries(rb_sles_tests PRIVATE rb_abi rb_mem OpenSLES dl)
+
+# M4 Task 2: the GL/EGL thunk table against the device's driver on an offscreen pbuffer.
+add_executable(rb_gl_thunk_tests gl_thunk_test.cpp "${CMAKE_SOURCE_DIR}/android/jni/thunks.cpp")
+target_include_directories(rb_gl_thunk_tests PRIVATE "${CMAKE_SOURCE_DIR}/android/jni")
+target_link_libraries(rb_gl_thunk_tests PRIVATE rb_abi rb_mem EGL GLESv2 dl)

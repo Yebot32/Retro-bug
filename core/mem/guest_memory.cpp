@@ -164,6 +164,10 @@ void GuestMemory::DropPage(std::size_t page_idx) {
 }
 
 bool GuestMemory::Map(std::uint32_t at, std::size_t len, unsigned prot, std::string* err) {
+  struct NotifyOnExit {  // every exit, a failure included: a partial change still moved pages
+    const GuestMemory& m; std::uint32_t a; std::size_t n;
+    ~NotifyOnExit() { m.Notify(a, n); }
+  } notify_on_exit{*this, at, len};
   // Success is reported by leaving `err` empty, so a string that arrives already carrying last call's
   // text must not be read as this call's failure. It was: a caller reusing one `std::string` across a
   // sequence of maps had a *successful* map roll itself back and return false, and the launcher is exactly
@@ -210,6 +214,10 @@ bool GuestMemory::Map(std::uint32_t at, std::size_t len, unsigned prot, std::str
 
 bool GuestMemory::MapFile(std::uint32_t at, std::size_t len, unsigned prot, int fd,
                           std::uint64_t offset, bool shared, std::string* err) {
+  struct NotifyOnExit {  // every exit, a failure included: a partial change still moved pages
+    const GuestMemory& m; std::uint32_t a; std::size_t n;
+    ~NotifyOnExit() { m.Notify(a, n); }
+  } notify_on_exit{*this, at, len};
   // Same precondition as `Map`: the caller's error string is an output, not an input.
   if (err != nullptr) err->clear();
   if (len == 0) {
@@ -273,6 +281,10 @@ bool GuestMemory::MapFile(std::uint32_t at, std::size_t len, unsigned prot, int 
 }
 
 bool GuestMemory::Protect(std::uint32_t at, std::size_t len, unsigned prot, std::string* err) {
+  struct NotifyOnExit {  // every exit, a failure included: a partial change still moved pages
+    const GuestMemory& m; std::uint32_t a; std::size_t n;
+    ~NotifyOnExit() { m.Notify(a, n); }
+  } notify_on_exit{*this, at, len};
   if (len == 0) {
     // A zero-length mprotect is a kernel no-op; taking the unaligned-address path a first draft took
     // re-protected (or unmapped) a whole page the caller never named.
@@ -303,6 +315,10 @@ bool GuestMemory::Protect(std::uint32_t at, std::size_t len, unsigned prot, std:
 }
 
 bool GuestMemory::Unmap(std::uint32_t at, std::size_t len, std::string* err) {
+  struct NotifyOnExit {  // every exit, a failure included: a partial change still moved pages
+    const GuestMemory& m; std::uint32_t a; std::size_t n;
+    ~NotifyOnExit() { m.Notify(a, n); }
+  } notify_on_exit{*this, at, len};
   if (len == 0) {
     if (err) *err = "zero-length munmap";
     return false;
@@ -749,6 +765,28 @@ void GuestMemory::Audit(diag::Auditor& audit) const {
                   std::to_string(mapped_page_count()));
   audit.Info("mem/pages", std::to_string(live) + " live, " + std::to_string(guards) +
                              " reservation(s), window " + std::to_string(window_bytes_) + " bytes");
+}
+
+}  // namespace rb::mem
+
+namespace rb::mem {
+
+int GuestMemory::AddObserver(Observer fn) {
+  const int id = next_observer_++;
+  observers_.emplace(id, std::move(fn));
+  return id;
+}
+
+void GuestMemory::RemoveObserver(int id) { observers_.erase(id); }
+
+void GuestMemory::Notify(std::uint32_t at, std::size_t len) const {
+  if (observers_.empty() || len == 0) return;
+  const std::uint64_t g = GranuleBytes();
+  const std::uint64_t from = (static_cast<std::uint64_t>(at) / g) * g;
+  std::uint64_t to = ((static_cast<std::uint64_t>(at) + len + g - 1) / g) * g;
+  if (to > window_bytes_) to = window_bytes_;
+  if (to <= from) return;
+  for (const auto& [id, fn] : observers_) fn(static_cast<std::uint32_t>(from), static_cast<std::size_t>(to - from));
 }
 
 }  // namespace rb::mem

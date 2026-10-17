@@ -53,8 +53,9 @@ struct GuestProcessOptions {
   std::size_t window_bytes = 64u << 20;
   /// `AddressModel::kBiased` when true, `kFlatIdentity` otherwise.
   bool biased = true;
-  /// What an import nothing answers is bound to (a weak one gets 0, as on a device). 0: no trap — an
-  /// unanswered strong import then fails the load by name. The page is reserved when inside the window.
+  /// Where imports nothing answers are bound (a weak one gets 0, as on a device): each name gets its own
+  /// slot from here (`GuestProcess::kTrapSpan` bytes), so calling one faults naming it. 0: no trap — an
+  /// unanswered strong import then fails the load by name. The span is reserved where inside the window.
   GuestAddr unresolved_trap = 0;
   /// Consulted after the scope (and earlier apps) for a name none of them defines. nullopt, or the trap
   /// address, means "not answered".
@@ -96,6 +97,12 @@ class GuestProcess {
   /// Nothing this process (or the monitor's `mmap2`) places is at or above this: the top of a 4 GiB
   /// window holds the runtime's trap (0xfffe0000) and the kuser helpers (0xffff0f60..).
   static constexpr GuestAddr kAllocCeiling = 0xfff0'0000u;
+  /// The unanswered-import trap's extent from `unresolved_trap`: one `kTrapSlot`-byte slot per name, in
+  /// `unanswered()` order (0xfffe0000..0xffff0000 for the runtime's, below the kuser helpers; 4096 slots).
+  /// Names past the last slot share it. 16 bytes, not 4: after a failed fetch both tiers leave PC one
+  /// instruction past the slot's start (measured: fetch 0xbad0010, pc 0xbad0014), which must still be its slot.
+  static constexpr std::uint32_t kTrapSpan = 0x1'0000u;
+  static constexpr std::uint32_t kTrapSlot = 16u;
   static constexpr std::uint32_t kMainStackBytes = 8u << 20;
   static constexpr unsigned kCallBudget = 4'000'000;
   static constexpr unsigned kJniArenaBytes = 1u << 20;
@@ -160,6 +167,8 @@ class GuestProcess {
   const std::vector<std::unique_ptr<loader::GuestModule>>& modules() const { return modules_; }
   /// Imports (scope and apps) nothing answered, each once, in first-asked order.
   const std::vector<std::string>& unanswered() const { return unanswered_; }
+  /// "the unanswered import <name> (...)" when `pc` is one of the trap's slots, else "". GGL-protected.
+  std::string TrapName(GuestAddr pc) const;
 
   // ---- guest threads (M2 Task 4)
   /// The process's futex waiters (the monitor's `futex`, thread exits' clear-child-tid wakes).

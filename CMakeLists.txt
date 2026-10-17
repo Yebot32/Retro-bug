@@ -68,14 +68,15 @@ endif()
 # which is the only way it gets built.
 if(RB_BUILD_LAUNCHER)
   add_library(rbguest SHARED EXCLUDE_FROM_ALL android/jni/launcher.cpp android/jni/gl_forward.cpp
-              android/jni/runtime_boot.cpp android/jni/host_slots.cpp)
+              android/jni/runtime_boot.cpp android/jni/host_slots.cpp android/jni/thunks.cpp android/jni/thunks_android.cpp android/jni/thunks_sles.cpp
+              android/jni/art_java.cpp android/jni/stub_entry_aarch64.S)
   # The same set `rb_guest_apk_tests` links (`core/tests/CMakeLists.txt`), because this target does the
   # same sequence: memory, loader, linker, executors, bridge. `rb_mem` is already implied by the others,
   # and named anyway so that a reader of this line sees which layer every address in the launcher goes
   # through. `-llog` for the two milestone lines that outlive a native crash; `-lz` (the NDK's system
   # zlib) inflates the guest APK's deflated assets for the class model's `readFile`. Static-lib link order is
   # CMake's business here, not ours: these are all CMake targets with PUBLIC dependencies.
-  target_link_libraries(rbguest PRIVATE rb_runtime rb_linker rb_loader rb_exec rb_abi rb_mem -llog -lz -lEGL -landroid)
+  target_link_libraries(rbguest PRIVATE rb_inbound rb_runtime rb_linker rb_loader rb_exec rb_abi rb_mem -llog -lz -lEGL -lGLESv2 -landroid -ljnigraphics)
   # The APK is `arm64-v8a` — RetroBug is the host — and the guest is `armeabi-v7a` *bytes*, never a
   # library this process asks the system loader for. Nothing here restricts the ABI, so an
   # `-DANDROID_ABI=x86_64` configure of this target builds and does not run: the emulator cannot execute

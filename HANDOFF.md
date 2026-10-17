@@ -6,6 +6,113 @@ hand-written IR interpreter = "Tier I"). Engine in `core/`, on-device launcher a
 (`android/jni/launcher.cpp` + `android/jni/gl_forward.cpp` + `android/java/.../LauncherActivity.java`).
 Everything below this section is older, detailed session history — read it only when you need depth.
 
+## M4 — thunk layer (2026-10-18, branch `m4-thunks`, DONE on the tablet and the OnePlus) — newest state
+
+Plan `docs/superpowers/plans/2026-10-17-m4-thunk-layer.md`; ledger `.superpowers/sdd/2026-10-17-m4-thunk-layer/progress.md`
+(every ruling is there). Nothing merged to `main`, nothing pushed — both wait for the human.
+
+**What runs (Tab S9, repacked at target 35, renamed `.rb`):**
+- **Fruit Ninja vs Skittles** — menu and play; the human played it and could not tell it from a native 32-bit device
+  (sound included, through its Java audio).
+- **Android KitKat Challenge** — menu and play; sound through OpenSL ES (engine, PCM buffer-queue player, callbacks
+  into the guest on the audio thread). This is the OpenSL ES acceptance.
+- **Gumball** (M3), **Looney Tunes Dash** and **Where's My Mickey** boot fully and draw their own first screen (an
+  age gate each — not filled in for the human).
+- **Angry Birds Go** draws its own UI, does TLS to Rovio, shows "Download failed": its content was a server download
+  (empty OBB/data dirs). The human: "probably not a good fit" — the acceptance moved to the games above.
+
+**What M4 added:** the generic AAPCS32→AAPCS64 caller and handle table (`core/abi/thunk.*`, 4096 slots); GLES1/2 and
+EGL tables + specials (`android/jni/thunks.cpp`, `host_slots.cpp`); libandroid (assets, windows, sensors, loopers),
+jnigraphics (`thunks_android.cpp`); OpenSL ES (`thunks_sles.cpp`); direct buffers over host memory; host file/socket
+I/O (`core/syscall/host_io.cpp`), DNS through netd; CPU-time clocks; PMCCNTR as a running count; Tier J ~250x faster
+(dynarmic's block index per page). Repack: `-e target N`, `-e stage`, exported defaults (31+), `org.apache.http.legacy`
+(28+), resources.arsc always STORED (30+).
+
+**Blocked, needs the human:**
+- Play Protect (this tablet) blocks fresh sideloads at targets 24 and 33 and some apps at 35 (OREO). Never bypassed.
+- Target 34+ makes `registerReceiver` without RECEIVER_EXPORTED/NOT_EXPORTED fatal (Blocky Roads, Cars). Both fixes
+  tried (a hidden-API shim; dex call-site rewriting to RECEIVER_EXPORTED) were stopped by the session's safety
+  classifier — pick another approach with the human.
+- Legacy storage permissions are always denied at target ≥ 33 (Rabbids refuses to start without them).
+- Renamed repacks look for their OBB under the new name (Sonic Transformed's 893 MB OBB).
+- Games that extract `lib/armeabi-v7a/*.so` from their own APK at run time (Looney's crash-recovery path) find nothing.
+
+**OnePlus (2026-10-18):** 25 suites green, bridge check 11/11, Fruit Ninja vs Skittles plays a round. Its Java read the
+device ID, which throws at target ≥ 29 on a phone; the bridge now answers a refused device-identifier read with null
+(what a phone without the permission gave), and only that (`ForwardingJni::MaskIdentifierRefusal`).
+
+**Next:** M5 — run every installed 32-bit app through the repackager and keep a pass/fail table in `docs/`; fix the most
+common causes first.
+
+**Tests:** 25 tablet suites (`tools/run_engine_tests.sh arm64-v8a`, new: rb_thunk_tests, rb_host_io_tests,
+rb_sles_tests, rb_gl_thunk_tests) and `tools/run_java_tests.sh` green on 2026-10-18. **Owed:** the same on the OnePlus
+(done 2026-10-18, see above); the human's OK before any merge or push.
+
+## M3 — JNI bridge (ACCEPTED 2026-10-17 on both devices; all work on branch `m3-integration`)
+
+**Accepted:** repacked Gumball launched by its icon reaches GumballMainMenu and plays Karate Chop on the OnePlus
+(own package) and the tablet (renamed `.rb` copy beside the original). The last blocker was mmap placement: the
+monitor now places guest mmaps top-down like Linux (6ff6eb2) — Gumball's `cLanguage::read` over-reads its buffer.
+Lanes and bridge check (11/11) green on both devices. Branch `m3-integration` = m3-jni-bridge + package-rename +
+m3-stale-local-ref + vigilant-cannon (trap names) + the mmap fix; not merged to main, not pushed.
+
+Plan `docs/superpowers/plans/2026-10-16-m3-jni-bridge.md`; ledger (rulings) `.superpowers/sdd/2026-10-16-m3-jni-bridge/progress.md`.
+Tasks 1–6 done on the tablet (the OnePlus was set aside by the human; its runs are owed before merge).
+- Forwarding JNIEnv/JavaVM (`core/abi/jni_forward.*`), inbound trampolines (`core/runtime/inbound.*`), real ART
+  (`android/jni/art_java.*`), generated stubs at repack (`NativeMethods`, `StubElfWriter`, `rb_stub_capture`).
+- Bridge test app (ours, never shipped): `bash tools/build_bridge_apk.sh`; native oracle on the tablet
+  `bash tools/run_bridge_oracle.sh` → `tests/corpus/oracle-jnibridge.txt`; bridged check
+  `bash tools/run_bridge_check.sh R52Y106BECZ` (needs `jnibridge.apk` staged once via the launcher's "Add a game"
+  picker from /sdcard/Download): **10 of 10 rows match** (strings, arrays, callbacks, exceptions, globals, threads,
+  register_natives, fields, overloads). The first run differed only in strings: ART gives 4-byte UTF-8 for a
+  surrogate pair and writes a NUL after GetStringUTFRegion — the bridge now does both.
+- `-e stubcheck <game>` in the launcher: Gumball 13/13, ABGo 93/93 exports resolve to rb_stub_capture.
+- Play Protect blocks a repacked app with an old targetSdk ("built for an older version of Android"); the test
+  app targets 34. Real games keep their target ≥ 24 — watch for this on Gumball/ABGo installs.
+- Task 7: GLES1 in the runtime — `HostSlots::enable_gl()` (slots 256..319, forwarded to the device driver on the
+  game's own GL thread; a call that cannot be forwarded returns 0 and is named once in the live log). Tablet
+  bootcheck: Gumball's unanswered imports 34 → 3 (only `__cxa_*` EH helpers left), ABGo 117 → 78, both boot clean.
+- **OnePlus runs (2026-10-17; the human handed the OnePlus 75ff8cd3 over for good, "Stay awake" is on on both devices).**
+  Launcher at 0face6c. Lanes: `RB_SERIAL=75ff8cd3 run_engine_tests.sh arm64-v8a` — all 22 suites 0 failures (dynarmic
+  200,561 assertions / 47 cases). `run_bridge_check.sh 75ff8cd3`: **10 of 10 rows match** (the script now installs via
+  the PackageInstaller session API: `adb install` is a silent no-op on ColorOS; ColorOS shows its own "No risks found
+  — Continue installation" check). ABGo (`-e repack base` — staged as base.apk there): Play Protect "App scan
+  recommended" → Scan app → "looks safe" → Install; launched by its LAUNCHER intent: shims, boot, JNI_OnLoad clean,
+  **past `isDeviceAmazon()`**; end point on the GL thread in `ExientGLSurfaceView.nativeInitialize`
+  (`onSurfaceCreated`): `instruction fetch failed at 0xfffe0000` — an unanswered EGL/GLES2/OpenSL/AAsset import (78
+  remain; M4's work, as the plan expected). ~~Gap: that fault does not name the import~~ — fixed on branch
+  `claude/vigilant-cannon-683313` (off package-rename): every unanswered import shared the one trap address and nothing
+  mapped a fault back to a name, on any thread (the adopted GL thread was incidental). Now each gets its own 16-byte
+  slot from the trap (`GuestProcess::kTrapSpan`/`kTrapSlot`; 16 because both tiers leave PC one instruction past a
+  failed fetch) and `AbiContext::RunThread` appends `GuestProcess::TrapName` to any fault; lane row
+  `unresolved_import_faults_by_name` (guest_thread_test, `tests/corpus/unresolved_call.c`, main + adopted thread, I+J).
+  OnePlus re-run 2026-10-17 (launcher + repack rebuilt, camera/location/contacts/phone/files permissions denied):
+  **ABGo's first missing import is `AAssetManager_fromJava`** — `nativeInitialize stopped: fault: instruction fetch
+  failed at 0xfffe00d0 ...: called the unanswered import AAssetManager_fromJava (bound to trap slot 0xfffe00d0)`.
+  M4's first target: the AAsset* family (AAssetManager_fromJava/open/openDir, AAsset_getLength/getBuffer/close/
+  openFileDescriptor, AAssetDir_*). Lanes after the fix: OnePlus 22/22 and tablet R52Y106BECZ 22/22, 0 failures.
+  Gumball: see the rename entry below (stale local ref in `jniInit`; fix in progress on branch
+  `m3-stale-local-ref`). Still owed for Gumball: `GumballMainMenu` drawn.
+- **Install beside the original** (branch `package-rename`, off m3-jni-bridge): `-e repack <name> -e rename 1` renames
+  the package to `<orig>.rb` (`-e rename <pkg>` for another name), kept as `repack/<name>.rb.apk`. AxmlEditor.renamePackage
+  expands relative class names against the ORIGINAL package (the DEX is not renamed), renames provider authorities and
+  declared permissions (+ their uses), a GCM category equal to the package, taskAffinity/process under it;
+  resources.arsc's package name follows. Tablet 2026-10-16: Gumball repacked as `com.twentysixdigital.gumballlite.rb`,
+  installer offered a fresh "Install this app?", then Play Protect blocked it ("built for an older version of
+  Android", targetSdk 24); the human let it through on 2026-10-17 (installed 00:30:58, arm64-v8a, beside the original,
+  which was untouched: lastUpdateTime 2025-04-28). **Launched by its LAUNCHER intent** (pid 13432): five RBSHIM lines,
+  RBRUNTIME "startup finished with no fault", GL thread adopted, every texture atlas loaded, then on
+  `loadTextureImage:font.png` → **crash**: `java.lang.Error: guest native Java_..._JNIGLSurface_jniInit stopped: host
+  call at slot 671: JNIEnv->GetObjectClass: 0xf0000204 is a stale local reference` (from `onDrawFrame`). The M3 bridge
+  likely drops a local ref made during a nested Java callback before the outer native returns. No main menu yet.
+  The renamed copy stays installed on the tablet; re-run with `monkey -p com.twentysixdigital.gumballlite.rb -c
+  android.intent.category.LAUNCHER 1` (dialogs: platform "older version" OK; permissions were denied).
+- Final whole-branch review (opus) done: 5 Important findings fixed in 04c76e9 (Delete* of a stale handle
+  ignored as ART does, detach frees locals, no 4 KiB NewStringUTF cap, ID records in a deque, boot teardown on
+  every failure); 9 Minor deferred in the ledger. Tablet: 21 lanes 0 failures after the fixes.
+- The OnePlus is often in the human's hands: start OnePlus work only when they say it is free, and stop it if
+  they ask. `build/brokenscope/brokenscope.apk` (staged in the tablet's launcher) is the boot-failure test APK.
+
 ## targetSdk compatibility shims (2026-10-16, branch `targetsdk-shims`, not merged, not pushed) — newest state
 
 **Problem.** The repackager raises targetSdk to 24 (install floor), which switches on every behaviour change the platform

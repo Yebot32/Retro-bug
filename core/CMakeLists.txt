@@ -73,7 +73,7 @@ target_link_libraries(rb_guest_thread PUBLIC rb_exec)
 # marshalling in abi/call.cpp is register arithmetic over MachineState, and the only executor coupling
 # is Run/resume around a host call or a guest syscall, so Tier J inherits the bridge unchanged
 # (docs/20 §C08).
-add_library(rb_abi STATIC abi/call.cpp abi/jni_env.cpp)
+add_library(rb_abi STATIC abi/call.cpp abi/jni_env.cpp abi/jni_args.cpp abi/jni_forward.cpp abi/thunk.cpp)
 target_compile_features(rb_abi PUBLIC cxx_std_20)
 target_link_libraries(rb_abi PUBLIC rb_exec rb_mem rb_syscall rb_guest_thread)
 
@@ -87,7 +87,7 @@ target_include_directories(rb_diag PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 # rb::syscall (C07): the monitor. It consumes an executor's state and a diag recorder, and owns no memory
 # of its own — which is the shape that keeps "no syscall reaches the host kernel except through the
 # allowlist" reviewable in one file rather than grep'd across the engine.
-add_library(rb_syscall STATIC syscall/monitor.cpp)
+add_library(rb_syscall STATIC syscall/monitor.cpp syscall/host_io.cpp)
 target_compile_features(rb_syscall PUBLIC cxx_std_20)
 target_link_libraries(rb_syscall PUBLIC rb_exec rb_diag rb_guest_thread)
 

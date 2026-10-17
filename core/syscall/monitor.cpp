@@ -2,6 +2,10 @@
  * RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
  */
 #include "rb/syscall/monitor.h"
+#include "rb/syscall/host_io.h"
+
+#include <fcntl.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <chrono>
@@ -32,15 +36,15 @@ std::string ProtText(std::uint32_t prot) {
   return out;
 }
 
-/// The host's own clocks, and the only place in this file that asks the host anything. `CLOCK_REALTIME`
-/// and `CLOCK_MONOTONIC` are facts a process can have; the process-CPU clocks are not answered here
-/// because a guest's "CPU time" measured by the emulator's host would be a different quantity wearing the
-/// right name, and a named refusal is better than a plausible wrong number.
+/// The host's own clocks, and the only place in this file that asks the host anything. The wall and monotonic
+/// clocks are facts a process can have. The CPU-time clocks are answered from the host too: the calling host thread
+/// is the one running this guest thread, so its CPU time is that thread's work (plus the emulator's, which makes it
+/// larger, never smaller or stuck). They were refused until M4: games budget work by clock() (CLOCK_PROCESS_CPUTIME_ID)
+/// and a refusal stalled Fruit Ninja's loader for good.
 bool HostClock(std::int32_t clock_id, std::int64_t* nanos) {
-  const clockid_t id = clock_id == static_cast<std::int32_t>(CLOCK_REALTIME)
-                           ? CLOCK_REALTIME
-                           : (clock_id == static_cast<std::int32_t>(CLOCK_MONOTONIC) ? CLOCK_MONOTONIC
-                                                                                    : -1);
+  // The wall and monotonic clocks and their raw/coarse/boot variants (0, 1, 4..7) — the guest kernel's answer — and
+  // the process and thread CPU clocks (2, 3). A clock id encoding a pid or tid (negative) is not answered.
+  const clockid_t id = (clock_id >= 0 && clock_id <= 7) ? clock_id : -1;
   if (id < 0) return false;
   timespec ts{};
   if (::clock_gettime(id, &ts) != 0) return false;
@@ -335,9 +339,8 @@ std::uint64_t Monitor::AllocLimit() const {
 }
 
 std::uint32_t Monitor::FindFreeRun(std::uint32_t hint, std::uint32_t size) const {
-  // The scan starts where the last anonymous mapping landed, so consecutive arenas stay consecutive,
-  // then wraps to the base; a hint is honoured only when page-aligned and entirely free, which is the
-  // kernel's own rule for a hint it is allowed to ignore. The base is one guest page in —
+  // A hint is honoured only when page-aligned and entirely free, which is the kernel's own rule for a hint it
+  // is allowed to ignore; otherwise the highest free run (top-down, below). The floor is one guest page in —
   // window-agnostic on purpose, because the model's window is 64 MiB on the launcher and a few pages
   // wide in tests, and a base tuned to one of them is a base the other cannot allocate above.
   //
@@ -353,18 +356,55 @@ std::uint32_t Monitor::FindFreeRun(std::uint32_t hint, std::uint32_t size) const
     return true;
   };
   if (hint != 0 && (hint & (mem::kGuestPage - 1u)) == 0 && free_run(hint)) return hint;
-  const std::uint64_t start = mmap_next_ >= kHeapBase ? mmap_next_ : kHeapBase;
-  for (std::uint64_t cand = start; cand + size <= limit; cand += mem::kGuestPage) {
-    if (free_run(cand)) return static_cast<std::uint32_t>(cand);
-  }
-  for (std::uint64_t cand = kHeapBase; cand + size <= start && cand + size <= limit; cand += mem::kGuestPage) {
-    if (free_run(cand)) return static_cast<std::uint32_t>(cand);
+  // Top-down, as Linux's default mmap layout places them: the highest free run below the limit. A mapping then
+  // sits just below the one made before it, so memory past the end of the newest region is an older region, as
+  // on a device — Gumball's cLanguage::read scans past its last string for a non-zero byte and relies on that.
+  // A mapped page inside a candidate moves the search to just below that page.
+  if (size == 0 || size > limit - kHeapBase) return 0;
+  std::uint64_t cand = (limit - size) & ~static_cast<std::uint64_t>(mem::kGuestPage - 1u);
+  while (cand >= kHeapBase) {
+    std::uint64_t blocked = 0;
+    for (std::uint64_t pg = cand + size; pg > cand;) {
+      pg -= mem::kGuestPage;
+      if (memory_->IsMapped(static_cast<std::uint32_t>(pg))) {
+        blocked = pg + 1;  // +1 so a block at page 0 is still "found"
+        break;
+      }
+    }
+    if (blocked == 0) return static_cast<std::uint32_t>(cand);
+    const std::uint64_t page = blocked - 1;
+    if (page < kHeapBase + size) return 0;
+    cand = page - size;
   }
   return 0;
 }
 
+bool Monitor::ServesItself(const Frame& f) {
+  if (HostIo::TakesFd(f.number)) {
+    const std::int32_t fd = static_cast<std::int32_t>(f.arg[0]);
+    if ((f.number == nr::kWrite || f.number == nr::kWritev) && (fd == 1 || fd == 2)) return true;  // the console
+    for (const ServedFile& s : served_) {
+      if (s.fd == fd) return true;
+    }
+    return false;
+  }
+  unsigned index = 0;
+  // Only the path calls this monitor has handlers for consult the provider (its virtual files).
+  if (files_ && memory_ != nullptr && HostIo::TakesPath(f.number, &index) &&
+      (f.number == nr::kOpenat || f.number == nr::kFstatat64 || f.number == nr::kFaccessat ||
+       f.number == nr::kReadlinkat)) {
+    std::string path;
+    if (ReadGuestPath(*memory_, f.arg[index], &path) != PathStatus::kOk) return false;
+    return files_(path).has_value();
+  }
+  return false;
+}
+
 Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::GuestThread* thread) {
   runtime::GuestThread& th = thread != nullptr ? *thread : *main_;
+  if (host_io_ && memory_ != nullptr && HostIo::Handles(f.number) && !ServesItself(f)) {
+    return HostIo::Serve(f, *memory_);
+  }
   switch (f.number) {
     case nr::kGetpid:
     case nr::kGettid: {
@@ -681,9 +721,9 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
       if (!have) {
         return Outcome::Refused(err::kEnosys,
                                 call + "(" + std::to_string(id) +
-                                    ") has no fact to answer from: this build answers CLOCK_REALTIME "
-                                    "(0) and CLOCK_MONOTONIC (1) only, and a CPU-time clock measured on "
-                                    "the host would be the emulator's time under the guest's name");
+                                    ") has no fact to answer from: this build answers clock ids 0..7 "
+                                    "(wall, monotonic and CPU time); per-process or per-thread clock ids "
+                                    "of another pid/tid are not mapped");
       }
       std::int64_t sec = nanos / 1'000'000'000;
       std::int64_t nsec = nanos % 1'000'000'000;
@@ -812,6 +852,9 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
 
     case nr::kPrctl: {
       const std::uint32_t option = f.arg[0];
+      if (option == 0x53564d41u) {  // PR_SET_VMA: names an anonymous mapping for /proc/maps; nothing to name here
+        return Outcome::Emulated(0, "prctl(PR_SET_VMA) -> 0: the mapping name is not recorded");
+      }
       // PR_SET_NAME (15) / PR_GET_NAME (16): the thread name is guest-visible state that RetroBug can
       // hold without touching the host thread, so these two are answered and everything else is refused
       // by name rather than answered with a 0 the way a kernel would answer an option it *does* know.
@@ -910,7 +953,10 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
                                                           "descriptor table is full (" +
                                                    std::to_string(kMaxServedFds) + ")");
       }
-      const std::int32_t fd = NextFd();
+      // With host I/O on, a served descriptor holds a real host descriptor number (an open /dev/null), so a host fd
+      // the guest opens later can never be given the same number.
+      const std::int32_t fd = host_io_ ? ::open("/dev/null", O_RDONLY | O_CLOEXEC) : NextFd();
+      if (fd < 0) return Outcome::Answered(err::kEmfile, "openat('" + path + "'): no host descriptor left to reserve");
       served_.push_back(ServedFile{path, std::move(*bytes), 0, fd});
       const std::string why = "openat('" + path + "') -> fd " + std::to_string(fd) + " (" +
                               std::to_string(served_.back().bytes.size()) +
@@ -923,6 +969,7 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
       const std::int32_t fd = static_cast<std::int32_t>(f.arg[0]);
       for (auto it = served_.begin(); it != served_.end(); ++it) {
         if (it->fd == fd) {
+          if (host_io_) ::close(fd);  // the reserved host number goes back
           served_.erase(it);
           return Outcome::Emulated(0, "close(" + std::to_string(fd) + ") -> 0");
         }
@@ -1061,7 +1108,13 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
       const std::int32_t fd = static_cast<std::int32_t>(f.arg[4]);
       if (len == 0) return Outcome::Answered(err::kEinval, "mmap2(len=0) = -EINVAL (-22)");
       constexpr std::uint32_t kMapAnonymous = 0x20u;
-      if ((flags & kMapAnonymous) == 0 && fd != -1) {
+      bool from_file = false;
+      if ((flags & kMapAnonymous) == 0 && fd != -1 && host_io_) {
+        bool served = false;
+        for (const ServedFile& s : served_) served = served || s.fd == fd;
+        from_file = !served;
+      }
+      if ((flags & kMapAnonymous) == 0 && fd != -1 && !from_file) {
         return Outcome::Refused(err::kEnosys,
                                 "mmap2 with a file descriptor (fd=" + std::to_string(fd) +
                                     ") is not implemented: this monitor serves no file mappings, and a "
@@ -1075,14 +1128,31 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
                                      ") = -ENOMEM (-12): the guest window has no free run of " +
                                      std::to_string(size) + " bytes left");
       }
-      const unsigned prot_bits = ((prot & 1u) ? mem::kRead : 0u) | ((prot & 2u) ? mem::kWrite : 0u) |
-                                 ((prot & 4u) ? mem::kExec : 0u);
+      const unsigned prot_bits = ((prot & 1u) ? mem::kRead : 0u) | ((prot & 2u) || from_file ? mem::kWrite : 0u) |
+                                 ((prot & 4u) ? mem::kExec : 0u);  // a file copy is written once here
       std::string merr;
       if (!memory_->Map(at, size, prot_bits, &merr)) {
         return Outcome::Answered(err::kEnomem, "mmap2: could not map " + std::to_string(size) +
                                                    " bytes at 0x" + Hex(at) + ": " + merr);
       }
       mmap_next_ = at + size;
+      if (from_file) {
+        // A private copy of the file's bytes from offset pgoff * 4096 (mmap2's unit): what MAP_PRIVATE reads; a
+        // MAP_SHARED writer's stores are not written back (named in the detail).
+        void* host = memory_->Host(at);
+        const off_t off = static_cast<off_t>(f.arg[5]) * 4096;
+        const ssize_t got = host == nullptr ? -1 : ::pread(fd, host, len, off);
+        if (got < 0) {
+          std::string e;
+          memory_->Unmap(at, size, &e);
+          return Outcome::Answered(err::kEbadf, "mmap2(fd=" + std::to_string(fd) + "): reading the file failed");
+        }
+        return Outcome::Emulated(static_cast<std::int32_t>(at),
+                                 "mmap2(fd=" + std::to_string(fd) + ", len=" + std::to_string(len) + ", off=" +
+                                     std::to_string(off) + ") -> 0x" + Hex(at) + ": a private copy of " +
+                                     std::to_string(got) + " file bytes" +
+                                     ((flags & 0x01u) != 0 ? " (MAP_SHARED: stores are not written back)" : ""));
+      }
       return Outcome::Emulated(static_cast<std::int32_t>(at),
                                "mmap2(anon, len=" + std::to_string(len) + ", prot=0x" + Hex(prot) +
                                    ") -> 0x" + Hex(at) + ": " + std::to_string(size) +
@@ -1587,12 +1657,13 @@ Outcome Monitor::Finish(exec::MachineState& state, Outcome done) {
 
 Outcome Monitor::Complete(exec::MachineState& state, Outcome o) {
   const Frame f = Frame::Capture(state, 0);
+  if (host_io_trace_ && (o.detail.rfind("host ", 0) == 0 || o.verdict == Verdict::kUnsupported)) host_io_trace_(o.detail);
   // Refusals and errno answers are recorded alongside the successes: the report's answer lines exist
   // so a run that died on an `openat` can say which path and why, not merely that openat happened.
   // Only four success sites called `Observe` before, so every refusal reached the report as a tally
   // entry with no reason attached — the exact silent-ignore shape the note machinery was built to
   // prevent.
-  if (o.r0 < 0) {
+  if (LooksLikeError(o.r0)) {  // an mmap address above 0x80000000 is negative as an int32, and a success
     ++refusals_;
     Observe(o.detail);
   }

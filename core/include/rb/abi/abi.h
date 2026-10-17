@@ -241,7 +241,7 @@ class AbiContext : public exec::HostDispatch {
   /// The largest host function index `SlotFor` can name. JNI's own table is 229 entries; the rest is
   /// headroom for host-provided symbols, and `IsHostEntry` refuses anything past it rather than
   /// aliasing one slot onto another.
-  static constexpr std::uint32_t kMaxSlots = 512;
+  static constexpr std::uint32_t kMaxSlots = 4096;  // M4: GLES2/EGL/OpenSL ES/libandroid thunks
   /**
    * The Linux ARM "kuser helpers": fixed addresses at the top of every 32-bit process the kernel
    * answers with tiny routines (`Documentation/arm/kernel_user_helpers.rst`). Old GCC-built code calls
@@ -308,6 +308,11 @@ class AbiContext : public exec::HostDispatch {
   /// once, at setup, before any host thread calls in.
   using Adopter = std::function<runtime::GuestThread*(std::string* why)>;
   void set_adopter(Adopter adopter) { adopter_ = std::move(adopter); }
+  /// Says what a fault's PC is when the context alone cannot (`GuestProcess`: an unanswered import's trap slot,
+  /// by name), or "" for nothing to add. `RunThread` appends it to a `Fault`'s detail — every call, guest thread
+  /// and adopted host thread runs there. Called under the GGL. Set once, at setup.
+  using FaultNamer = std::function<std::string(GuestAddr pc)>;
+  void set_fault_namer(FaultNamer namer) { fault_namer_ = std::move(namer); }
   [[nodiscard]] syscall::Monitor* monitor() const { return monitor_; }
 
   /// Set when a call ended in `StopReason::Exited`; the status the guest passed to `exit_group`.
@@ -328,6 +333,8 @@ class AbiContext : public exec::HostDispatch {
   /// contiguously from `slot_base`, which is what lets a JNI table be filled by arithmetic — and why
   /// no page is mapped for them.
   GuestAddr SlotFor(std::uint32_t slot) const { return slot_base_ + slot * 4u; }
+  /// A statistical profile hook: the guest pc each time a thread reaches a slice boundary (every kSliceSteps).
+  void set_slice_probe(std::function<void(std::uint32_t pc)> probe) { slice_probe_ = std::move(probe); }
   static constexpr std::uint32_t kInvalidSlot = 0xffff'ffffu;
 
   bool IsHostEntry(GuestAddr pc, std::uint32_t* slot) const override;
@@ -355,7 +362,7 @@ class AbiContext : public exec::HostDispatch {
   /// process exits (a thread's own unbounded work: never for a call the host must bound). `outcome` is the last
   /// turn's.
   Ret32 CallGuestToCompletion(GuestAddr fn, const Args32& args, const Shorty& shorty, unsigned turn_budget,
-                              exec::RunResult* outcome);
+                              exec::RunResult* outcome, MachineState* exit_state = nullptr);
 
   /// The JNI-shaped entry point C09 will use: a shorty plus the values already converted. Kept next to
   /// `CallGuest` so there is one marshalling path, not one per caller.
@@ -406,10 +413,13 @@ class AbiContext : public exec::HostDispatch {
   std::atomic<exec::Executor*> executor_{nullptr};
   syscall::Monitor* monitor_ = nullptr;
   Adopter adopter_;
+  FaultNamer fault_namer_;
   std::int32_t exit_status_ = 0;
   std::unordered_map<std::uint32_t, SlotRef> bound_;  ///< GGL-protected
   runtime::Ggl ggl_;
   runtime::GuestThread main_;
+  /// Diagnostics (M4 profiling): told the guest pc at every slice boundary, with the GGL held. Unset: nothing runs.
+  std::function<void(std::uint32_t pc)> slice_probe_;
   std::atomic<std::uint64_t> slices_{0};
   std::atomic<std::uint64_t> contended_slices_{0};
   GuestAddr slot_base_;

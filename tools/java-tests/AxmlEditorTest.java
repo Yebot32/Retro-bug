@@ -238,6 +238,49 @@ public class AxmlEditorTest {
                 "min_only extractNativeLibs should be absent");
     }
 
+    /** Diagnostics option: android:debuggable="true" on <application>, inserted when absent; aapt2 reads it back. */
+    static void setsDebuggable() throws Exception {
+        for (String base : new String[] {"min_only", "target22"}) {
+            AxmlEditor ed = AxmlEditor.parse(fixture(base));
+            ed.setDebuggable();
+            String tree = xmltree(base, ed.toBytes(), base + "-debuggable");
+            check(tree.contains("android:debuggable") && tree.contains("=true"), base + ": debuggable not true in\n" + tree);
+        }
+    }
+
+    /** API 28 took the Apache HTTP client off the default classpath; a repack raised past it declares the library. */
+    static void addsUsesLibrary() throws Exception {
+        for (String base : new String[] {"min_only", "target22", "filters"}) {
+            AxmlEditor ed = AxmlEditor.parse(fixture(base));
+            boolean added = ed.addUsesLibrary("org.apache.http.legacy", false);
+            String tree = xmltree(base, ed.toBytes(), base + "-uses-library");
+            int app = tree.indexOf("E: application"), lib = tree.indexOf("E: uses-library");
+            check(added && app >= 0 && lib > app, base + ": no uses-library under application in\n" + tree);
+            check(tree.contains("name(0x01010003)=\"org.apache.http.legacy\"") && tree.contains("required(0x0101028e)=false"),
+                    base + ": uses-library attributes in\n" + tree);
+            // A second call adds nothing: the manifest already declares it.
+            AxmlEditor again = AxmlEditor.parse(ed.toBytes());
+            check(!again.addUsesLibrary("org.apache.http.legacy", false), base + ": declared twice");
+        }
+    }
+
+    /** API 31+: every intent-filtered component gets the old default exported="true"; one that sets it keeps its value. */
+    static void setsExportedDefaults() throws Exception {
+        AxmlEditor ed = AxmlEditor.parse(fixture("filters"));
+        int n = ed.setExportedDefaults();
+        String tree = xmltree("filters", ed.toBytes(), "filters-exported");
+        check(n == 1, "filters: " + n + " components changed (want 1: the activity)");
+        int act = tree.indexOf("E: activity"), svc = tree.indexOf("E: service"), rx = tree.indexOf("E: receiver");
+        check(act >= 0 && svc > act && rx > svc, "filters: element order in\n" + tree);
+        if (act >= 0 && svc > act && rx > svc) {
+            check(tree.substring(act, svc).contains("exported(0x01010010)=true"), "activity exported=true in\n" + tree);
+            check(tree.substring(svc, rx).contains("exported(0x01010010)=false"), "service keeps exported=false in\n" + tree);
+            check(!tree.substring(rx).contains("exported"), "the filterless receiver is untouched in\n" + tree);
+        }
+        AxmlEditor again = AxmlEditor.parse(ed.toBytes());
+        check(again.setExportedDefaults() == 0, "a second pass changes nothing");
+    }
+
     static void refusesGarbage() {
         try {
             AxmlEditor.parse(new byte[]{1, 2, 3});
@@ -274,6 +317,96 @@ public class AxmlEditorTest {
         }
     }
 
+    /** aapt2's `dump xmltree` of {@code manifest} inside a copy of the {@code base} fixture APK. */
+    static String xmltree(String base, byte[] manifest, String tag) throws Exception {
+        badging(base, manifest, tag);                       // writes <tag>.apk and checks the badging parses
+        File txt = new File(scratch, tag + ".xmltree.txt");
+        int rc = new ProcessBuilder(aapt2, "dump", "xmltree", "--file", "AndroidManifest.xml",
+                new File(scratch, tag + ".apk").getPath()).redirectErrorStream(true).redirectOutput(txt).start().waitFor();
+        String t = new String(Files.readAllBytes(txt.toPath()), "UTF-8");
+        check(rc == 0, tag + ": aapt2 dump xmltree exit " + rc + ": " + t);
+        return t;
+    }
+
+    static final String A = "http://schemas.android.com/apk/res/android:";
+
+    static void renamePackage() throws Exception {
+        AxmlEditor e = AxmlEditor.parse(fixture("rename"));
+        java.util.List<String> changes = e.renamePackage("com.retrobug.fixture.rb");
+        byte[] out = e.toBytes();
+        AxmlEditor r = AxmlEditor.parse(out);
+        check("com.retrobug.fixture.rb".equals(r.packageName()), "rename: packageName re-parses: " + r.packageName());
+        check(changes.contains("manifest package: com.retrobug.fixture -> com.retrobug.fixture.rb"), "rename: change list: " + changes);
+        String b = badging("rename", out, "rename");
+        check(b.contains("package: name='com.retrobug.fixture.rb'"), "rename: badging reports the new package: " + b);
+        check(b.contains("launchable-activity: name='com.retrobug.fixture.Main'"),
+                "rename: launchable activity is the original package's class: " + b);
+        String t = xmltree("rename", out, "rename-x");
+        String[] want = {
+                "package=\"com.retrobug.fixture.rb\"",
+                // class names, expanded against the ORIGINAL package (the DEX is not renamed)
+                A + "name(0x01010003)=\"com.retrobug.fixture.App\"",
+                A + "backupAgent(0x0101027f)=\"com.retrobug.fixture.Backup\"",
+                A + "name(0x01010003)=\"com.retrobug.fixture.Main\"",
+                A + "parentActivityName(0x010103a7)=\"com.retrobug.fixture.Main\"",
+                A + "name(0x01010003)=\"com.retrobug.fixture.Alias\"",
+                A + "targetActivity(0x01010202)=\"com.retrobug.fixture.Main\"",
+                A + "name(0x01010003)=\"com.retrobug.fixture.sub.Svc\"",
+                A + "name(0x01010003)=\"com.retrobug.fixture.Recv\"",
+                A + "name(0x01010003)=\"com.retrobug.fixture.Prov\"",
+                A + "name(0x01010003)=\"com.thirdparty.AdActivity\"",
+                // unique-per-device names follow the package
+                A + "authorities(0x01010018)=\"com.retrobug.fixture.rb.files;com.facebook.app.FacebookContentProvider123.rb\"",
+                A + "name(0x01010003)=\"com.retrobug.fixture.rb.permission.C2D_MESSAGE\"",
+                A + "name(0x01010003)=\"org.other.permission.SHARED.rb\"",
+                A + "permission(0x01010006)=\"org.other.permission.SHARED.rb\"",
+                A + "readPermission(0x01010007)=\"com.retrobug.fixture.rb.permission.C2D_MESSAGE\"",
+                A + "name(0x01010003)=\"com.retrobug.fixture.rb\"",                     // GCM category
+                A + "taskAffinity(0x01010012)=\"com.retrobug.fixture.rb.main\"",
+                // untouched
+                A + "name(0x01010003)=\"android.permission.INTERNET\"",
+                A + "name(0x01010003)=\"android.intent.category.LAUNCHER\"",
+                A + "name(0x01010003)=\"com.google.android.c2dm.intent.RECEIVE\"",
+        };
+        for (String w : want) check(t.contains(w), "rename: aapt2 xmltree has " + w + "\n" + t);
+        check(!t.contains("\".Main\"") && !t.contains("\"Backup\"") && !t.contains("\".sub.Svc\""),
+                "rename: no relative class name left: " + t);
+        check(!t.contains("\"com.retrobug.fixture.permission.C2D_MESSAGE\"") && !t.contains("\"com.retrobug.fixture.files"),
+                "rename: no old permission or authority left: " + t);
+        check(t.indexOf("C2D_MESSAGE\"") != t.lastIndexOf("C2D_MESSAGE\""), "rename: the declared permission and its uses agree");
+
+        // The other edits still work on a renamed manifest (the repackager renames first, then raises the SDKs).
+        AxmlEditor r2 = AxmlEditor.parse(out);
+        r2.setTargetSdk(24);
+        r2.addProvider("com.retrobug.shim.RbShimProvider", "com.retrobug.fixture.rb.rbshim", Integer.MAX_VALUE);
+        String t2 = xmltree("rename", r2.toBytes(), "rename-then-edit");
+        check(t2.contains("package=\"com.retrobug.fixture.rb\"") && t2.contains("targetSdkVersion(0x01010270)=24")
+                && t2.contains(A + "name(0x01010003)=\"com.retrobug.fixture.Main\""), "rename then edit: " + t2);
+
+        check("a.b.C".equals(AxmlEditor.fullClassName("p.q", "a.b.C")) && "p.q.C".equals(AxmlEditor.fullClassName("p.q", "C"))
+                && "p.q.x.C".equals(AxmlEditor.fullClassName("p.q", ".x.C")), "fullClassName follows buildClassName");
+        check("p.q2".equals(AxmlEditor.renamedName("p.q", "p.q2", "p.q")) && "p.qq.x.y".equals(AxmlEditor.renamedName("p.q", "x.y", "p.qq")),
+                "renamedName: a prefix match is whole segments only");
+        check("x.y.a".equals(AxmlEditor.renamedName("p.q", "x.y", "p.q.a")) && "o.a.x.y".equals(AxmlEditor.renamedName("p.q", "x.y", "o.a")),
+                "renamedName with an unrelated new package");
+
+        for (String bad : new String[] {"com.retrobug.fixture", "nodots", "com..x", "1com.x", "com.x-y", ""}) {
+            try {
+                AxmlEditor.parse(fixture("rename")).renamePackage(bad);
+                check(false, "rename to '" + bad + "' should be refused");
+            } catch (IOException ex) {
+                checks++;
+            }
+        }
+        // A manifest with nothing but a package: only the package changes.
+        AxmlEditor m = AxmlEditor.parse(fixture("min_only"));
+        java.util.List<String> c2 = m.renamePackage("org.example.other");
+        String t3 = xmltree("min_only", m.toBytes(), "rename-min");
+        check(t3.contains("package=\"org.example.other\"") && t3.contains("\"com.retrobug.fixture.Main\""),
+                "min_only rename: package and expanded activity: " + t3);
+        check(c2.size() == 2, "min_only rename: package + one activity changed: " + c2);
+    }
+
     public static void main(String[] a) throws Exception {
         fixtures = new File(a[0]); scratch = new File(a[1]); aapt2 = a[2];
         minOnlyReadsBack();
@@ -285,7 +418,11 @@ public class AxmlEditorTest {
         refusesLyingFields();
         rewriteTargetSdk();
         readsExtractNativeLibs();
+        renamePackage();
         refusesGarbage();
+        setsDebuggable();
+        setsExportedDefaults();
+        addsUsesLibrary();
         System.out.println(checks + " checks, " + failures + " failures");
         System.exit(failures == 0 ? 0 : 1);
     }

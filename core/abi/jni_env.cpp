@@ -12,6 +12,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "rb/abi/jni_env.h"
+#include "rb/abi/jni_args.h"
 
 #include <cstdio>
 #include <cstring>
@@ -810,52 +811,7 @@ bool JniEnv::DefineHostMethod(GuestAddr cls, const std::string& name, const std:
   // `(params)ret`, with every reference — `Lpkg/Name;` or any `[...` array — reduced to L, because the
   // calling convention only cares that it is one word.
   HostMethodRec rec{cls, name, sig, {}, 'V', std::move(fn), 0, 0};
-  std::size_t i = 0;
-  if (sig.empty() || sig[i++] != '(') return fail("a signature starts with '('");
-  const auto one = [&](char& kind) -> bool {
-    if (i >= sig.size()) return false;
-    char c = sig[i];
-    if (c == '[') {
-      while (i < sig.size() && sig[i] == '[') ++i;
-      if (i >= sig.size()) return false;
-      c = sig[i];
-      if (c == 'L') {
-        const std::size_t semi = sig.find(';', i);
-        if (semi == std::string::npos) return false;
-        i = semi + 1;
-      } else {
-        if (std::strchr("ZBCSIJFD", c) == nullptr) return false;
-        ++i;
-      }
-      kind = 'L';
-      return true;
-    }
-    if (c == 'L') {
-      const std::size_t semi = sig.find(';', i);
-      if (semi == std::string::npos) return false;
-      i = semi + 1;
-      kind = 'L';
-      return true;
-    }
-    if (std::strchr("ZBCSIJFD", c) == nullptr) return false;
-    ++i;
-    kind = c;
-    return true;
-  };
-  while (i < sig.size() && sig[i] != ')') {
-    char k = 0;
-    if (!one(k)) return fail("unreadable parameter list");
-    rec.params.push_back(k);
-  }
-  if (i >= sig.size()) return fail("no ')'");
-  ++i;
-  if (i < sig.size() && sig[i] == 'V') {
-    rec.ret = 'V';
-    ++i;
-  } else if (!one(rec.ret)) {
-    return fail("unreadable return type");
-  }
-  if (i != sig.size()) return fail("trailing characters after the return type");
+  if (!jni::ParseSignature(sig, &rec.params, &rec.ret)) return fail("unreadable JNI method signature '" + sig + "'");
   methods_.push_back(std::move(rec));
   return true;
 }
@@ -936,50 +892,11 @@ bool JniEnv::CallHost(exec::MachineState& s, char family, ArgForm form, std::str
   // the last two, `...` promoted F to double and Z/B/C/S to int, and 8-byte values sit 8-aligned —
   // in the variadic form that alignment also skips r3, since a pair cannot start on an odd register.
   std::vector<std::uint64_t> args;
-  GuestAddr cursor = form == ArgForm::kVariadic ? s.r[13] : Arg(s, 3);
-  bool r3_free = form == ArgForm::kVariadic;
-  const auto read = [&](GuestAddr at, void* out, std::size_t n) {
-    return memory_.Read(at, out, n);
-  };
-  for (const char k : m.params) {
-    std::uint64_t v = 0;
-    if (form == ArgForm::kJvalues) {
-      const std::size_t n = (k == 'Z' || k == 'B') ? 1 : (k == 'C' || k == 'S') ? 2 : (k == 'J' || k == 'D') ? 8 : 4;
-      if (!read(cursor, &v, n)) return fail("Call*Method " + who + ": jvalue array at 0x" + Hex32(cursor) + " unreadable");
-      cursor += 8;
-    } else {
-      const bool wide = k == 'J' || k == 'D' || k == 'F';  // F arrives as a double
-      if (wide) {
-        r3_free = false;
-        cursor = (cursor + 7u) & ~7u;
-        if (!read(cursor, &v, 8)) return fail("Call*Method " + who + ": argument at 0x" + Hex32(cursor) + " unreadable");
-        cursor += 8;
-        if (k == 'F') {
-          double d = 0;
-          std::memcpy(&d, &v, 8);
-          const float f = static_cast<float>(d);
-          std::uint32_t bits = 0;
-          std::memcpy(&bits, &f, 4);
-          v = bits;
-        }
-      } else if (r3_free) {
-        v = s.r[3];
-        r3_free = false;
-      } else {
-        std::uint32_t w = 0;
-        if (!read(cursor, &w, 4)) return fail("Call*Method " + who + ": argument at 0x" + Hex32(cursor) + " unreadable");
-        v = w;
-        cursor += 4;
-      }
-    }
-    // Narrow kinds keep only their own bits, so a caller's stale upper bytes never reach the host.
-    if (k == 'Z') v &= 0xffu;
-    if (k == 'B') v = static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int8_t>(v)));
-    if (k == 'C') v &= 0xffffu;
-    if (k == 'S') v = static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int16_t>(v)));
-    if (k == 'I' || k == 'F' || k == 'L') v &= 0xffff'ffffu;
-    args.push_back(v);
-  }
+  std::string derr;
+  const jni::ArgForm jform = form == ArgForm::kVariadic ? jni::ArgForm::kVariadic
+                             : form == ArgForm::kVaList ? jni::ArgForm::kVaList
+                                                        : jni::ArgForm::kJvalues;
+  if (!jni::DecodeArgs(s, memory_, jform, m.params, 3, &args, &derr)) return fail("Call*Method " + who + ": " + derr);
 
   std::uint64_t ret = 0;
   std::string why;
