@@ -26,8 +26,10 @@ final class GameCatalog {
     private static final String TAG = "RetroBug";
 
     interface Listener {
+        /** A game as it is found (the first sighting of each package). */
         void onGame(Game g);
-        void onDone();
+        /** The whole library, one entry per package, after the scan: an added APK of an installed game is merged in. */
+        void onDone(java.util.List<Game> all);
     }
 
     private final Context ctx;
@@ -55,7 +57,8 @@ final class GameCatalog {
                 Intent launcher = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
                 for (ResolveInfo ri : pm.queryIntentActivities(launcher, 0)) {
                     String pkg = ri.activityInfo.packageName;
-                    if (seen.containsKey(pkg) || pkg.equals(ctx.getPackageName()) || pkg.endsWith(ApkRepackager.RENAME_SUFFIX))
+                    // RetroBug's own apps (this launcher, test probes) and converted copies are not games to offer.
+                    if (seen.containsKey(pkg) || pkg.startsWith("com.retrobug.") || pkg.endsWith(ApkRepackager.RENAME_SUFFIX))
                         continue;
                     Game g = installed(pm, pkg);
                     if (g == null) continue;
@@ -69,12 +72,14 @@ final class GameCatalog {
                         if (!f.getName().toLowerCase().endsWith(".apk")) continue;
                         Game g = added(pm, f, seen);
                         if (g == null) continue;
+                        boolean joined = seen.containsKey(g.key);
                         seen.put(g.key, g);
-                        post(l, g);
+                        if (!joined) post(l, g);  // an installed game's tile is already up; the final list carries the merge
                     }
                 }
+                final java.util.List<Game> all = new java.util.ArrayList<>(seen.values());
                 main.post(new Runnable() {
-                    @Override public void run() { l.onDone(); }
+                    @Override public void run() { l.onDone(all); }
                 });
             }
         });
@@ -104,6 +109,7 @@ final class GameCatalog {
             pi.applicationInfo.sourceDir = f.getAbsolutePath();
             pi.applicationInfo.publicSourceDir = f.getAbsolutePath();
             String pkg = pi.packageName;
+            if (pkg.startsWith("com.retrobug.")) return null;  // RetroBug's own test APKs (the JNI bridge app) are not games
             Game have = seen.get(pkg);
             if (have != null) {
                 return new Game(pkg, pkg, have.label, have.versionCode, have.apk, true, true, have.state);

@@ -117,7 +117,7 @@ public class LauncherActivity extends Activity {
     /// `-e stubcheck`: dlopen one generated stub here and check each of `symbols` reaches rb_stub_capture.
     private static native String nativeStubCheck(String stubPath, String[] symbols);
 
-    private enum Screen { HOME, LIBRARY, SETTINGS, DIAGNOSTICS, REPORT, RUN }
+    private enum Screen { HOME, DEV, LIBRARY, SETTINGS, DIAGNOSTICS, REPORT, RUN }
 
     private Screen screen_ = Screen.HOME;
     private String reportTitle_ = "";
@@ -282,7 +282,8 @@ public class LauncherActivity extends Activity {
     private void show(Screen which) {
         screen_ = which;
         switch (which) {
-            case HOME: setContentView(homeScreen()); break;
+            case HOME: setContentView(library()); break;
+            case DEV: setContentView(homeScreen()); break;
             case LIBRARY: setContentView(libraryScreen()); break;
             case SETTINGS: setContentView(settingsScreen()); break;
             case DIAGNOSTICS: setContentView(diagnosticsScreen()); break;
@@ -292,6 +293,21 @@ public class LauncherActivity extends Activity {
     }
 
     // ------------------------------------------------------------------ screens
+
+    /// Background work for the player's screens (the catalog scan, icon and art decoding): never the UI thread.
+    private final java.util.concurrent.ExecutorService bg_ = java.util.concurrent.Executors.newFixedThreadPool(2);
+    private LibraryScreen library_;
+
+    private View library() {
+        library_ = new LibraryScreen(this, bg_, new LibraryScreen.Host() {
+            @Override public void addApk() { pickApk(); }
+            @Override public void openSettings() { show(Screen.DEV); }
+            @Override public void openMenu(Game g) {
+                Toast.makeText(LauncherActivity.this, g.label, Toast.LENGTH_SHORT).show();
+            }
+        });
+        return library_;
+    }
 
     private View homeScreen() {
         LinearLayout root = column();
@@ -1106,7 +1122,7 @@ public class LauncherActivity extends Activity {
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
                         Toast.makeText(LauncherActivity.this, message, Toast.LENGTH_LONG).show();
-                        show(Screen.LIBRARY);
+                        show(Screen.HOME);  // the library rescans and shows the new game
                     }
                 });
             }
