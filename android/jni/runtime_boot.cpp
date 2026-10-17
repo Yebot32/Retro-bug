@@ -37,6 +37,7 @@
 
 #include "art_java.h"
 #include "host_slots.h"
+#include "thunks_android.h"
 #include "rb/abi/jni_forward.h"
 #include "rb/runtime/ggl.h"
 #include "rb/runtime/inbound.h"
@@ -459,6 +460,8 @@ bool BootScope(Runtime& rt, ApkZip& zip, std::string* out) {
     DropScope(rt);
     return false;
   }
+  // libandroid and jnigraphics calls that take a Java object need the bridge (M4 Task 3).
+  rb::launcher::RegisterAndroidThunks(*rt.slots, *rt.fwd, rt.vm);
   // Boot-only: no asset or file is served yet (M3). A provider that answers nothing makes every guest
   // openat an ENOENT the monitor's notes name, rather than ENOSYS.
   rt.proc->monitor().set_file_provider([](const std::string&) -> std::optional<std::vector<std::uint8_t>> {

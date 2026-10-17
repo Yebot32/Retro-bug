@@ -84,6 +84,7 @@ void Inbound::Fail(const InboundTarget& t, const std::string& why) {
 std::uint64_t Inbound::Dispatch(const InboundTarget& t, const CapturedArgs& a) {
   using abi::Value32;
   const char ret = t.shorty.empty() ? 'V' : t.shorty[0];
+  fwd_.SyncShadows();  // Java may have written a shadowed direct buffer since the guest last ran (M4)
   fwd_.PushFrame();
   std::string e;
   std::vector<Value32> args;
@@ -145,6 +146,7 @@ std::uint64_t Inbound::Dispatch(const InboundTarget& t, const CapturedArgs& a) {
                 (rr.reason == exec::StopReason::Exited ? "" : where));
     return 0;
   }
+  fwd_.SyncShadows();  // the guest's writes to a shadowed direct buffer reach Java before it reads them
   std::string pe;
   const abi::HostRef result = fwd_.PopFrame(ret == 'L' ? r.w() : 0, &pe);
   if (!pe.empty()) {

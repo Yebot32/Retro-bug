@@ -208,7 +208,14 @@ ForwardingJni::ForwardingJni(mem::GuestMemory& memory, AbiContext& abi, GuestAdd
       return;
     }
     abi_.Bind(
-        kEnvSlotBase + i, [this, i](exec::MachineState& s, std::string* e) { return Slot(i, s, e); },
+        kEnvSlotBase + i,
+        [this, i](exec::MachineState& s, std::string* e) {
+          // Host-memory direct buffers cross with every call into Java and back (SyncShadows).
+          if (small_shadows_.load(std::memory_order_relaxed) != 0) SyncShadows();
+          const bool ok = Slot(i, s, e);
+          if (small_shadows_.load(std::memory_order_relaxed) != 0) SyncShadows();
+          return ok;
+        },
         AbiContext::SlotLock::kReleasesGgl);
   }
   // The JavaVM: a word at kVmOffset holding its invoke-interface table's address, 3 reserved entries then 5.
@@ -942,6 +949,33 @@ GuestAddr ForwardingJni::Alloc(std::uint32_t bytes, std::string* err) {
   return got;
 }
 
+void ForwardingJni::SyncShadows() {
+  // Three-way, per 64-byte block, against the bytes as last synced: a block only the guest changed goes to the host,
+  // one only Java changed goes to the guest, and one both changed keeps the guest's (the native is the writer of
+  // the moment). So a Java writer and a guest writer on different parts of one buffer never undo each other.
+  constexpr std::size_t kBlock = 64;
+  if (small_shadows_.load(std::memory_order_relaxed) == 0) return;
+  std::lock_guard<std::mutex> lk(shadows_mu_);
+  for (auto& [host_ptr, sh] : shadows_) {
+    if (sh.snap.empty()) continue;
+    auto* host = static_cast<std::uint8_t*>(host_ptr);
+    auto* guest = static_cast<std::uint8_t*>(memory_.Host(sh.guest));
+    if (guest == nullptr) continue;
+    for (std::size_t at = 0; at < sh.snap.size(); at += kBlock) {
+      const std::size_t n = std::min(kBlock, sh.snap.size() - at);
+      std::uint8_t* snap = sh.snap.data() + at;
+      const bool guest_changed = std::memcmp(guest + at, snap, n) != 0;
+      if (guest_changed) {
+        std::memcpy(host + at, guest + at, n);
+        std::memcpy(snap, guest + at, n);
+      } else if (std::memcmp(host + at, snap, n) != 0) {
+        std::memcpy(guest + at, host + at, n);
+        std::memcpy(snap, host + at, n);
+      }
+    }
+  }
+}
+
 void ForwardingJni::Free(GuestAddr at) {
   std::lock_guard<std::mutex> lk(arena_mu_);
   const auto it = block_size_.find(at);
@@ -1365,12 +1399,43 @@ bool ForwardingJni::OtherEntry(std::uint32_t i, exec::MachineState& s, std::stri
       }
       const auto base = reinterpret_cast<std::uintptr_t>(memory_.window_base());
       const auto at = reinterpret_cast<std::uintptr_t>(p);
-      if (at < base || at - base >= memory_.window_bytes()) {
-        *err = "the buffer's memory is host memory outside the guest window; making it visible to the guest is the "
-               "host-memory window service (M4)";
+      if (at >= base && at - base < memory_.window_bytes()) {
+        s.r[0] = static_cast<std::uint32_t>(at - base);
+        return true;
+      }
+      // Host memory (ByteBuffer.allocateDirect, a mapped file): the guest works on a shadow in its window, refreshed
+      // from the host here; a small one is also merged both ways at every JNI transition (SyncShadows).
+      const std::int64_t cap = java_.GetDirectBufferCapacity(a);
+      if (cap < 0 || cap > (std::int64_t{1} << 30)) {
+        *err = "a direct buffer of capacity " + std::to_string(cap) + " outside the guest window cannot be shadowed";
         return false;
       }
-      s.r[0] = static_cast<std::uint32_t>(at - base);
+      std::unique_lock<std::mutex> lk(shadows_mu_);
+      auto it = shadows_.find(p);
+      if (it == shadows_.end() || it->second.capacity != static_cast<std::uint64_t>(cap)) {
+        lk.unlock();
+        if (!alloc_) {
+          *err = "a direct buffer outside the guest window needs guest memory for its shadow, and no allocator is set";
+          return false;
+        }
+        const GuestAddr g = alloc_(static_cast<std::uint32_t>(cap == 0 ? 1 : cap), err);
+        if (g == 0) return false;
+        lk.lock();
+        Shadow& sh = shadows_[p];
+        if (!sh.snap.empty()) small_shadows_.fetch_sub(1, std::memory_order_relaxed);  // a reused address
+        sh = Shadow{static_cast<std::uint64_t>(cap), g, {}};
+        if (cap <= kSmallShadow) {
+          sh.snap.assign(static_cast<const std::uint8_t*>(p), static_cast<const std::uint8_t*>(p) + cap);
+          if (cap != 0) small_shadows_.fetch_add(1, std::memory_order_relaxed);
+        }
+        memory_.Write(g, p, static_cast<std::size_t>(cap));
+        Note("GetDirectBufferAddress: a " + std::to_string(cap) + "-byte direct buffer in host memory is shadowed at " +
+             Hex(g) + (cap <= kSmallShadow ? " (merged at every JNI transition)" : " (refreshed at each GetDirectBufferAddress)"));
+        s.r[0] = g;
+        return true;
+      }
+      if (it->second.snap.empty()) memory_.Write(it->second.guest, p, static_cast<std::size_t>(cap));  // large: refresh
+      s.r[0] = it->second.guest;
       return true;
     }
     case 231:  // GetDirectBufferCapacity

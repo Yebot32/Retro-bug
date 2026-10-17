@@ -98,6 +98,10 @@ class ForwardingJni {
 
   [[nodiscard]] std::size_t live_locals() const { return shared_->live.load(std::memory_order_relaxed); }
   [[nodiscard]] std::size_t live_globals() const;
+  /// M4 host-memory window service: merges every small direct-buffer shadow with its host memory (block-wise, three-way
+  /// against the last synced copy, so each side keeps the other's writes). Run around every JNI transition; a no-op while
+  /// there is no such shadow.
+  void SyncShadows();
   [[nodiscard]] std::size_t refusals() const { return refusals_.load(std::memory_order_relaxed); }
 
  private:
@@ -197,6 +201,16 @@ class ForwardingJni {
   std::map<std::uint32_t, std::vector<GuestAddr>> free_by_size_;
   GuestAddr chunk_next_ = 0, chunk_end_ = 0;
   std::map<GuestAddr, Copy> copies_;
+  /// A Java direct buffer over host memory, seen by the guest through a copy in its window.
+  static constexpr std::int64_t kSmallShadow = 1 << 20;  ///< up to 1 MiB: merged at every transition
+  struct Shadow {
+    std::uint64_t capacity = 0;
+    GuestAddr guest = 0;
+    std::vector<std::uint8_t> snap;  ///< last synced bytes (small buffers only: those are merged at every transition)
+  };
+  std::mutex shadows_mu_;  ///< leaf
+  std::map<void*, Shadow> shadows_;  ///< by host address
+  std::atomic<unsigned> small_shadows_{0};
   mutable std::mutex notes_mu_;  ///< leaf
   std::vector<std::string> notes_;
 };

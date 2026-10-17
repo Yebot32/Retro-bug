@@ -367,11 +367,24 @@ void direct_buffer_over_guest_memory(int tier) {
   const abi::GuestAddr page = Scratch(pr);
   const Result r = Call(pr, tier, "fx_direct", {Value32::Ptr(page)});
   CHECK_CTX(Returned(r) && r.ret.i() == 3, r.rr.detail + " -> " + std::to_string(r.ret.i()));
+  // A Java buffer over host memory (ByteBuffer.allocateDirect, a mapped file): the guest gets a shadow copy in its
+  // window, and writes on either side cross at the next JNI transition (M4 host-memory window service).
   static std::uint8_t host_only[8];
+  std::memcpy(host_only, "ABCDEFGH", 8);
+  std::uint8_t seen_by_java = 0;
+  pr.java->DefineMethod("rb/Fixture", "touch", "()V", true,
+                        [&seen_by_java](test::FakeJava&, int, const std::vector<std::uint64_t>&) -> std::uint64_t {
+                          seen_by_java = host_only[0];
+                          host_only[1] = 'y';
+                          return 0;
+                        });
   const abi::GuestAddr b = pr.fwd->ToGuestLocal(pr.java->NewHostDirectBuffer(host_only, 8));
-  const Result h = Call(pr, tier, "fx_direct_address", {Value32::Ptr(b)}, "L");
-  CHECK_CTX(h.rr.reason == exec::StopReason::Fault && h.rr.detail.find("host-memory window service (M4)") != std::string::npos,
-            h.rr.detail);
+  const Result h = Call(pr, tier, "fx_direct_rw", {Value32::Ptr(b)});
+  const int sum = 'A' + 'B' + 'C' + 'D' + 'E' + 'F' + 'G' + 'H';
+  CHECK_CTX(Returned(h) && h.ret.i() == sum * 256 + 'y',
+            h.rr.detail + " -> " + std::to_string(h.ret.i()) + " (want " + std::to_string(sum * 256 + 'y') + ")");
+  CHECK_CTX(seen_by_java == 'Z', std::string{"Java saw byte 0 = "} + static_cast<char>(seen_by_java));
+  CHECK_CTX(host_only[0] == 'Z' && host_only[1] == 'y', "host buffer after: " + std::string(host_only, host_only + 8));
 }
 
 void reflection_round_trip(int tier) {

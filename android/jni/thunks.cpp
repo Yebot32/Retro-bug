@@ -111,6 +111,17 @@ const std::map<std::string, ThunkEntry>& Table() {
         {"eglGetCurrentDisplay", "H:"}, {"eglQueryContext", "u:hhip"}, {"eglWaitGL", "u:"},
         {"eglWaitNative", "u:i"}, {"eglSwapBuffers", "u:hh"}, {"eglCopyBuffers", "u:hhh"},
     });
+    // ---- libandroid: assets and native windows (the JNI-object and host-memory ones are specials, thunks_android).
+    // off_t is the guest's 32-bit long (`i`, sign-extended into the host's 64-bit off_t); off64_t is `l`.
+    add("libandroid.so", {
+        {"AAssetManager_open", "H:hpi"}, {"AAssetManager_openDir", "H:hp"}, {"AAssetDir_rewind", "v:h"},
+        {"AAsset_read", "i:hpu"}, {"AAsset_seek", "i:hii"}, {"AAsset_seek64", "l:hli"},
+        {"AAsset_getLength", "i:h"}, {"AAsset_getLength64", "l:h"}, {"AAsset_getRemainingLength", "i:h"},
+        {"AAsset_getRemainingLength64", "l:h"}, {"AAsset_isAllocated", "i:h"},
+        {"ANativeWindow_acquire", "v:h"}, {"ANativeWindow_release", "v:h"}, {"ANativeWindow_getWidth", "i:h"},
+        {"ANativeWindow_getHeight", "i:h"}, {"ANativeWindow_getFormat", "i:h"},
+        {"ANativeWindow_setBuffersGeometry", "i:hiii"},
+    });
     return t;
   }();
   return k;

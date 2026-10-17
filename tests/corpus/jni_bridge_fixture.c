@@ -393,3 +393,17 @@ __attribute__((visibility("default"))) int fx_attach_cycles(JNIEnv* env, JavaVM*
   }
   return 0;
 }
+
+/* M4: a direct buffer whose memory is the host's (a Java ByteBuffer): read it, write byte 0, call Java (which sees
+ * the write and changes byte 1), read byte 1 back. Result: sum("ABCDEFGH") * 256 + p[1] after the call. */
+__attribute__((visibility("default"))) int fx_direct_rw(JNIEnv* env, jobject b) {
+  unsigned char* p = (unsigned char*)(*env)->GetDirectBufferAddress(env, b);
+  if (p == 0) return -1;
+  int sum = 0;
+  for (int i = 0; i < 8; i++) sum += p[i];
+  p[0] = 'Z';
+  jclass c = (*env)->FindClass(env, "rb/Fixture");
+  jmethodID m = (*env)->GetStaticMethodID(env, c, "touch", "()V");
+  (*env)->CallStaticVoidMethod(env, c, m);
+  return sum * 256 + p[1];
+}
