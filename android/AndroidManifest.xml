@@ -46,6 +46,7 @@
     </queries>
 
     <application android:label="RetroBug" android:icon="@mipmap/ic_launcher"
+        android:theme="@android:style/Theme.Holo.NoActionBar"
         android:debuggable="false">
         <activity
             android:name=".LauncherActivity"

@@ -125,7 +125,17 @@ public class LauncherActivity extends Activity {
     @Override
     protected void onCreate(Bundle saved) {
         super.onCreate(saved);
-        show(Screen.HOME);
+        getWindow().setStatusBarColor(HoloTheme.PANEL);
+        getWindow().setNavigationBarColor(0xFF000000);
+        boolean scripted = getIntent() != null && getIntent().getExtras() != null && !getIntent().getExtras().isEmpty();
+        if (saved == null && !scripted) {
+            // A player's start: the boot animation, then the library. Scripted starts (`-e ...`) skip it.
+            setContentView(new BootScreen(this, new Runnable() {
+                @Override public void run() { show(Screen.HOME); }
+            }));
+        } else {
+            show(Screen.HOME);
+        }
         /*
          * An unattended run, so that a test does not depend on tapping the right pixel.
          *
