@@ -53,7 +53,8 @@ version, size, 32-bit libraries, the last conversion report). Below it, four tab
   - *Android target* — the targetSdk the copy is converted for; changing it re-converts (the existing `-e target`
     path). Shown with a one-line note on what older targets fix and that Play Protect may block them.
   - *Performance overlay* — on/off; an fps and guest-instruction-rate readout drawn over the game.
-  - *Clear game data* — clears the converted copy's data after a confirmation; the original game is never touched.
+  - *Clear game data* — opens the converted copy's storage page, where Android's own "Clear storage" lives (one app
+    cannot clear another's data); the original game is never touched.
   - *Resolution* — a render scale for games whose surface RetroBug sizes; listed but disabled with "Coming with M6"
     until it works.
 - **Mods** — asset overlays (texture packs, translations, music), each with an on/off switch. Empty state ("Add a mod
