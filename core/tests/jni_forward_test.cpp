@@ -483,6 +483,72 @@ void long_new_string_utf(int tier) {
   }
 }
 
+/// A device-identifier read refused at a raised targetSdk (TelephonyManager.getDeviceId throws SecurityException at
+/// 29+) comes back to the guest as null with nothing pending — what a phone without the permission answered the game
+/// was written for — and a SecurityException from anywhere else stays pending, untouched. The fake builds the
+/// throwable's stack the way the platform's is: framework frames first, then the app's.
+void device_identifier_refusals_read_as_null(int tier) {
+  Proc pr = Boot(tier);
+  CHECK_CTX(pr.p != nullptr, pr.err);
+  if (!pr.p) return;
+  FakeJava& j = *pr.java;
+  j.DefineClass("java/lang/Throwable", "java/lang/Object");
+  j.DefineClass("java/lang/Exception", "java/lang/Throwable");
+  j.DefineClass("java/lang/RuntimeException", "java/lang/Exception");
+  j.DefineClass("java/lang/SecurityException", "java/lang/RuntimeException");
+  j.DefineClass("java/lang/StackTraceElement", "java/lang/Object");
+  j.DefineField("java/lang/Throwable", "trace", "[Ljava/lang/StackTraceElement;", false);
+  j.DefineField("java/lang/StackTraceElement", "cls", "Ljava/lang/String;", false);
+  j.DefineField("java/lang/StackTraceElement", "meth", "Ljava/lang/String;", false);
+  j.DefineMethod("java/lang/Throwable", "getStackTrace", "()[Ljava/lang/StackTraceElement;", false,
+                 [](FakeJava& f, int self, const std::vector<std::uint64_t>&) {
+                   return static_cast<std::uint64_t>(f.MakeRef(static_cast<int>(f.FieldOf(self, "trace"))));
+                 });
+  j.DefineMethod("java/lang/StackTraceElement", "getClassName", "()Ljava/lang/String;", false,
+                 [](FakeJava& f, int self, const std::vector<std::uint64_t>&) {
+                   return static_cast<std::uint64_t>(f.MakeRef(static_cast<int>(f.FieldOf(self, "cls"))));
+                 });
+  j.DefineMethod("java/lang/StackTraceElement", "getMethodName", "()Ljava/lang/String;", false,
+                 [](FakeJava& f, int self, const std::vector<std::uint64_t>&) {
+                   return static_cast<std::uint64_t>(f.MakeRef(static_cast<int>(f.FieldOf(self, "meth"))));
+                 });
+  // Throws a SecurityException whose stack is `frames` (class, method), top first.
+  const auto thrower = [](std::vector<std::pair<std::u16string, std::u16string>> frames) {
+    return [frames](FakeJava& f, int, const std::vector<std::uint64_t>&) -> std::uint64_t {
+      const abi::HostRef ex = f.NewInstance("java/lang/SecurityException");
+      const abi::HostRef arr =
+          f.NewArray('L', static_cast<std::int32_t>(frames.size()), f.FindClass("java/lang/StackTraceElement"), 0);
+      for (std::size_t k = 0; k < frames.size(); ++k) {
+        const abi::HostRef e = f.NewInstance("java/lang/StackTraceElement");
+        f.PutField(f.ObjectOf(e), "cls", static_cast<std::uint64_t>(f.ObjectOf(f.NewJavaString(frames[k].first))));
+        f.PutField(f.ObjectOf(e), "meth", static_cast<std::uint64_t>(f.ObjectOf(f.NewJavaString(frames[k].second))));
+        f.SetObjectArrayElement(arr, static_cast<std::int32_t>(k), e);
+      }
+      f.PutField(f.ObjectOf(ex), "trace", static_cast<std::uint64_t>(f.ObjectOf(arr)));
+      f.Throw(ex);
+      return 0;
+    };
+  };
+  j.DefineMethod("rb/Fixture", "deviceId", "()Ljava/lang/String;", true,
+                 thrower({{u"android.os.Parcel", u"readException"},
+                          {u"com.android.internal.telephony.ITelephony$Stub$Proxy", u"getDeviceIdWithFeature"},
+                          {u"android.telephony.TelephonyManager", u"getDeviceId"},
+                          {u"com.halfbrick.mortar.HBSupport", u"GetDeviceID"}}));
+  // An app method that happens to be called getDeviceId, refused by something else: not an identifier read.
+  j.DefineMethod("rb/Fixture", "otherRefusal", "()Ljava/lang/String;", true,
+                 thrower({{u"android.app.ContextImpl", u"enforce"},
+                          {u"com.example.Game", u"getDeviceId"},
+                          {u"android.telephony.TelephonyManager", u"getDeviceId"}}));
+  const Result a = Call(pr, tier, "fx_identifier", {Value32::S32(0)});
+  CHECK_CTX(Returned(a) && a.ret.i() == 3, std::string{"Tier "} + TierName(tier) + ": deviceId -> bits " +
+                                               std::to_string(a.ret.i()) + " (want 3: null, nothing pending)");
+  CHECK_CTX(HasNote(pr, "device identifier"), Notes(pr));
+  const Result b = Call(pr, tier, "fx_identifier", {Value32::S32(1)});
+  CHECK_CTX(Returned(b) && b.ret.i() == 1, std::string{"Tier "} + TierName(tier) + ": otherRefusal -> bits " +
+                                               std::to_string(b.ret.i()) + " (want 1: null, the exception kept)");
+  CHECK(j.PendingClass().empty());
+}
+
 int main() {
   for (int tier : {1, 2}) {
     find_class_and_static_call(tier);
@@ -508,6 +574,7 @@ int main() {
     argument_used_after_its_native_returned(tier);
     detach_frees_the_threads_locals(tier);
     long_new_string_utf(tier);
+    device_identifier_refusals_read_as_null(tier);
   }
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;

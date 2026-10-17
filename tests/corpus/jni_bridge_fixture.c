@@ -407,3 +407,17 @@ __attribute__((visibility("default"))) int fx_direct_rw(JNIEnv* env, jobject b) 
   (*env)->CallStaticVoidMethod(env, c, m);
   return sum * 256 + p[1];
 }
+
+/* Reads an identifier the way a 2013 game does: a static String method, and no exception check after it.
+ * `which` 0 calls deviceId, 1 calls otherRefusal. Result bits: 1 = got null, 2 = no exception pending afterwards
+ * (a pending one is cleared before returning, so the next call starts clean). */
+__attribute__((visibility("default"))) int fx_identifier(JNIEnv* env, int which) {
+  jclass c = (*env)->FindClass(env, "rb/Fixture");
+  if (c == 0) return -1;
+  jmethodID m = (*env)->GetStaticMethodID(env, c, which ? "otherRefusal" : "deviceId", "()Ljava/lang/String;");
+  if (m == 0) return -2;
+  jobject s = (*env)->CallStaticObjectMethod(env, c, m);
+  int r = (s == 0 ? 1 : 0) | ((*env)->ExceptionCheck(env) ? 0 : 2);
+  if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+  return r;
+}

@@ -6,7 +6,7 @@ hand-written IR interpreter = "Tier I"). Engine in `core/`, on-device launcher a
 (`android/jni/launcher.cpp` + `android/jni/gl_forward.cpp` + `android/java/.../LauncherActivity.java`).
 Everything below this section is older, detailed session history — read it only when you need depth.
 
-## M4 — thunk layer (2026-10-18, branch `m4-thunks`, DONE on the tablet; OnePlus lanes owed) — newest state
+## M4 — thunk layer (2026-10-18, branch `m4-thunks`, DONE on the tablet and the OnePlus) — newest state
 
 Plan `docs/superpowers/plans/2026-10-17-m4-thunk-layer.md`; ledger `.superpowers/sdd/2026-10-17-m4-thunk-layer/progress.md`
 (every ruling is there). Nothing merged to `main`, nothing pushed — both wait for the human.
@@ -37,9 +37,12 @@ I/O (`core/syscall/host_io.cpp`), DNS through netd; CPU-time clocks; PMCCNTR as 
 - Renamed repacks look for their OBB under the new name (Sonic Transformed's 893 MB OBB).
 - Games that extract `lib/armeabi-v7a/*.so` from their own APK at run time (Looney's crash-recovery path) find nothing.
 
-**OnePlus (2026-10-18):** 25 suites green, bridge check 11/11. Fruit Ninja vs Skittles boots, then aborts: its Java calls
-`TelephonyManager.getDeviceId()`, which throws at target ≥ 29 on a phone (the Wi-Fi tablet returns null); the native
-ignores the exception and ART aborts at its next JNI call. Another raised-target compat case for the human.
+**OnePlus (2026-10-18):** 25 suites green, bridge check 11/11, Fruit Ninja vs Skittles plays a round. Its Java read the
+device ID, which throws at target ≥ 29 on a phone; the bridge now answers a refused device-identifier read with null
+(what a phone without the permission gave), and only that (`ForwardingJni::MaskIdentifierRefusal`).
+
+**Next:** M5 — run every installed 32-bit app through the repackager and keep a pass/fail table in `docs/`; fix the most
+common causes first.
 
 **Tests:** 25 tablet suites (`tools/run_engine_tests.sh arm64-v8a`, new: rb_thunk_tests, rb_host_io_tests,
 rb_sles_tests, rb_gl_thunk_tests) and `tools/run_java_tests.sh` green on 2026-10-18. **Owed:** the same on the OnePlus

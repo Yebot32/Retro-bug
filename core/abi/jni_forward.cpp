@@ -626,6 +626,7 @@ bool ForwardingJni::CallFamily(std::uint32_t i, exec::MachineState& s, std::stri
   }
   if (construct) return ReturnKind(s, 'L', java_.NewObject(target, rec.id, args), err);
   const std::uint64_t bits = java_.Call(rec.kind, is_static, target, nv_cls, rec.id, args);
+  if (java_.ExceptionCheck() && MaskIdentifierRefusal(rec.name)) return ReturnKind(s, family, 0, err);
   return ReturnKind(s, family, bits, err);  // in the shape the guest's call expects
 }
 
@@ -889,6 +890,82 @@ bool ForwardingJni::Slot(std::uint32_t i, exec::MachineState& s, std::string* er
 std::vector<std::string> ForwardingJni::notes() const {
   std::lock_guard<std::mutex> lk(notes_mu_);
   return notes_;
+}
+
+namespace {
+
+/// The platform's device-identifier reads. From API 29 they throw SecurityException for any app that is not
+/// privileged; a game repacked to a modern targetSdk hits that where its original target answered without throwing.
+bool IsDeviceIdentifierRead(const std::string& cls, const std::string& method) {
+  if (cls == "android.telephony.TelephonyManager") {
+    return method == "getDeviceId" || method == "getImei" || method == "getMeid" || method == "getSubscriberId" ||
+           method == "getSimSerialNumber";
+  }
+  return cls == "android.os.Build" && method == "getSerial";
+}
+
+/// Frames the platform owns. The search for an identifier read stops at the first frame that is not one of these: an
+/// app method that happens to share a name is not the platform's read.
+bool IsPlatformFrame(const std::string& cls) {
+  for (const char* p : {"android.", "com.android.", "java.", "javax.", "dalvik.", "libcore.", "sun."}) {
+    if (cls.rfind(p, 0) == 0) return true;
+  }
+  return false;
+}
+
+std::string Ascii(const std::u16string& s) {
+  std::string out;
+  for (char16_t c : s) out.push_back(c < 0x80 ? static_cast<char>(c) : '?');
+  return out;
+}
+
+}  // namespace
+
+bool ForwardingJni::MaskIdentifierRefusal(const std::string& called) {
+  const HostRef exc = java_.ExceptionOccurred();
+  if (exc == 0) return false;
+  // Nothing else may be called with an exception pending: take it off, look, and put it back unless it matches.
+  java_.ExceptionClear();
+  bool match = false;
+  std::string where;
+  const HostRef sec = java_.FindClass("java/lang/SecurityException");
+  if (sec != 0 && java_.IsInstanceOf(exc, sec)) {
+    const HostRef thr = java_.FindClass("java/lang/Throwable");
+    const HostRef ste = java_.FindClass("java/lang/StackTraceElement");
+    const HostId trace = thr ? java_.GetMethodID(thr, "getStackTrace", "()[Ljava/lang/StackTraceElement;", false) : 0;
+    const HostId cname = ste ? java_.GetMethodID(ste, "getClassName", "()Ljava/lang/String;", false) : 0;
+    const HostId mname = ste ? java_.GetMethodID(ste, "getMethodName", "()Ljava/lang/String;", false) : 0;
+    const HostRef frames =
+        trace && cname && mname ? static_cast<HostRef>(java_.Call('L', false, exc, 0, trace, {})) : 0;
+    const std::int32_t n = frames != 0 && !java_.ExceptionCheck() ? java_.GetArrayLength(frames) : 0;
+    for (std::int32_t k = 0; k < n && k < 32 && !match; ++k) {
+      const HostRef f = java_.GetObjectArrayElement(frames, k);
+      if (f == 0 || java_.ExceptionCheck()) break;
+      const HostRef cs = static_cast<HostRef>(java_.Call('L', false, f, 0, cname, {}));
+      const HostRef ms = static_cast<HostRef>(java_.Call('L', false, f, 0, mname, {}));
+      const std::string c = cs ? Ascii(java_.GetStringChars(cs)) : std::string{};
+      const std::string m = ms ? Ascii(java_.GetStringChars(ms)) : std::string{};
+      if (cs) java_.DeleteLocalRef(cs);
+      if (ms) java_.DeleteLocalRef(ms);
+      java_.DeleteLocalRef(f);
+      if (!IsPlatformFrame(c)) break;  // the app's own code: past the platform's part of the stack
+      if (IsDeviceIdentifierRead(c, m)) {
+        match = true;
+        where = c + "." + m;
+      }
+    }
+    if (frames != 0) java_.DeleteLocalRef(frames);
+    if (java_.ExceptionCheck()) java_.ExceptionClear();  // only our own inspection could have raised this
+  }
+  if (!match) {
+    java_.Throw(exc);
+    java_.DeleteLocalRef(exc);
+    return false;
+  }
+  java_.DeleteLocalRef(exc);
+  Note(called + ": " + where + " refused a device identifier (SecurityException, targetSdk 29+); the guest is answered "
+       "null, as a phone without the permission answered the game");
+  return true;
 }
 
 void ForwardingJni::Note(const std::string& note) {

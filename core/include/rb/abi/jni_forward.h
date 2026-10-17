@@ -152,6 +152,10 @@ class ForwardingJni {
   bool OtherEntry(std::uint32_t index, exec::MachineState& s, std::string* err);
   bool VmSlot(std::uint32_t index, exec::MachineState& s, std::string* err);
   void Note(const std::string& note);
+  /// A guest-initiated Java call left a pending exception: when it is a SecurityException thrown from inside one of
+  /// the platform's device-identifier reads, clears it and returns true (the guest is answered null). Any other
+  /// exception is put back exactly as it was.
+  bool MaskIdentifierRefusal(const std::string& called);
   bool ThrowNamed(const char* cls, const std::string& message);
 
   /// A copy JNI handed out, by its guest address: what Release has to put back, and how big it is.
