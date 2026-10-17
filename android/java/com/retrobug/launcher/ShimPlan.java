@@ -49,6 +49,8 @@ final class ShimPlan {
     static final String CONFIG_ENTRY = "assets/rb32/rbshim.properties";
     static final String PROVIDER_CLASS = "com.retrobug.shim.RbShimProvider";
     static final String AUTHORITY_SUFFIX = ".rbshim";
+    /** The launcher's SettingsProvider: where a converted copy reads its per-game settings at start. */
+    static final String SETTINGS_AUTHORITY = "com.retrobug.launcher.settings";
 
     static final String TARGET_SDK = "target-sdk";
     static final String STRICT_NETWORK = "strict-network";

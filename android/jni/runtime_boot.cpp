@@ -55,7 +55,32 @@ using rb::runtime::GuestProcess;
 constexpr const char* kTag = "RBRUNTIME";
 constexpr std::size_t kWindowBytes = std::size_t{4} << 30;
 constexpr rb::exec::GuestAddr kTrap = 0xfffe'0000u;
-constexpr int kTier = 2;  // Tier J
+std::string PackageName();
+
+/// The player's per-game settings (the launcher's GameSettings), as the repack's shim saved them at start:
+/// getFilesDir()/rb-settings.properties. Absent or unreadable -> "".
+std::string SettingsText() {
+  static const std::string text = [] {
+    const std::string pkg = PackageName();
+    if (pkg.empty()) return std::string{};
+    const std::string path = "/data/user/" + std::to_string(::getuid() / 100000) + "/" + pkg + "/files/rb-settings.properties";
+    std::string s;
+    if (FILE* f = std::fopen(path.c_str(), "rb")) {
+      char buf[1024];
+      const std::size_t n = std::fread(buf, 1, sizeof buf, f);
+      s.assign(buf, n);
+      std::fclose(f);
+    }
+    return s;
+  }();
+  return text;
+}
+
+/// The tier guest code runs on: Tier J (the JIT) unless the player chose "Safe" (Tier I, the interpreter).
+int Tier() {
+  static const int tier = SettingsText().find("cpu=safe") != std::string::npos ? 1 : 2;
+  return tier;
+}
 
 std::string Hex(std::uint32_t v) {
   char buf[16];
@@ -319,7 +344,7 @@ bool BootBridge(Runtime& rt, std::string* out) {
     rb::runtime::Ggl::Held hold(p.ggl());
     return p.MapFree(bytes, rb::mem::kRead | rb::mem::kWrite, e);
   });
-  rt.inbound = std::make_unique<rb::runtime::Inbound>(p, *rt.fwd, *rt.java, kTier);
+  rt.inbound = std::make_unique<rb::runtime::Inbound>(p, *rt.fwd, *rt.java, Tier());
   rt.fwd->set_native_binder([](rb::exec::GuestAddr fn, const std::string& name, const std::string& sig, std::string* e) -> void* {
     const std::string shorty = rb::runtime::ShortyOf(sig);
     if (shorty.empty()) {
@@ -334,7 +359,7 @@ bool BootBridge(Runtime& rt, std::string* out) {
     ::_exit(status);
   });
   Line(out, "jni: forwarding JNI bridge up — JNIEnv at " + Hex(rt.fwd->env()) + ", JavaVM at " + Hex(rt.fwd->vm()) +
-                ", natives on Tier " + (kTier == 2 ? "J" : "I"));
+                ", natives on Tier " + (Tier() == 2 ? "J" : "I"));
   return true;
 }
 
@@ -446,7 +471,7 @@ bool BootScope(Runtime& rt, ApkZip& zip, std::string* out) {
   o.window_bytes = kWindowBytes;
   o.biased = true;
   o.unresolved_trap = kTrap;
-  o.ctor_tier = kTier;
+  o.ctor_tier = Tier();
   o.log = [](const std::string& s) { Live(s); };
   o.host_resolver = [](const std::string& name) -> std::optional<rb::exec::GuestAddr> {
     Runtime& r = R();
@@ -721,7 +746,7 @@ bool BootOne(Runtime& rt, const std::string& apk, const std::string& lib, std::s
   // The guest JNI_OnLoad gets the bridge's JavaVM, synchronously on this (the loading) thread, inside a local frame
   // of its own as ART gives one.
   Line(out, "JNI_OnLoad: guest JavaVM at " + Hex(rt.fwd->vm()) + ", JNIEnv at " + Hex(rt.fwd->env()));
-  p.abi().set_executor(p.engine(kTier));
+  p.abi().set_executor(p.engine(Tier()));
   rb::exec::RunResult rr{};
   rb::exec::MachineState exit{};
   rt.fwd->PushFrame();
@@ -833,4 +858,36 @@ extern "C" int rb_runtime_boot(JavaVM* vm, const char* apk_path, const char* lib
                         std::strerror(errno));
   }
   return JNI_VERSION_1_6;
+}
+
+/// The performance overlay's numbers (the repack's shim, com.retrobug.shim.Overlay, asks once a second): frames since
+/// the last call, counted at eglSwapBuffers, and the guest instruction rate from the slice count (kSliceSteps per
+/// slice). Racy reads of plain counters, which is all a readout needs.
+extern "C" JNIEXPORT jstring JNICALL Java_com_retrobug_shim_Overlay_nativeStats(JNIEnv* env, jclass) {
+  static std::uint64_t last_frames = 0, last_slices = 0;
+  static auto last = std::chrono::steady_clock::now();
+  Runtime& r = R();
+  // Frames: the guest's eglSwapBuffers when it swaps itself; a game drawn through Java's GLSurfaceView swaps in Java,
+  // so its glClear calls stand in (games clear once per frame, nearly always).
+  std::uint64_t frames = 0, swaps = 0, clears = 0, slices = 0;
+  if (r.slots) {
+    for (const auto& c : r.slots->thunk_calls()) {
+      if (c.name == "eglSwapBuffers") swaps = c.calls;
+      if (c.name == "glClear") clears = c.calls;
+    }
+  }
+  frames = swaps != 0 ? swaps : clears;
+  if (r.proc) slices = r.proc->abi().slices();
+  const auto now = std::chrono::steady_clock::now();
+  const double dt = std::max(0.001, std::chrono::duration<double>(now - last).count());
+  const double fps = static_cast<double>(frames - last_frames) / dt;
+  const double mips = static_cast<double>(slices - last_slices) * rb::abi::AbiContext::kSliceSteps / dt / 1e6;
+  last_frames = frames;
+  last_slices = slices;
+  last = now;
+  char buf[96];
+  // A Tier I slice counts IR steps, not guest instructions (AbiContext::kSliceSteps), so its rate is named as steps.
+  std::snprintf(buf, sizeof buf, "%.0f fps \xc2\xb7 %.0f M %s/s \xc2\xb7 Tier %s", fps, mips,
+                Tier() == 2 ? "instr" : "steps", Tier() == 2 ? "J" : "I");
+  return env->NewStringUTF(buf);
 }

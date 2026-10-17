@@ -251,6 +251,18 @@ final class AxmlEditor {
     Integer targetSdk() { return intAttr("uses-sdk", "targetSdkVersion"); }
 
     /** Attribute names of the first {@code element}, in file order (tests check the resource-id ordering). */
+    /** Attribute names, in order, of the first {@code element} whose android:name is {@code name}. */
+    List<String> attrNamesOf(String element, String name) {
+        List<String> out = new ArrayList<>();
+        for (byte[] c : nodes) {
+            if (u16(c, 0) != XML_START_ELEMENT || !element.equals(str(s32(c, NODE_HEADER + 4)))) continue;
+            if (!name.equals(stringValue(c, findAttr(c, "name")))) continue;
+            for (int i = 0; i < attrCount(c); i++) out.add(str(s32(c, attrOff(c, i) + 4)));
+            return out;
+        }
+        return out;
+    }
+
     List<String> attrNames(String element) {
         List<String> out = new ArrayList<>();
         int n = findElement(element);
@@ -394,6 +406,57 @@ final class AxmlEditor {
         c[off + 15] = TYPE_INT_BOOLEAN;
         put32(c, off + 16, -1);
         put32(c, off + 8, -1);  // no raw string value
+    }
+
+    /**
+     * Adds {@code <queries><provider android:authorities=authority/></queries>} as a child of {@code <manifest>},
+     * before {@code <application>}: from API 30 an app sees another app's provider only when it declares it. False
+     * when that provider is already declared under a {@code <queries>}.
+     */
+    boolean addQueriesProvider(String authority) throws IOException {
+        boolean inQueries = false;
+        for (byte[] c : nodes) {
+            int type = u16(c, 0);
+            if (type != XML_START_ELEMENT && type != XML_END_ELEMENT) continue;
+            String el = str(s32(c, NODE_HEADER + 4));
+            if ("queries".equals(el)) inQueries = type == XML_START_ELEMENT;
+            if (inQueries && type == XML_START_ELEMENT && "provider".equals(el)
+                    && authority.equals(stringValue(c, findAttr(c, "authorities")))) {
+                return false;
+            }
+        }
+        int app = findElement("application");
+        if (app < 0) throw new IOException("manifest has no <application> element");
+        int nAuth = ensureAttrName("authorities", ATTR_AUTHORITIES);  // first: it may insert into the pool
+        int ns = indexOf(ANDROID_NS);
+        if (ns < 0) throw new IOException("manifest declares no android namespace");
+        int tQueries = poolString("queries"), tProvider = poolString("provider"), vAuth = poolString(authority);
+        app = findElement("application");
+        int line = s32(nodes.get(app), 8);
+        byte[] qStart = element(XML_START_ELEMENT, line, tQueries, 0);
+        byte[] pStart = element(XML_START_ELEMENT, line, tProvider, 1);
+        putStringAttr(pStart, NODE_HEADER + 20, ns, nAuth, vAuth);
+        byte[] pEnd = element(XML_END_ELEMENT, line, tProvider, 0);
+        byte[] qEnd = element(XML_END_ELEMENT, line, tQueries, 0);
+        nodes.add(app, qEnd);
+        nodes.add(app, pEnd);
+        nodes.add(app, pStart);
+        nodes.add(app, qStart);
+        return true;
+    }
+
+    /** A start (with room for `attrs` attributes) or end element node for tag pool index `tag`. */
+    private static byte[] element(int type, int line, int tag, int attrs) {
+        boolean start = type == XML_START_ELEMENT;
+        byte[] n = new byte[NODE_HEADER + (start ? 20 + attrs * ATTR_SIZE : 8)];
+        put16(n, 0, type); put16(n, 2, NODE_HEADER); put32(n, 4, n.length);
+        put32(n, 8, line); put32(n, 12, -1);
+        put32(n, NODE_HEADER, -1); put32(n, NODE_HEADER + 4, tag);
+        if (start) {
+            put16(n, NODE_HEADER + 8, 20); put16(n, NODE_HEADER + 10, ATTR_SIZE);
+            put16(n, NODE_HEADER + 12, attrs);
+        }
+        return n;
     }
 
     private static final int ATTR_VERSION_NAME = 0x0101021c;

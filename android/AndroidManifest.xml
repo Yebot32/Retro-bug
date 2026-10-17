@@ -48,6 +48,12 @@
     <application android:label="RetroBug" android:icon="@mipmap/ic_launcher"
         android:theme="@android:style/Theme.Holo.NoActionBar"
         android:debuggable="false">
+        <!-- Converted games read their per-game settings here; it answers only a copy signed with this
+             device's repack key (SettingsProvider checks the caller). -->
+        <provider
+            android:name=".SettingsProvider"
+            android:authorities="com.retrobug.launcher.settings"
+            android:exported="true" />
         <activity
             android:name=".LauncherActivity"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"

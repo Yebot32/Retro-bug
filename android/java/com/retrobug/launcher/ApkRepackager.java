@@ -189,15 +189,19 @@ final class ApkRepackager {
             // targetSdk compatibility shims (ShimPlan): decided from the target the original ran on.
             ShimPlan plan = ShimPlan.of(ShimPlan.effectiveTarget(oldT, oldMin), r.newTargetSdk);
             byte[] shimDex = runtimeFiles.get(ShimPlan.SHIM_DEX_KEY);
+            // The shim provider goes into every copy that runs Java: it applies the shims (when any are needed) and it
+            // is how the copy reads its RetroBug settings from the launcher at start (SettingsProvider).
             boolean addShims = false;
-            if (plan.shims.isEmpty()) {
-                r.report.add("shims: none needed (original target " + plan.originalTarget + ")");
-            } else if (Boolean.FALSE.equals(ed.hasCode())) {
-                r.report.add("shims: NOT added — application hasCode=\"false\" (no Java to run them); needed: " + plan.shims);
+            if (plan.shims.isEmpty()) r.report.add("shims: none needed (original target " + plan.originalTarget + ")");
+            if (Boolean.FALSE.equals(ed.hasCode())) {
+                if (!plan.shims.isEmpty())
+                    r.report.add("shims: NOT added — application hasCode=\"false\" (no Java to run them); needed: " + plan.shims);
             } else if (shimDex == null) {
-                r.report.add("shims: NOT added — this launcher build has no shim dex; needed: " + plan.shims);
+                if (!plan.shims.isEmpty())
+                    r.report.add("shims: NOT added — this launcher build has no shim dex; needed: " + plan.shims);
             } else {
                 ed.addProvider(ShimPlan.PROVIDER_CLASS, r.packageName + ShimPlan.AUTHORITY_SUFFIX, Integer.MAX_VALUE);
+                ed.addQueriesProvider(ShimPlan.SETTINGS_AUTHORITY);
                 edited = true;
                 addShims = true;
             }
