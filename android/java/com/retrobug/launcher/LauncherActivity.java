@@ -302,9 +302,6 @@ public class LauncherActivity extends Activity {
         library_ = new LibraryScreen(this, bg_, new LibraryScreen.Host() {
             @Override public void addApk() { pickApk(); }
             @Override public void openSettings() { show(Screen.DEV); }
-            @Override public void openMenu(Game g) {
-                Toast.makeText(LauncherActivity.this, g.label, Toast.LENGTH_SHORT).show();
-            }
         });
         return library_;
     }

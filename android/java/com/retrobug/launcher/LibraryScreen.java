@@ -29,7 +29,6 @@ final class LibraryScreen extends LinearLayout {
     interface Host {
         void addApk();
         void openSettings();
-        void openMenu(Game g);
     }
 
     private static final int RECEIVER_NOT_EXPORTED = 0x4;  // Context.RECEIVER_NOT_EXPORTED (API 33)
@@ -86,7 +85,7 @@ final class LibraryScreen extends LinearLayout {
         });
         grid.setOnItemLongClickListener(new android.widget.AdapterView.OnItemLongClickListener() {
             @Override public boolean onItemLongClick(android.widget.AdapterView<?> a, View v, int pos, long id) {
-                LibraryScreen.this.host.openMenu(games.get(pos));
+                GameMenu.show(getContext(), games.get(pos), art, settings, LibraryScreen.this);
                 return true;
             }
         });
