@@ -248,6 +248,21 @@ public class AxmlEditorTest {
         }
     }
 
+    /** A converted game reads its settings from the launcher's provider; API 30+ needs it declared under <queries>. */
+    static void addsQueriesProvider() throws Exception {
+        for (String base : new String[] {"min_only", "target22", "filters"}) {
+            AxmlEditor ed = AxmlEditor.parse(fixture(base));
+            boolean added = ed.addQueriesProvider("com.retrobug.launcher.settings");
+            String tree = xmltree(base, ed.toBytes(), base + "-queries");
+            int q = tree.indexOf("E: queries"), p = tree.indexOf("E: provider", Math.max(q, 0));
+            check(added && q >= 0 && p > q, base + ": no queries/provider in\n" + tree);
+            check(tree.contains("authorities(0x01010018)=\"com.retrobug.launcher.settings\""), base + ": authority in\n" + tree);
+            int app = tree.indexOf("E: application");
+            check(app < 0 || q < app, base + ": <queries> must be a child of <manifest>, before <application>\n" + tree);
+            check(!AxmlEditor.parse(ed.toBytes()).addQueriesProvider("com.retrobug.launcher.settings"), base + ": declared twice");
+        }
+    }
+
     /** API 28 took the Apache HTTP client off the default classpath; a repack raised past it declares the library. */
     static void addsUsesLibrary() throws Exception {
         for (String base : new String[] {"min_only", "target22", "filters"}) {
@@ -423,6 +438,7 @@ public class AxmlEditorTest {
         setsDebuggable();
         setsExportedDefaults();
         addsUsesLibrary();
+        addsQueriesProvider();
         System.out.println(checks + " checks, " + failures + " failures");
         System.exit(failures == 0 ? 0 : 1);
     }

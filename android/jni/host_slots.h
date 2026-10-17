@@ -95,6 +95,8 @@ class HostSlots {
 
   const std::vector<DlCall>& dl_calls() const { return dl_calls_; }
   const std::deque<ThunkCall>& thunk_calls() const { return thunk_calls_; }
+  /// How often the thunk for `name` has been called, 0 if it has none: safe from any thread (the overlay's readout).
+  std::uint64_t CallsOf(const std::string& name);
   void ReportThunks(const std::function<void(const std::string&)>& say) const;
   const std::vector<LogLine>& log() const { return log_; }
   unsigned log_dropped() const { return log_dropped_; }

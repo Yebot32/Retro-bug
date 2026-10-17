@@ -117,7 +117,7 @@ public class LauncherActivity extends Activity {
     /// `-e stubcheck`: dlopen one generated stub here and check each of `symbols` reaches rb_stub_capture.
     private static native String nativeStubCheck(String stubPath, String[] symbols);
 
-    private enum Screen { HOME, LIBRARY, SETTINGS, DIAGNOSTICS, REPORT, RUN }
+    private enum Screen { HOME, PREFS, DEV, LIBRARY, SETTINGS, DIAGNOSTICS, REPORT, RUN }
 
     private Screen screen_ = Screen.HOME;
     private String reportTitle_ = "";
@@ -125,7 +125,28 @@ public class LauncherActivity extends Activity {
     @Override
     protected void onCreate(Bundle saved) {
         super.onCreate(saved);
-        show(Screen.HOME);
+        getWindow().setStatusBarColor(HoloTheme.PANEL);
+        getWindow().setNavigationBarColor(0xFF000000);
+        boolean scripted = getIntent() != null && getIntent().getExtras() != null && !getIntent().getExtras().isEmpty();
+        if (saved == null && !scripted) {
+            // A player's start: the boot animation over the library, which is already scanning under it; the animation
+            // lifts off when it ends. Scripted starts (`-e ...`) skip it.
+            final android.widget.FrameLayout stack = new android.widget.FrameLayout(this);
+            stack.addView(library());
+            final View[] boot = new View[1];
+            boot[0] = new BootScreen(this, new Runnable() {
+                @Override public void run() {
+                    boot[0].animate().alpha(0f).setDuration(200).withEndAction(new Runnable() {
+                        @Override public void run() { stack.removeView(boot[0]); }
+                    });
+                }
+            });
+            stack.addView(boot[0]);
+            screen_ = Screen.HOME;
+            setContentView(stack);
+        } else {
+            show(Screen.HOME);
+        }
         /*
          * An unattended run, so that a test does not depend on tapping the right pixel.
          *
@@ -272,7 +293,9 @@ public class LauncherActivity extends Activity {
     private void show(Screen which) {
         screen_ = which;
         switch (which) {
-            case HOME: setContentView(homeScreen()); break;
+            case HOME: setContentView(library()); break;
+            case DEV: setContentView(homeScreen()); break;
+            case PREFS: setContentView(prefs()); break;
             case LIBRARY: setContentView(libraryScreen()); break;
             case SETTINGS: setContentView(settingsScreen()); break;
             case DIAGNOSTICS: setContentView(diagnosticsScreen()); break;
@@ -283,6 +306,28 @@ public class LauncherActivity extends Activity {
 
     // ------------------------------------------------------------------ screens
 
+    /// Background work for the player's screens (the catalog scan, icon and art decoding): never the UI thread.
+    private final java.util.concurrent.ExecutorService bg_ = java.util.concurrent.Executors.newFixedThreadPool(2);
+    private LibraryScreen library_;
+
+    private View library() {
+        library_ = new LibraryScreen(this, bg_, new LibraryScreen.Host() {
+            @Override public void addApk() { pickApk(); }
+            @Override public void openSettings() { show(Screen.PREFS); }
+        });
+        return library_;
+    }
+
+    private View prefs() {
+        return new SettingsScreen(this, new SettingsScreen.Host() {
+            @Override public void back() { show(Screen.HOME); }
+            @Override public void openDeveloper() { show(Screen.DEV); }
+            @Override public void restyle() { show(Screen.PREFS); }
+        });
+    }
+
+    /// The developer corner (Settings > Developer tools, revealed by seven taps on the version): the engine self-test,
+    /// the file-picker library with its scripted run modes, reports and diagnostics, as they were before the redesign.
     private View homeScreen() {
         LinearLayout root = column();
         root.addView(title("RetroBug", 26f, true));
@@ -728,27 +773,14 @@ public class LauncherActivity extends Activity {
 
     // ------------------------------------------------------------------ make installable (repack)
 
-    /// Where each runtime file the repackager adds comes from inside this launcher's own APK.
-    private static final String[][] REPACK_RUNTIME = {
-            {"lib/arm64-v8a/librbstub.so", ApkRepackager.STUB_KEY},
-            {"lib/arm64-v8a/librbguest.so", "lib/arm64-v8a/librbguest.so"},
-            {"assets/rbshim.dex", ShimPlan.SHIM_DEX_KEY},
-            {"assets/guest/libc.so", "assets/rb32sys/libc.so"},
-            {"assets/guest/libm.so", "assets/rb32sys/libm.so"},
-            {"assets/guest/libz.so", "assets/rb32sys/libz.so"},
-            {"assets/guest/libstdc++.so", "assets/rb32sys/libstdc++.so"},
-    };
-
-    private volatile boolean repacking_ = false;
-
-    /// "Make installable": rewrite the game for a 64-bit-only phone, sign it with the phone's repack key,
-    /// keep it (and its report) under getExternalFilesDir(null)/repack/, then offer it to the installer.
+    /// "Make installable" (the scripted `-e repack` and the developer screens): rewrite the game for a 64-bit-only
+    /// phone, sign it with the phone's repack key, keep it (and its report) under getExternalFilesDir(null)/repack/,
+    /// then offer it to the installer. The work is ConvertJob's; one conversion at a time, shared with the library.
     private void repackGame(final File apk, final boolean install, final String renameTo) {
-        if (repacking_) {
+        if (!ConvertJob.claim()) {
             Toast.makeText(this, "A repack is already running", Toast.LENGTH_SHORT).show();
             return;
         }
-        repacking_ = true;
         // A renamed repack is kept apart from the same-package one, which bootcheck boots in a staged original's place.
         final String label = apk.getName().replaceAll("\\.apk$", "")
                 + (renameTo == null ? "" : renameTo.startsWith(".") ? renameTo : "." + renameTo);
@@ -758,54 +790,14 @@ public class LauncherActivity extends Activity {
         new Thread(new Runnable() {
             @Override public void run() {
                 final StringBuilder out = new StringBuilder();
-                File signed = null;
-                File txt = null;
-                try {
-                    File dir = new File(getExternalFilesDir(null), "repack");
-                    if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("could not create " + dir);
-                    signed = new File(dir, label + ".apk");
-                    txt = new File(dir, label + ".txt");
-                    File unsigned = new File(getCacheDir(), label + ".unsigned.apk");
-                    out.append("repack: ").append(apk.getName()).append(" (").append(apk.length())
-                            .append(" bytes)\n");
-                    java.util.Map<String, byte[]> runtime = readRepackRuntime(out);
-                    ApkRepackager.Result r = ApkRepackager.transform(apk, runtime, unsigned, renameTo);
-                    out.append("package: ").append(r.packageName)
-                            .append(r.renamedFrom == null ? "" : " (renamed from " + r.renamedFrom + ")").append('\n');
-                    out.append("minSdk: ").append(r.oldMinSdk < 0 ? "absent" : String.valueOf(r.oldMinSdk))
-                            .append(" -> ").append(r.newMinSdk).append('\n');
-                    out.append("targetSdk: ").append(r.oldTargetSdk < 0 ? "absent" : String.valueOf(r.oldTargetSdk))
-                            .append(" -> ").append(r.newTargetSdk).append('\n');
-                    out.append("guest libs (assets/rb32/): ").append(r.guestLibs).append('\n');
-                    out.append("stubs (lib/arm64-v8a/): ").append(r.stubs).append('\n');
-                    for (String line : r.report) out.append("  ").append(line).append('\n');
-                    try {
-                        RepackSigner.sign(unsigned, signed);
-                    } finally {
-                        if (!unsigned.delete()) Log.w(TAG, "repack: could not delete " + unsigned);
-                    }
-                    out.append("signed: ").append(signed.getAbsolutePath()).append(" (").append(signed.length())
-                            .append(" bytes, key ").append(RepackSigner.ALIAS).append(", v1+v2+v3)\n");
-                    out.append("RESULT: repack OK — ").append(r.packageName).append('\n');
-                } catch (Throwable t) {
-                    String m = t.getMessage();
-                    if (t instanceof IOException && m != null && m.startsWith("refused:")) {
-                        out.append("RESULT: repack ").append(m).append('\n');
-                    } else {
-                        out.append("RESULT: repack FAILED — ").append(t.getClass().getName()).append(": ")
-                                .append(m).append('\n');
-                        Log.e(TAG, "repack failed", t);
-                    }
-                    if (signed != null && signed.exists() && !signed.delete())
-                        Log.w(TAG, "repack: could not delete " + signed);
-                    signed = null;
-                }
+                final File signed = ConvertJob.convert(LauncherActivity.this, apk, renameTo, label, out);
+                final File txt = new File(new File(getExternalFilesDir(null), "repack"), label + ".txt");
                 writeText(txt, out.toString());
                 final File toInstall = signed;
                 final File report = txt;
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
-                        repacking_ = false;
+                        ConvertJob.release();
                         saveAndShow("make installable: " + label, out.toString().trim());
                         if (toInstall != null && install) {
                             installRepacked(toInstall, report);
@@ -881,21 +873,7 @@ public class LauncherActivity extends Activity {
     }
 
     private java.util.Map<String, byte[]> readRepackRuntime(StringBuilder out) throws IOException {
-        java.util.Map<String, byte[]> files = new java.util.LinkedHashMap<>();
-        try (java.util.zip.ZipFile self = new java.util.zip.ZipFile(getApplicationInfo().sourceDir)) {
-            for (String[] m : REPACK_RUNTIME) {
-                ZipEntry e = self.getEntry(m[0]);
-                if (e == null) {
-                    // The stub and the engine are the repack; a guest library this build did not ship is
-                    // reported and left out (the runtime then names it when a game needs it).
-                    if (m[0].startsWith("lib/")) throw new IOException("this launcher's APK has no " + m[0]);
-                    out.append("runtime: ").append(m[0]).append(" not in this launcher build — not added\n");
-                    continue;
-                }
-                files.put(m[1], readAll(self.getInputStream(e)));
-            }
-        }
-        return files;
+        return ConvertJob.readRuntime(this, out);
     }
 
     private static void writeText(File f, String s) {
@@ -1163,7 +1141,7 @@ public class LauncherActivity extends Activity {
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
                         Toast.makeText(LauncherActivity.this, message, Toast.LENGTH_LONG).show();
-                        show(Screen.LIBRARY);
+                        show(Screen.HOME);  // the library rescans and shows the new game
                     }
                 });
             }

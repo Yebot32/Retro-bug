@@ -57,6 +57,16 @@ final class ApkRepackager {
     private static final String GUEST_DIR = "assets/rb32/";
     private static final String MANIFEST = "AndroidManifest.xml";
     private static final String ARSC = "resources.arsc";
+    /** The runtime generation a converted copy was made by, carried as its versionName suffix `-rb<N>`. Raise it when
+     *  the runtime changes in a way copies must be re-made for; the library then shows "Update available". */
+    static final int RUNTIME_STAMP = 1;
+
+    /** The stamp in a versionName (`2.5-rb3` or `rb3`), -1 when there is none. */
+    static int stampOf(String versionName) {
+        if (versionName == null) return -1;
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("(?:^|-)rb(\\d+)$").matcher(versionName);
+        return m.find() ? Integer.parseInt(m.group(1)) : -1;
+    }
 
     static final class Result {
         String packageName;      // the output's package (the new one when renamed)
@@ -158,18 +168,18 @@ final class ApkRepackager {
 
             Integer oldT = ed.targetSdk();
             r.oldTargetSdk = oldT == null ? -1 : oldT;
-            // Never below the install floor nor below the (new) minSdk; never lowered.
-            int floorT = Math.max(INSTALL_FLOOR_SDK, r.newMinSdk);
-            // A native control is a diagnostic install on a device whose Play Protect blocks old targets: current.
-            if (nativeControl) floorT = Math.max(floorT, 33);  // 34 makes registerReceiver without RECEIVER_* fatal
-            floorT = Math.max(floorT, targetFloor);
-            if (oldT == null && oldMin != null && oldMin >= floorT) {
+            // Never below the install floor nor below the (new) minSdk; never lowered (LibraryRules, shared with the
+            // library, which must know the target a copy will get). A native control is a diagnostic install on a
+            // device whose Play Protect blocks old targets: current (34 makes registerReceiver without RECEIVER_* fatal).
+            int setting = Math.max(targetFloor, nativeControl ? 33 : 0);
+            int floorT = LibraryRules.outputTarget(oldT, oldMin, setting);
+            if (oldT == null && oldMin != null && floorT == oldMin) {
                 // An absent targetSdk means "= minSdk"; writing the floor here would lower it.
                 r.newTargetSdk = oldMin;
                 r.report.add("targetSdk absent (defaults to minSdk " + oldMin + "), left unchanged");
-            } else if (oldT != null && oldT >= floorT) {
+            } else if (oldT != null && floorT == oldT) {
                 r.newTargetSdk = oldT;
-                r.report.add("targetSdk " + oldT + " already >= " + floorT + ", left unchanged");
+                r.report.add("targetSdk " + oldT + " already high enough, left unchanged");
             } else {
                 ed.setTargetSdk(floorT);
                 edited = true;
@@ -179,15 +189,19 @@ final class ApkRepackager {
             // targetSdk compatibility shims (ShimPlan): decided from the target the original ran on.
             ShimPlan plan = ShimPlan.of(ShimPlan.effectiveTarget(oldT, oldMin), r.newTargetSdk);
             byte[] shimDex = runtimeFiles.get(ShimPlan.SHIM_DEX_KEY);
+            // The shim provider goes into every copy that runs Java: it applies the shims (when any are needed) and it
+            // is how the copy reads its RetroBug settings from the launcher at start (SettingsProvider).
             boolean addShims = false;
-            if (plan.shims.isEmpty()) {
-                r.report.add("shims: none needed (original target " + plan.originalTarget + ")");
-            } else if (Boolean.FALSE.equals(ed.hasCode())) {
-                r.report.add("shims: NOT added — application hasCode=\"false\" (no Java to run them); needed: " + plan.shims);
+            if (plan.shims.isEmpty()) r.report.add("shims: none needed (original target " + plan.originalTarget + ")");
+            if (Boolean.FALSE.equals(ed.hasCode())) {
+                if (!plan.shims.isEmpty())
+                    r.report.add("shims: NOT added — application hasCode=\"false\" (no Java to run them); needed: " + plan.shims);
             } else if (shimDex == null) {
-                r.report.add("shims: NOT added — this launcher build has no shim dex; needed: " + plan.shims);
+                if (!plan.shims.isEmpty())
+                    r.report.add("shims: NOT added — this launcher build has no shim dex; needed: " + plan.shims);
             } else {
                 ed.addProvider(ShimPlan.PROVIDER_CLASS, r.packageName + ShimPlan.AUTHORITY_SUFFIX, Integer.MAX_VALUE);
+                ed.addQueriesProvider(ShimPlan.SETTINGS_AUTHORITY);
                 edited = true;
                 addShims = true;
             }
@@ -208,6 +222,13 @@ final class ApkRepackager {
                     && ed.addUsesLibrary("org.apache.http.legacy", false)) {
                 edited = true;
                 r.report.add("uses-library: org.apache.http.legacy (required=false), on the classpath before API 28");
+            }
+            {
+                String v = ed.versionName();
+                String stamped = (v == null || v.isEmpty() ? "" : v + "-") + "rb" + RUNTIME_STAMP;
+                ed.setVersionName(stamped);
+                edited = true;
+                r.report.add("versionName: " + (v == null ? "absent" : v) + " -> " + stamped);
             }
             if (edited) manifest = ed.toBytes();
 

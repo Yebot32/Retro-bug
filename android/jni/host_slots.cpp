@@ -407,7 +407,11 @@ std::optional<std::uint32_t> HostSlots::Resolve(const std::string& name) {
     return std::nullopt;
   }
   const std::size_t index = thunk_calls_.size();
-  thunk_calls_.push_back(ThunkCall{name, 0, {}, 0});
+  {
+    // Under the counters' lock: a running thunk (or the overlay's CallsOf) may be indexing the deque meanwhile.
+    std::lock_guard<std::mutex> lk(counters_mu_);
+    thunk_calls_.push_back(ThunkCall{name, 0, {}, 0});
+  }
   Special fn;
   if (special != specials_.end()) {
     fn = special->second;
@@ -429,11 +433,13 @@ std::optional<std::uint32_t> HostSlots::Resolve(const std::string& name) {
   // not a reference, is captured: a later push_back may move the vector.
   p_.abi().Bind(kThunkSlotBase + static_cast<std::uint32_t>(index), [this, index, fn](exec::MachineState& s,
                                                                                        std::string*) {
-    ThunkCall& c = thunk_calls_[index];
+    ThunkCall* cp = nullptr;
     {
-      std::lock_guard<std::mutex> lk(counters_mu_);
-      ++c.calls;
+      std::lock_guard<std::mutex> lk(counters_mu_);  // the deque's index too: another thread may be appending
+      cp = &thunk_calls_[index];
+      ++cp->calls;
     }
+    ThunkCall& c = *cp;  // a deque's elements stay put when it grows
     std::string why;
     if (fn(s, &why)) return true;
     s.r[0] = 0;
@@ -625,6 +631,14 @@ void HostSlots::enable_thunks() {
     }
     return true;
   });
+}
+
+std::uint64_t HostSlots::CallsOf(const std::string& name) {
+  std::lock_guard<std::mutex> lk(counters_mu_);
+  for (const ThunkCall& c : thunk_calls_) {
+    if (c.name == name) return c.calls;
+  }
+  return 0;
 }
 
 void HostSlots::ReportThunks(const std::function<void(const std::string&)>& say) const {

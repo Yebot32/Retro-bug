@@ -35,7 +35,46 @@ public final class RbShimProvider extends ContentProvider {
         } catch (Throwable t) {
             Log.i(Shims.TAG, "shims FAILED: could not read assets/" + CONFIG + ": " + t);
         }
+        String settings = fetchSettings();
+        if (settings.contains("overlay=1")) Overlay.install(getContext());
         return true;
+    }
+
+    static final String SETTINGS_AUTHORITY = "com.retrobug.launcher.settings";
+    static final String SETTINGS_FILE = "rb-settings.properties";
+
+    /**
+     * The player's settings for this game, from the RetroBug launcher (its SettingsProvider answers only this copy),
+     * saved to getFilesDir()/rb-settings.properties for the native runtime, which reads it at boot. When the launcher
+     * cannot be asked (uninstalled, or it refuses), the last saved settings stand; none saved means the defaults.
+     */
+    private String fetchSettings() {
+        java.io.File file = new java.io.File(getContext().getFilesDir(), SETTINGS_FILE);
+        String pkg = getContext().getPackageName();
+        String original = pkg.endsWith(".rb") ? pkg.substring(0, pkg.length() - 3) : pkg;
+        String text = null;
+        try (Cursor c = getContext().getContentResolver().query(
+                Uri.parse("content://" + SETTINGS_AUTHORITY + "/" + original), null, null, null, null)) {
+            if (c != null && c.moveToFirst()) text = c.getString(0);
+        } catch (Throwable t) {
+            Log.i(Shims.TAG, "settings: the launcher could not be asked (" + t + "); using the last saved ones");
+        }
+        if (text != null) {
+            try (java.io.OutputStream o = new java.io.FileOutputStream(file)) {
+                o.write(text.getBytes("UTF-8"));
+            } catch (Throwable t) {
+                Log.i(Shims.TAG, "settings: could not save " + file + ": " + t);
+            }
+            Log.i(Shims.TAG, "settings: " + text.replace('\n', ' ').trim());
+            return text;
+        }
+        try (java.io.InputStream in = new java.io.FileInputStream(file)) {
+            byte[] b = new byte[1024];
+            int n = in.read(b);
+            return n > 0 ? new String(b, 0, n, "UTF-8") : "";
+        } catch (Throwable t) {
+            return "";
+        }
     }
 
     @Override public Cursor query(Uri u, String[] proj, String sel, String[] args, String order) { return null; }

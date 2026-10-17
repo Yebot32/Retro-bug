@@ -22,6 +22,7 @@ import java.util.zip.ZipOutputStream;
 
 public class ApkRepackagerTest {
     static int checks = 0, failures = 0;
+    static final String SETTINGS_AUTHORITY = "com.retrobug.launcher.settings";
     static File fixtures, scratch;
 
     static void check(boolean ok, String what) {
@@ -325,8 +326,8 @@ public class ApkRepackagerTest {
         AxmlEditor e = AxmlEditor.parse(o.get("AndroidManifest.xml"));
         check("com.retrobug.fixture.rbshim".equals(e.stringAttrOf("provider", ShimPlan.PROVIDER_CLASS, "authorities")),
                 "provider authorities: " + e.stringAttrOf("provider", ShimPlan.PROVIDER_CLASS, "authorities"));
-        check(e.attrNames("provider").equals(Arrays.asList("name", "exported", "authorities", "initOrder")),
-                "provider attributes in resource-id order: " + e.attrNames("provider"));
+        check(e.attrNamesOf("provider", ShimPlan.PROVIDER_CLASS).equals(Arrays.asList("name", "exported", "authorities", "initOrder")),
+                "provider attributes in resource-id order: " + e.attrNamesOf("provider", ShimPlan.PROVIDER_CLASS));
         check(Integer.valueOf(24).equals(e.targetSdk()) && Integer.valueOf(24).equals(e.minSdk()), "sdk still raised");
         // aapt2 is the judge of the bytes: the provider must read back with the platform's attribute ids.
         String t = xmltree(out);
@@ -335,7 +336,7 @@ public class ApkRepackagerTest {
         check(t.contains("exported(0x01010010)=false"), "aapt2: exported=false");
         check(t.contains("authorities(0x01010018)=\"com.retrobug.fixture.rbshim\""), "aapt2: authorities");
         check(t.contains("initOrder(0x0101001a)=2147483647"), "aapt2: initOrder");
-        check(t.indexOf("E: provider") > t.indexOf("E: activity"), "provider is a child after the activity");
+        check(t.lastIndexOf("E: provider") > t.indexOf("E: activity"), "the shim provider is a child after the activity");
         check(t.contains("name(0x01010003)=\".Main\""), "aapt2: the existing activity name survives the pool shift");
         check(reportHas(r, "shims: [target-sdk", "classes2.dex"), "report names the shims: " + r.report);
         check(reportHas(r, "risk: implicit service", "covered by shim target-sdk"), "report names bindService risk: " + r.report);
@@ -355,12 +356,17 @@ public class ApkRepackagerTest {
         Map<String, byte[]> x = new LinkedHashMap<>();
         x.put("classes.dex", Files.readAllBytes(new File(fixtures, "RiskyFixture.dex").toPath()));
         x.put("lib/armeabi-v7a/libfoo.so", b("V7A"));
-        // Target 30 is left at 30: no behaviour change, so no shim, no provider, no risk lines.
+        // Target 30 is left at 30: no behaviour change, so no shim and no risk lines — but the shim provider still
+        // comes, with an empty shim list: it is also how the game reads its RetroBug settings at start.
         File t30 = build("min_only", minOnlyManifestWithTarget(30), "shims30", x);
         ApkRepackager.Result r = ApkRepackager.transform(t30, runtimeWithShims(), new File(scratch, "shims30.out.apk"));
         Map<String, byte[]> o = readAll(new File(scratch, "shims30.out.apk"));
-        check(!o.containsKey("classes2.dex") && !o.containsKey(ShimPlan.CONFIG_ENTRY), "target 30: no shim entries");
-        check(AxmlEditor.parse(o.get("AndroidManifest.xml")).attrNames("provider").isEmpty(), "target 30: no provider");
+        String cfg30 = o.containsKey(ShimPlan.CONFIG_ENTRY) ? new String(o.get(ShimPlan.CONFIG_ENTRY), StandardCharsets.UTF_8) : null;
+        check(Arrays.equals(o.get("classes2.dex"), SHIMDEX) && cfg30 != null && cfg30.contains("shims=\n"),
+                "target 30: the shim dex and an empty shim list: " + cfg30);
+        AxmlEditor m30 = AxmlEditor.parse(o.get("AndroidManifest.xml"));
+        check(ShimPlan.PROVIDER_CLASS.equals(m30.stringAttrOf("provider", ShimPlan.PROVIDER_CLASS, "name")), "target 30: the provider");
+        check(!m30.addQueriesProvider(SETTINGS_AUTHORITY), "target 30: the launcher's settings provider is declared under <queries>");
         check(r.shims.isEmpty() && r.risks.isEmpty() && reportHas(r, "shims: none needed", "30"), "target 30 report: " + r.report);
         // A launcher build without the shim dex: named, nothing half-added.
         File m = build("min_only", null, "noshimdex", x);
@@ -469,6 +475,32 @@ public class ApkRepackagerTest {
         }
     }
 
+    /** The aapt2-built fixture's binary manifest. */
+    static byte[] fixture(String base) throws IOException {
+        try (ZipFile z = new ZipFile(new File(fixtures, base + ".apk"));
+             InputStream in = z.getInputStream(z.getEntry("AndroidManifest.xml"))) {
+            return in.readAllBytes();
+        }
+    }
+
+    /** A converted copy's versionName carries the runtime stamp the library reads back (Ready vs Update available). */
+    static void stampsVersionName() throws Exception {
+        File in = build("min_only", null, "stamp-none", fullExtras());
+        File out = new File(scratch, "stamp-none.out.apk");
+        ApkRepackager.transform(in, runtime(), out);
+        String none = AxmlEditor.parse(readAll(out).get("AndroidManifest.xml")).versionName();
+        check(("rb" + ApkRepackager.RUNTIME_STAMP).equals(none), "no versionName -> rb<stamp>: " + none);
+        AxmlEditor ed = AxmlEditor.parse(fixture("min_only"));
+        ed.setVersionName("2.5");
+        File in2 = build("min_only", ed.toBytes(), "stamp-25", fullExtras());
+        File out2 = new File(scratch, "stamp-25.out.apk");
+        ApkRepackager.transform(in2, runtime(), out2);
+        String v = AxmlEditor.parse(readAll(out2).get("AndroidManifest.xml")).versionName();
+        check(("2.5-rb" + ApkRepackager.RUNTIME_STAMP).equals(v), "2.5 -> 2.5-rb<stamp>: " + v);
+        check(ApkRepackager.stampOf("2.5-rb7") == 7 && ApkRepackager.stampOf("rb3") == 3, "stampOf reads the stamp");
+        check(ApkRepackager.stampOf("2.5") == -1 && ApkRepackager.stampOf(null) == -1, "stampOf: no stamp is -1");
+    }
+
     public static void main(String[] a) throws Exception {
         fixtures = new File(a[0]); scratch = new File(a[1]); aapt2 = a[2];
         addsShims();
@@ -485,6 +517,7 @@ public class ApkRepackagerTest {
         generatesStubs();
         refusals();
         storesCompressedArsc();
+        stampsVersionName();
         System.out.println(checks + " checks, " + failures + " failures");
         System.exit(failures == 0 ? 0 : 1);
     }
