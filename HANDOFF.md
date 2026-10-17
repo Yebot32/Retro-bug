@@ -37,9 +37,13 @@ I/O (`core/syscall/host_io.cpp`), DNS through netd; CPU-time clocks; PMCCNTR as 
 - Renamed repacks look for their OBB under the new name (Sonic Transformed's 893 MB OBB).
 - Games that extract `lib/armeabi-v7a/*.so` from their own APK at run time (Looney's crash-recovery path) find nothing.
 
+**OnePlus (2026-10-18):** 25 suites green, bridge check 11/11. Fruit Ninja vs Skittles boots, then aborts: its Java calls
+`TelephonyManager.getDeviceId()`, which throws at target ≥ 29 on a phone (the Wi-Fi tablet returns null); the native
+ignores the exception and ART aborts at its next JNI call. Another raised-target compat case for the human.
+
 **Tests:** 25 tablet suites (`tools/run_engine_tests.sh arm64-v8a`, new: rb_thunk_tests, rb_host_io_tests,
 rb_sles_tests, rb_gl_thunk_tests) and `tools/run_java_tests.sh` green on 2026-10-18. **Owed:** the same on the OnePlus
-(the human has it), then the whole-branch review before any merge.
+(done 2026-10-18, see above); the human's OK before any merge or push.
 
 ## M3 — JNI bridge (ACCEPTED 2026-10-17 on both devices; all work on branch `m3-integration`)
 
