@@ -454,7 +454,7 @@ bool BootScope(Runtime& rt, ApkZip& zip, std::string* out) {
   rt.slots = std::make_unique<rb::launcher::HostSlots>(*rt.proc, TargetSdk(),
                                                        [](const std::string& s) { Live(s); });
   // The game's own GLSurfaceView makes its GLES1 context current on its GL thread, where its natives call gl*.
-  rt.slots->enable_gl();
+  rt.slots->enable_thunks();
   if (!BootBridge(rt, out)) {
     DropScope(rt);
     return false;
