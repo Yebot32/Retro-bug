@@ -121,6 +121,12 @@ const std::map<std::string, ThunkEntry>& Table() {
         {"ANativeWindow_acquire", "v:h"}, {"ANativeWindow_release", "v:h"}, {"ANativeWindow_getWidth", "i:h"},
         {"ANativeWindow_getHeight", "i:h"}, {"ANativeWindow_getFormat", "i:h"},
         {"ANativeWindow_setBuffersGeometry", "i:hiii"},
+        // Sensors and loopers (Cars). ASensorEvent is 104 bytes with the same offsets on armeabi and arm64, so getEvents
+        // writes the guest's array in place. createEventQueue is a special (thunks_android): its callback is guest code.
+        {"ASensorManager_getInstance", "H:"}, {"ASensorManager_getDefaultSensor", "H:hi"},
+        {"ASensorEventQueue_enableSensor", "i:hh"}, {"ASensorEventQueue_disableSensor", "i:hh"},
+        {"ASensorEventQueue_setEventRate", "i:hhi"}, {"ASensorEventQueue_getEvents", "i:hpu"},
+        {"ALooper_forThread", "H:"}, {"ALooper_prepare", "H:i"},
     });
     return t;
   }();

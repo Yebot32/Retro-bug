@@ -248,6 +248,22 @@ public class AxmlEditorTest {
         }
     }
 
+    /** API 28 took the Apache HTTP client off the default classpath; a repack raised past it declares the library. */
+    static void addsUsesLibrary() throws Exception {
+        for (String base : new String[] {"min_only", "target22", "filters"}) {
+            AxmlEditor ed = AxmlEditor.parse(fixture(base));
+            boolean added = ed.addUsesLibrary("org.apache.http.legacy", false);
+            String tree = xmltree(base, ed.toBytes(), base + "-uses-library");
+            int app = tree.indexOf("E: application"), lib = tree.indexOf("E: uses-library");
+            check(added && app >= 0 && lib > app, base + ": no uses-library under application in\n" + tree);
+            check(tree.contains("name(0x01010003)=\"org.apache.http.legacy\"") && tree.contains("required(0x0101028e)=false"),
+                    base + ": uses-library attributes in\n" + tree);
+            // A second call adds nothing: the manifest already declares it.
+            AxmlEditor again = AxmlEditor.parse(ed.toBytes());
+            check(!again.addUsesLibrary("org.apache.http.legacy", false), base + ": declared twice");
+        }
+    }
+
     /** API 31+: every intent-filtered component gets the old default exported="true"; one that sets it keeps its value. */
     static void setsExportedDefaults() throws Exception {
         AxmlEditor ed = AxmlEditor.parse(fixture("filters"));
@@ -406,6 +422,7 @@ public class AxmlEditorTest {
         refusesGarbage();
         setsDebuggable();
         setsExportedDefaults();
+        addsUsesLibrary();
         System.out.println(checks + " checks, " + failures + " failures");
         System.exit(failures == 0 ? 0 : 1);
     }

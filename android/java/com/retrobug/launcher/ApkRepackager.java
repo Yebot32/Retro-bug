@@ -203,6 +203,12 @@ final class ApkRepackager {
                     r.report.add("exported: " + n + " component(s) with intent filters given android:exported=\"true\" (their default before API 31)");
                 }
             }
+            // API 28 took the Apache HTTP client off the default classpath; an app built before it got it for free.
+            if (ShimPlan.effectiveTarget(oldT, oldMin) < 28 && r.newTargetSdk >= 28
+                    && ed.addUsesLibrary("org.apache.http.legacy", false)) {
+                edited = true;
+                r.report.add("uses-library: org.apache.http.legacy (required=false), on the classpath before API 28");
+            }
             if (edited) manifest = ed.toBytes();
 
             List<ZipEntry> guest = new ArrayList<>();

@@ -400,6 +400,7 @@ final class AxmlEditor {
     private static final int ATTR_EXPORTED = 0x01010010;
     private static final int ATTR_AUTHORITIES = 0x01010018;
     private static final int ATTR_INIT_ORDER = 0x0101001a;
+    private static final int ATTR_REQUIRED = 0x0101028e;
 
     /**
      * Adds {@code <provider android:name=cls android:exported="false" android:authorities=auth
@@ -446,6 +447,49 @@ final class AxmlEditor {
         put32(close, NODE_HEADER, -1); put32(close, NODE_HEADER + 4, tag);
         nodes.add(end, close);
         nodes.add(end, start);
+    }
+
+    /**
+     * Adds {@code <uses-library android:name=library android:required=required/>} as the last child of
+     * {@code <application>}, unless the manifest already declares that library. False when nothing was added.
+     * API 28 took org.apache.http.legacy off the default classpath; an app built before it that uses the Apache client
+     * declares the library to get it back (developer.android.com, "Apache HTTP client deprecation").
+     */
+    boolean addUsesLibrary(String library, boolean required) throws IOException {
+        if (stringAttrOf("uses-library", library, "name") != null) return false;
+        int app = findElement("application");
+        if (app < 0) throw new IOException("manifest has no <application> element");
+        int nName = ensureAttrName("name", ATTR_NAME);
+        int nRequired = ensureAttrName("required", ATTR_REQUIRED);
+        int ns = indexOf(ANDROID_NS);
+        if (ns < 0) throw new IOException("manifest declares no android namespace to attach the library to");
+        int tag = poolString("uses-library"), vName = poolString(library);
+        int end = -1;
+        for (int i = nodes.size() - 1; i > app && end < 0; i--) {
+            byte[] c = nodes.get(i);
+            if (u16(c, 0) == XML_END_ELEMENT && "application".equals(str(s32(c, NODE_HEADER + 4)))) end = i;
+        }
+        if (end < 0) throw new IOException("<application> has no end element");
+        int line = s32(nodes.get(end), 8);
+        // Attributes in resource-id order: name (0x01010003) < required (0x0101028e).
+        byte[] start = new byte[NODE_HEADER + 20 + 2 * ATTR_SIZE];
+        put16(start, 0, XML_START_ELEMENT); put16(start, 2, NODE_HEADER); put32(start, 4, start.length);
+        put32(start, 8, line); put32(start, 12, -1);
+        put32(start, NODE_HEADER, -1); put32(start, NODE_HEADER + 4, tag);
+        put16(start, NODE_HEADER + 8, 20); put16(start, NODE_HEADER + 10, ATTR_SIZE);
+        put16(start, NODE_HEADER + 12, 2);
+        int a = NODE_HEADER + 20;
+        putStringAttr(start, a, ns, nName, vName);
+        put32(start, a + ATTR_SIZE, ns); put32(start, a + ATTR_SIZE + 4, nRequired);
+        put32(start, a + ATTR_SIZE + 8, -1); put16(start, a + ATTR_SIZE + 12, 8);
+        start[a + ATTR_SIZE + 15] = TYPE_INT_BOOLEAN; put32(start, a + ATTR_SIZE + 16, required ? -1 : 0);
+        byte[] close = new byte[NODE_HEADER + 8];
+        put16(close, 0, XML_END_ELEMENT); put16(close, 2, NODE_HEADER); put32(close, 4, close.length);
+        put32(close, 8, line); put32(close, 12, -1);
+        put32(close, NODE_HEADER, -1); put32(close, NODE_HEADER + 4, tag);
+        nodes.add(end, close);
+        nodes.add(end, start);
+        return true;
     }
 
     // ---------------------------------------------------------------- package rename

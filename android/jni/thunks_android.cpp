@@ -9,6 +9,7 @@
 #include <android/bitmap.h>
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
+#include <android/sensor.h>
 
 #include <cstdio>
 #include <map>
@@ -188,6 +189,26 @@ void RegisterAndroidThunks(HostSlots& slots, abi::ForwardingJni& fwd, JavaVM* vm
     jobject surface = nullptr;
     if (env == nullptr || !st->Object(s.r[1], &surface, why)) return false;
     s.r[0] = st->slots.handles().Put(ANativeWindow_fromSurface(env, surface));
+    return true;
+  });
+
+  // ASensorManager_createEventQueue(manager, looper, ident, callback, data): a NULL callback (the game polls getEvents)
+  // goes through; a guest callback would be called by the host looper outside any guest call, so it is refused by name.
+  static_assert(sizeof(ASensorEvent) == 104, "ASensorEvent: the guest's layout is passed in place");
+  slots.AddSpecial("ASensorManager_createEventQueue", [st](exec::MachineState& s, std::string* why) {
+    void* manager = nullptr;
+    void* looper = nullptr;
+    if (!st->Handle(s.r[0], &manager, "ASensorManager", why)) return false;
+    if (s.r[1] != 0 && !st->Handle(s.r[1], &looper, "ALooper", why)) return false;
+    const std::uint32_t callback = s.r[3];  // the 4th argument; `data` (5th) is on the stack and only reaches a callback
+    if (callback != 0) {
+      *why = "a guest ALooper callback (" + Hex(callback) + ") is not supported; poll with ASensorEventQueue_getEvents";
+      return false;
+    }
+    ASensorEventQueue* q = ASensorManager_createEventQueue(static_cast<ASensorManager*>(manager),
+                                                           static_cast<ALooper*>(looper), static_cast<int>(s.r[2]),
+                                                           nullptr, nullptr);
+    s.r[0] = q ? st->slots.handles().Put(q) : 0;
     return true;
   });
 
