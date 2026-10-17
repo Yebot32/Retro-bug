@@ -260,7 +260,7 @@ final class ApkRepackager {
                         int k = renameArscPackage(arsc, r.renamedFrom, r.packageName);
                         r.report.add(ARSC + ": " + (k == 0 ? "no package named " + r.renamedFrom + ", left unchanged"
                                 : "package name -> " + r.packageName));
-                        putBytes(zo, n, arsc, e.getMethod() == ZipEntry.STORED ? ZipEntry.STORED : ZipEntry.DEFLATED);
+                        putBytes(zo, n, arsc, ZipEntry.STORED);  // API 30+ installs only a STORED, aligned one
                         continue;
                     }
                     copy(zip, e, zo);
@@ -421,10 +421,15 @@ final class ApkRepackager {
         zo.closeEntry();
     }
 
-    /** Copies an entry keeping its compression method (resources.arsc must stay STORED for newer Android). */
+    /**
+     * Copies an entry keeping its compression method, except resources.arsc, which is always STORED: a package
+     * targeting API 30+ is refused unless its resources.arsc is uncompressed and 4-byte aligned (RepackSigner aligns
+     * STORED entries), and some games ship it compressed.
+     */
     private static void copy(ZipFile zip, ZipEntry src, ZipOutputStream zo) throws IOException {
         byte[] data;
         try (InputStream in = zip.getInputStream(src)) { data = readFully(in); }
-        putBytes(zo, src.getName(), data, src.getMethod() == ZipEntry.STORED ? ZipEntry.STORED : ZipEntry.DEFLATED);
+        final boolean stored = src.getMethod() == ZipEntry.STORED || src.getName().equals(ARSC);
+        putBytes(zo, src.getName(), data, stored ? ZipEntry.STORED : ZipEntry.DEFLATED);
     }
 }

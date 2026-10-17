@@ -443,6 +443,32 @@ public class ApkRepackagerTest {
 
     static String aapt2;
 
+    /** Targeting API 30+ refuses a compressed resources.arsc (Where's My Mickey ships one): the output stores it. */
+    static void storesCompressedArsc() throws IOException {
+        File plain = build("min_only", null, "arsc-src", fullExtras());
+        File in = new File(scratch, "arsc-deflated.apk");
+        try (ZipFile src = new ZipFile(plain); ZipOutputStream zo = new ZipOutputStream(Files.newOutputStream(in.toPath()))) {
+            for (Enumeration<? extends ZipEntry> en = src.entries(); en.hasMoreElements(); ) {
+                ZipEntry se = en.nextElement();
+                byte[] data;
+                try (InputStream s = src.getInputStream(se)) { data = s.readAllBytes(); }
+                zo.putNextEntry(new ZipEntry(se.getName()));  // everything DEFLATED, resources.arsc included
+                zo.write(data);
+                zo.closeEntry();
+            }
+        }
+        check(methodOf(in, "resources.arsc") == ZipEntry.DEFLATED, "fixture precondition: resources.arsc is DEFLATED");
+        File out = new File(scratch, "arsc-deflated.out.apk");
+        ApkRepackager.transform(in, runtime(), out);
+        try (ZipFile z = new ZipFile(out); ZipFile p = new ZipFile(plain)) {
+            check(z.getEntry("resources.arsc").getMethod() == ZipEntry.STORED, "compressed resources.arsc is written STORED");
+            byte[] want, got;
+            try (InputStream s = p.getInputStream(p.getEntry("resources.arsc"))) { want = s.readAllBytes(); }
+            try (InputStream s = z.getInputStream(z.getEntry("resources.arsc"))) { got = s.readAllBytes(); }
+            check(Arrays.equals(want, got), "resources.arsc bytes unchanged");
+        }
+    }
+
     public static void main(String[] a) throws Exception {
         fixtures = new File(a[0]); scratch = new File(a[1]); aapt2 = a[2];
         addsShims();
@@ -458,6 +484,7 @@ public class ApkRepackagerTest {
         armeabiOnlyWorks();
         generatesStubs();
         refusals();
+        storesCompressedArsc();
         System.out.println(checks + " checks, " + failures + " failures");
         System.exit(failures == 0 ? 0 : 1);
     }

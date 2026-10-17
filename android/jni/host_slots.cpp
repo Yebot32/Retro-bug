@@ -493,6 +493,24 @@ void HostSlots::enable_thunks() {
     }
     return true;
   });
+  // GLES1's glGetPointerv(pname, void** out): the same answer for the client-array pointers (Where's My Mickey).
+  AddSpecial("glGetPointerv", [this](exec::MachineState& s, std::string* why) {
+    using Fn = void (*)(unsigned, void**);
+    const auto f = reinterpret_cast<Fn>(HostSymbol("libGLESv1_CM.so", "glGetPointerv"));
+    if (f == nullptr) {
+      *why = "this device's libGLESv1_CM has no glGetPointerv";
+      return false;
+    }
+    void* host = nullptr;
+    f(s.r[0], &host);
+    std::uint32_t guest = 0;
+    if (host != nullptr && !p_.memory().Translate(host, &guest)) guest = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(host));
+    if (s.r[1] != 0 && !p_.memory().Write(s.r[1], &guest, 4)) {
+      *why = "glGetPointerv: the out pointer " + Hex(s.r[1]) + " is not writable guest memory";
+      return false;
+    }
+    return true;
+  });
   AddSpecial("eglQueryString", [this](exec::MachineState& s, std::string* why) {
     void* dpy = nullptr;
     if (!handles_.Get(s.r[0], &dpy)) {
