@@ -678,7 +678,13 @@ struct Sles::Impl {
     const std::uint32_t cell = NewObject(made, std::move(strings));
     if (cell == 0) return SL_RESULT_MEMORY_FAILURE;
     if (!Put(out, cell)) {
-      std::lock_guard<std::mutex> lk(mu);  // nothing to unwind into the guest: leave it, but say so
+      // The guest can never name the object: destroy it here rather than leave a live host object behind.
+      if (Itf* itf = Find(cell)) {
+        exec::MachineState unused{};
+        Destroy(*itf, unused);
+      }
+      Say("out " + Hex(out), "an object was made but its out-pointer " + Hex(out) +
+                                 " is not writable guest memory: destroyed, PARAMETER_INVALID");
       return SL_RESULT_PARAMETER_INVALID;
     }
     return SL_RESULT_SUCCESS;

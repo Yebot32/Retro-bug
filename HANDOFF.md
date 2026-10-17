@@ -6,10 +6,40 @@ hand-written IR interpreter = "Tier I"). Engine in `core/`, on-device launcher a
 (`android/jni/launcher.cpp` + `android/jni/gl_forward.cpp` + `android/java/.../LauncherActivity.java`).
 Everything below this section is older, detailed session history — read it only when you need depth.
 
-## M4 — thunk layer (2026-10-17, branch `m3-integration`, in progress) — newest state
+## M4 — thunk layer (2026-10-18, branch `m4-thunks`, DONE on the tablet; OnePlus lanes owed) — newest state
 
-Plan `docs/superpowers/plans/2026-10-17-m4-thunk-layer.md`; ledger `.superpowers/sdd/2026-10-17-m4-thunk-layer/progress.md`.
-Target: Angry Birds Go title screen with sound on the OnePlus (first missing import today: `AAssetManager_fromJava`).
+Plan `docs/superpowers/plans/2026-10-17-m4-thunk-layer.md`; ledger `.superpowers/sdd/2026-10-17-m4-thunk-layer/progress.md`
+(every ruling is there). Nothing merged to `main`, nothing pushed — both wait for the human.
+
+**What runs (Tab S9, repacked at target 35, renamed `.rb`):**
+- **Fruit Ninja vs Skittles** — menu and play; the human played it and could not tell it from a native 32-bit device
+  (sound included, through its Java audio).
+- **Android KitKat Challenge** — menu and play; sound through OpenSL ES (engine, PCM buffer-queue player, callbacks
+  into the guest on the audio thread). This is the OpenSL ES acceptance.
+- **Gumball** (M3), **Looney Tunes Dash** and **Where's My Mickey** boot fully and draw their own first screen (an
+  age gate each — not filled in for the human).
+- **Angry Birds Go** draws its own UI, does TLS to Rovio, shows "Download failed": its content was a server download
+  (empty OBB/data dirs). The human: "probably not a good fit" — the acceptance moved to the games above.
+
+**What M4 added:** the generic AAPCS32→AAPCS64 caller and handle table (`core/abi/thunk.*`, 4096 slots); GLES1/2 and
+EGL tables + specials (`android/jni/thunks.cpp`, `host_slots.cpp`); libandroid (assets, windows, sensors, loopers),
+jnigraphics (`thunks_android.cpp`); OpenSL ES (`thunks_sles.cpp`); direct buffers over host memory; host file/socket
+I/O (`core/syscall/host_io.cpp`), DNS through netd; CPU-time clocks; PMCCNTR as a running count; Tier J ~250x faster
+(dynarmic's block index per page). Repack: `-e target N`, `-e stage`, exported defaults (31+), `org.apache.http.legacy`
+(28+), resources.arsc always STORED (30+).
+
+**Blocked, needs the human:**
+- Play Protect (this tablet) blocks fresh sideloads at targets 24 and 33 and some apps at 35 (OREO). Never bypassed.
+- Target 34+ makes `registerReceiver` without RECEIVER_EXPORTED/NOT_EXPORTED fatal (Blocky Roads, Cars). Both fixes
+  tried (a hidden-API shim; dex call-site rewriting to RECEIVER_EXPORTED) were stopped by the session's safety
+  classifier — pick another approach with the human.
+- Legacy storage permissions are always denied at target ≥ 33 (Rabbids refuses to start without them).
+- Renamed repacks look for their OBB under the new name (Sonic Transformed's 893 MB OBB).
+- Games that extract `lib/armeabi-v7a/*.so` from their own APK at run time (Looney's crash-recovery path) find nothing.
+
+**Tests:** 25 tablet suites (`tools/run_engine_tests.sh arm64-v8a`, new: rb_thunk_tests, rb_host_io_tests,
+rb_sles_tests, rb_gl_thunk_tests) and `tools/run_java_tests.sh` green on 2026-10-18. **Owed:** the same on the OnePlus
+(the human has it), then the whole-branch review before any merge.
 
 ## M3 — JNI bridge (ACCEPTED 2026-10-17 on both devices; all work on branch `m3-integration`)
 

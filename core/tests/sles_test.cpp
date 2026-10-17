@@ -422,6 +422,17 @@ void a_play_callback_gets_its_event() {
   CHECK(r.sles->live_objects() == 0);
 }
 
+/// A guest out-pointer that is not writable memory: the call fails, and the host object it made is not left behind.
+void an_unwritable_out_pointer_leaves_no_object() {
+  Rig r;
+  const auto create = r.sles->Resolve("slCreateEngine");
+  CHECK(create.has_value());
+  if (!create) return;
+  CHECK(r.Call(*create, {0x00500000u /* unmapped */, 0, 0, 0, 0, 0}) == SL_RESULT_PARAMETER_INVALID);
+  CHECK(r.sles->live_objects() == 0);
+  CHECK(r.handles.size() == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -430,6 +441,7 @@ int main() {
   an_unknown_interface_is_unsupported_and_named();
   a_pcm_buffer_queue_player_calls_the_guest_back();
   a_play_callback_gets_its_event();
+  an_unwritable_out_pointer_leaves_no_object();
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;
 }
