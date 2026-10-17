@@ -15,6 +15,7 @@
 
 #include "runtime_boot.h"
 
+#include <atomic>
 #include <android/log.h>
 #include <dlfcn.h>
 #include <fcntl.h>
@@ -468,6 +469,20 @@ bool BootScope(Runtime& rt, ApkZip& zip, std::string* out) {
     return std::nullopt;
   });
   rt.proc->monitor().set_host_io(true);
+  {
+    // The first host-I/O answers go to logcat as they happen: what a game's file and network code did is otherwise
+    // invisible after boot. Capped so a long run does not flood the log.
+    auto left = std::make_shared<std::atomic<int>>(1500);
+    rt.proc->monitor().set_host_io_trace([left](const std::string& line) {
+      // Errors and everything but the routine file walk (stat, getdents, read, close) of a successful call.
+      const bool error = line.find(" = -") != std::string::npos;
+      const bool routine = line.find("fstatat64") != std::string::npos || line.find("nr:0x18d") != std::string::npos ||
+                           line.find("getdents64") != std::string::npos || line.find("host read ") != std::string::npos ||
+                           line.find("host close ") != std::string::npos || line.find("host fstat64 ") != std::string::npos ||
+                           line.find("host nr:0x148") != std::string::npos;
+      if ((error || !routine) && left->fetch_sub(1) > 0) Live("io: " + line);
+    });
+  }
   std::vector<std::uint8_t> sys[3];
   const char* const names[3] = {"libc.so", "libm.so", "libz.so"};
   for (int i = 0; i < 3; ++i) {

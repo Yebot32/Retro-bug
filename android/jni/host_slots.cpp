@@ -6,6 +6,9 @@
 #include "thunks.h"
 
 #include <dlfcn.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
 
 #include <cctype>
 #include <cstdio>
@@ -310,10 +313,23 @@ HostSlots::HostSlots(runtime::GuestProcess& p, int target_sdk, std::function<voi
         case DlKind::kDlopen:
         case DlKind::kDlopenExt:
           // NULL: the library this build cannot provide. A caller that checks — netd's does — carries
-          // on; one that does not faults on the NULL it asked to be lied to about.
+          // on; one that does not faults on the NULL it asked to be lied to about. With the thunks on,
+          // libnetd_client.so is the exception: bionic's resolver needs it to reach netd (dnsproxyd), and
+          // without it every getaddrinfo fails (there are no nameservers to fall back on).
           c.last_path = GuestStringOrEmpty(mem, s.r[0]);
-          s.r[0] = 0;
+          s.r[0] = thunks_on_ && c.last_path.size() >= 17 &&
+                           c.last_path.compare(c.last_path.size() - 17, 17, "libnetd_client.so") == 0
+                       ? kNetdHandle
+                       : 0u;
           return true;
+        case DlKind::kDlsym: {
+          // The stand-in libnetd_client.so exports one entry point: netdClientInitDnsOpenProxy.
+          const std::string sym = GuestStringOrEmpty(mem, s.r[1]);
+          std::optional<std::uint32_t> at;
+          if (s.r[0] == kNetdHandle && sym == "netdClientInitDnsOpenProxy") at = Resolve("rb_netdClientInitDnsOpenProxy");
+          s.r[0] = at ? *at : 0u;
+          return true;
+        }
         case DlKind::kTargetSdk:
           s.r[0] = static_cast<std::uint32_t>(target_sdk_);
           return true;
@@ -521,6 +537,31 @@ void HostSlots::enable_thunks() {
   };
   AddSpecial("eglChooseConfig", configs("eglChooseConfig", true));
   AddSpecial("eglGetConfigs", configs("eglGetConfigs", false));
+
+  // ---- the stand-in libnetd_client.so (dlopen/dlsym above): bionic's netdClientInit calls
+  // netdClientInitDnsOpenProxy(&dispatch.dnsOpenProxy); the function it installs opens a stream to netd's
+  // dnsproxyd, as the real library does, and the guest libc then speaks netd's protocol over it (host I/O).
+  AddSpecial("rb_netdDnsOpenProxy", [](exec::MachineState& s, std::string*) {
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    std::strncpy(addr.sun_path, "/dev/socket/dnsproxyd", sizeof addr.sun_path - 1);
+    if (fd >= 0 && ::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0) {
+      ::close(fd);
+      s.r[0] = static_cast<std::uint32_t>(-1);
+      return true;
+    }
+    s.r[0] = static_cast<std::uint32_t>(fd);
+    return true;
+  });
+  AddSpecial("rb_netdClientInitDnsOpenProxy", [this](exec::MachineState& s, std::string* why) {
+    const auto at = Resolve("rb_netdDnsOpenProxy");
+    if (!at || s.r[0] == 0 || !p_.memory().Write(s.r[0], &*at, 4)) {
+      *why = "netdClientInitDnsOpenProxy: the dispatch slot at " + Hex(s.r[0]) + " is not writable";
+      return false;
+    }
+    return true;
+  });
 }
 
 void HostSlots::ReportThunks(const std::function<void(const std::string&)>& say) const {

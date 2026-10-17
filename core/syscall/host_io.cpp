@@ -9,6 +9,7 @@
 #include <sys/epoll.h>
 #include <sys/file.h>
 #include <sys/ioctl.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
@@ -42,7 +43,8 @@ constexpr std::uint32_t kRead = 3, kWrite = 4, kOpen = 5, kClose = 6, kCreat = 8
                         kFstatat64 = 327, kUnlinkat = 328, kRenameat = 329, kLinkat = 330, kSymlinkat = 331,
                         kReadlinkat = 332, kFchmodat = 333, kFaccessat = 334, kPselect6 = 335, kPpoll = 336,
                         kUtimensat = 348, kEventfd2 = 356, kEpollCreate1 = 357, kDup3 = 358, kPipe2 = 359,
-                        kAccept4 = 366, kStatx = 397;
+                        kAccept4 = 366, kStatx = 397, kRenameat2 = 382, kGettimeofday = 78, kSigaltstack = 186,
+                        kUgetrlimit = 191, kGetuid32 = 199, kGetgid32 = 200, kGeteuid32 = 201, kGetegid32 = 202;
 }  // namespace a32
 
 constexpr int kAtFdcwd = -100;
@@ -233,6 +235,8 @@ bool HostIo::Handles(std::uint32_t n) {
     case a32::kFchmodat: case a32::kFaccessat: case a32::kPselect6: case a32::kPpoll: case a32::kUtimensat:
     case a32::kEventfd2: case a32::kEpollCreate1: case a32::kDup3: case a32::kPipe2: case a32::kAccept4:
     case a32::kStatx:
+    case a32::kRenameat2: case a32::kGettimeofday: case a32::kSigaltstack: case a32::kUgetrlimit:
+    case a32::kGetuid32: case a32::kGetgid32: case a32::kGeteuid32: case a32::kGetegid32:
       return true;
     default: return false;
   }
@@ -258,6 +262,7 @@ bool HostIo::TakesPath(std::uint32_t n, unsigned* index) {
       *index = 0;
       return true;
     case a32::kOpenat: case a32::kMkdirat: case a32::kFstatat64: case a32::kUnlinkat: case a32::kRenameat:
+    case a32::kRenameat2:
     case a32::kReadlinkat: case a32::kFchmodat: case a32::kFaccessat: case a32::kUtimensat: case a32::kStatx:
       *index = 1;
       return true;
@@ -547,6 +552,38 @@ Outcome HostIo::Serve(const Frame& f, mem::GuestMemory& mem) {
         if (!sending && r >= 0) PutMsg(m, a[1], msg);
         break;
       }
+      case a32::kRenameat2:  // bionic's rename() on recent releases
+        r = path(1, &p1) && path(3, &p2)
+                ? R(::syscall(SYS_renameat2, dirfd(0), p1.c_str(), dirfd(2), p2.c_str(), a[4]))
+                : perr;
+        break;
+      case a32::kGettimeofday: {
+        struct timeval tv {};
+        r = R(::gettimeofday(&tv, nullptr));
+        if (r == 0 && a[0] != 0 && !PutTimeval(m, a[0], tv)) r = -EFAULT;
+        const std::int32_t tz[2] = {0, 0};
+        if (r == 0 && a[1] != 0 && !m.Write(a[1], tz, 8)) r = -EFAULT;
+        break;
+      }
+      case a32::kSigaltstack: {
+        // Guest signals are never delivered on a host stack (spec: signals recorded, handlers never installed on
+        // the host), so the alternate stack is accepted and reported back as disabled.
+        const std::uint32_t old[3] = {0, 2 /*SS_DISABLE*/, 0};
+        r = a[1] != 0 && !m.Write(a[1], old, 12) ? -EFAULT : 0;
+        break;
+      }
+      case a32::kUgetrlimit: {  // struct rlimit of two 32-bit words; RLIM_INFINITY and anything larger -> ~0u
+        struct rlimit rl {};
+        r = R(::getrlimit(static_cast<int>(a[0]), &rl));
+        const auto narrow = [](rlim_t v) { return v > 0xffffffffull ? 0xffffffffu : static_cast<std::uint32_t>(v); };
+        const std::uint32_t w[2] = {narrow(rl.rlim_cur), narrow(rl.rlim_max)};
+        if (r == 0 && !m.Write(a[1], w, 8)) r = -EFAULT;
+        break;
+      }
+      case a32::kGetuid32: r = ::getuid(); break;
+      case a32::kGetgid32: r = ::getgid(); break;
+      case a32::kGeteuid32: r = ::geteuid(); break;
+      case a32::kGetegid32: r = ::getegid(); break;
       default: r = -ENOSYS; break;
     }
     const std::string why = "host " + Describe(fr.number) + (p1.empty() ? "" : "('" + p1 + "')") + " = " + std::to_string(r);

@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -228,9 +229,36 @@ void served_and_host_descriptors_never_share_a_number() {
   CHECK(r.Sys(322, AtFdcwd, r.Str("/nonexistent/x"), O_RDONLY, 0) == -ENOENT);  // the host's own answer
 }
 
+/// The calls Angry Birds Go's first run needed beyond files and sockets.
+void the_rest_of_a_games_first_run() {
+  Rig r;
+  std::system("mkdir -p /data/local/tmp/rb_hostio; echo -n mapped-bytes > /data/local/tmp/rb_hostio/m.bin");
+  const std::string a = std::string{kDir} + "/r1", b = std::string{kDir} + "/r2";
+  std::system("touch /data/local/tmp/rb_hostio/r1; rm -f /data/local/tmp/rb_hostio/r2");
+  CHECK(r.Sys(382 /*renameat2*/, AtFdcwd, r.Str(a), AtFdcwd, r.Str(b), 0) == 0 && ::access(b.c_str(), F_OK) == 0);
+  const std::uint32_t tv = r.Zero(8), tz = r.Zero(8);
+  CHECK(r.Sys(78 /*gettimeofday*/, tv, tz) == 0 && r.U32(tv) > 1700000000u);
+  const std::uint32_t rl = r.Zero(8);
+  CHECK(r.Sys(191 /*ugetrlimit*/, RLIMIT_NOFILE, rl) == 0 && r.U32(rl) > 0 && r.U32(rl + 4) >= r.U32(rl));
+  CHECK(r.Sys(199 /*getuid32*/) == static_cast<std::int32_t>(::getuid()));
+  const std::uint32_t old = r.Zero(12);
+  CHECK(r.Sys(186 /*sigaltstack*/, 0, old) == 0 && r.U32(old + 4) == 2u /*SS_DISABLE*/);
+  // mmap2 of a host file: a private copy of its bytes
+  const std::int32_t fd = r.Sys(322, AtFdcwd, r.Str(std::string{kDir} + "/m.bin"), O_RDONLY, 0);
+  const std::int32_t at = r.Sys(192 /*mmap2*/, 0, 4096, 1 /*PROT_READ*/, 2 /*MAP_PRIVATE*/, static_cast<std::uint32_t>(fd), 0);
+  CHECK_CTX(at > 0 || at < -4095, "mmap2 -> " + std::to_string(at));
+  CHECK(r.Read(static_cast<std::uint32_t>(at), 12) == "mapped-bytes");
+  r.Sys(6, fd);
+  // CLOCK_MONOTONIC_COARSE (6) is answered; PR_SET_VMA is accepted
+  const std::uint32_t ts = r.Zero(8);
+  CHECK(r.Sys(263 /*clock_gettime*/, 6, ts) == 0);
+  CHECK(r.Sys(172 /*prctl*/, 0x53564d41u, 0, 0, 0, 0) == 0);
+}
+
 }  // namespace
 
 int main() {
+  the_rest_of_a_games_first_run();
   files_round_trip();
   pipes_and_messages();
   tcp_to_a_host_listener();

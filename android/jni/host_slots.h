@@ -9,6 +9,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <map>
 #include <optional>
@@ -38,6 +39,8 @@ class HostSlots {
   /// The thunk window (opt-in, `enable_thunks`): one slot per imported name, given on first sight.
   static constexpr std::uint32_t kThunkSlotBase = 1024u;
   static constexpr std::size_t kThunkSlots = abi::AbiContext::kMaxSlots - kThunkSlotBase;
+  /// What dlopen("libnetd_client.so") answers with the thunks on (a stand-in only dlsym understands).
+  static constexpr std::uint32_t kNetdHandle = 0xC0DE0001u;
 
   struct ThunkCall {
     std::string name;
@@ -86,7 +89,7 @@ class HostSlots {
   std::uint32_t GuestString(const std::string& key, const std::string& text);
 
   const std::vector<DlCall>& dl_calls() const { return dl_calls_; }
-  const std::vector<ThunkCall>& thunk_calls() const { return thunk_calls_; }
+  const std::deque<ThunkCall>& thunk_calls() const { return thunk_calls_; }
   void ReportThunks(const std::function<void(const std::string&)>& say) const;
   const std::vector<LogLine>& log() const { return log_; }
   unsigned log_dropped() const { return log_dropped_; }
@@ -106,7 +109,8 @@ class HostSlots {
   bool thunks_on_ = false;
   abi::HandleTable handles_;
   std::map<std::string, Special> specials_;
-  std::vector<ThunkCall> thunk_calls_;
+  std::deque<ThunkCall> thunk_calls_;  ///< a deque: a running thunk holds a reference while eglGetProcAddress or
+                                      ///< dlsym may add another
   std::map<std::string, std::uint32_t> guest_strings_;  ///< GuestString's copies
 };
 

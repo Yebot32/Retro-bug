@@ -357,6 +357,8 @@ class Monitor {
   /// app's own permissions; the provider still answers its own paths first, and its descriptors keep their handlers.
   void set_host_io(bool on) { host_io_ = on; }
   [[nodiscard]] bool host_io() const { return host_io_; }
+  /// Receives the answer line of every host-I/O call as it completes (diagnostics; unset = nothing is formatted twice).
+  void set_host_io_trace(std::function<void(const std::string&)> trace) { host_io_trace_ = std::move(trace); }
 
   /// Overrides the host-clock default, for a test that needs a value it can assert and for a launcher
   /// that wants the guest to see its own notion of time.
@@ -503,6 +505,7 @@ class Monitor {
   RandomSource random_;
   std::vector<ServedFile> served_;
   bool host_io_ = false;
+  std::function<void(const std::string&)> host_io_trace_;
   /// Whether this monitor answers `f` itself even with host I/O on: a descriptor it served, console output, or a
   /// path its provider serves.
   bool ServesItself(const Frame& f);

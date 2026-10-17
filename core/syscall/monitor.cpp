@@ -41,10 +41,9 @@ std::string ProtText(std::uint32_t prot) {
 /// because a guest's "CPU time" measured by the emulator's host would be a different quantity wearing the
 /// right name, and a named refusal is better than a plausible wrong number.
 bool HostClock(std::int32_t clock_id, std::int64_t* nanos) {
-  const clockid_t id = clock_id == static_cast<std::int32_t>(CLOCK_REALTIME)
-                           ? CLOCK_REALTIME
-                           : (clock_id == static_cast<std::int32_t>(CLOCK_MONOTONIC) ? CLOCK_MONOTONIC
-                                                                                    : -1);
+  // The wall and monotonic clocks and their raw/coarse/boot variants (0, 1, 4, 5, 6, 7) — the same answer the guest's
+  // kernel would give. The CPU-time clocks (2, 3) stay refused: the host's would be the emulator's time.
+  const clockid_t id = (clock_id == 0 || clock_id == 1 || (clock_id >= 4 && clock_id <= 7)) ? clock_id : -1;
   if (id < 0) return false;
   timespec ts{};
   if (::clock_gettime(id, &ts) != 0) return false;
@@ -852,6 +851,9 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
 
     case nr::kPrctl: {
       const std::uint32_t option = f.arg[0];
+      if (option == 0x53564d41u) {  // PR_SET_VMA: names an anonymous mapping for /proc/maps; nothing to name here
+        return Outcome::Emulated(0, "prctl(PR_SET_VMA) -> 0: the mapping name is not recorded");
+      }
       // PR_SET_NAME (15) / PR_GET_NAME (16): the thread name is guest-visible state that RetroBug can
       // hold without touching the host thread, so these two are answered and everything else is refused
       // by name rather than answered with a 0 the way a kernel would answer an option it *does* know.
@@ -1105,7 +1107,13 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
       const std::int32_t fd = static_cast<std::int32_t>(f.arg[4]);
       if (len == 0) return Outcome::Answered(err::kEinval, "mmap2(len=0) = -EINVAL (-22)");
       constexpr std::uint32_t kMapAnonymous = 0x20u;
-      if ((flags & kMapAnonymous) == 0 && fd != -1) {
+      bool from_file = false;
+      if ((flags & kMapAnonymous) == 0 && fd != -1 && host_io_) {
+        bool served = false;
+        for (const ServedFile& s : served_) served = served || s.fd == fd;
+        from_file = !served;
+      }
+      if ((flags & kMapAnonymous) == 0 && fd != -1 && !from_file) {
         return Outcome::Refused(err::kEnosys,
                                 "mmap2 with a file descriptor (fd=" + std::to_string(fd) +
                                     ") is not implemented: this monitor serves no file mappings, and a "
@@ -1119,14 +1127,31 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
                                      ") = -ENOMEM (-12): the guest window has no free run of " +
                                      std::to_string(size) + " bytes left");
       }
-      const unsigned prot_bits = ((prot & 1u) ? mem::kRead : 0u) | ((prot & 2u) ? mem::kWrite : 0u) |
-                                 ((prot & 4u) ? mem::kExec : 0u);
+      const unsigned prot_bits = ((prot & 1u) ? mem::kRead : 0u) | ((prot & 2u) || from_file ? mem::kWrite : 0u) |
+                                 ((prot & 4u) ? mem::kExec : 0u);  // a file copy is written once here
       std::string merr;
       if (!memory_->Map(at, size, prot_bits, &merr)) {
         return Outcome::Answered(err::kEnomem, "mmap2: could not map " + std::to_string(size) +
                                                    " bytes at 0x" + Hex(at) + ": " + merr);
       }
       mmap_next_ = at + size;
+      if (from_file) {
+        // A private copy of the file's bytes from offset pgoff * 4096 (mmap2's unit): what MAP_PRIVATE reads; a
+        // MAP_SHARED writer's stores are not written back (named in the detail).
+        void* host = memory_->Host(at);
+        const off_t off = static_cast<off_t>(f.arg[5]) * 4096;
+        const ssize_t got = host == nullptr ? -1 : ::pread(fd, host, len, off);
+        if (got < 0) {
+          std::string e;
+          memory_->Unmap(at, size, &e);
+          return Outcome::Answered(err::kEbadf, "mmap2(fd=" + std::to_string(fd) + "): reading the file failed");
+        }
+        return Outcome::Emulated(static_cast<std::int32_t>(at),
+                                 "mmap2(fd=" + std::to_string(fd) + ", len=" + std::to_string(len) + ", off=" +
+                                     std::to_string(off) + ") -> 0x" + Hex(at) + ": a private copy of " +
+                                     std::to_string(got) + " file bytes" +
+                                     ((flags & 0x01u) != 0 ? " (MAP_SHARED: stores are not written back)" : ""));
+      }
       return Outcome::Emulated(static_cast<std::int32_t>(at),
                                "mmap2(anon, len=" + std::to_string(len) + ", prot=0x" + Hex(prot) +
                                    ") -> 0x" + Hex(at) + ": " + std::to_string(size) +
@@ -1631,6 +1656,7 @@ Outcome Monitor::Finish(exec::MachineState& state, Outcome done) {
 
 Outcome Monitor::Complete(exec::MachineState& state, Outcome o) {
   const Frame f = Frame::Capture(state, 0);
+  if (host_io_trace_ && (o.detail.rfind("host ", 0) == 0 || o.verdict == Verdict::kUnsupported)) host_io_trace_(o.detail);
   // Refusals and errno answers are recorded alongside the successes: the report's answer lines exist
   // so a run that died on an `openat` can say which path and why, not merely that openat happened.
   // Only four success sites called `Observe` before, so every refusal reached the report as a tally
