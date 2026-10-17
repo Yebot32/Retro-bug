@@ -129,7 +129,7 @@ constexpr std::size_t kWindowBytes = 64u << 20;
 /// that with a guard reservation, because an *unreserved* window is a loaded library that ends past
 /// 12 MiB: the loader's free-space scan would place a module over the sentinel and the slots, and a
 /// guest branch to a 4-aligned address inside the range would then report a bogus host call.
-constexpr std::size_t kHostWindowBytes = 0x2000u;
+constexpr std::size_t kHostWindowBytes = 0x1000u + std::size_t{abi::AbiContext::kMaxSlots} * 4u;
 /// One guest call's instruction budget, the same figure the APK lane uses. Tier I counts IR ops and Tier
 /// J guest encodings, so this bounds the two differently — it exists to stop a runaway guest, not to
 /// measure it.

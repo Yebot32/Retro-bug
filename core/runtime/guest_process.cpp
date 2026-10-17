@@ -287,7 +287,9 @@ std::unique_ptr<GuestProcess> GuestProcess::Create(const GuestProcessOptions& op
   mem::GuestMemory& m = *p->mem_;
 
   // The host-entry window (return sentinel + slot table): reserved so no placement lands on it.
-  if (!m.Map(kReturnAddress, 0x2000, mem::kNone, &e)) return fail("reserving the host-entry window: " + e);
+  // The sentinel page, then the slot table (`AbiContext::SlotFor`: kMaxSlots four-byte entries).
+  constexpr std::size_t kHostWindow = 0x1000u + std::size_t{abi::AbiContext::kMaxSlots} * 4u;
+  if (!m.Map(kReturnAddress, kHostWindow, mem::kNone, &e)) return fail("reserving the host-entry window: " + e);
   // Nothing at or above kAllocCeiling: reserved outright when the window reaches it, so neither this
   // allocator, the loader's placement scan nor the monitor's mmap2 can hand it out.
   p->ceiling_ = static_cast<GuestAddr>(std::min<std::size_t>(options.window_bytes, kAllocCeiling));
