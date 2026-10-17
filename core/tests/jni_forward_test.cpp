@@ -398,6 +398,42 @@ void double_delete_is_tolerated(int tier) {
   CHECK_CTX(HasNote(pr, "already deleted"), Notes(pr));
 }
 
+/// A native's argument used after that native returned. Gumball's gumballJNIBegin saves `this` in a static on
+/// every entry and never restores it, so a nested native (a Java callback's) leaves its own `this` there and the
+/// outer native then calls GetObjectClass on it. ART reads a native's arguments from the call's stack, unchecked
+/// without CheckJNI, so this works on a device: the bridge answers it with the object. A plain local of the same
+/// popped frame stays refused, and a DeleteLocalRef of the old argument is ignored.
+void argument_used_after_its_native_returned(int tier) {
+  Proc pr = Boot(tier);
+  CHECK_CTX(pr.p != nullptr, pr.err);
+  if (!pr.p) return;
+  const abi::HostRef obj = pr.java->NewInstance("rb/Fixture");
+  pr.fwd->PushFrame();  // the outer native
+  pr.fwd->PushFrame();  // the nested one: `this` is its argument
+  const abi::GuestAddr self = pr.fwd->ToGuestLocal(pr.java->NewLocalRef(obj));
+  pr.fwd->ArgumentsIn();
+  const abi::GuestAddr made = pr.fwd->ToGuestLocal(pr.java->NewLocalRef(obj));
+  pr.fwd->PopFrame(0);
+  // The outer native goes on making locals: the popped slots are reused under new serials.
+  const abi::GuestAddr reuse1 = pr.fwd->ToGuestLocal(pr.java->NewLocalRef(obj));
+  const abi::GuestAddr reuse2 = pr.fwd->ToGuestLocal(pr.java->NewLocalRef(obj));
+  CHECK(((reuse1 ^ self) & 0xfffc0u) == 0 || ((reuse2 ^ self) & 0xfffc0u) == 0);  // the same slot, reused
+  const Result r = Call(pr, tier, "fx_class_of", {Value32::Ptr(self)});
+  CHECK_CTX(Returned(r) && r.ret.i() == 1, r.rr.detail);
+  CHECK_CTX(HasNote(pr, "argument used after that native returned"), Notes(pr));
+  const Result live = Call(pr, tier, "fx_class_of", {Value32::Ptr(reuse1)});
+  CHECK_CTX(Returned(live) && live.ret.i() == 1, live.rr.detail);
+  const Result del = Call(pr, tier, "fx_double_delete", {Value32::Ptr(self)});
+  CHECK_CTX(Returned(del) && del.ret.i() == 7, del.rr.detail + " / " + Notes(pr));
+  const Result still = Call(pr, tier, "fx_class_of", {Value32::Ptr(reuse1)});
+  CHECK_CTX(Returned(still) && still.ret.i() == 1, "the reused slot after deleting the old argument: " + still.rr.detail);
+  const Result plain = Call(pr, tier, "fx_class_of", {Value32::Ptr(made)});
+  CHECK_CTX(plain.rr.reason == exec::StopReason::Fault &&
+                plain.rr.detail.find("stale local reference") != std::string::npos,
+            plain.rr.detail);
+  pr.fwd->PopFrame(0);
+}
+
 /// Attach, make a local, detach — without DeleteLocalRef, as detach frees a thread's locals on ART: 20000 events
 /// (past the 16384-slot table) leave no live local behind.
 void detach_frees_the_threads_locals(int tier) {
@@ -456,6 +492,7 @@ int main() {
     direct_buffer_over_guest_memory(tier);
     reflection_round_trip(tier);
     double_delete_is_tolerated(tier);
+    argument_used_after_its_native_returned(tier);
     detach_frees_the_threads_locals(tier);
     long_new_string_utf(tier);
   }

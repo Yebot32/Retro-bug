@@ -33,6 +33,18 @@ public class BridgeActivity extends Activity {
         static native int nativeAdd(int a, int b);
     }
 
+    /**
+     * Gumball's JNIGLSurface shape: instance natives whose C saves `this` in a static on entry and never restores
+     * it, and a Java callback (loadTextureImage) that calls a native back (jniTextureReady), so the outer native
+     * goes on with the nested one's `this`, kept past that native's return.
+     */
+    static final class Surface {
+        native String outer(String name);
+        native void inner(String name);
+        void load(String name) { inner(name); }
+        String label() { return "surface"; }
+    }
+
     static final class Holder {
         int i = 7;
         long j = 1L << 40;
@@ -135,6 +147,7 @@ public class BridgeActivity extends Activity {
                     + " label=" + Holder.label;
         }});
         row("overloads", new Row() { public String run() { return over(41) + " " + over("s"); }});
+        row("nested_this", new Row() { public String run() { return new Surface().outer("font.png"); }});
         Log.i(TAG, "done " + rows + " rows");
     }
 }

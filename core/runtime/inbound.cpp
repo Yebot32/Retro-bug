@@ -126,16 +126,23 @@ std::uint64_t Inbound::Dispatch(const InboundTarget& t, const CapturedArgs& a) {
     Fail(t, e);
     return 0;
   }
+  fwd_.ArgumentsIn();
   exec::RunResult rr{};
+  exec::MachineState last{};
   const char shorty[2] = {ret, '\0'};
   const abi::Ret32 r = p_.abi().CallGuestToCompletion(t.fn, args, abi::Shorty::For(shorty),
-                                                      GuestProcess::kThreadTurnBudget, &rr);
+                                                      GuestProcess::kThreadTurnBudget, &rr, &last);
   if (rr.reason != exec::StopReason::Returned) {
     fwd_.PopFrame(0);
     if (rr.reason == exec::StopReason::Exited && p_.monitor().group_exited() && on_exit_) {
       on_exit_(static_cast<int>(p_.abi().exit_status()));
     }
-    Fail(t, std::string{ReasonText(rr.reason)} + (rr.detail.empty() ? "" : ": " + rr.detail));
+    // Where the guest was: without it a fault inside a game's library names no instruction to look at.
+    char where[48];
+    std::snprintf(where, sizeof where, " (pc 0x%x, lr 0x%x)", static_cast<unsigned>(last.pc),
+                  static_cast<unsigned>(last.r[14]));
+    Fail(t, std::string{ReasonText(rr.reason)} + (rr.detail.empty() ? "" : ": " + rr.detail) +
+                (rr.reason == exec::StopReason::Exited ? "" : where));
     return 0;
   }
   std::string pe;

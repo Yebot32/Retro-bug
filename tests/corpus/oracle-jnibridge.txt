@@ -1,7 +1,7 @@
 # JNI bridge oracle — com.retrobug.jnibridge run natively (tools/run_bridge_oracle.sh).
 # device: SM-X710 (R52Y106BECZ), samsung/gts9wifixx/gts9wifi:16/BP4A.251205.006/X710XXS6EZI2:user/release-keys
 # libc: /system/lib/libc.so sha256 ff80f560ecadf3d7894188f6d63bf1c8c0bc10f240f8100213295dfe126733f4
-# app: libjnibridge.so sha256 ac9e7fd6ab040125f937288e66f810c247b1420bef86088bf9406cd5b7e22b01
+# app: libjnibridge.so sha256 0743bfb2b1ddce7123798e262ccd802f027b1b316428a06ab44682d0ac4eb79f
 strings=a len 6 utf 10 h 379bd93b rt 1 region c556f7e1; b len 65536 utf 194024 h d937722e crit 1 rt 1 r10 db823062 java 6:cedc8daa 65536:4bd26c2
 arrays=lens 4 3 2 made 4 prims 081f1e70 bytesum 128 first x fill 4 ints 10,20,103,40 doubles 0.25,2.0 objects x,from native
 callbacks=124123
@@ -11,4 +11,5 @@ threads=2839600
 register_natives=65
 fields_and_statics=read i=7 j=1099511627776 d=4/8 s=held counter=3 after i=42 j=1099511627777 d=1.5 s=set by native counter=42 label=static set
 overloads=int 42 string of 1
-done 9 rows
+nested_this=loaded font.png, then surface (depth 1)
+done 10 rows

@@ -1,6 +1,7 @@
 // RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
 #include "rb/abi/jni_forward.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
@@ -256,6 +257,10 @@ ForwardingJni::LocalTable::~LocalTable() {
   shared->live.fetch_sub(live, std::memory_order_relaxed);
   std::lock_guard<std::mutex> lk(shared->mu);
   shared->free_threads.push_back(thread);
+  // Its ghosts are weak globals: an exiting thread may have no Java left to delete them with, so the bridge does.
+  for (const HostRef g : ghosts) {
+    if (g != 0) shared->orphans.push_back(g);
+  }
 }
 
 ForwardingJni::LocalTable* ForwardingJni::Locals(std::string* err) {
@@ -334,6 +339,12 @@ HostRef ForwardingJni::FromGuest(GuestAddr h, std::string* err) {
                   "; this is thread " + std::to_string(t->thread) + ")");
     }
     if (n >= t->refs.size() || t->refs[n] == 0 || t->serials[n] != serial) {
+      if (n < t->ghosts.size() && t->ghosts[n] != 0 && t->ghost_serials[n] == serial &&
+          !java_.IsSameObject(t->ghosts[n], 0)) {  // a collected object is stale, as it is anywhere
+        Note("a native's argument used after that native returned (a stale local): answered with its object, as "
+             "ART reads it from the returned call's stack");
+        return t->ghosts[n];
+      }
       return fail(Hex(h) + " is a stale local reference (deleted, or the frame that made it has returned)");
     }
     return t->refs[n];
@@ -363,7 +374,14 @@ void ForwardingJni::PushFrame() {
   if (LocalTable* t = Locals(&e)) {
     t->frames.push_back(t->refs.size());
     t->free.emplace_back();
+    t->args_end.push_back(t->refs.size());  // no arguments until ArgumentsIn says so
   }
+}
+
+void ForwardingJni::ArgumentsIn() {
+  std::string e;
+  LocalTable* t = Locals(&e);
+  if (t != nullptr && !t->args_end.empty()) t->args_end.back() = t->refs.size();
 }
 
 HostRef ForwardingJni::PopFrame(GuestAddr result, std::string* err) {
@@ -372,8 +390,29 @@ HostRef ForwardingJni::PopFrame(GuestAddr result, std::string* err) {
   LocalTable* t = Locals(&e);
   if (t == nullptr || t->frames.empty()) return r;
   const std::size_t start = t->frames.back();
+  const std::size_t args_end = std::min(t->args_end.back(), t->refs.size());
   t->frames.pop_back();
   t->free.pop_back();
+  t->args_end.pop_back();
+  // The frame's arguments outlive it as ghosts (see ArgumentsIn): one weak global per slot (a stack read pins
+  // nothing on ART either: a weak referent a native was handed must still be collectable), the newest one kept.
+  std::vector<HostRef> dead;
+  for (std::size_t n = start; n < args_end; ++n) {
+    if (t->refs[n] == 0) continue;
+    if (t->ghosts.size() <= n) {
+      t->ghosts.resize(n + 1, 0);
+      t->ghost_serials.resize(n + 1, 0);
+    }
+    if (t->ghosts[n] != 0) dead.push_back(t->ghosts[n]);
+    t->ghosts[n] = java_.NewWeakGlobalRef(t->refs[n]);
+    t->ghost_serials[n] = t->serials[n];
+  }
+  {
+    std::lock_guard<std::mutex> lk(shared_->mu);
+    dead.insert(dead.end(), shared_->orphans.begin(), shared_->orphans.end());
+    shared_->orphans.clear();
+  }
+  for (const HostRef g : dead) java_.DeleteWeakGlobalRef(g);
   std::size_t live = 0;
   for (std::size_t n = start; n < t->refs.size(); ++n) live += t->refs[n] != 0;
   t->refs.resize(start);  // the slots' serials stay, so a handle into a popped frame stays stale
@@ -732,6 +771,11 @@ bool ForwardingJni::Slot(std::uint32_t i, exec::MachineState& s, std::string* er
       LocalTable* t = Locals(&why);
       if (t == nullptr) return refuse(why);
       const std::uint32_t n = (h >> 6) & 0x3fffu;
+      if (n >= t->refs.size() || t->refs[n] == 0 || t->serials[n] != ((h >> 2) & 0xfu)) {
+        // A ghost (a returned native's argument): ART's DeleteLocalRef of an argument does nothing either.
+        Note("JNIEnv->DeleteLocalRef of a returned native's argument — ignored, as ART does");
+        return true;
+      }
       t->refs[n] = 0;
       // Reusable in the frame it belongs to; a slot below the current frame waits for its own frame to pop.
       if (t->frames.empty() || n >= t->frames.back()) t->free.back().push_back(n);
@@ -1377,6 +1421,7 @@ bool ForwardingJni::VmSlot(std::uint32_t i, exec::MachineState& s, std::string* 
           t->refs.clear();
           t->frames.clear();
           t->free.assign(1, {});
+          t->args_end.clear();
           shared_->live.fetch_sub(live, std::memory_order_relaxed);
         }
       }
