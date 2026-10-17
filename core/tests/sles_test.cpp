@@ -234,7 +234,9 @@ void an_unknown_interface_is_unsupported_and_named() {
   r.Put(kScratch + 16, 0x1234);
   CHECK(r.Method(obj, kGetInterface, {bogus, kScratch + 16}) == SL_RESULT_FEATURE_UNSUPPORTED);
   CHECK(r.U32(kScratch + 16) == 0x1234);
-  CHECK(!r.said.empty());
+  bool named = false;
+  for (const std::string& line : r.said) named = named || line.find("GetInterface(IID") != std::string::npos;
+  CHECK(named);
   r.Method(obj, kDestroy, {});
 }
 

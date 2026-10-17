@@ -10,6 +10,7 @@
 #include <dlfcn.h>
 
 #include <array>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -434,13 +435,21 @@ struct Sles::Impl {
     return true;  // `gone` frees the callbacks: the host promised none runs after Destroy
   }
 
+  // One line the first time audio flows: a game's log then shows the whole path worked, not only that nothing failed.
+  std::atomic<bool> first_callback{false};
+  void FirstCallback() {
+    if (!first_callback.exchange(true)) Say("callback", "first buffer-queue callback into the guest: audio is flowing");
+  }
+
   // ---- callbacks (host audio threads)
   static void BqTramp(SLBufferQueueItf, void* ctx) {
     auto* c = static_cast<Callback*>(ctx);
+    c->impl->FirstCallback();
     c->impl->host.call_guest(c->fn, {c->self, c->ctx});
   }
   static void SimpleBqTramp(SLAndroidSimpleBufferQueueItf, void* ctx) {
     auto* c = static_cast<Callback*>(ctx);
+    c->impl->FirstCallback();
     c->impl->host.call_guest(c->fn, {c->self, c->ctx});
   }
   static void PlayTramp(SLPlayItf, void* ctx, SLuint32 event) {
@@ -655,6 +664,10 @@ struct Sles::Impl {
       r = (*e)->CreateAudioPlayer(e, &made, &src.src, &sink, static_cast<SLuint32>(hids.size()), hids.data(),
                                   hreq.data());
     }
+    {
+      const std::string k = Hex(src.loc.type) + "/" + (src.src.pFormat ? Hex(src.fmt.type) : std::string{"-"}) + " -> " + Hex(r);
+      Say("player " + k, "CreateAudioPlayer: source locator/format " + k);
+    }
     s.r[0] = Finish(r, made, out, std::move(strings));
     return true;
   }
@@ -694,6 +707,7 @@ struct Sles::Impl {
       r = fn(&made, static_cast<SLuint32>(opts.size()), opts.empty() ? nullptr : opts.data(),
              static_cast<SLuint32>(hids.size()), hids.data(), hreq.data());
     }
+    Say("engine " + Hex(r), "slCreateEngine -> " + Hex(r));
     s.r[0] = Finish(r, made, out, {});
     return true;
   }
