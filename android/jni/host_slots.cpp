@@ -473,6 +473,26 @@ void HostSlots::enable_thunks() {
     s.r[0] = GuestString("gl:" + std::to_string(s.r[0]), reinterpret_cast<const char*>(host));
     return true;
   });
+  // glGetVertexAttribPointerv(index, pname, void** out): the host answers what glVertexAttribPointer was given — a
+  // translated guest pointer (client array) or a buffer offset. A pointer into the guest window goes back as its guest
+  // address; anything else is an offset, which fits in 32 bits.
+  AddSpecial("glGetVertexAttribPointerv", [this](exec::MachineState& s, std::string* why) {
+    using Fn = void (*)(unsigned, unsigned, void**);
+    const auto f = reinterpret_cast<Fn>(HostSymbol("libGLESv2.so", "glGetVertexAttribPointerv"));
+    if (f == nullptr) {
+      *why = "this device's libGLESv2 has no glGetVertexAttribPointerv";
+      return false;
+    }
+    void* host = nullptr;
+    f(s.r[0], s.r[1], &host);
+    std::uint32_t guest = 0;
+    if (host != nullptr && !p_.memory().Translate(host, &guest)) guest = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(host));
+    if (s.r[2] != 0 && !p_.memory().Write(s.r[2], &guest, 4)) {
+      *why = "glGetVertexAttribPointerv: the out pointer " + Hex(s.r[2]) + " is not writable guest memory";
+      return false;
+    }
+    return true;
+  });
   AddSpecial("eglQueryString", [this](exec::MachineState& s, std::string* why) {
     void* dpy = nullptr;
     if (!handles_.Get(s.r[0], &dpy)) {

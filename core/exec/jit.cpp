@@ -211,6 +211,9 @@ class Arm15Coprocessor final : public Dynarmic::A32::Coprocessor {
     if (IsThreadPointer(two, opc1, CRn, CRm, opc2)) {
       return Callback{&ReadThreadPointer, Site(true, false, {})};
     }
+    if (IsCycleCounterRead(15, two, opc1, static_cast<unsigned>(CRn), static_cast<unsigned>(CRm), opc2)) {
+      return Callback{&ReadCycleCounter, Site(false, false, {})};
+    }
     return Callback{&Refuse, Site(false, false, Describe("MRC", two, opc1, CRn, CRm, opc2))};
   }
 
@@ -241,6 +244,9 @@ class Arm15Coprocessor final : public Dynarmic::A32::Coprocessor {
 
  private:
   static std::uint64_t ReadVirtualCounter(void*, std::uint32_t, std::uint32_t) { return HostVirtualCounter(); }
+  static std::uint64_t ReadCycleCounter(void*, std::uint32_t, std::uint32_t) {
+    return static_cast<std::uint32_t>(HostVirtualCounter());
+  }
 
   /// `mrc`/`mcr p15, #0, rX, c13, c0, #3`: ARMv7's user-mode thread ID register, which is what bionic's
   /// `__get_tls()` compiles to and therefore what `__errno()`, `assert`, and the property and locale

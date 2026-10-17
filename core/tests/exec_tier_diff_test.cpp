@@ -1119,6 +1119,36 @@ void the_virtual_counter_reads_the_host_count_on_both_tiers() {
   }
 }
 
+/// PMCCNTR (`mrc p15, #0, rT, c9, c13, #0`), the PMU cycle counter, read as a running count on both tiers — what a
+/// kernel with user PMU access enabled gives. Older OpenSSL's `_armv7_tick` reads it under a SIGILL guard (Looney
+/// Tunes Dash's libToonRunner, in a static initialiser); this build delivers no signals, so a refusal stopped the
+/// constructor for good. It is answered from the same host count as CNTVCT, low word. Encoding (ARM state):
+///   mrc p15,#0,r0,c9,c13,#0 ; mrc p15,#0,r1,c9,c13,#0 ; bx lr  → ee190f1d ee191f1d e12fff1e
+void the_cycle_counter_reads_a_running_count_on_both_tiers() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  constexpr exec::GuestAddr kBlob = 0x0070'9000u;
+  constexpr std::uint32_t kCode[] = {0xEE190F1D, 0xEE191F1D, 0xE12FFF1E};
+  std::string err;
+  if (!rig.mem->Map(kBlob, mem::kGuestPage, kRead | kWrite | kExec, &err)) {
+    fail("could not map the cycle-counter page", __LINE__, err);
+    return;
+  }
+  CHECK_CTX(rig.mem->Write(kBlob, kCode, sizeof(kCode)), "could not plant the cycle-counter blob");
+  for (const bool jit : {false, true}) {
+    const char* tier = jit ? "J" : "I";
+    exec::Executor& engine = jit ? static_cast<exec::Executor&>(*rig.jit) : static_cast<exec::Executor&>(*rig.interp);
+    exec::MachineState s = EntryState(kBlob, 0, 0, false);
+    const std::uint64_t before = exec::HostVirtualCounter();
+    const exec::RunResult r = engine.Run(s, 1000);
+    const std::uint64_t after = exec::HostVirtualCounter();
+    CHECK_CTX(r.reason == exec::StopReason::Returned, std::string{"Tier "} + tier + ": " + r.detail);
+    // A 32-bit count: the two reads are in order (modulo the wrap) and no further apart than the host's span.
+    CHECK_CTX(s.r[0] != 0 && static_cast<std::uint32_t>(s.r[1] - s.r[0]) <= after - before,
+              std::string{"Tier "} + tier + ": counts " + Hex(s.r[0]) + "/" + Hex(s.r[1]));
+  }
+}
+
 /// The same rule one coprocessor number over — and until the wrapper registered a refusing object for
 /// every slot, this row could not even run: with `Config::coprocessors[14]` empty, the AArch64 back end
 /// compiled this `mrc p14` into `EmitCoprocessorException()`, which is `ASSERT_FALSE` and not
@@ -3064,6 +3094,7 @@ int main(int argc, char** argv) {
   a_kuser_helper_call_is_answered_on_both_tiers();
   an_unmodelled_coprocessor_access_stops_both_tiers();
   the_virtual_counter_reads_the_host_count_on_both_tiers();
+  the_cycle_counter_reads_a_running_count_on_both_tiers();
   an_unmodelled_coprocessor_number_stops_both_tiers();
   the_thumb_acquire_byte_and_half_rows_execute_on_both_tiers();
   the_dsp_multiplies_publish_q_on_both_tiers();
