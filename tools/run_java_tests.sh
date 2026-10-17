@@ -86,3 +86,4 @@ java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.StubElfWriterTest \
 
 # The Holo launcher's pure parts (docs/superpowers/plans/2026-10-18-holo-launcher-ui.md).
 java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ApkScanTest "$(to_host "$OUT/scratch")"
+java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ArtPickerTest
