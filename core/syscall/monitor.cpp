@@ -335,9 +335,8 @@ std::uint64_t Monitor::AllocLimit() const {
 }
 
 std::uint32_t Monitor::FindFreeRun(std::uint32_t hint, std::uint32_t size) const {
-  // The scan starts where the last anonymous mapping landed, so consecutive arenas stay consecutive,
-  // then wraps to the base; a hint is honoured only when page-aligned and entirely free, which is the
-  // kernel's own rule for a hint it is allowed to ignore. The base is one guest page in —
+  // A hint is honoured only when page-aligned and entirely free, which is the kernel's own rule for a hint it
+  // is allowed to ignore; otherwise the highest free run (top-down, below). The floor is one guest page in —
   // window-agnostic on purpose, because the model's window is 64 MiB on the launcher and a few pages
   // wide in tests, and a base tuned to one of them is a base the other cannot allocate above.
   //
@@ -353,12 +352,25 @@ std::uint32_t Monitor::FindFreeRun(std::uint32_t hint, std::uint32_t size) const
     return true;
   };
   if (hint != 0 && (hint & (mem::kGuestPage - 1u)) == 0 && free_run(hint)) return hint;
-  const std::uint64_t start = mmap_next_ >= kHeapBase ? mmap_next_ : kHeapBase;
-  for (std::uint64_t cand = start; cand + size <= limit; cand += mem::kGuestPage) {
-    if (free_run(cand)) return static_cast<std::uint32_t>(cand);
-  }
-  for (std::uint64_t cand = kHeapBase; cand + size <= start && cand + size <= limit; cand += mem::kGuestPage) {
-    if (free_run(cand)) return static_cast<std::uint32_t>(cand);
+  // Top-down, as Linux's default mmap layout places them: the highest free run below the limit. A mapping then
+  // sits just below the one made before it, so memory past the end of the newest region is an older region, as
+  // on a device — Gumball's cLanguage::read scans past its last string for a non-zero byte and relies on that.
+  // A mapped page inside a candidate moves the search to just below that page.
+  if (size == 0 || size > limit - kHeapBase) return 0;
+  std::uint64_t cand = (limit - size) & ~static_cast<std::uint64_t>(mem::kGuestPage - 1u);
+  while (cand >= kHeapBase) {
+    std::uint64_t blocked = 0;
+    for (std::uint64_t pg = cand + size; pg > cand;) {
+      pg -= mem::kGuestPage;
+      if (memory_->IsMapped(static_cast<std::uint32_t>(pg))) {
+        blocked = pg + 1;  // +1 so a block at page 0 is still "found"
+        break;
+      }
+    }
+    if (blocked == 0) return static_cast<std::uint32_t>(cand);
+    const std::uint64_t page = blocked - 1;
+    if (page < kHeapBase + size) return 0;
+    cand = page - size;
   }
   return 0;
 }
@@ -1592,7 +1604,7 @@ Outcome Monitor::Complete(exec::MachineState& state, Outcome o) {
   // Only four success sites called `Observe` before, so every refusal reached the report as a tally
   // entry with no reason attached — the exact silent-ignore shape the note machinery was built to
   // prevent.
-  if (o.r0 < 0) {
+  if (LooksLikeError(o.r0)) {  // an mmap address above 0x80000000 is negative as an int32, and a success
     ++refusals_;
     Observe(o.detail);
   }
