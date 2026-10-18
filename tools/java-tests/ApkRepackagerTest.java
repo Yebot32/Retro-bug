@@ -15,6 +15,7 @@ import java.nio.file.Files;
 import java.util.Arrays;
 import java.util.Enumeration;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -472,6 +473,42 @@ public class ApkRepackagerTest {
                 "no patches: no fingerprint");
     }
 
+    /** M6: enabled mods replace assets (keeping each entry's compression) and add new ones; the later id wins. */
+    static void appliesMods() throws Exception {
+        Map<String, byte[]> x = fullExtras();
+        File in = build("min_only", null, "modded", x);
+        File modZip = new File(scratch, "mod-b.zip"), modZip2 = new File(scratch, "mod-a.zip");
+        try (java.util.zip.ZipOutputStream z = new java.util.zip.ZipOutputStream(new java.io.FileOutputStream(modZip))) {
+            z.putNextEntry(new ZipEntry("mod.properties")); z.write(b("id=b-mod\ntitle=B\n")); z.closeEntry();
+            z.putNextEntry(new ZipEntry("files/assets/stored.bin")); z.write(b("modded stored payload")); z.closeEntry();
+            z.putNextEntry(new ZipEntry("files/assets/x.txt")); z.write(b("from B")); z.closeEntry();
+            z.putNextEntry(new ZipEntry("files/assets/new/extra.txt")); z.write(b("brand new")); z.closeEntry();
+        }
+        try (java.util.zip.ZipOutputStream z = new java.util.zip.ZipOutputStream(new java.io.FileOutputStream(modZip2))) {
+            z.putNextEntry(new ZipEntry("mod.properties")); z.write(b("id=a-mod\ntitle=A\n")); z.closeEntry();
+            z.putNextEntry(new ZipEntry("files/assets/x.txt")); z.write(b("from A")); z.closeEntry();
+        }
+        List<Mod> mods = Mod.enabled(Arrays.asList(Mod.open(modZip), Mod.open(modZip2)), "a-mod,b-mod");
+        ApkRepackager.mods = mods;
+        File out = new File(scratch, "modded.out.apk");
+        ApkRepackager.Result r;
+        try {
+            r = ApkRepackager.transform(in, runtime(), out);
+        } finally {
+            ApkRepackager.mods = java.util.Collections.emptyList();
+        }
+        Map<String, byte[]> o = readAll(out);
+        check(Arrays.equals(o.get("assets/x.txt"), b("from B")), "a replaced asset; the later mod id (b) wins");
+        check(Arrays.equals(o.get("assets/stored.bin"), b("modded stored payload")), "a replaced stored asset");
+        try (java.util.zip.ZipFile z = new java.util.zip.ZipFile(out)) {
+            check(z.getEntry("assets/stored.bin").getMethod() == ZipEntry.STORED, "a STORED asset stays STORED");
+        }
+        check(Arrays.equals(o.get("assets/new/extra.txt"), b("brand new")), "a new asset is added");
+        check(reportHas(r, "mod b-mod", "replaced"), "report: " + r.report);
+        check(Mod.fingerprint(mods).equals(AxmlEditor.parse(o.get("AndroidManifest.xml")).metaDataString(ApkRepackager.MODS_META)),
+                "the copy carries the mods' fingerprint");
+    }
+
     static void shimsWhenNotNeededOrImpossible() throws Exception {
         Map<String, byte[]> x = new LinkedHashMap<>();
         x.put("classes.dex", Files.readAllBytes(new File(fixtures, "RiskyFixture.dex").toPath()));
@@ -638,6 +675,7 @@ public class ApkRepackagerTest {
         dropsSharedUserAndMaxSdk();
         twoUsesSdk();
         appliesPatches();
+        appliesMods();
         shimsWhenNotNeededOrImpossible();
         renamesPackage();
         movesV7aAndStubs();

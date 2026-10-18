@@ -68,6 +68,10 @@ final class ApkRepackager {
     static final String PATCHES_META = "com.retrobug.patches";
     /** The patches to apply to the next conversion (set by ConvertJob from the game's settings); empty = none. */
     static volatile List<Patch> patches = java.util.Collections.emptyList();
+    /** The fingerprint (Mod.fingerprint) of the M6 mods requested for a copy; absent when none were. */
+    static final String MODS_META = "com.retrobug.mods";
+    /** The mods to apply to the next conversion (set by ConvertJob from the game's settings), in id order. */
+    static volatile List<Mod> mods = java.util.Collections.emptyList();
 
     static final class Result {
         String packageName;      // the output's package (the new one when renamed)
@@ -269,6 +273,10 @@ final class ApkRepackager {
             // The requested set (not only the ones that fit): the library compares it with the player's choice, and a
             // patch that does not fit this build must not leave the game "out of date" forever (the report says why).
             if (!patches.isEmpty()) ed.addMetaDataString(PATCHES_META, Patch.fingerprint(patches));
+            // M6 mods: which mod supplies each replaced or added path (a later id wins), stamped like the patches.
+            Map<String, Mod> modFor = new TreeMap<>();
+            for (Mod m : mods) for (String path : m.files()) modFor.put(path, m);
+            if (!mods.isEmpty()) ed.addMetaDataString(MODS_META, Mod.fingerprint(mods));
             if (edited) manifest = ed.toBytes();
 
             List<ZipEntry> guest = new ArrayList<>();
@@ -305,6 +313,12 @@ final class ApkRepackager {
                         continue;
                     }
                     claim(names, n);
+                    Mod mod = modFor.get(n);
+                    if (mod != null) {  // M6: the mod's file in place of the game's, compressed the way the original was
+                        putBytes(zo, n, mod.read(n), e.getMethod() == ZipEntry.STORED ? ZipEntry.STORED : ZipEntry.DEFLATED);
+                        r.report.add("mod " + mod.id + ": replaced " + n);
+                        continue;
+                    }
                     if (n.matches("classes\\d*\\.dex")) {
                         byte[] dex;
                         try (InputStream in = zip.getInputStream(e)) { dex = readFully(in); }
@@ -342,6 +356,19 @@ final class ApkRepackager {
                         continue;
                     }
                     copy(zip, e, zo);
+                }
+                // M6 mods: files the game does not have. New assets are added; a new res/ file is not (nothing in
+                // resources.arsc would point at it), and is reported.
+                for (Map.Entry<String, Mod> added : modFor.entrySet()) {
+                    String path = added.getKey();
+                    if (names.contains(path)) continue;
+                    if (!path.startsWith("assets/")) {
+                        r.report.add("mod " + added.getValue().id + ": skipped " + path + " (only existing res/ files can be replaced)");
+                        continue;
+                    }
+                    claim(names, path);
+                    putBytes(zo, path, added.getValue().read(path), ZipEntry.DEFLATED);
+                    r.report.add("mod " + added.getValue().id + ": added " + path);
                 }
                 r.risks = plan.riskReport(refs, addShims ? plan.shims : Collections.<String>emptyList());
                 r.report.addAll(r.risks);
