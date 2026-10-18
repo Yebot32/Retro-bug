@@ -27,9 +27,9 @@
   the platform's mascot rather than a mark of this project, so it says nothing about who wrote RetroBug.
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.retrobug.launcher"
-    android:versionCode="1"
-    android:versionName="1">
+    package="com.retrobug.launcher">
+    <!-- versionCode / versionName are injected by tools/build_launcher_apk.sh (aapt2 link version flags). Declaring
+         them here as well would win over those flags and pin every build to the same version. -->
 
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />
 

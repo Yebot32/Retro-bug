@@ -127,7 +127,8 @@ public class LauncherActivity extends Activity {
         super.onCreate(saved);
         getWindow().setStatusBarColor(HoloTheme.PANEL);
         getWindow().setNavigationBarColor(0xFF000000);
-        boolean scripted = getIntent() != null && getIntent().getExtras() != null && !getIntent().getExtras().isEmpty();
+        boolean scripted = diagnosticsAllowed() && getIntent() != null && getIntent().getExtras() != null
+                && !getIntent().getExtras().isEmpty();
         if (saved == null && !scripted) {
             // A player's start: the boot animation over the library, which is already scanning under it; the animation
             // lifts off when it ends. Scripted starts (`-e ...`) skip it.
@@ -174,6 +175,9 @@ public class LauncherActivity extends Activity {
          * tools/run_shimcheck.sh). The shims stay applied to the process afterwards, so the script restarts
          * the launcher for it and force-stops it after.
          */
+        // The activity is exported, so any app on the device can start it with extras. Everything below is a
+        // diagnostic path for the tools (stage a file, repack, run, bootcheck): a release build ignores all of it.
+        if (!diagnosticsAllowed()) return;
         if (getIntent() != null && getIntent().getStringExtra("shimcheck") != null) {
             saveAndShow("targetSdk shim check", ShimCheck.run(this).trim());
             return;
@@ -208,7 +212,12 @@ public class LauncherActivity extends Activity {
                     ApkRepackager.debuggable = "1".equals(getIntent().getStringExtra("debuggable"));
                     ApkRepackager.nativeControl = "1".equals(getIntent().getStringExtra("native"));
                     String target = getIntent().getStringExtra("target");
-                    ApkRepackager.targetFloor = target == null ? 0 : Integer.parseInt(target);
+                    try {
+                        ApkRepackager.targetFloor = target == null ? 0 : Integer.parseInt(target.trim());
+                    } catch (NumberFormatException e) {
+                        ApkRepackager.targetFloor = 0;
+                        Log.w(TAG, "repack: ignoring malformed target '" + target + "'");
+                    }
                     String rename = getIntent().getStringExtra("rename");
                     // `-e settings 1`: the game's own settings (target, M6 patches, mods, aspect) apply, as in the library.
                     if ("1".equals(getIntent().getStringExtra("settings"))) applyGameSettings(f, target == null);
@@ -298,6 +307,12 @@ public class LauncherActivity extends Activity {
 
     // ------------------------------------------------------------------ navigation
 
+    /// The `-e` paths (stage/repack/run/bootcheck/...) exist for the tools. They are honoured only in a debuggable
+    /// build: the activity is exported, and a release build must not let any caller repack or run a game for it.
+    private boolean diagnosticsAllowed() {
+        return (getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+    }
+
     private void show(Screen which) {
         screen_ = which;
         switch (which) {
@@ -319,6 +334,13 @@ public class LauncherActivity extends Activity {
     private LibraryScreen library_;
 
     private View library() {
+        // One instance for the activity's lifetime. Rebuilding it on every return to Home threw away the
+        // LibraryScreen's own state — a conversion that was running looked cancelled the moment the player opened
+        // Settings and came back (C11). Reusing it keeps that state; refresh() re-reads the catalog for new games.
+        if (library_ != null) {
+            library_.refresh();
+            return library_;
+        }
         library_ = new LibraryScreen(this, bg_, new LibraryScreen.Host() {
             @Override public void addApk() { pickApk(); }
             @Override public void openSettings() { show(Screen.PREFS); }

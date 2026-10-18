@@ -153,6 +153,22 @@ final class ConvertJob {
                 final StringBuilder out = new StringBuilder();
                 boolean handedToInstaller = false;
                 try {
+                    // Space first (C6): the signed copy is about the size of the original, and a device that runs out
+                    // mid-write leaves a truncated file and a failed conversion with no explanation. 128 MB of margin
+                    // covers the temporary entries the repackager writes while streaming.
+                    final File repackDir = new File(app.getExternalFilesDir(null), "repack");
+                    repackDir.mkdirs();
+                    final long need = game.apk.length() + (128L << 20);
+                    final long free = repackDir.getUsableSpace();
+                    if (free < need) {
+                        out.append("space: needs ").append(need >> 20).append(" MB free, ")
+                                .append(free >> 20).append(" MB available\n");
+                        release();
+                        main.post(new Runnable() {
+                            @Override public void run() { cb.onDone(false, out.toString()); }
+                        });
+                        return;
+                    }
                     ApkRepackager.debuggable = false;
                     ApkRepackager.nativeControl = false;
                     ApkRepackager.targetFloor = settings.target;
@@ -178,6 +194,11 @@ final class ConvertJob {
                                 }
                                 if (!finished.compareAndSet(false, true)) return;  // one verdict per conversion
                                 RepackInstaller.pendingConfirm = null;
+                                // The signed copy has done its job (C5): keeping it left hundreds of MB in external
+                                // files forever. The report beside it stays for the player to read.
+                                if (signed != null && signed.exists() && !signed.delete()) {
+                                    Log.w(TAG, "could not delete " + signed);
+                                }
                                 final boolean ok = line.contains("(SUCCESS)");
                                 if (ok && !ObbStore.sources(app, game).isEmpty()) {
                                     // The game's OBB goes into the copy's own folder before the tile says Ready.
@@ -213,6 +234,16 @@ final class ConvertJob {
                                 }
                             }
                         });
+                        // Backing out of the installer prompt sends no status at all on some devices, which used to
+                        // leave the conversion slot claimed for the rest of the process (C12). No verdict in three
+                        // minutes counts as cancelled and frees the slot; a real install reports well before that.
+                        main.postDelayed(new Runnable() {
+                            @Override public void run() {
+                                if (!finished.get()) {
+                                    status.onStatus("install: no answer after 3 minutes — treating it as cancelled", true);
+                                }
+                            }
+                        }, 180_000L);
                     }
                 } finally {
                     ApkRepackager.targetFloor = 0;

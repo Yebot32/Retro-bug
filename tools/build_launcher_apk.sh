@@ -210,8 +210,18 @@ if [ -d "$SRC/res" ]; then
 else
   echo "note: no $SRC/res, building without an icon" >&2
 fi
+# Version: one place, and a monotonic default. `RB_VERSION_CODE` / `RB_VERSION_NAME` override both (CI does), else the
+# commit count is the code and `0.1.<count>` the name. Before this, every build was versionCode 1 / versionName 1, so
+# Android could not tell two builds apart and the launcher's own "Update available" logic had nothing to compare.
+VERSION_CODE="${RB_VERSION_CODE:-$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 1)}"
+VERSION_NAME="${RB_VERSION_NAME:-0.1.$VERSION_CODE}"
+# Dev builds are debuggable, which is what lets the `-e` diagnostic paths run (LauncherActivity gates them on
+# FLAG_DEBUGGABLE). `RB_RELEASE=1` drops both the flag and the diagnostics: that is the build to hand to someone.
+DEBUG_ARGS=(--debug-mode)
+if [ "${RB_RELEASE:-0}" = "1" ]; then DEBUG_ARGS=(); fi
 "$BT/aapt2.exe" link -I "$(to_host "$AJ")" --manifest "$(to_host "$SRC/AndroidManifest.xml")" \
-  --min-sdk-version 26 --target-sdk-version 34 --version-code 1 --version-name 1 \
+  --min-sdk-version 26 --target-sdk-version 34 --version-code "$VERSION_CODE" --version-name "$VERSION_NAME" \
+  ${DEBUG_ARGS[@]+"${DEBUG_ARGS[@]}"} \
   ${RES_ARGS[@]+"${RES_ARGS[@]}"} \
   -o "$(to_host "$OUT/base.apk")"
 cp "$OUT/dex/classes.dex" "$OUT/stage/"
