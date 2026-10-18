@@ -46,7 +46,7 @@ done
 
 # Never trust a piped exit status: the source list is built into an array first, and javac runs bare.
 mapfile -t SRCS < <(grep -L 'import android\.' "$ROOT"/android/java/com/retrobug/launcher/*.java)
-SRCS+=("$ROOT"/tools/java-tests/*.java "$ROOT"/android/shim/com/retrobug/shim/SaveArchive.java)
+SRCS+=("$ROOT"/tools/java-tests/*.java "$ROOT"/android/shim/com/retrobug/shim/SaveArchive.java "$ROOT"/android/shim/com/retrobug/shim/PermissionPolicy.java)
 HOST_SRCS=(); for s in "${SRCS[@]}"; do HOST_SRCS+=("$(to_host "$s")"); done
 javac -encoding UTF-8 -nowarn -Xlint:-options -d "$(to_host "$OUT/classes")" "${HOST_SRCS[@]}"
 
@@ -93,3 +93,4 @@ java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.LibraryRulesTest
 java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ObbRulesTest
 java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ElfRepairTest
 java -cp "$(to_host "$OUT/classes")" com.retrobug.shim.SaveArchiveTest
+java -cp "$(to_host "$OUT/classes")" com.retrobug.shim.PermissionPolicyTest

@@ -144,9 +144,11 @@ public final class Shims {
     static void permissions(Context ctx, List<String> out) throws PackageManager.NameNotFoundException {
         final Context app = ctx.getApplicationContext() != null ? ctx.getApplicationContext() : ctx;
         PackageInfo pi = app.getPackageManager().getPackageInfo(app.getPackageName(), PackageManager.GET_PERMISSIONS);
-        final List<String> missing = missingDangerous(app, pi.requestedPermissions);
+        List<String> all = missingDangerous(app, pi.requestedPermissions);
+        // Only what a game plays with (PermissionPolicy): ads/analytics permissions get no dialog.
+        final List<String> missing = PermissionPolicy.worthAsking(all, app.getApplicationInfo().targetSdkVersion);
         if (missing.isEmpty()) {
-            say(out, "shim " + PERMISSIONS + ": no dangerous permission missing");
+            say(out, "shim " + PERMISSIONS + ": nothing worth asking (missing, not asked: " + all + ")");
             return;
         }
         if (!(app instanceof Application)) {
