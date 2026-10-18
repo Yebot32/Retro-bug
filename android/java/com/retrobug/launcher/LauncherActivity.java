@@ -210,23 +210,34 @@ public class LauncherActivity extends Activity {
         }
         final String repack = getIntent() == null ? null : getIntent().getStringExtra("repack");
         if (repack != null && !repack.isEmpty()) {
-            for (File f : games()) {
+            for (final File f : games()) {
                 if (f.getName().toLowerCase().contains(repack.toLowerCase())) {
-                    ApkRepackager.debuggable = "1".equals(getIntent().getStringExtra("debuggable"));
-                    ApkRepackager.nativeControl = "1".equals(getIntent().getStringExtra("native"));
-                    String target = getIntent().getStringExtra("target");
-                    try {
-                        ApkRepackager.targetFloor = target == null ? 0 : Integer.parseInt(target.trim());
-                    } catch (NumberFormatException e) {
-                        ApkRepackager.targetFloor = 0;
-                        Log.w(TAG, "repack: ignoring malformed target '" + target + "'");
-                    }
-                    String rename = getIntent().getStringExtra("rename");
-                    // `-e settings 1`: the game's own settings (target, M6 patches, mods, aspect) apply, as in the library.
-                    if ("1".equals(getIntent().getStringExtra("settings"))) applyGameSettings(f, target == null);
+                    final String target = getIntent().getStringExtra("target");
+                    final boolean debuggable = "1".equals(getIntent().getStringExtra("debuggable"));
+                    final boolean nativeControl = "1".equals(getIntent().getStringExtra("native"));
+                    final boolean useSettings = "1".equals(getIntent().getStringExtra("settings"));
+                    final String rename = getIntent().getStringExtra("rename");
+                    // These are process-wide statics the converter reads, so they are set only once the slot is
+                    // ours (C3). Setting them first meant a scripted run that lost the claim to a library
+                    // conversion still changed the flags under the conversion already running.
                     repackGame(f, !"0".equals(getIntent().getStringExtra("install")),
                             rename == null || rename.equals("0") ? null
-                                    : rename.equals("1") ? ApkRepackager.RENAME_SUFFIX : rename);
+                                    : rename.equals("1") ? ApkRepackager.RENAME_SUFFIX : rename,
+                            new Runnable() {
+                                @Override public void run() {
+                                    ApkRepackager.debuggable = debuggable;
+                                    ApkRepackager.nativeControl = nativeControl;
+                                    try {
+                                        ApkRepackager.targetFloor = target == null ? 0 : Integer.parseInt(target.trim());
+                                    } catch (NumberFormatException e) {
+                                        ApkRepackager.targetFloor = 0;
+                                        Log.w(TAG, "repack: ignoring malformed target '" + target + "'");
+                                    }
+                                    // `-e settings 1`: the game's own settings (target, M6 patches, mods, aspect)
+                                    // apply, as they do from the library.
+                                    if (useSettings) applyGameSettings(f, target == null);
+                                }
+                            });
                     return;
                 }
             }
@@ -836,10 +847,17 @@ public class LauncherActivity extends Activity {
     }
 
     private void repackGame(final File apk, final boolean install, final String renameTo) {
+        repackGame(apk, install, renameTo, null);
+    }
+
+    /// `configure` runs only once the slot is ours: it sets process-wide converter statics, which must not change
+    /// under a conversion that is already running (C3).
+    private void repackGame(final File apk, final boolean install, final String renameTo, final Runnable configure) {
         if (!ConvertJob.claim()) {
             Toast.makeText(this, "A repack is already running", Toast.LENGTH_SHORT).show();
             return;
         }
+        if (configure != null) configure.run();
         // A renamed repack is kept apart from the same-package one, which bootcheck boots in a staged original's place.
         final String label = apk.getName().replaceAll("\\.apk$", "")
                 + (renameTo == null ? "" : renameTo.startsWith(".") ? renameTo : "." + renameTo);
@@ -894,6 +912,12 @@ public class LauncherActivity extends Activity {
     /// The `-e stubcheck` run, on a worker thread: ApkRepackager.transform into the cache, each generated stub
     /// written to the code cache (an exec-allowed app directory) and checked by nativeStubCheck; one line per stub.
     private void stubCheck(final File apk) {
+        // A stubcheck repacks the game, so it takes the same slot as every other conversion (C3): without the
+        // claim it could run alongside a library conversion and both would write the shared repack output.
+        if (!ConvertJob.claim()) {
+            Toast.makeText(this, "A repack is already running", Toast.LENGTH_SHORT).show();
+            return;
+        }
         reportTitle_ = "stubcheck " + apk.getName();
         currentReport_ = "stubcheck " + apk.getName() + " ...";
         show(Screen.REPORT);
@@ -924,6 +948,7 @@ public class LauncherActivity extends Activity {
                     Log.e(TAG, "stubcheck failed", t);
                 } finally {
                     if (unsigned.exists() && !unsigned.delete()) Log.w(TAG, "stubcheck: could not delete " + unsigned);
+                    ConvertJob.release();
                 }
                 final String text = out.toString();
                 Log.i(TAG, text);
