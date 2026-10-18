@@ -13,8 +13,8 @@ on a device.
 | A1 | Analysis → this backlog | done |
 | A2 | Data tab: device edge cases, fixes, merge into the session branch | done (9ec4366) |
 | A3 | SpongeBob Game Station: playable offline (patch on the `.rb` copy only) | blocked (G-Presto anti-tamper; see spongebob-gamestation.md) |
-| A4 | M5: compatibility table for every 32-bit game on the Tab S9 (`compatibility.md`) | doing |
-| A5 | M6: patches, mods, resolution | todo |
+| A4 | M5: compatibility table for every 32-bit game on the Tab S9 (`docs/compatibility.md`) | done (4 rows need a clean re-run) |
+| A5 | M6: patches, mods, resolution | done (device-verified 2026-10-18) |
 | A6 | Polish | todo |
 | A7 | Release prep, final summary | todo |
 
@@ -51,7 +51,7 @@ refused, no-OBB status text.
 | C7 | gap | Base-has-v7a + other splits classified GAME (copy misses split resources) | GameCatalog/LibraryRules.classify | todo |
 | C8 | gap | `sharedUserId` kept on rename | AxmlEditor.renamePackage | todo |
 | C9 | gap | `maxSdkVersion` never removed | ApkRepackager | todo |
-| C10 | risk | Every entry read fully into memory (OOM on big games) | ApkRepackager.java:262-263, 305-307 | deferred |
+| C10 | risk | Every entry read fully into memory (OOM on big games) | ApkRepackager.java:262-263, 305-307 | done (8b3d22e; Among Us 497 MB on device) |
 | C11 | bug | Every `show(HOME)` builds a new LibraryScreen: conversion state lost after visiting Settings | LauncherActivity.java:296-319, LibraryScreen | todo |
 | C12 | bug | Install prompt backed out → slot can stay held for the process lifetime (device dependent) | ConvertJob/RepackInstaller | todo (timeout/abandon) |
 | C13 | bug | Menu sizes computed once; rotated menu clipped | GameMenu.java:65-85 | todo |
@@ -60,13 +60,13 @@ refused, no-OBB status text.
 | C16 | polish | Disabled primary button text invisible | HoloTheme.java:79,93-96 | todo |
 | C17 | polish | Hard-coded badge colours; "Update available" same as orange accent | GameTile.java:77,85 | todo |
 | C18 | polish | Developer corner still unstyled; back from DEV goes home | LauncherActivity.java:331-512 | todo |
-| C19 | placeholder | "Coming with M6" texts | GameMenu.java:303-306,372,399-416 | todo (M6 replaces) |
+| C19 | placeholder | "Coming with M6" texts | GameMenu.java:303-306,372,399-416 | done (M6 landed) |
 | C20 | polish | Stretched non-square icons; ArtCache per screen; no in-flight dedupe | ArtCache.java | todo |
 | C21 | gap | Empty state ignores the "Library shows" filter; no Add button | LibraryScreen.java:140-141 | todo |
 | C22 | risk | Catalog scan exceptions leave "Looking for your games…" forever | GameCatalog.java:52-87 | todo |
 | C23 | gap | Permission shim asks for every dangerous permission at once (SMS, contacts, location…) | shim/Shims.java:122-172 | todo (ask only what is needed) |
-| C24 | gap | Settings parsed with `contains`, 1 KiB cap — blocks M6 lists | shim RbShimProvider:39,72-74; jni/runtime_boot.cpp:66-81 | todo (before M6) |
-| C25 | gap | dlopen/dlsym stubbed → all Unity games fail (Teeny Titans 2, FC All-Stars) | jni/host_slots.cpp:315-340 | todo (M5 multi-game root cause) |
+| C24 | gap | Settings parsed with `contains`, 1 KiB cap — blocks M6 lists | shim RbShimProvider:39,72-74; jni/runtime_boot.cpp:66-81 | done (93d258c) |
+| C25 | gap | dlopen/dlsym stubbed → all Unity games fail (Teeny Titans 2, FC All-Stars) | jni/host_slots.cpp:315-340 | done (44096c0) |
 | C26 | gap | No signals delivered (Mono/Boehm GC) — Unity/Mono needs this too | core/syscall/monitor.cpp:507-510 | deferred (engine milestone) |
 | C27 | bug | JNI_OnLoad/constructors run under a 4M-step budget that poisons the process | jni/runtime_boot.cpp:753-754 | todo |
 | C28 | bug | ARM32 vs AArch64 `O_*` flags not translated (O_LARGEFILE→O_NOFOLLOW, O_DIRECTORY→O_DIRECT) | core/syscall/host_io.cpp:291,297 | todo |

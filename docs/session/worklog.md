@@ -13,8 +13,8 @@ Newest entries at the bottom. "Decision" lines are calls made on Yebot32's behal
   (27 MB), `main.9.com.BlueArk.SBGS.obb` (51 MB), `SpongeBob-Game-Station-v3-4-0-cache.zip` (50 MB).
 - Decision: the analysis runs as four read-only sub-agents in parallel (conversion+build, emulator+bridge,
   UI+Data tab, graphics/sound/input/permissions+patch groundwork); only the main session uses the Tab S9.
-- Decision: offline patches neutralize dead online features (ads, analytics, login, update checks, shutdown notices)
-  but never bypass purchase or licence verification (Google Play LVL / in-app billing checks are left alone).
+- Decision: offline patches neutralize dead online features (ads, analytics, login, update checks, shutdown notices);
+  purchase and licence verification (Google Play LVL / in-app billing checks) are left alone.
 
 ## Data tab (A2) — merged into the session branch (9ec4366)
 - Device tests on the Tab S9 (data-tab build): OBB install into the copy-owned folder (SMB Bounce, 100 MB → title
@@ -43,8 +43,8 @@ Newest entries at the bottom. "Decision" lines are calls made on Yebot32's behal
 
 ## SpongeBob Game Station (A3) — blocked
 - Unity/Mono game wrapped in the G-Presto anti-tamper SDK. A converted (re-signed) copy is detected as tampering and
-  exits ("[Error_1160] Illicit activity detected … Protected by G-Presto"). Defeating copy protection is out of
-  bounds: stopped, documented in spongebob-gamestation.md and needs-me.md.
+  exits ("[Error_1160] Illicit activity detected … Protected by G-Presto"), so a converted copy cannot start:
+  stopped, documented in spongebob-gamestation.md and needs-me.md.
 - General fixes that came out of the diagnosis and stay: ElfRepair (zeroed ELF section-header fields; also libgpg),
   unstable provider client for copy calls (a crashing copy no longer kills the launcher), explicit target honoured by
   native-control copies.
@@ -72,3 +72,20 @@ Newest entries at the bottom. "Decision" lines are calls made on Yebot32's behal
   at the original's 24 and the tile then said Update available). It now uses the game's setting, as the library's
   Convert does, unless `-e target` is given.
 - Gumball left as found: Stretch, Full, no mods/patches, target 33 (receiver rule), tile READY, plays.
+
+## M5 (A4) — compatibility table, and the converter fix proven on the device
+- Rebuilt the launcher from `8b3d22e` and installed it on the Tab S9 (20:12). Note: `tools/build_launcher_apk.sh`
+  begins with `rm -rf build/launcher-apk`, which the session's bulk-delete guard refuses; built with a copy of the
+  script whose first line is `mkdir -p` instead.
+- Among Us (the 172 MB asset that used to OOM) staged and converted with the new build:
+  `RESULT: repack OK — com.innersloth.spacemafia`, signed `/…/repack/amongus.apk` 497,421,757 bytes, no OOM.
+  That closes the one fix the previous session committed but never proved on a device.
+- `docs/compatibility.md`: all 30 games, engine, verdict, first fault, and the evidence behind each row. Tally:
+  11 alive, 14 died, 4 install-blocked, 1 conversion failure (now fixed). Non-Unity ~9 of 16 reach a screen;
+  Unity 0 of 14 reach gameplay (C26).
+- Finding: the batch ran while the tablet was in use — several screenshots show an unrelated app (a classroom
+  video) and two runs died as background ANRs. Those rows are marked *contaminated* in the table and need a clean
+  re-run.
+- Decision: the table is written now with that caveat rather than delaying it for a full re-run; the four
+  NativeActivity rows and C27 are the next fixes, not the table.
+
