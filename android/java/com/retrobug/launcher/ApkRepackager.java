@@ -150,6 +150,16 @@ final class ApkRepackager {
                 edited = true;
                 r.report.add("package " + r.renamedFrom + " -> " + neu + " (installs beside the original)");
                 for (String c : changes) r.report.add("rename: " + c);
+                // The shared user belongs to the original's signer: a copy signed with another key cannot join it.
+                if (ed.removeAttribute("manifest", "sharedUserId")) {
+                    ed.removeAttribute("manifest", "sharedUserLabel");
+                    r.report.add("sharedUserId removed (the copy is signed with another key; it runs as its own user)");
+                }
+            }
+            // A cap on the platform version keeps a copy off current Android; the copy targets it on purpose.
+            if (ed.removeAttribute("uses-sdk", "maxSdkVersion")) {
+                edited = true;
+                r.report.add("uses-sdk maxSdkVersion removed (it would block installing on current Android)");
             }
             Integer oldMin = ed.minSdk();
             r.oldMinSdk = oldMin == null ? -1 : oldMin;

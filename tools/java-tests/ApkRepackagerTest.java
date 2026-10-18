@@ -405,6 +405,20 @@ public class ApkRepackagerTest {
         check(reportHas(r, "elf: assets/ATG_E.sec", "restored"), "the report names the repaired asset: " + r.report);
     }
 
+    /** A renamed copy drops android:sharedUserId; every copy drops uses-sdk maxSdkVersion. */
+    static void dropsSharedUserAndMaxSdk() throws Exception {
+        Map<String, byte[]> x = new LinkedHashMap<>();
+        x.put("lib/armeabi-v7a/libfoo.so", b("V7A"));
+        File in = build("shared_max", null, "sharedmax", x);
+        File out = new File(scratch, "sharedmax.out.apk");
+        ApkRepackager.Result r = ApkRepackager.transform(in, runtime(), out, ApkRepackager.RENAME_SUFFIX);
+        String t = xmltree(out);
+        check(!t.contains("sharedUserId"), "sharedUserId removed from the renamed copy: " + t);
+        check(!t.contains("maxSdkVersion"), "maxSdkVersion removed");
+        check(t.contains("minSdkVersion") && t.contains("targetSdkVersion"), "uses-sdk keeps min/target");
+        check(reportHas(r, "sharedUserId", "removed") && reportHas(r, "maxSdkVersion", "removed"), "report: " + r.report);
+    }
+
     static void shimsWhenNotNeededOrImpossible() throws Exception {
         Map<String, byte[]> x = new LinkedHashMap<>();
         x.put("classes.dex", Files.readAllBytes(new File(fixtures, "RiskyFixture.dex").toPath()));
@@ -568,6 +582,7 @@ public class ApkRepackagerTest {
         addsShims();
         addsSaveProvider();
         repairsElfAssets();
+        dropsSharedUserAndMaxSdk();
         shimsWhenNotNeededOrImpossible();
         renamesPackage();
         movesV7aAndStubs();

@@ -813,6 +813,36 @@ final class AxmlEditor {
         return out;
     }
 
+    /**
+     * Removes attribute {@code attr} from every {@code <element>}; true when one was removed. The attribute's name
+     * stays in the string pool (harmless); the node shrinks and its id/class/style indexes follow.
+     */
+    boolean removeAttribute(String element, String attr) {
+        boolean any = false;
+        for (int i = 0; i < nodes.size(); i++) {
+            byte[] c = nodes.get(i);
+            if (u16(c, 0) != XML_START_ELEMENT || !element.equals(str(s32(c, NODE_HEADER + 4)))) continue;
+            int size = u16(c, NODE_HEADER + 10), n = attrCount(c), at = -1;
+            for (int k = 0; k < n && at < 0; k++) if (attr.equals(str(s32(c, attrOff(c, k) + 4)))) at = k;
+            if (at < 0) continue;
+            int del = attrOff(c, at);
+            byte[] out = new byte[c.length - size];
+            System.arraycopy(c, 0, out, 0, del);
+            System.arraycopy(c, del + size, out, del, c.length - del - size);
+            put32(out, 4, out.length);
+            put16(out, NODE_HEADER + 12, n - 1);
+            // idIndex/classIndex/styleIndex are 1-based positions: the removed one becomes 0, later ones move down.
+            for (int f = NODE_HEADER + 14; f <= NODE_HEADER + 18; f += 2) {
+                int v = u16(out, f);
+                if (v == at + 1) put16(out, f, 0);
+                else if (v > at + 1) put16(out, f, v - 1);
+            }
+            nodes.set(i, out);
+            any = true;
+        }
+        return any;
+    }
+
     /** Add one to every string-pool reference in node {@code c} that is >= {@code at}. */
     private static void shiftStringRefs(byte[] c, int at) {
         int type = u16(c, 0);
