@@ -77,6 +77,10 @@ java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.AxmlEditorTest \
 java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ApkRepackagerTest \
   "$(to_host "$OUT/fixtures")" "$(to_host "$OUT/scratch")" "$(to_host "$BT/aapt2.exe")"
 
+# A 160 MB asset under a 96 MB heap: entries are streamed, never read whole (Among Us, M5).
+java -Xmx96m -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.LargeEntryTest \
+  "$(to_host "$OUT/fixtures")" "$(to_host "$OUT/scratch")"
+
 # Generated stubs (M3 Task 5). The game rows read the human's own Gumball / ABGo files from build/games
 # (gumball-lite.apk, angry-birds-go-1.10.1.apk; never committed), read in memory, and skip without them.
 java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.NativeMethodsTest \

@@ -129,7 +129,7 @@ final class ApkRepackager {
             ZipEntry me = zip.getEntry(MANIFEST);
             if (me == null) throw new IOException("no " + MANIFEST + " in " + inApk);
             byte[] manifest;
-            try (InputStream in = zip.getInputStream(me)) { manifest = readFully(in); }
+            manifest = readFully(zip, me);
             AxmlEditor ed = AxmlEditor.parse(manifest);
             r.packageName = ed.packageName();
 
@@ -272,7 +272,7 @@ final class ApkRepackager {
                 }
                 byte[] base = patched.get(p.lib);
                 if (base == null) {
-                    try (InputStream in = zip.getInputStream(le)) { base = ElfRepair.repair(readFully(in)); }
+                    base = ElfRepair.repair(readFully(zip, le));
                 }
                 Patch.Applied a = p.apply(base);
                 if (a.ok) {
@@ -321,7 +321,7 @@ final class ApkRepackager {
                         claim(names, n);
                         if (n.endsWith(".so")) {  // except for zeroed section-header fields, which the platform refuses
                             byte[] lib;
-                            try (InputStream in = zip.getInputStream(e)) { lib = readFully(in); }
+                            lib = readFully(zip, e);
                             byte[] fixed = ElfRepair.repair(lib);
                             if (fixed != lib) r.report.add("elf: " + n + " — e_shentsize/e_shstrndx restored (zeroed by a protection wrapper)");
                             putBytes(zo, n, fixed, e.getMethod() == ZipEntry.STORED ? ZipEntry.STORED : ZipEntry.DEFLATED);
@@ -345,7 +345,7 @@ final class ApkRepackager {
                     }
                     if (n.matches("classes\\d*\\.dex")) {
                         byte[] dex;
-                        try (InputStream in = zip.getInputStream(e)) { dex = readFully(in); }
+                        dex = readFully(zip, e);
                         try {
                             refs.addAll(DexScanner.methodRefs(dex));
                         } catch (IOException ex) {
@@ -362,7 +362,7 @@ final class ApkRepackager {
                     }
                     if (r.renamedFrom != null && n.equals(ARSC)) {
                         byte[] arsc;
-                        try (InputStream in = zip.getInputStream(e)) { arsc = readFully(in); }
+                        arsc = readFully(zip, e);
                         int k = renameArscPackage(arsc, r.renamedFrom, r.packageName);
                         r.report.add(ARSC + ": " + (k == 0 ? "no package named " + r.renamedFrom + ", left unchanged"
                                 : "package name -> " + r.packageName));
@@ -373,7 +373,7 @@ final class ApkRepackager {
                         // A library shipped as an asset and dlopen'd from files/ (a protection engine) gets the same
                         // section-header repair as lib/; any other asset is copied byte for byte.
                         byte[] data;
-                        try (InputStream in = zip.getInputStream(e)) { data = readFully(in); }
+                        data = readFully(zip, e);
                         byte[] fixed = ElfRepair.repair(data);
                         if (fixed != data) r.report.add("elf: " + n + " — e_shentsize/e_shstrndx restored (zeroed by a protection wrapper)");
                         putBytes(zo, n, fixed, e.getMethod() == ZipEntry.STORED ? ZipEntry.STORED : ZipEntry.DEFLATED);
@@ -410,7 +410,7 @@ final class ApkRepackager {
                     String dest = GUEST_DIR + name;
                     claim(names, dest);
                     byte[] lib;
-                    try (InputStream in = zip.getInputStream(e)) { lib = readFully(in); }
+                    lib = readFully(zip, e);
                     byte[] fixed = ElfRepair.repair(lib);  // zeroed header fields hide the JNI exports from the stub writer
                     if (fixed != lib) {
                         r.report.add("elf: " + name + " — e_shentsize/e_shstrndx restored (zeroed by a protection wrapper)");
@@ -539,6 +539,20 @@ final class ApkRepackager {
         e.setTime(new GregorianCalendar(2008, 0, 1, 0, 0, 0).getTimeInMillis());
     }
 
+    /** An entry's bytes in one array of exactly its size when the directory gives it (a 56 MB libil2cpp.so is then
+     *  56 MB of heap, not the 3x a growing buffer needs on its way there). */
+    private static byte[] readFully(ZipFile zip, ZipEntry e) throws IOException {
+        try (InputStream in = zip.getInputStream(e)) {
+            long size = e.getSize();
+            if (size < 0 || size > Integer.MAX_VALUE - 8) return readFully(in);
+            byte[] data = new byte[(int) size];
+            int at = 0;
+            for (int k; at < data.length && (k = in.read(data, at, data.length - at)) > 0; ) at += k;
+            if (at != data.length || in.read() >= 0) throw new IOException(e.getName() + ": size differs from the zip directory");
+            return data;
+        }
+    }
+
     // InputStream.readAllBytes is API 33; this class runs on-device from API 26.
     private static byte[] readFully(InputStream in) throws IOException {
         java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
@@ -560,22 +574,13 @@ final class ApkRepackager {
         zo.closeEntry();
     }
 
-    /**
-     * Copies an entry keeping its compression method, except resources.arsc, which is always STORED: a package
-     * targeting API 30+ is refused unless its resources.arsc is uncompressed and 4-byte aligned (RepackSigner aligns
-     * STORED entries), and some games ship it compressed.
-     */
-    /**
-     * The old JAR/APK signature files: META-INF/MANIFEST.MF, *.SF, *.RSA, *.DSA, *.EC and SIG-* at the top of META-INF.
-     * Everything else there stays — META-INF/services/* is how libraries find their plug-ins at runtime (ServiceLoader).
-     */
     /** True when any classesN.dex references a registerReceiver method (Context, ContextWrapper, Activity...). */
     static boolean registersReceivers(ZipFile zip) {
         for (Enumeration<? extends ZipEntry> en = zip.entries(); en.hasMoreElements(); ) {
             ZipEntry e = en.nextElement();
             if (!e.getName().matches("classes\\d*\\.dex")) continue;
-            try (InputStream in = zip.getInputStream(e)) {
-                for (String ref : DexScanner.methodRefs(readFully(in))) if (ref.contains("->registerReceiver")) return true;
+            try {
+                for (String ref : DexScanner.methodRefs(readFully(zip, e))) if (ref.contains("->registerReceiver")) return true;
             } catch (IOException ex) {
                 // unreadable dex: the risk scan reports it later
             }
@@ -583,6 +588,10 @@ final class ApkRepackager {
         return false;
     }
 
+    /**
+     * The old JAR/APK signature files: META-INF/MANIFEST.MF, *.SF, *.RSA, *.DSA, *.EC and SIG-* at the top of META-INF.
+     * Everything else there stays — META-INF/services/* is how libraries find their plug-ins at runtime (ServiceLoader).
+     */
     static boolean isSignatureFile(String n) {
         if (!n.startsWith("META-INF/") || n.indexOf('/', "META-INF/".length()) >= 0) return false;
         String f = n.substring("META-INF/".length()).toUpperCase(java.util.Locale.ROOT);
@@ -590,10 +599,29 @@ final class ApkRepackager {
                 || f.startsWith("SIG-");
     }
 
+    /**
+     * Copies an entry keeping its compression method, except resources.arsc, which is always STORED: a package
+     * targeting API 30+ is refused unless its resources.arsc is uncompressed and 4-byte aligned (RepackSigner aligns
+     * STORED entries), and some games ship it compressed. Streamed: an asset can be larger than the heap (Among Us
+     * ships a 172 MB bundle); a STORED entry takes its size and CRC from the source's directory.
+     */
     private static void copy(ZipFile zip, ZipEntry src, ZipOutputStream zo) throws IOException {
-        byte[] data;
-        try (InputStream in = zip.getInputStream(src)) { data = readFully(in); }
         final boolean stored = src.getMethod() == ZipEntry.STORED || src.getName().equals(ARSC);
-        putBytes(zo, src.getName(), data, stored ? ZipEntry.STORED : ZipEntry.DEFLATED);
+        if (stored && (src.getMethod() != ZipEntry.STORED || src.getSize() < 0 || src.getCrc() < 0)) {
+            byte[] data;  // a compressed resources.arsc (small): its CRC is computed from the bytes
+            data = readFully(zip, src);
+            putBytes(zo, src.getName(), data, ZipEntry.STORED);
+            return;
+        }
+        ZipEntry e = new ZipEntry(src.getName());
+        e.setMethod(stored ? ZipEntry.STORED : ZipEntry.DEFLATED);
+        if (stored) { e.setSize(src.getSize()); e.setCompressedSize(src.getSize()); e.setCrc(src.getCrc()); }
+        stamp(e);
+        zo.putNextEntry(e);
+        byte[] buf = new byte[1 << 16];
+        try (InputStream in = zip.getInputStream(src)) {
+            for (int k; (k = in.read(buf)) > 0; ) zo.write(buf, 0, k);
+        }
+        zo.closeEntry();
     }
 }
