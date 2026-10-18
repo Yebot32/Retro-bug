@@ -1,9 +1,9 @@
 // RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
 //
 // A game's menu, opened by a long press on its tile. The header is the game's page: its best artwork from inside the
-// APK, dimmed and softened, with the icon, title and the one action a tap would take. Below it, four Holo tabs —
-// Settings (per game), Mods and Patches (empty until M6 fills them), Delete (the converted copy, or the added APK; the
-// original installed game is never touched).
+// APK, dimmed and softened, with the icon, title and the one action a tap would take. Below it, five Holo tabs —
+// Settings (per game), Mods and Patches (empty until M6 fills them), Data (the OBB, save export and import), Delete
+// (the converted copy, or the added APK; the original installed game is never touched).
 package com.retrobug.launcher;
 
 import android.app.AlertDialog;
@@ -34,7 +34,11 @@ import java.util.Set;
 import java.util.function.Consumer;
 
 final class GameMenu {
-    private static final String[] TABS = {"Settings", "Mods", "Patches", "Delete"};
+    private static final String[] TABS = {"Settings", "Mods", "Patches", "Data", "Delete"};
+    private static final int DATA_TAB = 3;
+    private int current = 0;
+    /** The Data tab's line for work in progress (an OBB copy, an export), shown until the tab is rebuilt. */
+    private String busy;
     private static final int[] TARGETS = {35, 33, 28, 24};
 
     private final Context c;
@@ -297,6 +301,7 @@ final class GameMenu {
             t.setBackground(bg);
         }
         content.removeAllViews();
+        current = k;
         View v;
         switch (k) {
             case 0: v = settingsTab(); break;
@@ -304,6 +309,7 @@ final class GameMenu {
                     + "with its own switch.", "Add a mod pack"); break;
             case 2: v = emptyTab("No patches yet", "Code patches, fixes and cheats made for this game's version will appear "
                     + "here, each with its own switch.", "Add a patch"); break;
+            case DATA_TAB: v = dataTab(); break;
             default: v = deleteTab(); break;
         }
         content.addView(v);
@@ -413,6 +419,203 @@ final class GameMenu {
         });
         box.addView(add, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         return scroll(box);
+    }
+
+    // ------------------------------------------------------------------ Data (OBB and saves)
+
+    private View dataTab() {
+        LinearLayout list = list();
+        final boolean copy = copyInstalled();
+        list.addView(section("Game data (OBB)"));
+        if (busy != null) list.addView(row(busy, null, false, null));
+        java.util.List<File> src = ObbStore.sources(c, game), have = ObbStore.installed(game);
+        boolean mine = ObbStore.added(c, game);
+        String status;
+        if (!have.isEmpty() && ObbStore.upToDate(c, game)) {
+            status = "Installed for RetroBug's copy · " + mb(ObbStore.size(have));
+        } else if (!src.isEmpty()) {
+            status = (mine ? "Your OBB file" : "The original game's OBB") + " (" + mb(ObbStore.size(src)) + ") · "
+                    + (copy ? "not installed for the copy yet" : "installed when the game is made playable");
+        } else {
+            status = "No OBB. Most games don't need one; if this game says its data is missing, add its .obb file.";
+        }
+        list.addView(row("OBB", status, false, null));
+        list.addView(row("Install OBB", copy ? "Copies it into the folder RetroBug's copy reads"
+                : "Make the game playable first", copy && !src.isEmpty() && busy == null && !ObbStore.upToDate(c, game),
+                new View.OnClickListener() {
+                    @Override public void onClick(View v) { installObb(); }
+                }));
+        list.addView(row("Add OBB file", "Pick the game's .obb file (main.<version>." + game.packageName + ".obb)",
+                busy == null, new View.OnClickListener() {
+                    @Override public void onClick(View v) { addObb(); }
+                }));
+        list.addView(row("Remove OBB", "From RetroBug's copy" + (mine ? ", with the file you added" : "")
+                + ". The original game's OBB is never touched.", busy == null && (!have.isEmpty() || mine),
+                new View.OnClickListener() {
+                    @Override public void onClick(View v) {
+                        confirm("Remove the OBB?", "RetroBug's copy of " + game.label + " loses its OBB. The original "
+                                + "game's OBB is not touched.", "Remove", new Runnable() {
+                            @Override public void run() {
+                                ObbStore.remove(game);
+                                ObbStore.forgetAdded(c, game);
+                                select(DATA_TAB);
+                            }
+                        });
+                    }
+                }));
+
+        list.addView(section("Saves"));
+        boolean saves = copy && game.hasCode;
+        String why = !game.hasCode ? "This game has no Java code, so RetroBug can't reach its saves"
+                : !copy ? "Make the game playable first" : null;
+        list.addView(row("Export saves", why != null ? why : "Saves the game's progress as a .zip wherever you choose",
+                saves && busy == null, new View.OnClickListener() {
+                    @Override public void onClick(View v) { exportSaves(); }
+                }));
+        list.addView(row("Import saves", why != null ? why : "Replaces the game's progress with a saved .zip. The current "
+                + "progress is kept so you can undo.", saves && busy == null, new View.OnClickListener() {
+                    @Override public void onClick(View v) {
+                        confirm("Import saves?", game.label + " closes if it is open, and its progress is replaced by the "
+                                + "save you pick. The current progress is kept: Undo import brings it back.", "Pick a save",
+                                new Runnable() {
+                                    @Override public void run() { importSaves(); }
+                                });
+                    }
+                }));
+        final View undo = row("Undo import", "Puts back the progress from before the last import", false, null);
+        list.addView(undo);
+        if (saves) {
+            background(new Runnable() {
+                @Override public void run() {
+                    final Boolean can = SaveClient.hasUndo(c, game);
+                    content.post(new Runnable() {
+                        @Override public void run() {
+                            if (current != DATA_TAB || undo.getParent() == null || !Boolean.TRUE.equals(can)) return;
+                            ViewGroup parent = (ViewGroup) undo.getParent();
+                            int at = parent.indexOfChild(undo);
+                            parent.removeView(undo);
+                            parent.addView(row("Undo import", "Puts back the progress from before the last import", true,
+                                    new View.OnClickListener() {
+                                        @Override public void onClick(View v) { undoImport(); }
+                                    }), at);
+                        }
+                    });
+                }
+            });
+        }
+        return scroll(list);
+    }
+
+    private static String mb(long bytes) { return (bytes >> 20) + " MB"; }
+
+    private View section(String title) {
+        TextView t = HoloTheme.text(c, title, 14, HoloTheme.accent(c), HoloTheme.MEDIUM);
+        t.setAllCaps(true);
+        t.setPadding(HoloTheme.dp(c, 20), HoloTheme.dp(c, 20), HoloTheme.dp(c, 20), HoloTheme.dp(c, 6));
+        return t;
+    }
+
+    private void background(Runnable r) { new Thread(r, "rb-data").start(); }
+
+    /** Runs `work` off the UI thread with `label` as the Data tab's busy line, then toasts its answer (null = `ok`). */
+    private void busyWith(String label, final String ok, final java.util.concurrent.Callable<String> work) {
+        busy = label;
+        if (current == DATA_TAB) select(DATA_TAB);
+        background(new Runnable() {
+            @Override public void run() {
+                String why;
+                try {
+                    why = work.call();
+                } catch (Exception e) {
+                    why = String.valueOf(e.getMessage());
+                }
+                final String msg = why == null ? ok : why;
+                content.post(new Runnable() {
+                    @Override public void run() {
+                        busy = null;
+                        if (current == DATA_TAB) select(DATA_TAB);
+                        Toast.makeText(c, msg, Toast.LENGTH_LONG).show();
+                    }
+                });
+            }
+        });
+    }
+
+    /** Progress into the busy line, from the copying thread. */
+    private ObbStore.Progress progress(final String verb) {
+        return new ObbStore.Progress() {
+            @Override public void at(final long done, final long total) {
+                content.post(new Runnable() {
+                    @Override public void run() {
+                        if (busy == null) return;
+                        busy = verb + " " + (total > 0 ? (done * 100 / total) + " %" : mb(done)) + "…";
+                        if (current == DATA_TAB) select(DATA_TAB);
+                    }
+                });
+            }
+        };
+    }
+
+    private void installObb() {
+        final ObbStore.Progress p = progress("Installing the OBB");
+        busyWith("Installing the OBB…", "OBB installed for " + game.label, new java.util.concurrent.Callable<String>() {
+            @Override public String call() { return ObbStore.install(c, game, p); }
+        });
+    }
+
+    private void addObb() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*");
+        library.pickFile(i, new Consumer<Uri>() {
+            @Override public void accept(final Uri uri) {
+                final String name = library.nameOf(uri);
+                final ObbStore.Progress p = progress("Adding the OBB");
+                busyWith("Adding the OBB…", "OBB added for " + game.label, new java.util.concurrent.Callable<String>() {
+                    @Override public String call() {
+                        String why = ObbStore.add(c, game, uri, name, p);
+                        if (why == null && copyInstalled()) why = ObbStore.install(c, game, progress("Installing the OBB"));
+                        return why;
+                    }
+                });
+            }
+        });
+    }
+
+    private void exportSaves() {
+        String day = new java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.ROOT).format(new java.util.Date());
+        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("application/zip")
+                .putExtra(Intent.EXTRA_TITLE, game.label.replaceAll("[\\\\/:*?\"<>|]", "_") + " - save " + day + ".zip");
+        library.pickFile(i, new Consumer<Uri>() {
+            @Override public void accept(final Uri uri) {
+                busyWith("Exporting saves…", "Saves exported", new java.util.concurrent.Callable<String>() {
+                    @Override public String call() { return SaveClient.export(c, game, uri); }
+                });
+            }
+        });
+    }
+
+    private void importSaves() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("application/zip")
+                .putExtra(Intent.EXTRA_MIME_TYPES, new String[] {"application/zip", "application/octet-stream",
+                        "application/x-zip-compressed"});
+        library.pickFile(i, new Consumer<Uri>() {
+            @Override public void accept(final Uri uri) {
+                busyWith("Importing saves…", "Saves imported. " + game.label + " starts from them next time.",
+                        new java.util.concurrent.Callable<String>() {
+                            @Override public String call() { return SaveClient.importFrom(c, game, uri); }
+                        });
+            }
+        });
+    }
+
+    private void undoImport() {
+        confirm("Undo the import?", game.label + " closes if it is open and goes back to the progress it had before the "
+                + "last import.", "Undo", new Runnable() {
+            @Override public void run() {
+                busyWith("Putting the old saves back…", "Old saves restored", new java.util.concurrent.Callable<String>() {
+                    @Override public String call() { return SaveClient.undo(c, game); }
+                });
+            }
+        });
     }
 
     // ------------------------------------------------------------------ Delete

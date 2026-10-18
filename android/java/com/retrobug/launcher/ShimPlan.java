@@ -51,6 +51,14 @@ final class ShimPlan {
     static final String AUTHORITY_SUFFIX = ".rbshim";
     /** The launcher's SettingsProvider: where a converted copy reads its per-game settings at start. */
     static final String SETTINGS_AUTHORITY = "com.retrobug.launcher.settings";
+    /**
+     * The copy's save export/import (the launcher's Data tab): exported, because the launcher asks it, and it answers
+     * only the launcher signed with the certificate recorded in the config as launcherCert.
+     */
+    static final String SAVES_PROVIDER_CLASS = "com.retrobug.shim.RbSaveProvider";
+    static final String SAVES_AUTHORITY_SUFFIX = ".rbsaves";
+    /** runtimeFiles key of the launcher's signing certificate's SHA-256, lower-case hex (ConvertJob reads it). */
+    static final String LAUNCHER_CERT_KEY = "launchercert";
 
     static final String TARGET_SDK = "target-sdk";
     static final String STRICT_NETWORK = "strict-network";

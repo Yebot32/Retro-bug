@@ -29,7 +29,15 @@ final class LibraryScreen extends LinearLayout {
     interface Host {
         void addApk();
         void openSettings();
+        /** A document picker; `done` gets the chosen file (not called when the player backs out). */
+        void pickFile(Intent intent, Consumer<android.net.Uri> done);
+        /** A picked file's display name, or null. */
+        String nameOf(android.net.Uri uri);
     }
+
+    void pickFile(Intent intent, Consumer<android.net.Uri> done) { host.pickFile(intent, done); }
+
+    String nameOf(android.net.Uri uri) { return host.nameOf(uri); }
 
     private static final int RECEIVER_NOT_EXPORTED = 0x4;  // Context.RECEIVER_NOT_EXPORTED (API 33)
 

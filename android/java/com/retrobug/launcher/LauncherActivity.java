@@ -314,6 +314,8 @@ public class LauncherActivity extends Activity {
         library_ = new LibraryScreen(this, bg_, new LibraryScreen.Host() {
             @Override public void addApk() { pickApk(); }
             @Override public void openSettings() { show(Screen.PREFS); }
+            @Override public void pickFile(Intent i, java.util.function.Consumer<Uri> done) { LauncherActivity.this.pickFile(i, done); }
+            @Override public String nameOf(Uri uri) { return queryName(uri); }
         });
         return library_;
     }
@@ -1112,9 +1114,29 @@ public class LauncherActivity extends Activity {
         }
     }
 
+    private static final int PICK_FILE = 2;
+    private java.util.function.Consumer<Uri> picked_;
+
+    /** Opens a document picker (`intent`: ACTION_OPEN_DOCUMENT or ACTION_CREATE_DOCUMENT); `done` gets the chosen Uri. */
+    void pickFile(Intent intent, java.util.function.Consumer<Uri> done) {
+        picked_ = done;
+        try {
+            startActivityForResult(intent, PICK_FILE);
+        } catch (android.content.ActivityNotFoundException e) {
+            picked_ = null;
+            Toast.makeText(this, "No file picker on this phone", Toast.LENGTH_LONG).show();
+        }
+    }
+
     @Override
     protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if (request == PICK_FILE) {
+            java.util.function.Consumer<Uri> done = picked_;
+            picked_ = null;
+            if (done != null && result == RESULT_OK && data != null && data.getData() != null) done.accept(data.getData());
+            return;
+        }
         if (request != PICK_APK || result != RESULT_OK || data == null || data.getData() == null) return;
         final Uri uri = data.getData();
         String name = queryName(uri);

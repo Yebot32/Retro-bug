@@ -504,6 +504,11 @@ final class AxmlEditor {
      * service, and a high initOrder puts it ahead of the game's own providers.
      */
     void addProvider(String cls, String authorities, int initOrder) throws IOException {
+        addProvider(cls, authorities, initOrder, false);
+    }
+
+    /** As {@link #addProvider(String, String, int)}, with android:exported set to `exported`. */
+    void addProvider(String cls, String authorities, int initOrder, boolean exported) throws IOException {
         int app = findElement("application");
         if (app < 0) throw new IOException("manifest has no <application> element");
         // Names first: each insert shifts later pool indexes, so no index is taken until they are all in.
@@ -532,7 +537,7 @@ final class AxmlEditor {
         putStringAttr(start, a, ns, nName, vName);
         put32(start, a + ATTR_SIZE, ns); put32(start, a + ATTR_SIZE + 4, nExported);
         put32(start, a + ATTR_SIZE + 8, -1); put16(start, a + ATTR_SIZE + 12, 8);
-        start[a + ATTR_SIZE + 15] = TYPE_INT_BOOLEAN; put32(start, a + ATTR_SIZE + 16, 0);
+        start[a + ATTR_SIZE + 15] = TYPE_INT_BOOLEAN; put32(start, a + ATTR_SIZE + 16, exported ? -1 : 0);
         putStringAttr(start, a + 2 * ATTR_SIZE, ns, nAuth, vAuth);
         put32(start, a + 3 * ATTR_SIZE, ns); put32(start, a + 3 * ATTR_SIZE + 4, nInit);
         putTyped(start, a + 3 * ATTR_SIZE, initOrder);
@@ -585,6 +590,57 @@ final class AxmlEditor {
         nodes.add(end, close);
         nodes.add(end, start);
         return true;
+    }
+
+    private static final int ATTR_VALUE = 0x01010024;
+
+    /** The integer android:value of {@code <meta-data android:name=name>} under {@code <application>}, or null. */
+    Integer metaDataInt(String name) {
+        for (byte[] c : nodes) {
+            if (u16(c, 0) != XML_START_ELEMENT || !"meta-data".equals(str(s32(c, NODE_HEADER + 4)))) continue;
+            if (!name.equals(stringValue(c, findAttr(c, "name")))) continue;
+            int a = findAttr(c, "value");
+            return a < 0 || (c[a + 15] & 0xff) != TYPE_INT_DEC ? null : s32(c, a + 16);
+        }
+        return null;
+    }
+
+    /**
+     * Adds {@code <meta-data android:name=name android:value=value/>} (an integer) as the last child of
+     * {@code <application>}; PackageManager hands it back in ApplicationInfo.metaData (GET_META_DATA).
+     */
+    void addMetaDataInt(String name, int value) throws IOException {
+        int app = findElement("application");
+        if (app < 0) throw new IOException("manifest has no <application> element");
+        int nName = ensureAttrName("name", ATTR_NAME);
+        int nValue = ensureAttrName("value", ATTR_VALUE);
+        int ns = indexOf(ANDROID_NS);
+        if (ns < 0) throw new IOException("manifest declares no android namespace to attach the meta-data to");
+        int tag = poolString("meta-data"), vName = poolString(name);
+        int end = -1;
+        for (int i = nodes.size() - 1; i > app && end < 0; i--) {
+            byte[] c = nodes.get(i);
+            if (u16(c, 0) == XML_END_ELEMENT && "application".equals(str(s32(c, NODE_HEADER + 4)))) end = i;
+        }
+        if (end < 0) throw new IOException("<application> has no end element");
+        int line = s32(nodes.get(end), 8);
+        // Attributes in resource-id order: name (0x01010003) < value (0x01010024).
+        byte[] start = new byte[NODE_HEADER + 20 + 2 * ATTR_SIZE];
+        put16(start, 0, XML_START_ELEMENT); put16(start, 2, NODE_HEADER); put32(start, 4, start.length);
+        put32(start, 8, line); put32(start, 12, -1);
+        put32(start, NODE_HEADER, -1); put32(start, NODE_HEADER + 4, tag);
+        put16(start, NODE_HEADER + 8, 20); put16(start, NODE_HEADER + 10, ATTR_SIZE);
+        put16(start, NODE_HEADER + 12, 2);
+        int a = NODE_HEADER + 20;
+        putStringAttr(start, a, ns, nName, vName);
+        put32(start, a + ATTR_SIZE, ns); put32(start, a + ATTR_SIZE + 4, nValue);
+        putTyped(start, a + ATTR_SIZE, value);
+        byte[] close = new byte[NODE_HEADER + 8];
+        put16(close, 0, XML_END_ELEMENT); put16(close, 2, NODE_HEADER); put32(close, 4, close.length);
+        put32(close, 8, line); put32(close, 12, -1);
+        put32(close, NODE_HEADER, -1); put32(close, NODE_HEADER + 4, tag);
+        nodes.add(end, close);
+        nodes.add(end, start);
     }
 
     // ---------------------------------------------------------------- package rename

@@ -66,7 +66,34 @@ final class ConvertJob {
                 try (InputStream in = self.getInputStream(e)) { files.put(m[1], readAll(in)); }
             }
         }
+        String cert = launcherCertSha256(ctx);
+        if (cert != null) files.put(ShimPlan.LAUNCHER_CERT_KEY, cert.getBytes("UTF-8"));
+        else out.append("runtime: this launcher's certificate could not be read — the copy gets no save export/import\n");
         return files;
+    }
+
+    /** SHA-256 of this launcher's one signing certificate, lower-case hex: what a copy's RbSaveProvider trusts. */
+    @SuppressWarnings("deprecation")
+    static String launcherCertSha256(Context ctx) {
+        try {
+            android.content.pm.PackageManager pm = ctx.getPackageManager();
+            android.content.pm.Signature[] sigs;
+            if (android.os.Build.VERSION.SDK_INT >= 28) {
+                android.content.pm.PackageInfo pi = pm.getPackageInfo(ctx.getPackageName(),
+                        android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES);
+                sigs = pi.signingInfo == null ? null : pi.signingInfo.getApkContentsSigners();
+            } else {
+                sigs = pm.getPackageInfo(ctx.getPackageName(), android.content.pm.PackageManager.GET_SIGNATURES).signatures;
+            }
+            if (sigs == null || sigs.length != 1) return null;
+            StringBuilder hex = new StringBuilder();
+            for (byte b : java.security.MessageDigest.getInstance("SHA-256").digest(sigs[0].toByteArray()))
+                hex.append(String.format("%02x", b));
+            return hex.toString();
+        } catch (Exception e) {
+            Log.w(TAG, "launcher certificate: " + e);
+            return null;
+        }
     }
 
     /**
@@ -145,8 +172,26 @@ final class ConvertJob {
                                 }
                                 if (!finished.compareAndSet(false, true)) return;  // one verdict per conversion
                                 RepackInstaller.pendingConfirm = null;
-                                release();
                                 final boolean ok = line.contains("(SUCCESS)");
+                                if (ok && !ObbStore.sources(app, game).isEmpty()) {
+                                    // The game's OBB goes into the copy's own folder before the tile says Ready.
+                                    new Thread(new Runnable() {
+                                        @Override public void run() {
+                                            String why = ObbStore.install(app, game, new ObbStore.Progress() {
+                                                @Override public void at(long done, long total) {
+                                                    post(main, cb, "obb: " + (total > 0 ? done * 100 / total : 0) + "%");
+                                                }
+                                            });
+                                            out.append(why == null ? "obb: installed for the copy\n" : "obb: " + why + "\n");
+                                            release();
+                                            main.post(new Runnable() {
+                                                @Override public void run() { cb.onDone(true, out.toString()); }
+                                            });
+                                        }
+                                    }, "rb-obb").start();
+                                    return;
+                                }
+                                release();
                                 main.post(new Runnable() {
                                     @Override public void run() { cb.onDone(ok, out.toString()); }
                                 });
