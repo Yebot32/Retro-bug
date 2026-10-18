@@ -98,7 +98,8 @@ public final class RbSaveProvider extends ContentProvider {
         } catch (Throwable t) {
             Log.i(Shims.TAG, "saves: " + method + " failed: " + t);
             out.putBoolean("ok", false);
-            out.putString("message", String.valueOf(t.getMessage()));
+            out.putString("message", t instanceof java.io.IOException && t.getMessage() != null && t.getMessage().contains("ENOSPC")
+                    ? "The phone is out of storage space" : "Something went wrong in the game's copy (" + t.getClass().getSimpleName() + ")");
             return out;
         }
     }
@@ -116,15 +117,13 @@ public final class RbSaveProvider extends ContentProvider {
         String why;
         try (InputStream in = new FileInputStream(zip)) { why = SaveArchive.unpack(in, staging, original()); }
         if (why != null) {
+            Log.i(Shims.TAG, "saves: import refused: " + why);
             out.putBoolean("ok", false);
             out.putString("message", why);
             return out;
         }
-        if (keepUndo) {
-            try (OutputStream o = new FileOutputStream(new File(c.getNoBackupFilesDir(), UNDO))) {
-                SaveArchive.write(original(), dirs(), o);
-            }
-        }
+        // The current saves first, whole or not at all: a failed write keeps the previous undo copy.
+        if (keepUndo) SaveArchive.writeTo(original(), dirs(), new File(c.getNoBackupFilesDir(), UNDO));
         SaveArchive.replace(dirs(), staging);
         SaveArchive.delete(staging);
         if (keepUndo) zip.delete();

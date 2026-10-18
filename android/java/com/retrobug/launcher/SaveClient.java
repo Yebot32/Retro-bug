@@ -24,6 +24,15 @@ final class SaveClient {
         return Uri.parse("content://" + g.copyPackage() + ShimPlan.SAVES_AUTHORITY_SUFFIX + "/" + path);
     }
 
+    /** True when the copy is installed and carries RetroBug's save/OBB helper (copies made from runtime stamp 2 on). */
+    static boolean available(Context c, Game g) {
+        try {
+            return c.getPackageManager().resolveContentProvider(g.copyPackage() + ShimPlan.SAVES_AUTHORITY_SUFFIX, 0) != null;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
     private static Bundle call(Context c, Game g, String method) {
         return c.getContentResolver().call(uri(g, ""), method, null, null);
     }
@@ -38,7 +47,20 @@ final class SaveClient {
         }
     }
 
+    /** Exports to `dest`; on failure the file "Save as" already created there is removed again (no empty save left). */
     static String export(Context c, Game g, Uri dest) {
+        String why = exportOrWhy(c, g, dest);
+        if (why != null) {
+            try {
+                android.provider.DocumentsContract.deleteDocument(c.getContentResolver(), dest);
+            } catch (Exception ignored) {
+                // a provider that can't delete: the empty file stays, the message still says it failed
+            }
+        }
+        return why;
+    }
+
+    private static String exportOrWhy(Context c, Game g, Uri dest) {
         ContentResolver cr = c.getContentResolver();
         try {
             Bundle b = call(c, g, "export");

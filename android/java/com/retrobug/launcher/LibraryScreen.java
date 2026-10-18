@@ -203,6 +203,11 @@ final class LibraryScreen extends LinearLayout {
                 if (!ok) {
                     Toast.makeText(c, "Couldn't make " + g.label + " playable. Long press it for details.",
                             Toast.LENGTH_LONG).show();
+                } else if (report != null && report.contains("\nobb: ") && !report.contains("\nobb: installed")) {
+                    // Installed, but its OBB copy failed: the game would sit at its loading screen without saying why.
+                    String why = report.substring(report.lastIndexOf("\nobb: ") + 6).trim();
+                    Toast.makeText(c, g.label + " is ready, but its OBB wasn't copied: " + why
+                            + ". Long press it → Data to try again.", Toast.LENGTH_LONG).show();
                 }
                 refresh();
             }

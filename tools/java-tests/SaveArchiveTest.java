@@ -108,6 +108,34 @@ public class SaveArchiveTest {
                 check(!new File(tmp, "evil").exists(), "nothing written outside staging for " + b);
             }
 
+            // The runtime's own report is RetroBug's, like its settings: never exported, never replaced.
+            File r = new File(tmp, "report");
+            Map<String, File> rd = dirs(r);
+            put(new File(rd.get("files"), "rb-report.txt"), "boot log");
+            put(new File(rd.get("files"), "slot.dat"), "s");
+            ByteArrayOutputStream ro = new ByteArrayOutputStream();
+            check(SaveArchive.write("com.example.game", rd, ro) == 1, "rb-report.txt is not a save");
+            File rs = new File(tmp, "rstaging");
+            check(SaveArchive.unpack(new ByteArrayInputStream(ro.toByteArray()), rs, "com.example.game") == null, "unpacks");
+            SaveArchive.replace(rd, rs);
+            check(read(new File(rd.get("files"), "rb-report.txt")).equals("boot log"), "rb-report.txt kept on import");
+
+            // A corrupt zip (a good one cut short) is a reason for the player, and leaves no staging behind.
+            byte[] whole = out.toByteArray();
+            byte[] cut = java.util.Arrays.copyOf(whole, whole.length / 2);
+            File cs = new File(tmp, "cstaging");
+            String cr = SaveArchive.unpack(new ByteArrayInputStream(cut), cs, "com.example.game");
+            check(cr != null && !cr.contains("Exception"), "a cut-short zip is refused in words: " + cr);
+            check(!cs.exists(), "no staging left after a corrupt zip");
+
+            // Saves written to a file go through a temporary and replace the old file whole.
+            File undo = new File(tmp, "undo.zip");
+            put(undo, "old undo");
+            check(SaveArchive.writeTo("com.example.game", g, undo) == 4, "writeTo counts the files");
+            check(!new File(tmp, "undo.zip.tmp").exists(), "no temporary left");
+            check(SaveArchive.unpack(new java.io.FileInputStream(undo), new File(tmp, "ustaging"), "com.example.game") == null,
+                    "the written file is a whole save");
+
             // OBB file names the copy will write into its own OBB folder for the launcher: a plain .obb name only.
             check(SaveArchive.obbName("main.102120000.com.sega.smbbounce.rb.obb"), "an OBB name");
             check(SaveArchive.obbName("patch.3.a.b.rb.OBB"), "case of .OBB");

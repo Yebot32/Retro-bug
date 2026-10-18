@@ -39,6 +39,7 @@ final class GameMenu {
     private int current = 0;
     /** The Data tab's line for work in progress (an OBB copy, an export), shown until the tab is rebuilt. */
     private String busy;
+    private TextView busyView;
     private static final int[] TARGETS = {35, 33, 28, 24};
 
     private final Context c;
@@ -427,7 +428,14 @@ final class GameMenu {
         LinearLayout list = list();
         final boolean copy = copyInstalled();
         list.addView(section("Game data (OBB)"));
-        if (busy != null) list.addView(row(busy, null, false, null));
+        if (busy != null) {
+            // Live progress: only this line changes while a copy runs (a whole-tab rebuild per tick was too heavy).
+            busyView = HoloTheme.text(c, busy, 15, HoloTheme.accent(c), HoloTheme.MEDIUM);
+            busyView.setPadding(HoloTheme.dp(c, 20), HoloTheme.dp(c, 10), HoloTheme.dp(c, 20), HoloTheme.dp(c, 10));
+            list.addView(busyView);
+        } else {
+            busyView = null;
+        }
         java.util.List<File> src = ObbStore.sources(c, game), have = ObbStore.installed(game);
         boolean mine = ObbStore.added(c, game);
         String status;
@@ -440,8 +448,12 @@ final class GameMenu {
             status = "No OBB. Most games don't need one; if this game says its data is missing, add its .obb file.";
         }
         list.addView(row("OBB", status, false, null));
-        list.addView(row("Install OBB", copy ? "Copies it into the folder RetroBug's copy reads"
-                : "Make the game playable first", copy && !src.isEmpty() && busy == null && !ObbStore.upToDate(c, game),
+        final boolean canAsk = copy && SaveClient.available(c, game);  // the copy writes its own OBB through its helper
+        boolean upToDate = ObbStore.upToDate(c, game);
+        list.addView(row("Install OBB", !copy ? "Make the game playable first"
+                : !canAsk ? "Update this game first (tap Update above): its copy is older than OBB support"
+                : upToDate && !have.isEmpty() ? "Already installed" : "Copies it into the folder RetroBug's copy reads",
+                canAsk && !src.isEmpty() && busy == null && !upToDate,
                 new View.OnClickListener() {
                     @Override public void onClick(View v) { installObb(); }
                 }));
@@ -465,9 +477,13 @@ final class GameMenu {
                 }));
 
         list.addView(section("Saves"));
-        boolean saves = copy && game.hasCode;
+        // Checked before any picker opens: a copy made before saves existed has no helper to ask (a "Save as" first
+        // would leave an empty .zip behind).
+        boolean helper = copy && game.hasCode && SaveClient.available(c, game);
+        boolean saves = helper;
         String why = !game.hasCode ? "This game has no Java code, so RetroBug can't reach its saves"
-                : !copy ? "Make the game playable first" : null;
+                : !copy ? "Make the game playable first"
+                : !helper ? "Update this game first (tap Update above): its copy is older than saves" : null;
         list.addView(row("Export saves", why != null ? why : "Saves the game's progress as a .zip wherever you choose",
                 saves && busy == null, new View.OnClickListener() {
                     @Override public void onClick(View v) { exportSaves(); }
@@ -527,7 +543,7 @@ final class GameMenu {
                 try {
                     why = work.call();
                 } catch (Exception e) {
-                    why = String.valueOf(e.getMessage());
+                    why = e.getMessage() != null ? e.getMessage() : "Something went wrong (" + e.getClass().getSimpleName() + ")";
                 }
                 final String msg = why == null ? ok : why;
                 content.post(new Runnable() {
@@ -549,7 +565,7 @@ final class GameMenu {
                     @Override public void run() {
                         if (busy == null) return;
                         busy = verb + " " + (total > 0 ? (done * 100 / total) + " %" : mb(done)) + "…";
-                        if (current == DATA_TAB) select(DATA_TAB);
+                        if (busyView != null) busyView.setText(busy);
                     }
                 });
             }

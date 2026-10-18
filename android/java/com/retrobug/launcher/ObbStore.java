@@ -93,9 +93,36 @@ final class ObbStore {
      * otherwise the reason. Run off the UI thread.
      */
     static String install(Context c, Game g, Progress p) {
+        // One copy per game at a time: the menu and a conversion's automatic install would write the same .part.
+        synchronized (BUSY) {
+            if (!BUSY.add(g.packageName)) return "This game's OBB is already being copied";
+        }
+        try {
+            return installLocked(c, g, p);
+        } finally {
+            synchronized (BUSY) { BUSY.remove(g.packageName); }
+        }
+    }
+
+    private static final java.util.Set<String> BUSY = new java.util.HashSet<>();
+
+    /** Free space needed beyond the copy itself, so the phone is not filled to the last byte. */
+    static final long SPACE_MARGIN = 64L << 20;
+
+    private static String installLocked(Context c, Game g, Progress p) {
         List<File> src = sources(c, g);
         if (src.isEmpty()) return "This game has no OBB on this phone. Add its OBB file first.";
         File dir = copyDir(g);
+        long need = 0;
+        for (File s : src) {
+            File t = new File(dir, ObbRules.copyName(s.getName(), g.packageName, g.versionCode));
+            if (t.length() != s.length() || ours(t)) need += s.length();
+        }
+        long free = obbRoot().getUsableSpace();
+        if (need > 0 && free < need + SPACE_MARGIN) {
+            return "Not enough storage: the OBB needs " + ((need + SPACE_MARGIN) >> 20) + " MB free, the phone has "
+                    + (free >> 20) + " MB";
+        }
         // Anything this launcher put there itself (an earlier build did) is unreadable to the game: cleared first.
         File[] old = dir.listFiles();
         if (old != null) for (File f : old) if (ours(f)) f.delete();
@@ -132,6 +159,7 @@ final class ObbStore {
                     }
                 }
             } catch (IOException | RuntimeException e) {
+                new File(dir, name + ".part").delete();  // the launcher may delete in the folder (it can write Android/obb)
                 return "Couldn't copy " + s.getName() + ": " + e.getMessage();
             }
             android.os.Bundle b = cr.call(provider(g, ""), "obbCommit", name, null);
@@ -153,7 +181,12 @@ final class ObbStore {
         if (name == null || !ObbRules.isObb(name)) return "That isn't an .obb file";
         File dir = addedDir(c, g);
         if (!dir.isDirectory() && !dir.mkdirs()) return "Couldn't create " + dir;
-        for (File old : obbs(dir)) old.delete();
+        long size = sizeOf(c, uri);
+        long free = dir.getUsableSpace();
+        if (size > 0 && free < size + SPACE_MARGIN) {
+            return "Not enough storage: this OBB needs " + ((size + SPACE_MARGIN) >> 20) + " MB free, the phone has "
+                    + (free >> 20) + " MB";
+        }
         File t = new File(dir, name.replaceAll("[^A-Za-z0-9._-]", "_"));
         File part = new File(dir, t.getName() + ".part");
         long done = 0;
@@ -165,7 +198,7 @@ final class ObbStore {
                 out.write(buf, 0, n);
                 done += n;
                 if (done - last >= (8 << 20)) {
-                    p.at(done, -1);
+                    p.at(done, size);
                     last = done;
                 }
             }
@@ -173,7 +206,22 @@ final class ObbStore {
             part.delete();
             return "Couldn't copy the file: " + e.getMessage();
         }
+        // Only now is an older OBB of the same kind (main or patch) replaced: a failed copy keeps the old one.
+        String kind = t.getName().contains(".") ? t.getName().substring(0, t.getName().indexOf('.')) : t.getName();
+        for (File old : obbs(dir)) if (!old.equals(t) && old.getName().startsWith(kind + ".")) old.delete();
+        if (t.exists() && !t.delete()) { part.delete(); return "Couldn't replace " + t.getName(); }
         return part.renameTo(t) ? null : "Couldn't finish " + t.getName();
+    }
+
+    /** The picked file's size from its provider, or -1 when it does not say. */
+    private static long sizeOf(Context c, Uri uri) {
+        try (android.database.Cursor q = c.getContentResolver().query(uri,
+                new String[] {android.provider.OpenableColumns.SIZE}, null, null, null)) {
+            if (q != null && q.moveToFirst() && !q.isNull(0)) return q.getLong(0);
+        } catch (RuntimeException ignored) {
+            // no size: copied without the check
+        }
+        return -1;
     }
 
     /** Forgets the player's added OBB for the game. */

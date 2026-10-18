@@ -32,7 +32,28 @@ final class SaveArchive {
 
     /** RetroBug's own files, which a save neither carries nor replaces. */
     static boolean ours(String section, String rel) {
-        return section.equals("files") && rel.equals(SETTINGS_FILE);
+        return section.equals("files") && (rel.equals(SETTINGS_FILE) || rel.equals(REPORT_FILE));
+    }
+
+    /** The native runtime's boot report (runtime_boot.cpp), rewritten at every start: not a save. */
+    static final String REPORT_FILE = "rb-report.txt";
+
+    /**
+     * {@link #write} into `target` through `target`.tmp, renamed over `target` only when complete: a failed write
+     * leaves the previous file whole (the undo copy must never be half a save).
+     */
+    static int writeTo(String pkg, Map<String, File> dirs, File target) throws IOException {
+        File tmp = new File(target.getPath() + ".tmp");
+        int n;
+        try (OutputStream o = new FileOutputStream(tmp)) {
+            n = write(pkg, dirs, o);
+        } catch (IOException | RuntimeException e) {
+            tmp.delete();
+            throw e;
+        }
+        if (target.exists() && !target.delete()) { tmp.delete(); throw new IOException("could not replace " + target); }
+        if (!tmp.renameTo(target)) { tmp.delete(); throw new IOException("could not finish " + target); }
+        return n;
     }
 
     /** Writes the saves of the game `pkg` (its original package) to `out`; returns how many files went in. */
@@ -72,7 +93,15 @@ final class SaveArchive {
      * allowed; otherwise the reason, in the player's words, and `staging` is emptied.
      */
     static String unpack(InputStream in, File staging, String pkg) throws IOException {
-        String why = unpackOrWhy(in, staging, pkg);
+        String why;
+        try {
+            why = unpackOrWhy(in, staging, pkg);
+        } catch (java.util.zip.ZipException | java.io.EOFException e) {
+            why = "This file isn't a complete save (the zip is damaged or cut short)";
+        } catch (IOException | RuntimeException e) {
+            delete(staging);
+            throw e;
+        }
         if (why != null) delete(staging);
         return why;
     }
