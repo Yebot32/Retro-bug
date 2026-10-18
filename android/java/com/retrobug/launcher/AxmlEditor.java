@@ -246,9 +246,24 @@ final class AxmlEditor {
         return raw >= 0 ? str(raw) : ((c[a + 15] & 0xff) == TYPE_STRING ? str(s32(c, a + 16)) : null);
     }
 
-    Integer minSdk() { return intAttr("uses-sdk", "minSdkVersion"); }
+    Integer minSdk() { return usesSdk("minSdkVersion"); }
 
-    Integer targetSdk() { return intAttr("uses-sdk", "targetSdkVersion"); }
+    Integer targetSdk() { return usesSdk("targetSdkVersion"); }
+
+    /**
+     * An int attribute of {@code <uses-sdk>} as Android reads it: a manifest may carry several {@code <uses-sdk>}
+     * elements (OREO: Twist Lick Dunk splits min and target over two), and each value comes from the last element
+     * that has it.
+     */
+    private Integer usesSdk(String attr) {
+        Integer v = null;
+        for (byte[] c : nodes) {
+            if (u16(c, 0) != XML_START_ELEMENT || !"uses-sdk".equals(str(s32(c, NODE_HEADER + 4)))) continue;
+            int a = findAttr(c, attr);
+            if (a >= 0) v = s32(c, a + 16);
+        }
+        return v;
+    }
 
     /** Attribute names of the first {@code element}, in file order (tests check the resource-id ordering). */
     /** Attribute names, in order, of the first {@code element} whose android:name is {@code name}. */
@@ -307,6 +322,12 @@ final class AxmlEditor {
     /** Sets an int attribute of {@code <uses-sdk>}: rewritten in place, inserted, or with a new element. */
     private void setUsesSdk(String attr, int resId, int value) throws IOException {
         int us = findElement("uses-sdk");
+        // Later <uses-sdk> elements would override the value set on the first: they lose that attribute.
+        for (int i = us + 1; us >= 0 && i < nodes.size(); i++) {
+            byte[] c = nodes.get(i);
+            if (u16(c, 0) != XML_START_ELEMENT || !"uses-sdk".equals(str(s32(c, NODE_HEADER + 4)))) continue;
+            removeAttrAt(i, attr);
+        }
         if (us >= 0) {
             int a = findAttr(nodes.get(us), attr);
             if (a >= 0) {                       // already there: rewrite the typed value, nothing else moves
@@ -822,25 +843,31 @@ final class AxmlEditor {
         for (int i = 0; i < nodes.size(); i++) {
             byte[] c = nodes.get(i);
             if (u16(c, 0) != XML_START_ELEMENT || !element.equals(str(s32(c, NODE_HEADER + 4)))) continue;
-            int size = u16(c, NODE_HEADER + 10), n = attrCount(c), at = -1;
-            for (int k = 0; k < n && at < 0; k++) if (attr.equals(str(s32(c, attrOff(c, k) + 4)))) at = k;
-            if (at < 0) continue;
-            int del = attrOff(c, at);
-            byte[] out = new byte[c.length - size];
-            System.arraycopy(c, 0, out, 0, del);
-            System.arraycopy(c, del + size, out, del, c.length - del - size);
-            put32(out, 4, out.length);
-            put16(out, NODE_HEADER + 12, n - 1);
-            // idIndex/classIndex/styleIndex are 1-based positions: the removed one becomes 0, later ones move down.
-            for (int f = NODE_HEADER + 14; f <= NODE_HEADER + 18; f += 2) {
-                int v = u16(out, f);
-                if (v == at + 1) put16(out, f, 0);
-                else if (v > at + 1) put16(out, f, v - 1);
-            }
-            nodes.set(i, out);
-            any = true;
+            any |= removeAttrAt(i, attr);
         }
         return any;
+    }
+
+    /** Removes attribute {@code attr} from the start element at node index {@code i}; true when it was there. */
+    private boolean removeAttrAt(int i, String attr) {
+        byte[] c = nodes.get(i);
+        int size = u16(c, NODE_HEADER + 10), n = attrCount(c), at = -1;
+        for (int k = 0; k < n && at < 0; k++) if (attr.equals(str(s32(c, attrOff(c, k) + 4)))) at = k;
+        if (at < 0) return false;
+        int del = attrOff(c, at);
+        byte[] out = new byte[c.length - size];
+        System.arraycopy(c, 0, out, 0, del);
+        System.arraycopy(c, del + size, out, del, c.length - del - size);
+        put32(out, 4, out.length);
+        put16(out, NODE_HEADER + 12, n - 1);
+        // idIndex/classIndex/styleIndex are 1-based positions: the removed one becomes 0, later ones move down.
+        for (int f = NODE_HEADER + 14; f <= NODE_HEADER + 18; f += 2) {
+            int v = u16(out, f);
+            if (v == at + 1) put16(out, f, 0);
+            else if (v > at + 1) put16(out, f, v - 1);
+        }
+        nodes.set(i, out);
+        return true;
     }
 
     /** Add one to every string-pool reference in node {@code c} that is >= {@code at}. */

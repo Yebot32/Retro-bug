@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Mirrors OREO: Twist Lick Dunk (com.pikpok.oreo): minSdkVersion and targetSdkVersion in two separate <uses-sdk>
+     elements. Android takes each value from the last element that has it, so editing only the first is not enough. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.retrobug.fixture">
+    <uses-sdk android:minSdkVersion="10"/>
+    <uses-sdk android:targetSdkVersion="22"/>
+    <application android:label="fixture">
+        <activity android:name=".Main" android:exported="true"/>
+    </application>
+</manifest>

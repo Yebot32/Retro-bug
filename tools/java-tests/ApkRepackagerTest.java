@@ -419,6 +419,27 @@ public class ApkRepackagerTest {
         check(reportHas(r, "sharedUserId", "removed") && reportHas(r, "maxSdkVersion", "removed"), "report: " + r.report);
     }
 
+    /** Two <uses-sdk> elements (OREO): the target the platform sees is the last one's, so both must agree after editing. */
+    static void twoUsesSdk() throws Exception {
+        Map<String, byte[]> x = new LinkedHashMap<>();
+        x.put("lib/armeabi-v7a/libfoo.so", b("V7A"));
+        File in = build("two_uses_sdk", null, "twosdk", x);
+        AxmlEditor src = AxmlEditor.parse(readAll(in).get("AndroidManifest.xml"));
+        check(Integer.valueOf(22).equals(src.targetSdk()) && Integer.valueOf(10).equals(src.minSdk()),
+                "the editor reads each value from the element that has it: min " + src.minSdk() + " target " + src.targetSdk());
+        File out = new File(scratch, "twosdk.out.apk");
+        ApkRepackager.targetFloor = 35;
+        try {
+            ApkRepackager.transform(in, runtime(), out);
+        } finally {
+            ApkRepackager.targetFloor = 0;
+        }
+        String t = xmltree(out);
+        check(!t.contains("targetSdkVersion(0x01010270)=22"), "no element keeps the old target 22: " + t);
+        check(t.contains("targetSdkVersion(0x01010270)=35"), "target 35");
+        check(!t.contains("minSdkVersion(0x0101020c)=10"), "no element keeps the old minSdk 10");
+    }
+
     static void shimsWhenNotNeededOrImpossible() throws Exception {
         Map<String, byte[]> x = new LinkedHashMap<>();
         x.put("classes.dex", Files.readAllBytes(new File(fixtures, "RiskyFixture.dex").toPath()));
@@ -583,6 +604,7 @@ public class ApkRepackagerTest {
         addsSaveProvider();
         repairsElfAssets();
         dropsSharedUserAndMaxSdk();
+        twoUsesSdk();
         shimsWhenNotNeededOrImpossible();
         renamesPackage();
         movesV7aAndStubs();
