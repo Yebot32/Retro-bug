@@ -124,3 +124,36 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
 - Still open, in the order I would take them: C31's tile message (4 NativeActivity games), C29/C30 (the sensor
   thunks Angry Birds Epic now names), C26 (Mono signals — the Unity milestone), C17/C18/C20/C21/C23 polish,
   then A6/A7 and the merge/push.
+
+## 2026-10-18, later — C31's cheap half: a NativeActivity game says so (0.1.236)
+
+- **What was wrong.** Four of the thirty M5 games died with `undefined symbol: ANativeActivity_onCreate` before a
+  frame was drawn. Nothing in the library said so, so the four looked like engine faults.
+- **What decides it, measured rather than assumed.** The platform's `NativeActivity.onCreate` is what dlopen()s the
+  game's library and dlsym()s that entry point, so the question is whether the *launcher activity* descends from
+  `android.app.NativeActivity`. All four declare a Java subclass, not the platform class:
+  `com.prime31.UnityPlayerNativeActivity` → `com.unity3d.player.UnityPlayerNativeActivity` → `NativeActivity`
+  (dexdump on Derby Quest's classes.dex). None declares `android.app.lib_name`, so the platform falls back to
+  `libmain.so` — which is 33 KB and exports `ANativeActivity_onCreate` and `JNI_OnLoad` and no `Java_*` at all.
+- **The export alone is not the answer.** MadTruck's `libmain.so` exports the same entry point and MadTruck runs,
+  because its launcher activity is `com.unity3d.player.UnityPlayerActivity`, a plain Java class that never calls it.
+  Measured across ten Unity games on the tablet: five export it (Derby, FC All-Stars, LEGO, Torture, MadTruck),
+  five do not (Angry Birds Epic, Cars 3, Teeny Titans 2, Gumball Party, Among Us). The export is asked first only
+  as a filter — 30 KB against a DEX's megabytes, and the 30-game library holds 180 MB of DEX, so the class chain
+  would have cost ~1 s per rescan on its own. On the SM-X710 the filter admits five and the chain picks the four.
+- **What changed** (`b4fbdba`): `DexScanner.superclasses` (class_defs → descriptor/superclass map),
+  `ApkScan.isNativeActivity` (the ELF filter, then the chain across classes*.dex), `StubElfWriter.definedFunctions`
+  (`jniExportsOf` is now its filter), `LibraryRules.NATIVE_ACTIVITY_WHY`, and `GameCatalog` asking the question for
+  an installed game and again for an APK the player added. The four tiles read CAN'T PLAY HERE.
+- **The first wording did not fit.** "…Nothing is wrong with the game or the APK" was ellipsized at "Nothing is
+  wr…" in the tap's toast, which cut exactly the reassurance the change exists for. Shortened to two lines:
+  "RetroBug can't run this game yet: it starts from native code (a NativeActivity). The game and its APK are fine."
+- **Verified on the tablet** (0.1.236): the four tiles red and the other 26 untouched, the toast complete, the game
+  menu's action button disabled for them (so nothing tries to convert one), and Delete still offers the copy. The
+  first row's badges look staggered in a screenshot — that is SpongeBob's two-line name pushing its own badge down,
+  not a ghost (uiautomator bounds confirm one badge per tile).
+- Host tests: `ApkScanTest` 24 checks (9 new, over a d8 hierarchy fixture and two real 32-bit ELFs — one with the
+  entry point, one without). Suite 16 of 16, 0 failures. The engine is untouched, so its lanes were not re-run.
+- Still open in C31: running such a game needs ANativeActivityCallbacks and the guest-side activity loop; a game
+  that names its entry library through `android.app.lib_name` is not recognised; and an APK added for a game that
+  is not installed has no launcher class to ask about (it converts and fails at launch, as before).

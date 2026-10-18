@@ -25,14 +25,14 @@ signals) plus JIT-shaped code, not a per-game bug.
 | 5 | Car Game | com.bertheussen.cargame | Unity | not installed | Play Protect verification failure | install log |
 | 6 | Cars 3 (Lightning) | com.disney.cars3_goo | Unity | died | guest native called `exit(127)` | logcat (screenshot contaminated) |
 | 7 | Crash Drive 2 | com.spilgames.a10.google.crashdrive2 | Unity | ran, then died | guest thread fetched 0x0 | logcat |
-| 8 | Derby Quest | com.tapsy.derbyquesthd | Unity + NativeActivity | died | `ANativeActivity_onCreate` undefined | logcat |
-| 9 | FC All-Stars | com.turner.fcallstars | Unity + NativeActivity | died | `ANativeActivity_onCreate` undefined | logcat |
+| 8 | Derby Quest | com.tapsy.derbyquesthd | Unity + NativeActivity | died | `ANativeActivity_onCreate` undefined — tile now says so (C31, 0.1.236) | logcat; tile |
+| 9 | FC All-Stars | com.turner.fcallstars | Unity + NativeActivity | died | `ANativeActivity_onCreate` undefined — tile now says so (C31, 0.1.236) | logcat; tile |
 | 10 | Fruit Ninja vs Skittles | com.halfbrick.fruitninjavsskittles | native | **runs** | — playable | screenshot + played |
 | 11 | Gumball Lite | com.twentysixdigital.gumballlite | native | **runs** | — playable | screenshot + played |
 | 12 | Gumball's Amazing Party | com.turner.gumballsamazingparty | Unity | died | undefined instruction in `libgvradio.so` ctor (obfuscated/DRM lib) | logcat |
 | 13 | Gameloft Cars | com.gameloft.android.ANMP.GloftCAHM | native | died | `ASensorManager_createEventQueue` refuses a guest looper callback | logcat |
 | 14 | KitKat Challenge | com.doubleleft.androidkitkat | native | **runs** | — playable | screenshot + played |
-| 15 | LEGO Mighty Micros | com.lego.superheroes.dccomicsmightymicros | Unity + NativeActivity | died | `ANativeActivity_onCreate` undefined | logcat |
+| 15 | LEGO Mighty Micros | com.lego.superheroes.dccomicsmightymicros | Unity + NativeActivity | died | `ANativeActivity_onCreate` undefined — tile now says so (C31, 0.1.236) | logcat; tile |
 | 16 | Looney Tunes Dash | com.zynga.looney | native | **runs** | — age gate on screen | screenshot |
 | 17 | MadTruck | com.spilgames.mtc | Unity | ran, black screen | nothing drawn after boot | screenshot |
 | 18 | Oreo | com.pikpok.oreo | native | not installed | Play Protect verification failure | install log |
@@ -43,7 +43,7 @@ signals) plus JIT-shaped code, not a per-game bug.
 | 23 | Sonic Transformed | com.sega.sonic.transformed | native | **runs** | — title screen (needs its 851 MB OBB) | screenshot |
 | 24 | Tap Tap Revenge 4 | com.tapulous.taptaprevenge4 | native | died | foreground `PushService` start refused | logcat |
 | 25 | Teeny Titans 2 | com.turner.ttgfigures2 | Unity | died | guest native called `exit(127)` | logcat (screenshot contaminated) |
-| 26 | Torture the Murderer | com.ningunosentertainment.TortureTheMurdererElectric | Unity + NativeActivity | died | `ANativeActivity_onCreate` undefined | logcat |
+| 26 | Torture the Murderer | com.ningunosentertainment.TortureTheMurdererElectric | Unity + NativeActivity | died | `ANativeActivity_onCreate` undefined — tile now says so (C31, 0.1.236) | logcat; tile |
 | 27 | Turbo FAST | com.pikpok.turbo | native | not installed | Play Protect verification failure | install log |
 | 28 | Nutty Fluffies | com.UBI.A90.WW | Unity | died | re-run 2026-10-18 21:46: `JNI_OnLoad` runs 147,666,044 steps (was stopped at 4,000,000) and faults on an unmapped guest read at 0xc0d900b3, pc 0x2410bc — a real memory fault, no longer the budget | logcat |
 | 29 | Where's My Mickey | com.disney.wheresmymickey_goo | native | **runs** | — age gate on screen | screenshot |
@@ -53,7 +53,7 @@ signals) plus JIT-shaped code, not a per-game bug.
 
 | Cause | Games | Tracked as |
 |---|---|---|
-| NativeActivity games (`ANativeActivity_onCreate`) | 4 | C31 — tile should say "not supported" |
+| NativeActivity games (`ANativeActivity_onCreate`) | 4 | C31 — the tile says so since 0.1.236; running them is still open |
 | Unity native init (0x0 fetch, `exit(127)`, unmapped read at 0xc0d900b3, obfuscated ctor) | 5 | per-game (the step budget, C27, is no longer one of them) |
 | Thunk gaps (sensor looper callback, thread fetch 0x0) | 2 | C29/C30 |
 | Java/Android behaviour (reflection, foreground service, activity start, ANR) | 4 | per-game |
@@ -63,8 +63,9 @@ signals) plus JIT-shaped code, not a per-game bug.
 ## What to do next, in order
 
 1. Re-run the contaminated rows (2, 6, 25 and any duplicate screenshot) with the tablet idle; replace their verdicts.
-2. The four NativeActivity games are one fix: a clear "not supported yet" tile, or the `ANativeActivity_onCreate`
-   stub. The tile message is the cheap half and stops these looking like engine bugs.
+2. ~~The four NativeActivity games look like engine bugs~~ — done 2026-10-18 (C31's cheap half, 0.1.236): the
+   launcher activity's own class chain decides, and the four tiles read "Can't play here" with the reason on tap.
+   Running them is the expensive half: ANativeActivityCallbacks and the guest-side activity loop.
 3. ~~C27 (the 4M-step budget on `JNI_OnLoad`)~~ — done 2026-10-18 (`kInitBudget`). Row 28 now runs 147M steps
    and stops on a real unmapped read; row 3 was never budget-bound (its `JNI_OnLoad` returns in 35 steps). The
    budget was hiding one fault, not four.

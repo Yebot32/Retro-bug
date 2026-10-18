@@ -72,7 +72,7 @@ refused, no-OBB status text.
 | C28 | bug | ARM32 vs AArch64 `O_*` flags not translated (O_LARGEFILE→O_NOFOLLOW, O_DIRECTORY→O_DIRECT) | core/syscall/host_io.cpp:291,297 | todo |
 | C29 | gap | Missing GLES2 ext / GLES1 fixed-point / GLES3 / sensor teardown thunks | jni/thunks.cpp | todo (per M5 evidence) |
 | C30 | gap | `glGetString` advertises ES 3.2 + extensions with no thunks | jni/host_slots.cpp:471-481 | todo |
-| C31 | gap | NativeActivity games unsupported (no ANativeActivity_onCreate) | StubElfWriter.java:197 | deferred (say so on the tile) |
+| C31 | gap | NativeActivity games unsupported (no ANativeActivity_onCreate) | ApkScan.java:isNativeActivity | half done (tile says so, b4fbdba; running them needs ANativeActivityCallbacks) |
 | C32 | perf | Always-on profiler map grows forever | jni/runtime_boot.cpp:542-582 | todo |
 | C33 | risk | `rb_runtime_boot` returns JNI_VERSION_1_6 even on failure | jni/runtime_boot.cpp:860 | todo |
 | C34 | gap | Many syscalls ENOSYS (uname, sysinfo, sched_*affinity, prlimit64…) | core/syscall/monitor.cpp:1403-1418 | todo (per M5 evidence) |
