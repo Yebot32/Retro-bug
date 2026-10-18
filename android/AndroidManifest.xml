@@ -45,7 +45,7 @@
         </intent>
     </queries>
 
-    <application android:label="RetroBug" android:icon="@mipmap/ic_launcher"
+    <application android:label="@string/app_name" android:icon="@mipmap/ic_launcher"
         android:theme="@android:style/Theme.Holo.NoActionBar"
         android:debuggable="false">
         <!-- Converted games read their per-game settings here; it answers only a copy signed with this
