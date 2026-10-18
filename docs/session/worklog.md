@@ -40,3 +40,15 @@ Newest entries at the bottom. "Decision" lines are calls made on Yebot32's behal
 - Decision: the `-STABLE-BACKUP` APK is the build installed at session start (the tested data-tab build 44ac2de).
 - Observation: SMB Bounce's copy already had foreground location granted (USER_SET) from an earlier session; I
   did not grant anything. Android's "allow all the time" upgrade prompt was answered "Keep while in use".
+
+## SpongeBob Game Station (A3) — blocked
+- Unity/Mono game wrapped in the G-Presto anti-tamper SDK. A converted (re-signed) copy is detected as tampering and
+  exits ("[Error_1160] Illicit activity detected … Protected by G-Presto"). Defeating copy protection is out of
+  bounds: stopped, documented in spongebob-gamestation.md and needs-me.md.
+- General fixes that came out of the diagnosis and stay: ElfRepair (zeroed ELF section-header fields; also libgpg),
+  unstable provider client for copy calls (a crashing copy no longer kills the launcher), explicit target honoured by
+  native-control copies.
+- Cleanup: the diagnostic copy com.BlueArk.SBGS.rb (a RetroBug copy, not an original) was uninstalled; the pushed
+  OBB copy in Download removed; Play Protect refused the original, so nothing else was installed.
+- Permission prompts seen during this work (Sonic Transformed copy: contacts, files; SpongeBob copy: location,
+  phone, media) were all denied. Sonic's copy still holds READ_PROFILE from an earlier session (not granted by me).

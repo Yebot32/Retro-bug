@@ -12,8 +12,8 @@ on a device.
 |---|---|---|
 | A1 | Analysis → this backlog | done |
 | A2 | Data tab: device edge cases, fixes, merge into the session branch | done (9ec4366) |
-| A3 | SpongeBob Game Station: playable offline (patch on the `.rb` copy only) | doing |
-| A4 | M5: compatibility table for every 32-bit game on the Tab S9 (`compatibility.md`) | todo |
+| A3 | SpongeBob Game Station: playable offline (patch on the `.rb` copy only) | blocked (G-Presto anti-tamper; see spongebob-gamestation.md) |
+| A4 | M5: compatibility table for every 32-bit game on the Tab S9 (`compatibility.md`) | doing |
 | A5 | M6: patches, mods, resolution | todo |
 | A6 | Polish | todo |
 | A7 | Release prep, final summary | todo |
