@@ -20,7 +20,7 @@ signals) plus JIT-shaped code, not a per-game bug.
 |---|---|---|---|---|---|---|
 | 1 | Angry Birds Go | com.rovio.angrybirdsgo | native | not installed | version downgrade (repack 226 < installed 261) | install log |
 | 2 | Angry Birds Go+ | com.rovio.angrybirdsgp | native | died | boot ANR, killed in background | logcat (contaminated) |
-| 3 | Angry Birds Epic | com.rovio.gold | Unity | died | `nativeRender` fetched address 0x0 | logcat; re-run 2026-10-18 21:47: boot now finishes (JNI_OnLoad 35 steps) and `libunity.so` names 10 unanswered imports (6 × `ASensor*`, `__google_potentially_blocking_region_begin`/`_end`, 2 more) — C29 |
+| 3 | Angry Birds Epic | com.rovio.gold | Unity (il2cpp) | died | `nativeRender` calls a null function pointer: `ldr lr, [r4, #0xcc]; blx lr` at `libunity.so+0x597b3c` | logcat 2026-10-18 23:01 with the new stop report: boot completes (370 constructors), GL context is real (Unity logs the Adreno extension list), then the null call. The 12 unanswered `libunity.so` imports are answered since C29's sensor half landed, and the two weak `__google_potentially_blocking_region_*` are no longer 0 |
 | 4 | Blocky Roads | com.crescentmoongames.blocky_roads | native | **runs** | — (gameplay on screen) | screenshot |
 | 5 | Car Game | com.bertheussen.cargame | Unity | not installed | Play Protect verification failure | install log |
 | 6 | Cars 3 (Lightning) | com.disney.cars3_goo | Unity | died | guest native called `exit(127)` | logcat (screenshot contaminated) |
@@ -69,4 +69,8 @@ signals) plus JIT-shaped code, not a per-game bug.
 3. ~~C27 (the 4M-step budget on `JNI_OnLoad`)~~ — done 2026-10-18 (`kInitBudget`). Row 28 now runs 147M steps
    and stops on a real unmapped read; row 3 was never budget-bound (its `JNI_OnLoad` returns in 35 steps). The
    budget was hiding one fault, not four.
-4. Unity as a class stays blocked on C26 (Mono GC signals) — that is the engine milestone, not this table.
+4. Unity as a class is no longer waiting on C26 first: measured 2026-10-18, every Unity boot installs Mono's three
+   signal handlers (`rt_sigaction` on 39/36/38) and never issues a `tgkill`, so no Unity game here has died on a
+   dropped signal yet. The class's remaining blockers are per-game null function pointers in `libunity.so` (Angry
+   Birds Epic: `+0x597b3c`, a table entry at `+0xcc` in the object at r4) and the Java side never calling
+   `nativeRender` (MadTruck). C26 stays open for the first GC stop-the-world.

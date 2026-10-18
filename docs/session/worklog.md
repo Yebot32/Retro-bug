@@ -157,3 +157,46 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
 - Still open in C31: running such a game needs ANativeActivityCallbacks and the guest-side activity loop; a game
   that names its entry library through `android.app.lib_name` is not recognised; and an APK added for a game that
   is not installed has no launcher class to ask about (it converts and fails at launch, as before).
+
+## 2026-10-18, Unity step 1 — what a Unity boot dies of, and the null calls that named nothing
+
+- **The question.** Unity is 0 of 14 games reaching gameplay. C26 (no signals delivered) was the standing
+  explanation. Measuring first was worth it: it is not the explanation for these deaths.
+- **What the M5 reports actually say.** Eight Unity games' boot tallies are identical: `rt_sigaction x3` on signals
+  39, 36 and 38, and **no `tgkill` at all** — Mono installs its suspend/restart/abort handlers and never gets as far
+  as suspending a thread. So nothing dies *because* a signal was dropped: the games stop before the first GC
+  stop-the-world, or hang before one. C26 stays a real milestone (a stop-the-world will need it), but it is not
+  step one.
+- **Angry Birds Epic is IL2CPP, not Mono** (`libil2cpp.so`, 370 constructors, boot completes). It gets a real GL
+  context — Unity logs the Adreno extension list through `guest log: D/Unity:` — and then `nativeRender()Z` stops on
+  "instruction fetch failed at 0x0". The message named no symbol, and neither did anything else.
+- **The stop report can now name things.** A fatal stop's message carries pc, lr, sp and r0..r12, pc and lr named
+  against the loaded modules, and the first KiB of the stopped thread's stack scanned for words that land inside a
+  module (stated as a scan, not an unwind: there is no CFI walker here). Its first use on Angry Birds Epic:
+  `lr = libunity.so+0x597b3c | stack: libunity.so+0x56e010, libmain.so+0x206f, libunity.so+0x5781a4,
+  libunity.so+0x10f1c2c, libmain.so+0x206f, …` — and `llvm-objdump` at that offset is `ldr lr, [r4, #0xcc]; blx lr`,
+  so the game calls a function pointer at `+0xcc` in the object at r4 and it is null. That is a table Unity's own
+  platform layer fills, not a syscall and not a thunk gap; it is the next thing to chase for this game.
+- **The fix that did land: weak imports nothing answers.** Scanning every 32-bit library in all 30 M5 games for
+  *weak undefined* symbols — the ones the loader must bind to 0, so a call through one is a jump to 0 that names
+  nothing — found `__google_potentially_blocking_region_begin` / `_end` in **14 libraries across 9 Unity games**,
+  `libunity.so` and `libil2cpp.so` among them. They are ART's "this thread may block" hooks; there is no ART monitor
+  here watching a guest's JNI calls, so they answer as the no-ops they are to a guest. Measured effect: Angry Birds
+  Epic's `libunity.so` unanswered-import line went from 12 names to none.
+- **The same scan finished C29's sensor half.** The names libunity imports *strongly* were the sensor and key
+  getters: `ASensorManager_getSensorList`, `ASensor_getType`/`Name`/`Vendor`/`Resolution`/`MinDelay`,
+  `ASensorEventQueue_hasEvents`, `ASensorManager_destroyEventQueue`, `AKeyEvent_getAction`/`getMetaState`. All are
+  answered from the device now: the sensor list is copied into a guest array of handles (the host's array is host
+  pointers, the guest can only hold 4-byte handles), the two string getters copy into guest memory like
+  `glGetString`, and the integer getters go through the generic caller.
+- **Tooling, discovered the hard way and worth writing down.** The engine is baked into every *converted* game's
+  APK (`lib/arm64-v8a/librbguest.so`, written by `ConvertJob` out of the launcher's own APK). Rebuilding and
+  reinstalling the launcher changes nothing for a game that is already converted — the first re-run of Angry Birds
+  Epic after the fix produced the identical crash because the game was still carrying the old engine. The loop that
+  works, and needs no UI: push the original APK into the launcher's external files dir, then
+  `am start -n com.retrobug.launcher/.LauncherActivity -e stage <f> -e repack <f> -e install 0 -e settings 1
+  -e rename .rb` (**force-stop the launcher first** — the extras are read in `onCreate`, and a running instance only
+  gets `onNewIntent`), pull `files/repack/<label>.rb.apk`, `adb install -r`. ~4 minutes a game.
+- Gates: engine lanes 17 suites + dynarmic's 200,561 assertions, 0 failures; both advisory lanes green.
+- Still true, and stated plainly: no Unity game draws a frame yet. What changed is that the failures are now named
+  — module + offset, with a call chain — instead of "address 0".
