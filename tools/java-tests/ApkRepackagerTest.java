@@ -537,6 +537,40 @@ public class ApkRepackagerTest {
         check(!t2.contains("AspectRatio"), "stretch: no aspect attributes");
     }
 
+    /** A game that registers receivers the old way stays at target 33 (34+ makes that call throw); others go to 35. */
+    static void receiverGamesStayAt33() throws Exception {
+        Map<String, byte[]> x = new LinkedHashMap<>();
+        x.put("classes.dex", Files.readAllBytes(new File(fixtures, "ReceiverFixture.dex").toPath()));
+        x.put("lib/armeabi-v7a/libfoo.so", b("V7A"));
+        File in = build("target_only", null, "receivers", x);
+        File out = new File(scratch, "receivers.out.apk");
+        ApkRepackager.targetFloor = 35;
+        ApkRepackager.Result r;
+        try {
+            r = ApkRepackager.transform(in, runtime(), out);
+        } finally {
+            ApkRepackager.targetFloor = 0;
+        }
+        check(r.newTargetSdk == 33, "a receiver-registering game is kept at 33: " + r.newTargetSdk);
+        check(reportHas(r, "registerReceiver", "33"), "report says why: " + r.report);
+        check("1".equals(AxmlEditor.parse(readAll(out).get("AndroidManifest.xml")).metaDataString(ApkRepackager.RECEIVERS_META)),
+                "the copy records it (for the library's update check)");
+        // Without the call: the setting stands.
+        Map<String, byte[]> y = new LinkedHashMap<>(x);
+        y.put("classes.dex", Files.readAllBytes(new File(fixtures, "CleanFixture.dex").toPath()));
+        File in2 = build("target_only", null, "noreceivers", y);
+        ApkRepackager.targetFloor = 35;
+        try {
+            check(ApkRepackager.transform(in2, runtime(), new File(scratch, "noreceivers.out.apk")).newTargetSdk == 35,
+                    "a game without registerReceiver gets the setting (35)");
+        } finally {
+            ApkRepackager.targetFloor = 0;
+        }
+        check(LibraryRules.outputTarget(22, 9, 35, true) == 33 && LibraryRules.outputTarget(22, 9, 35, false) == 35
+                && LibraryRules.outputTarget(34, 21, 35, true) == 35 && LibraryRules.outputTarget(22, 9, 30, true) == 30,
+                "outputTarget with receivers: capped at 33 only when it would reach 34+ and the original was below 34");
+    }
+
     static void shimsWhenNotNeededOrImpossible() throws Exception {
         Map<String, byte[]> x = new LinkedHashMap<>();
         x.put("classes.dex", Files.readAllBytes(new File(fixtures, "RiskyFixture.dex").toPath()));
@@ -705,6 +739,7 @@ public class ApkRepackagerTest {
         appliesPatches();
         appliesMods();
         setsAspect();
+        receiverGamesStayAt33();
         shimsWhenNotNeededOrImpossible();
         renamesPackage();
         movesV7aAndStubs();

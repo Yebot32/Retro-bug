@@ -181,8 +181,11 @@ final class GameCatalog {
             int stamp = copy.applicationInfo == null || copy.applicationInfo.metaData == null ? -1
                     : copy.applicationInfo.metaData.getInt(ApkRepackager.RUNTIME_META, -1);
             ApplicationInfo oa = original.applicationInfo;
+            // A copy kept at 33 for its receivers (LibraryRules) is judged by the same rule, not as "out of date".
+            boolean receivers = copy.applicationInfo != null && copy.applicationInfo.metaData != null
+                    && "1".equals(copy.applicationInfo.metaData.getString(ApkRepackager.RECEIVERS_META));
             int wantTarget = oa == null ? settings.get(pkg).target
-                    : LibraryRules.outputTarget(oa.targetSdkVersion, oa.minSdkVersion, settings.get(pkg).target);
+                    : LibraryRules.outputTarget(oa.targetSdkVersion, oa.minSdkVersion, settings.get(pkg).target, receivers);
             // M6: the copy was made with the patches the player has on now (fingerprints match; both "" when none).
             String hasPatches = copy.applicationInfo == null || copy.applicationInfo.metaData == null ? ""
                     : copy.applicationInfo.metaData.getString(ApkRepackager.PATCHES_META, "");

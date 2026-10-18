@@ -33,6 +33,19 @@ final class LibraryRules {
         return floor;
     }
 
+    /**
+     * As {@link #outputTarget(Integer, Integer, int)}, for a game whose code calls registerReceiver: from target 34 that
+     * call throws unless it passes RECEIVER_EXPORTED/NOT_EXPORTED, which a game written for an older Android never does.
+     * Such a copy is kept at 33 — unless the original already targeted 34+ (it was written for the rule) or the
+     * player's setting is below 34 anyway.
+     */
+    static int outputTarget(Integer oldTarget, Integer oldMin, int setting, boolean registersReceivers) {
+        int t = outputTarget(oldTarget, oldMin, setting);
+        int original = oldTarget != null ? oldTarget : (oldMin != null ? oldMin : 1);
+        if (registersReceivers && t >= 34 && original < 34) return Math.max(33, ApkRepackager.MIN_SDK_FLOOR);
+        return t;
+    }
+
     /** Where the 32-bit ARM code is: in the base APK, only in a split, or nowhere a 64-bit phone would not run natively. */
     static Kind classify(Set<String> baseAbis, Set<String> splitAbis) {
         if (baseAbis.contains("arm64-v8a") || splitAbis.contains("arm64-v8a")) return Kind.NOT_32_BIT;

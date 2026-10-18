@@ -75,6 +75,8 @@ final class ApkRepackager {
     /** M6 aspect of the next conversion: "stretch" (untouched), "fit169" or "fit43" (activities pinned to that shape). */
     static volatile String aspect = "stretch";
     static final String ASPECT_META = "com.retrobug.aspect";
+    /** "1" when a copy was kept at target 33 because the game registers receivers the old way (LibraryRules). */
+    static final String RECEIVERS_META = "com.retrobug.receivers";
 
     static final class Result {
         String packageName;      // the output's package (the new one when renamed)
@@ -191,7 +193,14 @@ final class ApkRepackager {
             // device whose Play Protect blocks old targets: current (34 makes registerReceiver without RECEIVER_* fatal).
             // An explicitly asked-for target wins in a native control too (diagnosing a game that needs < 31).
             int setting = targetFloor > 0 ? targetFloor : (nativeControl ? 33 : 0);
-            int floorT = LibraryRules.outputTarget(oldT, oldMin, setting);
+            // A game that calls registerReceiver the old way would throw at 34+: such a copy stays at 33 (LibraryRules).
+            boolean receivers = registersReceivers(zip);
+            int floorT = LibraryRules.outputTarget(oldT, oldMin, setting, receivers);
+            if (floorT != LibraryRules.outputTarget(oldT, oldMin, setting)) {
+                ed.addMetaDataString(RECEIVERS_META, "1");
+                r.report.add("targetSdk kept at " + floorT + ": the game calls registerReceiver without the RECEIVER_* flags "
+                        + "Android 14 requires from target 34");
+            }
             if (oldT == null && oldMin != null && floorT == oldMin) {
                 // An absent targetSdk means "= minSdk"; writing the floor here would lower it.
                 r.newTargetSdk = oldMin;
@@ -560,6 +569,20 @@ final class ApkRepackager {
      * The old JAR/APK signature files: META-INF/MANIFEST.MF, *.SF, *.RSA, *.DSA, *.EC and SIG-* at the top of META-INF.
      * Everything else there stays — META-INF/services/* is how libraries find their plug-ins at runtime (ServiceLoader).
      */
+    /** True when any classesN.dex references a registerReceiver method (Context, ContextWrapper, Activity...). */
+    static boolean registersReceivers(ZipFile zip) {
+        for (Enumeration<? extends ZipEntry> en = zip.entries(); en.hasMoreElements(); ) {
+            ZipEntry e = en.nextElement();
+            if (!e.getName().matches("classes\\d*\\.dex")) continue;
+            try (InputStream in = zip.getInputStream(e)) {
+                for (String ref : DexScanner.methodRefs(readFully(in))) if (ref.contains("->registerReceiver")) return true;
+            } catch (IOException ex) {
+                // unreadable dex: the risk scan reports it later
+            }
+        }
+        return false;
+    }
+
     static boolean isSignatureFile(String n) {
         if (!n.startsWith("META-INF/") || n.indexOf('/', "META-INF/".length()) >= 0) return false;
         String f = n.substring("META-INF/".length()).toUpperCase(java.util.Locale.ROOT);
