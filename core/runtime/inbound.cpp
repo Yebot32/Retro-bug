@@ -33,6 +33,77 @@ bool ValidShorty(const std::string& s) {
   return true;
 }
 
+/// The name a reader recognises for a module: its soname, else the last path component. The full path is already in
+/// the boot report ("load: libunity.so at 0xc05000 extent 0x1362000"); what a fault needs is the name and an offset.
+std::string ModuleName(const loader::GuestModule& m) {
+  if (!m.soname.empty()) return m.soname;
+  const char* slash = std::strrchr(m.path.c_str(), '/');
+  return slash == nullptr ? m.path : std::string{slash + 1};
+}
+
+/// `addr` as "<module>+0x<offset>", or the bare address when no loaded module covers it. This is the difference
+/// between "instruction fetch failed at 0x0" and "…and lr was inside libunity.so at +0x594b3c".
+std::string NameAddress(GuestProcess& p, std::uint32_t addr) {
+  for (const auto& m : p.modules()) {
+    if (m != nullptr && addr >= m->base && addr - m->base < m->extent) {
+      char off[16];
+      std::snprintf(off, sizeof off, "0x%x", static_cast<unsigned>(addr - m->base));
+      return ModuleName(*m) + "+" + off;
+    }
+  }
+  char buf[16];
+  std::snprintf(buf, sizeof buf, "0x%x", static_cast<unsigned>(addr));
+  return buf;
+}
+
+/// Where the guest was when it stopped: pc, lr, sp and r0..r12, with pc and lr named against the loaded modules. The
+/// register file is here because a fault that names no symbol — a call or a return through a null function pointer,
+/// which is how a *weak* import nothing answers fails — is only identifiable from the register that held the
+/// pointer. Without it the report reads "instruction fetch failed at 0x0" and says nothing about who asked for it
+/// (measured: Angry Birds Epic's `nativeRender`; 2026-10-18).
+std::string Registers(GuestProcess& p, const exec::MachineState& s) {
+  char buf[16];
+  const auto hex = [&buf](std::uint32_t v) {
+    std::snprintf(buf, sizeof buf, "0x%x", static_cast<unsigned>(v));
+    return std::string{buf};
+  };
+  std::string out = " (pc " + hex(s.pc) + " = " + NameAddress(p, s.pc) + ", lr " + hex(s.r[14]) + " = " +
+                    NameAddress(p, s.r[14]) + ", sp " + hex(s.r[13]);
+  for (unsigned i = 0; i < 13; ++i) out += ", r" + std::to_string(i) + " " + hex(s.r[i]);
+  return out + ")";
+}
+
+/// The code addresses the stopped thread's stack still holds, in stack order: every word in the first KiB above sp
+/// that lands inside a loaded module, named "<module>+0x<offset>", at most eight of them.
+///
+/// This is a scan, not an unwind, and it says so: there is no CFI walker here, and the guest's own frame layout is
+/// whatever its compiler chose. Every word reported is either a return address or a coincidence — but a return
+/// address is what the great majority of module-shaped words in a live stack are, so the first few name the call
+/// chain a fatal stop came out of, which is the one thing a fault inside a stripped game library otherwise never
+/// says. Only read when a stop is already fatal, so the cost never reaches a running game.
+std::string StackWords(GuestProcess& p, const exec::MachineState& s) {
+  constexpr std::size_t kWindow = 1024, kMaxFrames = 8;
+  const std::uint32_t sp = s.r[13];
+  if (sp == 0) return {};
+  std::string out;
+  std::size_t frames = 0;
+  for (std::size_t i = 0; i < kWindow / 4 && frames < kMaxFrames; ++i) {
+    std::uint32_t word = 0;
+    if (!p.memory().Read(sp + static_cast<std::uint32_t>(i) * 4u, &word, 4)) break;
+    bool in_a_module = false;
+    for (const auto& m : p.modules()) {
+      if (m != nullptr && word >= m->base && word - m->base < m->extent) {
+        in_a_module = true;
+        break;
+      }
+    }
+    if (!in_a_module) continue;
+    out += (out.empty() ? "" : ", ") + NameAddress(p, word);
+    ++frames;
+  }
+  return out.empty() ? std::string{} : " | stack: " + out;
+}
+
 }  // namespace
 
 std::uint64_t InboundEntry(std::uint32_t index, CapturedArgs* a) {
@@ -139,11 +210,8 @@ std::uint64_t Inbound::Dispatch(const InboundTarget& t, const CapturedArgs& a) {
       on_exit_(static_cast<int>(p_.abi().exit_status()));
     }
     // Where the guest was: without it a fault inside a game's library names no instruction to look at.
-    char where[48];
-    std::snprintf(where, sizeof where, " (pc 0x%x, lr 0x%x)", static_cast<unsigned>(last.pc),
-                  static_cast<unsigned>(last.r[14]));
     Fail(t, std::string{ReasonText(rr.reason)} + (rr.detail.empty() ? "" : ": " + rr.detail) +
-                (rr.reason == exec::StopReason::Exited ? "" : where));
+                (rr.reason == exec::StopReason::Exited ? "" : Registers(p_, last) + StackWords(p_, last)));
     return 0;
   }
   fwd_.SyncShadows();  // the guest's writes to a shadowed direct buffer reach Java before it reads them

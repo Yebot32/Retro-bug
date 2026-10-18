@@ -212,6 +212,76 @@ void RegisterAndroidThunks(HostSlots& slots, abi::ForwardingJni& fwd, JavaVM* vm
     return true;
   });
 
+  // ASensorManager_getSensorList(manager, &list): the host answers an `ASensorList` — an array of `ASensor const*`
+  // it owns — through an out-pointer, and the guest can only hold 4-byte handles. So the host's array is copied
+  // once into a guest array of handles and *list points at that. The guest array is never freed: a sensor list is
+  // static for the process's lifetime, and a second call would hand back the same handles from the handle table.
+  slots.AddSpecial("ASensorManager_getSensorList", [st](exec::MachineState& s, std::string* why) {
+    void* manager = nullptr;
+    if (s.r[0] != 0 && !st->Handle(s.r[0], &manager, "ASensorManager", why)) return false;
+    ASensorList host_list = nullptr;
+    const int n = ASensorManager_getSensorList(static_cast<ASensorManager*>(manager), &host_list);
+    std::uint32_t guest_list = 0;
+    if (n > 0 && host_list != nullptr) {
+      std::uint32_t mapped = 0;
+      guest_list = st->Alloc(4u * static_cast<std::size_t>(n), &mapped);
+      if (guest_list == 0) {
+        *why = "ASensorManager_getSensorList: no guest memory for " + std::to_string(n) + " sensor handles";
+        return false;
+      }
+      for (int i = 0; i < n; ++i) {
+        const std::uint32_t h = st->slots.handles().Put(const_cast<ASensor*>(host_list[i]));
+        if (!st->mem().Write(guest_list + 4u * static_cast<std::uint32_t>(i), &h, 4)) {
+          *why = "ASensorManager_getSensorList: the guest handle array is not writable";
+          return false;
+        }
+      }
+    }
+    if (s.r[1] != 0 && !st->mem().Write(s.r[1], &guest_list, 4)) {
+      *why = "ASensorManager_getSensorList: the list out-pointer is not writable";
+      return false;
+    }
+    s.r[0] = static_cast<std::uint32_t>(n);
+    return true;
+  });
+  // ASensor_getName / ASensor_getVendor return a host `const char*` the guest would dereference as a guest address.
+  // One copy per call, like glGetString: the strings are short, static and asked for once per sensor.
+  const auto sensor_string = [st](const char* what, const char* (*get)(ASensor const*)) {
+    return [st, what, get](exec::MachineState& s, std::string* why) {
+      void* a = nullptr;
+      if (!st->Handle(s.r[0], &a, "ASensor", why)) return false;
+      const char* text = get(static_cast<ASensor const*>(a));
+      if (text == nullptr) {
+        s.r[0] = 0;  // NULL is the device's own answer for a sensor it cannot describe
+        return true;
+      }
+      const std::string copy = text;
+      std::uint32_t mapped = 0;
+      const std::uint32_t at = st->Alloc(copy.size() + 1, &mapped);
+      if (at == 0 || !st->mem().Write(at, copy.c_str(), copy.size() + 1)) {
+        *why = std::string{what} + ": no guest memory for the string";
+        return false;
+      }
+      s.r[0] = at;
+      return true;
+    };
+  };
+  slots.AddSpecial("ASensor_getName", sensor_string("ASensor_getName", ASensor_getName));
+  slots.AddSpecial("ASensor_getVendor", sensor_string("ASensor_getVendor", ASensor_getVendor));
+
+  // ---- ART's JNI "potentially blocking region" hooks. Unity's libunity and libil2cpp reference both *weakly* and
+  // call them on JNI transitions, so with nothing answering them the reference is null — and a call through it
+  // stops the process on an instruction fetch at 0x0, naming no symbol at all (measured: Angry Birds Epic,
+  // 2026-10-18, "nativeRender()Z stopped: fault: instruction fetch failed at 0x0", lr inside libunity). On a
+  // device they resolve to ART's own bookkeeping, which has no meaning here: there is no ART monitor watching a
+  // guest's JNI calls to mark a thread as about to block. They answer as the no-ops they are to a guest.
+  for (const char* name : {"__google_potentially_blocking_region_begin", "__google_potentially_blocking_region_end"}) {
+    slots.AddSpecial(name, [](exec::MachineState& s, std::string*) {
+      s.r[0] = 0;
+      return true;
+    });
+  }
+
   // ---- jnigraphics: the pixels are host memory; the guest works on a shadow copied in at lock, out at unlock.
   slots.AddSpecial("AndroidBitmap_getInfo", [st](exec::MachineState& s, std::string* why) {
     JNIEnv* env = st->Env(why);

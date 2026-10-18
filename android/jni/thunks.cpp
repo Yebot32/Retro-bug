@@ -216,6 +216,12 @@ const std::map<std::string, ThunkEntry>& Table() {
         {"ASensorManager_getInstance", "H:"}, {"ASensorManager_getDefaultSensor", "H:hi"},
         {"ASensorEventQueue_enableSensor", "i:hh"}, {"ASensorEventQueue_disableSensor", "i:hh"},
         {"ASensorEventQueue_setEventRate", "i:hhi"}, {"ASensorEventQueue_getEvents", "i:hpu"},
+        // The rest of what Unity's libunity imports (measured: Angry Birds Epic's 12 unanswered names, 2026-10-18).
+        // Every one is a getter over a sensor or key handle this table issued, so the generic caller serves them:
+        // the answer is the device's own, and a handle that was never issued is refused by name instead of dereferenced.
+        {"ASensorEventQueue_hasEvents", "i:h"}, {"ASensorManager_destroyEventQueue", "i:h"},
+        {"ASensor_getType", "i:h"}, {"ASensor_getMinDelay", "i:h"}, {"ASensor_getResolution", "f:h"},
+        {"AKeyEvent_getAction", "i:h"}, {"AKeyEvent_getMetaState", "i:h"},
         {"ALooper_forThread", "H:"}, {"ALooper_prepare", "H:i"},
     });
     return t;
