@@ -306,8 +306,7 @@ final class GameMenu {
         View v;
         switch (k) {
             case 0: v = settingsTab(); break;
-            case 1: v = emptyTab("No mods yet", "Texture packs, translations and music for this game will appear here, each "
-                    + "with its own switch.", "Add a mod pack"); break;
+            case 1: v = modsTab(); break;
             case 2: v = patchesTab(); break;
             case DATA_TAB: v = dataTab(); break;
             default: v = deleteTab(); break;
@@ -465,25 +464,70 @@ final class GameMenu {
         return scroll(list);
     }
 
-    // ------------------------------------------------------------------ Mods
+    // ------------------------------------------------------------------ Mods (M6)
 
-    private View emptyTab(String title, String body, String button) {
-        LinearLayout box = list();
-        box.setGravity(Gravity.CENTER_HORIZONTAL);
-        box.setPadding(HoloTheme.dp(c, 32), HoloTheme.dp(c, 40), HoloTheme.dp(c, 32), HoloTheme.dp(c, 24));
-        TextView t = HoloTheme.text(c, title, 20, HoloTheme.TEXT, HoloTheme.LIGHT);
-        t.setGravity(Gravity.CENTER);
-        box.addView(t);
-        TextView b = HoloTheme.text(c, body, 14, HoloTheme.TEXT_2, HoloTheme.REGULAR);
-        b.setGravity(Gravity.CENTER);
-        b.setPadding(0, HoloTheme.dp(c, 8), 0, HoloTheme.dp(c, 24));
-        box.addView(b);
-        TextView add = HoloTheme.buttonView(c, button, false);
-        add.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) { Toast.makeText(c, "Mods and patches come with M6", Toast.LENGTH_SHORT).show(); }
-        });
-        box.addView(add, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        return scroll(box);
+    /** The game's mods (asset packs), each with a switch; changes apply when the copy is updated. */
+    private View modsTab() {
+        LinearLayout list = list();
+        final java.util.List<Mod> all = ModStore.available(c, game.packageName);
+        list.addView(section("Mods"));
+        list.addView(row(all.isEmpty() ? "No mods for this game yet" : "Changes apply when the game's copy is updated",
+                all.isEmpty() ? "A mod is a .zip of replacement pictures, sounds or text for this game (mod.properties and "
+                        + "files/…). Only the game's assets are changed, never its code."
+                        : "Your saves are backed up first. The original game is never changed.", false, null));
+        for (final Mod m : all) {
+            String sub = (m.description.isEmpty() ? "" : m.description + "\n") + m.files().size() + " file(s), "
+                    + Math.max(1, m.size() >> 20) + " MB. Long press to remove.";
+            View r = switchRow(m.title, sub, ("," + settings.mods + ",").contains("," + m.id + ","),
+                    new CompoundButton.OnCheckedChangeListener() {
+                        @Override public void onCheckedChanged(CompoundButton b, boolean on) {
+                            java.util.List<String> ids = new java.util.ArrayList<>();
+                            for (String s : settings.mods.split(",")) if (!s.isEmpty() && !s.equals(m.id)) ids.add(s);
+                            if (on) ids.add(m.id);
+                            settings.mods = GameSettings.ids(android.text.TextUtils.join(",", ids));
+                            store.put(game.packageName, settings);
+                            library.refresh();
+                        }
+                    });
+            ((ViewGroup) r).getChildAt(0).setOnLongClickListener(new View.OnLongClickListener() {
+                @Override public boolean onLongClick(View v) {
+                    confirm("Remove this mod?", "\"" + m.title + "\" is deleted from RetroBug. Update the game's copy "
+                            + "afterwards to take it out of the game.", "Remove", new Runnable() {
+                        @Override public void run() {
+                            ModStore.remove(c, game, m);
+                            select(current);
+                        }
+                    });
+                    return true;
+                }
+            });
+            list.addView(r);
+        }
+        list.addView(row("Add a mod", "Pick a mod .zip made for this game", true, new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("application/zip")
+                        .putExtra(Intent.EXTRA_MIME_TYPES, new String[] {"application/zip", "application/octet-stream",
+                                "application/x-zip-compressed"});
+                library.pickFile(i, new Consumer<Uri>() {
+                    @Override public void accept(final Uri uri) {
+                        Toast.makeText(c, "Adding the mod…", Toast.LENGTH_SHORT).show();
+                        background(new Runnable() {
+                            @Override public void run() {
+                                final String why = ModStore.add(c, game, uri);
+                                content.post(new Runnable() {
+                                    @Override public void run() {
+                                        Toast.makeText(c, why == null ? "Mod added. Turn it on, then update the game's copy."
+                                                : why, Toast.LENGTH_LONG).show();
+                                        if (current == 1) select(1);
+                                    }
+                                });
+                            }
+                        });
+                    }
+                });
+            }
+        }));
+        return scroll(list);
     }
 
     // ------------------------------------------------------------------ Data (OBB and saves)

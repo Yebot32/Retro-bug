@@ -187,8 +187,12 @@ final class GameCatalog {
             String hasPatches = copy.applicationInfo == null || copy.applicationInfo.metaData == null ? ""
                     : copy.applicationInfo.metaData.getString(ApkRepackager.PATCHES_META, "");
             String wantPatches = Patch.fingerprint(Patch.enabled(PatchStore.available(ctx, pkg), settings.get(pkg).patches));
+            String hasMods = copy.applicationInfo == null || copy.applicationInfo.metaData == null ? ""
+                    : copy.applicationInfo.metaData.getString(ApkRepackager.MODS_META, "");
+            String wantMods = Mod.fingerprint(Mod.enabled(ModStore.available(ctx, pkg), settings.get(pkg).mods));
             boolean current = stamp == ApkRepackager.RUNTIME_STAMP && copy.applicationInfo != null
-                    && copy.applicationInfo.targetSdkVersion == wantTarget && hasPatches.equals(wantPatches);
+                    && copy.applicationInfo.targetSdkVersion == wantTarget && hasPatches.equals(wantPatches)
+                    && hasMods.equals(wantMods);
             return current ? Game.State.READY : Game.State.UPDATE;
         } catch (PackageManager.NameNotFoundException e) {
             return Game.State.NOT_CONVERTED;

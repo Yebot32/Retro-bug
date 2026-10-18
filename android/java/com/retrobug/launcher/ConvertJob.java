@@ -157,6 +157,7 @@ final class ConvertJob {
                     ApkRepackager.nativeControl = false;
                     ApkRepackager.targetFloor = settings.target;
                     ApkRepackager.patches = PatchStore.enabled(app, game, settings);
+                    ApkRepackager.mods = ModStore.enabled(app, game, settings);
                     // Saves first: an update re-makes the copy (patches, mods, target), so its progress is kept aside.
                     String backup = SaveClient.backup(app, game);
                     if (backup != null) out.append("saves: backed up to ").append(backup).append('\n');
@@ -215,6 +216,7 @@ final class ConvertJob {
                 } finally {
                     ApkRepackager.targetFloor = 0;
                     ApkRepackager.patches = java.util.Collections.emptyList();
+                    ApkRepackager.mods = java.util.Collections.emptyList();
                     if (!handedToInstaller) {
                         release();
                         main.post(new Runnable() {
