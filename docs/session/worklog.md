@@ -89,3 +89,38 @@ Newest entries at the bottom. "Decision" lines are calls made on Yebot32's behal
 - Decision: the table is written now with that caveat rather than delaying it for a full re-run; the four
   NativeActivity rows and C27 are the next fixes, not the table.
 
+
+## 2026-10-18 evening — the device checks the previous session left, and what they found
+
+Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touched.
+
+- **C11/C15 device check found a regression, not a pass.** The C11 fix (one LibraryScreen for the activity's
+  lifetime) crashed the app on *every* way back to Home: Settings > DONE, Settings > Back, and the end of Add
+  APK all threw `IllegalStateException: The specified child already has a parent`. Cause: Theme.Holo leaves
+  content transitions on, so PhoneWindow stacks each screen instead of replacing it, and the retained library
+  was still a child of the content view (inside the boot screen's FrameLayout at first start). Both crashes are
+  in the tablet's crash buffer (21:21:27 Back, 21:22:33 DONE). Fixed in `5b25229`: `show()` builds the screen,
+  clears the content container, detaches the screen if it still has a parent, then calls setContentView.
+  Re-verified: conversion survives Settings both ways; Add APK with an invalid file shows "CAN'T READ THIS FILE"
+  and a graceful message; Remove deletes it; a stray `.part` leaves no tile. C12 also verified — declining the
+  install prompt frees the tile at once.
+- **D6** (`2410054`): label is `@string/app_name`; the build needed no change (aapt2 compiles all of res/).
+- **C3** (`25057e3`): the scripted `-e repack` path now configures the converter statics through a Runnable that
+  runs only after `ConvertJob.claim()`; stubcheck claims and releases the slot. Verified `-e repack sonic -e
+  install 0` still reports `repack OK`.
+- **C7** (`e088907`): `classify()` takes `hasSplits`, so a 32-bit base in a split install is SPLIT rather than
+  GAME. Library unchanged on the tablet (no such game there); LibraryRulesTest 20 checks.
+- **C27** (`88106a1`): `kInitBudget = 1 << 30` for constructors and JNI_OnLoad; `kCallBudget` stays for the
+  bounded calls. Re-converted copies on the tablet: Nutty Fluffies now runs JNI_OnLoad **147,666,044 steps**
+  (was stopped at 4,000,000) and fails on a real unmapped read at 0xc0d900b3; Angry Birds Epic's JNI_OnLoad
+  returns in 35 steps and its boot completes, naming 10 unanswered `libunity.so` imports (6 × ASensor* — C29).
+  So the budget was hiding one fault, not unlocking four games. `docs/compatibility.md` rows 3 and 28 updated.
+- **C16** (`2dcf3df`): a disabled primary button's label was dark-on-near-black; the text colour is now a state
+  list (TEXT_3 when disabled). Seen on the tablet.
+- Gates after all of it: engine lanes 25/25 exit 0 (re-run after the engine change); host Java 16 suites exit 0.
+- Device left as found: the two test tiles removed, `broken2.apk` deleted from Download, no `.part` left. The
+  re-converted Nutty Fluffies and Angry Birds Epic copies stay installed (they are RetroBug copies, and the new
+  engine is what makes their reports current).
+- Still open, in the order I would take them: C31's tile message (4 NativeActivity games), C29/C30 (the sensor
+  thunks Angry Birds Epic now names), C26 (Mono signals — the Unity milestone), C17/C18/C20/C21/C23 polish,
+  then A6/A7 and the merge/push.

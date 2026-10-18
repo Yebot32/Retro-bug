@@ -44,20 +44,20 @@ refused, no-OBB status text.
 |---|---|---|---|---|
 | C1 | bug | `META-INF/` dropped whole — `META-INF/services/*` (ServiceLoader) lost | java/ApkRepackager.java:248 | todo |
 | C2 | bug | versionName stamp breaks games (fixed on data-tab by the meta-data stamp) | ApkRepackager.java:226-232 | done on data-tab |
-| C3 | bug | Static repack flags set by the scripted `-e repack` path before the slot is claimed; stubCheck without a claim | LauncherActivity.java:202-205, 843 | todo |
+| C3 | bug | Static repack flags set by the scripted `-e repack` path before the slot is claimed; stubCheck without a claim | LauncherActivity.java:202-205, 843 | done (25057e3) |
 | C4 | risk | Diagnostic intent extras honoured by the exported activity in release builds; parseInt crash | LauncherActivity.java:177-229 | todo (release prep) |
 | C5 | gap | Signed `<pkg>.rb.apk` kept forever in external files | ConvertJob.java:79-81 | todo |
 | C6 | gap | No free-space check before converting | ConvertJob.java:79-84 | todo |
-| C7 | gap | Base-has-v7a + other splits classified GAME (copy misses split resources) | GameCatalog/LibraryRules.classify | todo |
-| C8 | gap | `sharedUserId` kept on rename | AxmlEditor.renamePackage | todo |
-| C9 | gap | `maxSdkVersion` never removed | ApkRepackager | todo |
+| C7 | gap | Base-has-v7a + other splits classified GAME (copy misses split resources) | GameCatalog/LibraryRules.classify | done (e088907) |
+| C8 | gap | `sharedUserId` kept on rename | AxmlEditor.renamePackage | done (dc8fac9) |
+| C9 | gap | `maxSdkVersion` never removed | ApkRepackager | done (dc8fac9) |
 | C10 | risk | Every entry read fully into memory (OOM on big games) | ApkRepackager.java:262-263, 305-307 | done (8b3d22e; Among Us 497 MB on device) |
-| C11 | bug | Every `show(HOME)` builds a new LibraryScreen: conversion state lost after visiting Settings | LauncherActivity.java:296-319, LibraryScreen | todo |
-| C12 | bug | Install prompt backed out → slot can stay held for the process lifetime (device dependent) | ConvertJob/RepackInstaller | todo (timeout/abandon) |
+| C11 | bug | Every `show(HOME)` builds a new LibraryScreen: conversion state lost after visiting Settings | LauncherActivity.java:296-319, LibraryScreen | done (5b25229, which also fixed the crash the first C11 fix introduced) |
+| C12 | bug | Install prompt backed out → slot can stay held for the process lifetime (device dependent) | ConvertJob/RepackInstaller | done (c13842c watchdog; device: Back on the prompt frees the tile at once) |
 | C13 | bug | Menu sizes computed once; rotated menu clipped | GameMenu.java:65-85 | todo |
 | C14 | bug | Menu header action uses a stale Game after target change | GameMenu.java:130-136, 347-358 | todo |
-| C15 | bug | Added APK copied straight to its final name; a failed copy leaves a broken tile | LauncherActivity.java:1115-1149 | todo |
-| C16 | polish | Disabled primary button text invisible | HoloTheme.java:79,93-96 | todo |
+| C15 | bug | Added APK copied straight to its final name; a failed copy leaves a broken tile | LauncherActivity.java:1115-1149 | done (228b606; device-verified 2026-10-18) |
+| C16 | polish | Disabled primary button text invisible | HoloTheme.java:79,93-96 | done (2dcf3df) |
 | C17 | polish | Hard-coded badge colours; "Update available" same as orange accent | GameTile.java:77,85 | todo |
 | C18 | polish | Developer corner still unstyled; back from DEV goes home | LauncherActivity.java:331-512 | todo |
 | C19 | placeholder | "Coming with M6" texts | GameMenu.java:303-306,372,399-416 | done (M6 landed) |
@@ -68,7 +68,7 @@ refused, no-OBB status text.
 | C24 | gap | Settings parsed with `contains`, 1 KiB cap — blocks M6 lists | shim RbShimProvider:39,72-74; jni/runtime_boot.cpp:66-81 | done (93d258c) |
 | C25 | gap | dlopen/dlsym stubbed → all Unity games fail (Teeny Titans 2, FC All-Stars) | jni/host_slots.cpp:315-340 | done (44096c0) |
 | C26 | gap | No signals delivered (Mono/Boehm GC) — Unity/Mono needs this too | core/syscall/monitor.cpp:507-510 | deferred (engine milestone) |
-| C27 | bug | JNI_OnLoad/constructors run under a 4M-step budget that poisons the process | jni/runtime_boot.cpp:753-754 | todo |
+| C27 | bug | JNI_OnLoad/constructors run under a 4M-step budget that poisons the process | jni/runtime_boot.cpp:753-754 | done (88106a1; the budget was hiding a real fault, see compatibility.md row 28) |
 | C28 | bug | ARM32 vs AArch64 `O_*` flags not translated (O_LARGEFILE→O_NOFOLLOW, O_DIRECTORY→O_DIRECT) | core/syscall/host_io.cpp:291,297 | todo |
 | C29 | gap | Missing GLES2 ext / GLES1 fixed-point / GLES3 / sensor teardown thunks | jni/thunks.cpp | todo (per M5 evidence) |
 | C30 | gap | `glGetString` advertises ES 3.2 + extensions with no thunks | jni/host_slots.cpp:471-481 | todo |
@@ -86,7 +86,7 @@ refused, no-OBB status text.
 | D3 | Old "probe" text in CI release notes and build script output | .github/workflows/build-apk.yml:177-185; build_launcher_apk.sh:274-281 | todo |
 | D4 | CI publishes with a throwaway key when the secret is missing | build-apk.yml:129-131 | needs-me (not touched: publishing is out of scope) |
 | D5 | App icon is the Android robot | AndroidManifest.xml:23-27 | needs-me (artwork) |
-| D6 | Manifest typo "librguest.so"; label not a resource | AndroidManifest.xml:17,48 | todo |
+| D6 | Manifest typo "librguest.so"; label not a resource | AndroidManifest.xml:17,48 | done (2410054) |
 | D7 | No keys or passwords committed (checked) | — | done |
 
 ## E. M6 plan (from G)
