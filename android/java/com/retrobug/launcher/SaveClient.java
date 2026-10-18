@@ -34,7 +34,26 @@ final class SaveClient {
     }
 
     private static Bundle call(Context c, Game g, String method) {
-        return c.getContentResolver().call(uri(g, ""), method, null, null);
+        return callCopy(c, g, method, null);
+    }
+
+    /**
+     * A call to the copy's helper through an *unstable* provider client. The call starts the game's process; a game
+     * that crashes at start (SpongeBob's protection SDK did) must not take RetroBug down with it, which is what Android
+     * does to a client holding a stable reference to a provider whose process dies. Throws IllegalArgumentException
+     * when the copy has no helper, and RuntimeException (DeadObjectException wrapped) when its process died.
+     */
+    static Bundle callCopy(Context c, Game g, String method, String arg) {
+        android.content.ContentProviderClient client =
+                c.getContentResolver().acquireUnstableContentProviderClient(g.copyPackage() + ShimPlan.SAVES_AUTHORITY_SUFFIX);
+        if (client == null) throw new IllegalArgumentException("Unknown authority");
+        try {
+            return client.call(method, arg, null);
+        } catch (android.os.RemoteException e) {
+            throw new IllegalStateException("The game's copy stopped while RetroBug was asking it (" + method + ")", e);
+        } finally {
+            client.close();
+        }
     }
 
     /** True when the copy has saves kept from before an import; null when the copy cannot be asked. */

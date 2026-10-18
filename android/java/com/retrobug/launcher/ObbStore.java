@@ -129,7 +129,7 @@ final class ObbStore {
         if (dir.isDirectory() && ours(dir)) dir.delete();
         android.content.ContentResolver cr = c.getContentResolver();
         try {
-            android.os.Bundle b = cr.call(provider(g, ""), "obbPrepare", null, null);
+            android.os.Bundle b = SaveClient.callCopy(c, g, "obbPrepare", null);
             if (b == null || !b.getBoolean("ok")) return "The game's copy couldn't create its OBB folder";
         } catch (IllegalArgumentException e) {
             return SaveClient.OLD_COPY;  // a copy made before RetroBug's helper could take an OBB
@@ -162,7 +162,7 @@ final class ObbStore {
                 new File(dir, name + ".part").delete();  // the launcher may delete in the folder (it can write Android/obb)
                 return "Couldn't copy " + s.getName() + ": " + e.getMessage();
             }
-            android.os.Bundle b = cr.call(provider(g, ""), "obbCommit", name, null);
+            android.os.Bundle b = SaveClient.callCopy(c, g, "obbCommit", name);
             if (b == null || !b.getBoolean("ok")) return "The game's copy couldn't finish " + name;
             p.at(done, total);
         }
