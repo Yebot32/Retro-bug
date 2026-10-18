@@ -195,6 +195,12 @@ public class LauncherActivity extends Activity {
                 Log.e(TAG, "stage: could not copy " + src + ": " + e.getMessage());
             }
         }
+        // The scripted inverse of `stage` (device test runs stage many games): removes that file from the library folder.
+        final String unstage = getIntent() == null ? null : getIntent().getStringExtra("unstage");
+        if (unstage != null && !unstage.isEmpty()) {
+            File f = new File(gamesDir(), new File(unstage).getName().replaceAll("[^A-Za-z0-9._-]", "_"));
+            Log.i(TAG, "unstage: " + f + (f.isFile() && f.delete() ? " removed" : " not there"));
+        }
         final String repack = getIntent() == null ? null : getIntent().getStringExtra("repack");
         if (repack != null && !repack.isEmpty()) {
             for (File f : games()) {
