@@ -319,16 +319,26 @@ HostSlots::HostSlots(runtime::GuestProcess& p, int target_sdk, std::function<voi
           // libnetd_client.so is the exception: bionic's resolver needs it to reach netd (dnsproxyd), and
           // without it every getaddrinfo fails (there are no nameservers to fall back on).
           c.last_path = GuestStringOrEmpty(mem, s.r[0]);
-          s.r[0] = thunks_on_ && c.last_path.size() >= 17 &&
-                           c.last_path.compare(c.last_path.size() - 17, 17, "libnetd_client.so") == 0
-                       ? kNetdHandle
-                       : 0u;
+          if (thunks_on_ && c.last_path.size() >= 17 &&
+              c.last_path.compare(c.last_path.size() - 17, 17, "libnetd_client.so") == 0) {
+            s.r[0] = kNetdHandle;
+            return true;
+          }
+          // The game's own libraries (Unity's libmain dlopens libunity, libmono, by full path): the runtime loads
+          // them from assets/rb32/. Anything else stays NULL, which callers that probe check.
+          {
+            std::string why;
+            const std::uint32_t h = dlopen_hook_ ? dlopen_hook_(c.last_path, &why) : 0u;
+            if (h == 0 && !why.empty() && live_log_) live_log_("dl: dlopen(\"" + c.last_path + "\") = NULL: " + why);
+            s.r[0] = h;
+          }
           return true;
         case DlKind::kDlsym: {
           // The stand-in libnetd_client.so exports one entry point: netdClientInitDnsOpenProxy.
           const std::string sym = GuestStringOrEmpty(mem, s.r[1]);
           std::optional<std::uint32_t> at;
           if (s.r[0] == kNetdHandle && sym == "netdClientInitDnsOpenProxy") at = Resolve("rb_netdClientInitDnsOpenProxy");
+          else if (dlsym_hook_) at = dlsym_hook_(s.r[0], sym);
           s.r[0] = at ? *at : 0u;
           return true;
         }
@@ -476,7 +486,128 @@ void HostSlots::enable_thunks() {
       *why = "glGetString(0x" + Hex(s.r[0]) + ") returned NULL (no current context on this thread?)";
       return false;
     }
-    s.r[0] = GuestString("gl:" + std::to_string(s.r[0]), reinterpret_cast<const char*>(host));
+    std::string text = reinterpret_cast<const char*>(host);
+    // The guest gets the ES 2.0, 3.0 and 3.1 entry points (thunks.cpp): an ES 3.2 context is reported as 3.1, so an
+    // engine that reads the version does not take a 3.2-only path. Nothing of the host's string is kept for a
+    // substring search to find a higher version in.
+    if (s.r[0] == 0x1F02u /* GL_VERSION */ && text.compare(0, 12, "OpenGL ES 3.") == 0 && text.compare(12, 1, "2") >= 0) {
+      text = "OpenGL ES 3.1 RetroBug";
+    } else if (s.r[0] == 0x8B8Cu /* GL_SHADING_LANGUAGE_VERSION */ && text.compare(0, 20, "OpenGL ES GLSL ES 3.") == 0 &&
+               text.compare(20, 1, "2") >= 0) {
+      text = "OpenGL ES GLSL ES 3.10";
+    }
+    s.r[0] = GuestString("gl:" + std::to_string(s.r[0]), text);
+    return true;
+  });
+  // glGetStringi(name, index): an engine that enumerates extensions one by one (Unity: GL_NUM_EXTENSIONS, then
+  // glGetStringi(GL_EXTENSIONS, i)) gets each host string, copied once into guest memory like glGetString's.
+  AddSpecial("glGetStringi", [this](exec::MachineState& s, std::string* why) {
+    using Fn = const unsigned char* (*)(unsigned, unsigned);
+    static Fn f = nullptr;
+    if (f == nullptr) f = reinterpret_cast<Fn>(HostSymbol("libGLESv3.so", "glGetStringi"));
+    if (f == nullptr) f = reinterpret_cast<Fn>(HostSymbol("libGLESv2.so", "glGetStringi"));
+    const unsigned char* host = f != nullptr ? f(s.r[0], s.r[1]) : nullptr;
+    if (host == nullptr) {
+      *why = "glGetStringi(0x" + Hex(s.r[0]) + ", " + std::to_string(s.r[1]) + ") returned NULL";
+      return false;
+    }
+    s.r[0] = GuestString("gli:" + std::to_string(s.r[0]) + ":" + std::to_string(s.r[1]), reinterpret_cast<const char*>(host));
+    return true;
+  });
+  // glMapBufferRange / glFlushMappedBufferRange / glUnmapBuffer: the driver's mapping is host memory the guest cannot
+  // address, so the guest gets a shadow in its own window — filled from the mapping when read access was asked for,
+  // written back on flush and on unmap when write access was. One mapping per target (as GL allows).
+  struct GlMap { void* host; std::uint32_t guest, mapped, len, access; };
+  auto maps = std::make_shared<std::map<std::uint32_t, GlMap>>();
+  AddSpecial("glMapBufferRange", [this, maps](exec::MachineState& s, std::string* why) {
+    using Fn = void* (*)(unsigned, long, long, unsigned);
+    static Fn f = nullptr;
+    if (f == nullptr) f = reinterpret_cast<Fn>(HostSymbol("libGLESv3.so", "glMapBufferRange"));
+    if (f == nullptr) { *why = "this device's libGLESv3 has no glMapBufferRange"; return false; }
+    const std::uint32_t target = s.r[0], access = s.r[3];
+    const long off = static_cast<std::int32_t>(s.r[1]), len = static_cast<std::int32_t>(s.r[2]);
+    void* host = len > 0 ? f(target, off, len, access) : nullptr;
+    if (host == nullptr) { s.r[0] = 0; return true; }  // the GL error is the driver's to report
+    std::uint32_t mapped = static_cast<std::uint32_t>((static_cast<std::size_t>(len) + mem::kGuestPage - 1) & ~std::size_t{mem::kGuestPage - 1});
+    std::string e;
+    const std::uint32_t guest = p_.MapFree(mapped, mem::kRead | mem::kWrite, &e);
+    if (guest == 0) { *why = "glMapBufferRange: no guest memory for " + std::to_string(len) + " bytes: " + e; return false; }
+    if ((access & 0x1u) != 0) p_.memory().Write(guest, host, static_cast<std::size_t>(len));  // GL_MAP_READ_BIT
+    (*maps)[target] = GlMap{host, guest, mapped, static_cast<std::uint32_t>(len), access};
+    s.r[0] = guest;
+    return true;
+  });
+  AddSpecial("glFlushMappedBufferRange", [this, maps](exec::MachineState& s, std::string* why) {
+    using Fn = void (*)(unsigned, long, long);
+    static Fn f = nullptr;
+    if (f == nullptr) f = reinterpret_cast<Fn>(HostSymbol("libGLESv3.so", "glFlushMappedBufferRange"));
+    const auto it = maps->find(s.r[0]);
+    const long off = static_cast<std::int32_t>(s.r[1]), len = static_cast<std::int32_t>(s.r[2]);
+    if (it != maps->end() && off >= 0 && len > 0 && static_cast<std::uint64_t>(off + len) <= it->second.len) {
+      p_.memory().Read(it->second.guest + static_cast<std::uint32_t>(off), static_cast<char*>(it->second.host) + off,
+                       static_cast<std::size_t>(len));
+    }
+    if (f == nullptr) { *why = "this device's libGLESv3 has no glFlushMappedBufferRange"; return false; }
+    f(s.r[0], off, len);
+    return true;
+  });
+  AddSpecial("glUnmapBuffer", [this, maps](exec::MachineState& s, std::string* why) {
+    using Fn = unsigned char (*)(unsigned);
+    static Fn f = nullptr;
+    if (f == nullptr) f = reinterpret_cast<Fn>(HostSymbol("libGLESv3.so", "glUnmapBuffer"));
+    if (f == nullptr) { *why = "this device's libGLESv3 has no glUnmapBuffer"; return false; }
+    const auto it = maps->find(s.r[0]);
+    if (it != maps->end()) {
+      const GlMap m = it->second;
+      // Write access without explicit flushing: the whole range goes back (with GL_MAP_FLUSH_EXPLICIT_BIT the game
+      // flushed what it wrote, and the rest is undefined anyway).
+      if ((m.access & 0x2u) != 0 && (m.access & 0x10u) == 0) p_.memory().Read(m.guest, m.host, m.len);
+      std::string e;
+      p_.memory().Unmap(m.guest, m.mapped, &e);
+      maps->erase(it);
+    }
+    s.r[0] = f(s.r[0]);
+    return true;
+  });
+  // glGetUniformIndices / glTransformFeedbackVaryings: an array of guest string pointers, read into host strings.
+  AddSpecial("glGetUniformIndices", [this](exec::MachineState& s, std::string* why) {
+    using Fn = void (*)(unsigned, int, const char* const*, unsigned*);
+    static Fn f = nullptr;
+    if (f == nullptr) f = reinterpret_cast<Fn>(HostSymbol("libGLESv3.so", "glGetUniformIndices"));
+    if (f == nullptr) { *why = "this device's libGLESv3 has no glGetUniformIndices"; return false; }
+    const int count = static_cast<std::int32_t>(s.r[1]);
+    if (count < 0 || count > 4096) { *why = "glGetUniformIndices: count " + std::to_string(count); return false; }
+    auto& mem = p_.memory();
+    std::vector<std::string> names(static_cast<std::size_t>(count));
+    std::vector<const char*> ptrs(static_cast<std::size_t>(count));
+    for (int i = 0; i < count; ++i) {
+      std::uint32_t at = 0;
+      mem.Read(s.r[2] + 4u * static_cast<std::uint32_t>(i), &at, 4);
+      names[static_cast<std::size_t>(i)] = GuestStringOrEmpty(mem, at);
+      ptrs[static_cast<std::size_t>(i)] = names[static_cast<std::size_t>(i)].c_str();
+    }
+    std::vector<unsigned> out(static_cast<std::size_t>(count));
+    f(s.r[0], count, ptrs.data(), out.data());
+    if (count > 0 && !mem.Write(s.r[3], out.data(), out.size() * 4)) { *why = "glGetUniformIndices: indices not writable"; return false; }
+    return true;
+  });
+  AddSpecial("glTransformFeedbackVaryings", [this](exec::MachineState& s, std::string* why) {
+    using Fn = void (*)(unsigned, int, const char* const*, unsigned);
+    static Fn f = nullptr;
+    if (f == nullptr) f = reinterpret_cast<Fn>(HostSymbol("libGLESv3.so", "glTransformFeedbackVaryings"));
+    if (f == nullptr) { *why = "this device's libGLESv3 has no glTransformFeedbackVaryings"; return false; }
+    const int count = static_cast<std::int32_t>(s.r[1]);
+    if (count < 0 || count > 4096) { *why = "glTransformFeedbackVaryings: count " + std::to_string(count); return false; }
+    auto& mem = p_.memory();
+    std::vector<std::string> names(static_cast<std::size_t>(count));
+    std::vector<const char*> ptrs(static_cast<std::size_t>(count));
+    for (int i = 0; i < count; ++i) {
+      std::uint32_t at = 0;
+      mem.Read(s.r[2] + 4u * static_cast<std::uint32_t>(i), &at, 4);
+      names[static_cast<std::size_t>(i)] = GuestStringOrEmpty(mem, at);
+      ptrs[static_cast<std::size_t>(i)] = names[static_cast<std::size_t>(i)].c_str();
+    }
+    f(s.r[0], count, ptrs.data(), s.r[3]);
     return true;
   });
   // glGetVertexAttribPointerv(index, pname, void** out): the host answers what glVertexAttribPointer was given — a
@@ -559,6 +690,10 @@ void HostSlots::enable_thunks() {
   AddSpecial("eglGetProcAddress", [this](exec::MachineState& s, std::string*) {
     const std::string name = GuestStringOrEmpty(p_.memory(), s.r[0]);
     const auto at = name.empty() ? std::nullopt : Resolve(name);
+    if (!at && !name.empty() && live_log_) {  // once each: a NULL the engine may call later
+      static std::set<std::string> said;
+      if (said.insert(name).second) live_log_("egl: eglGetProcAddress(\"" + name + "\") = NULL (no host thunk)");
+    }
     s.r[0] = at ? *at : 0u;
     return true;
   });

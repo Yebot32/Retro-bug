@@ -19,6 +19,7 @@ namespace {
 constexpr const char* kEgl = "libEGL.so";
 constexpr const char* kGl2 = "libGLESv2.so";
 constexpr const char* kGl1 = "libGLESv1_CM.so";
+constexpr const char* kGl3 = "libGLESv3.so";
 
 const std::map<std::string, ThunkEntry>& Table() {
   static const std::map<std::string, ThunkEntry> k = [] {
@@ -77,6 +78,95 @@ const std::map<std::string, ThunkEntry>& Table() {
         // Common OES extensions games call by name (resolved through eglGetProcAddress on the host).
         {"glDiscardFramebufferEXT", "v:uip"}, {"glBindVertexArrayOES", "v:u"}, {"glGenVertexArraysOES", "v:ip"},
         {"glDeleteVertexArraysOES", "v:ip"}, {"glIsVertexArrayOES", "u:u"},
+    });
+    // ---- OpenGL ES 3.0 / 3.1 (gl3.h, gl31.h): what Unity 5+ resolves for its ES3 renderer. Hand-written instead:
+    // glGetStringi (host strings), glMapBufferRange/glUnmapBuffer/glFlushMappedBufferRange (driver memory, shadowed in
+    // the guest), glGetUniformIndices/glTransformFeedbackVaryings (arrays of guest string pointers). GLsync is a handle;
+    // GLuint64/GLint64 are 'l'; GLintptr/GLsizeiptr are 'i' (sign-extended).
+    add(kGl3, {
+        {"glReadBuffer", "v:u"}, {"glDrawRangeElements", "v:uuuiuo"}, {"glTexImage3D", "v:uiiiiiiuuo"},
+        {"glTexSubImage3D", "v:uiiiiiiiuuo"}, {"glCopyTexSubImage3D", "v:uiiiiiiii"},
+        {"glCompressedTexImage3D", "v:uiuiiiiio"}, {"glCompressedTexSubImage3D", "v:uiiiiiiiuio"},
+        {"glGenQueries", "v:ip"}, {"glDeleteQueries", "v:ip"}, {"glIsQuery", "u:u"}, {"glBeginQuery", "v:uu"},
+        {"glEndQuery", "v:u"}, {"glGetQueryiv", "v:uup"}, {"glGetQueryObjectuiv", "v:uup"},
+        {"glDrawBuffers", "v:ip"}, {"glUniformMatrix2x3fv", "v:iiup"}, {"glUniformMatrix3x2fv", "v:iiup"},
+        {"glUniformMatrix2x4fv", "v:iiup"}, {"glUniformMatrix4x2fv", "v:iiup"}, {"glUniformMatrix3x4fv", "v:iiup"},
+        {"glUniformMatrix4x3fv", "v:iiup"}, {"glBlitFramebuffer", "v:iiiiiiiiuu"},
+        {"glRenderbufferStorageMultisample", "v:uiuii"}, {"glFramebufferTextureLayer", "v:uuuii"},
+        {"glBindVertexArray", "v:u"}, {"glDeleteVertexArrays", "v:ip"}, {"glGenVertexArrays", "v:ip"},
+        {"glIsVertexArray", "u:u"}, {"glGetIntegeri_v", "v:uup"}, {"glBeginTransformFeedback", "v:u"},
+        {"glEndTransformFeedback", "v:"}, {"glBindBufferRange", "v:uuuii"}, {"glBindBufferBase", "v:uuu"},
+        {"glGetTransformFeedbackVarying", "v:uuipppp"}, {"glVertexAttribIPointer", "v:uiuio"},
+        {"glGetVertexAttribIiv", "v:uup"}, {"glGetVertexAttribIuiv", "v:uup"}, {"glVertexAttribI4i", "v:uiiii"},
+        {"glVertexAttribI4ui", "v:uuuuu"}, {"glVertexAttribI4iv", "v:up"}, {"glVertexAttribI4uiv", "v:up"},
+        {"glGetUniformuiv", "v:uip"}, {"glGetFragDataLocation", "i:up"}, {"glUniform1ui", "v:iu"},
+        {"glUniform2ui", "v:iuu"}, {"glUniform3ui", "v:iuuu"}, {"glUniform4ui", "v:iuuuu"},
+        {"glUniform1uiv", "v:iip"}, {"glUniform2uiv", "v:iip"}, {"glUniform3uiv", "v:iip"}, {"glUniform4uiv", "v:iip"},
+        {"glClearBufferiv", "v:uip"}, {"glClearBufferuiv", "v:uip"}, {"glClearBufferfv", "v:uip"},
+        {"glClearBufferfi", "v:uifi"}, {"glCopyBufferSubData", "v:uuiii"}, {"glGetActiveUniformsiv", "v:uipup"},
+        {"glGetUniformBlockIndex", "u:up"}, {"glGetActiveUniformBlockiv", "v:uuup"},
+        {"glGetActiveUniformBlockName", "v:uuipp"}, {"glUniformBlockBinding", "v:uuu"},
+        {"glDrawArraysInstanced", "v:uiii"}, {"glDrawElementsInstanced", "v:uiuoi"}, {"glFenceSync", "H:uu"},
+        {"glIsSync", "u:h"}, {"glDeleteSync", "v:h"}, {"glClientWaitSync", "u:hul"}, {"glWaitSync", "v:hul"},
+        {"glGetInteger64v", "v:up"}, {"glGetSynciv", "v:huipp"}, {"glGetInteger64i_v", "v:uup"},
+        {"glGetBufferParameteri64v", "v:uup"}, {"glGenSamplers", "v:ip"}, {"glDeleteSamplers", "v:ip"},
+        {"glIsSampler", "u:u"}, {"glBindSampler", "v:uu"}, {"glSamplerParameteri", "v:uui"},
+        {"glSamplerParameteriv", "v:uup"}, {"glSamplerParameterf", "v:uuf"}, {"glSamplerParameterfv", "v:uup"},
+        {"glGetSamplerParameteriv", "v:uup"}, {"glGetSamplerParameterfv", "v:uup"}, {"glVertexAttribDivisor", "v:uu"},
+        {"glBindTransformFeedback", "v:uu"}, {"glDeleteTransformFeedbacks", "v:ip"},
+        {"glGenTransformFeedbacks", "v:ip"}, {"glIsTransformFeedback", "u:u"}, {"glPauseTransformFeedback", "v:"},
+        {"glResumeTransformFeedback", "v:"}, {"glGetProgramBinary", "v:uippp"}, {"glProgramBinary", "v:uupi"},
+        {"glProgramParameteri", "v:uui"}, {"glInvalidateFramebuffer", "v:uip"},
+        {"glInvalidateSubFramebuffer", "v:uipiiii"}, {"glTexStorage2D", "v:uiuii"}, {"glTexStorage3D", "v:uiuiii"},
+        {"glGetInternalformativ", "v:uuuip"},
+        // 3.1
+        {"glDispatchCompute", "v:uuu"}, {"glDispatchComputeIndirect", "v:i"}, {"glDrawArraysIndirect", "v:uo"},
+        {"glDrawElementsIndirect", "v:uuo"}, {"glFramebufferParameteri", "v:uui"},
+        {"glGetProgramInterfaceiv", "v:uuup"}, {"glGetProgramResourceIndex", "u:uup"},
+        {"glGetProgramResourceName", "v:uuuipp"}, {"glGetProgramResourceiv", "v:uuuipipp"},
+        {"glGetProgramResourceLocation", "i:uup"}, {"glBindImageTexture", "v:uuiuiuu"}, {"glMemoryBarrier", "v:u"},
+        {"glMemoryBarrierByRegion", "v:u"}, {"glTexStorage2DMultisample", "v:uiuiiu"},
+        {"glGetMultisamplefv", "v:uup"}, {"glSampleMaski", "v:uu"}, {"glGetTexLevelParameteriv", "v:uiup"},
+        {"glGetTexLevelParameterfv", "v:uiup"}, {"glBindVertexBuffer", "v:uuii"}, {"glVertexAttribFormat", "v:uiuuu"},
+        {"glVertexAttribIFormat", "v:uiuu"}, {"glVertexAttribBinding", "v:uu"}, {"glVertexBindingDivisor", "v:uu"},
+        {"glUseProgramStages", "v:uuu"}, {"glActiveShaderProgram", "v:uu"}, {"glGenProgramPipelines", "v:ip"},
+        {"glDeleteProgramPipelines", "v:ip"}, {"glBindProgramPipeline", "v:u"}, {"glIsProgramPipeline", "u:u"},
+        {"glValidateProgramPipeline", "v:u"}, {"glGetProgramPipelineiv", "v:uup"},
+        {"glGetProgramPipelineInfoLog", "v:uipp"},
+        {"glProgramUniform1i", "v:uii"}, {"glProgramUniform2i", "v:uiii"}, {"glProgramUniform3i", "v:uiiii"},
+        {"glProgramUniform4i", "v:uiiiii"}, {"glProgramUniform1ui", "v:uiu"}, {"glProgramUniform2ui", "v:uiuu"},
+        {"glProgramUniform3ui", "v:uiuuu"}, {"glProgramUniform4ui", "v:uiuuuu"}, {"glProgramUniform1f", "v:uif"},
+        {"glProgramUniform2f", "v:uiff"}, {"glProgramUniform3f", "v:uifff"}, {"glProgramUniform4f", "v:uiffff"},
+        {"glProgramUniform1iv", "v:uiip"}, {"glProgramUniform2iv", "v:uiip"}, {"glProgramUniform3iv", "v:uiip"},
+        {"glProgramUniform4iv", "v:uiip"}, {"glProgramUniform1uiv", "v:uiip"}, {"glProgramUniform2uiv", "v:uiip"},
+        {"glProgramUniform3uiv", "v:uiip"}, {"glProgramUniform4uiv", "v:uiip"}, {"glProgramUniform1fv", "v:uiip"},
+        {"glProgramUniform2fv", "v:uiip"}, {"glProgramUniform3fv", "v:uiip"}, {"glProgramUniform4fv", "v:uiip"},
+        {"glProgramUniformMatrix2fv", "v:uiiup"}, {"glProgramUniformMatrix3fv", "v:uiiup"},
+        {"glProgramUniformMatrix4fv", "v:uiiup"}, {"glProgramUniformMatrix2x3fv", "v:uiiup"},
+        {"glProgramUniformMatrix3x2fv", "v:uiiup"}, {"glProgramUniformMatrix2x4fv", "v:uiiup"},
+        {"glProgramUniformMatrix4x2fv", "v:uiiup"}, {"glProgramUniformMatrix3x4fv", "v:uiiup"},
+        {"glProgramUniformMatrix4x3fv", "v:uiiup"},
+        // 3.2 / extensions Unity probes; absent on a device, they answer 0 and are named once.
+        {"glFramebufferTexture", "v:uuui"}, {"glPatchParameteri", "v:ui"}, {"glTexStorage3DMultisample", "v:uiuiiiu"},
+        {"glCopyImageSubData", "v:uuiiiiuuiiiiiii"},
+    });
+    add(kGl2, {
+        {"glFramebufferTexture3D", "v:uuuuii"}, {"glFramebufferTexture3DOES", "v:uuuuii"},
+        {"glTexImage2DMultisample", "v:uiuiiu"},
+        // Extensions engines fetch with eglGetProcAddress when the host advertises them (Unity: multisampled
+        // render-to-texture, discard, debug markers, program binaries, timer queries).
+        {"glFramebufferTexture2DMultisampleEXT", "v:uuuuii"}, {"glRenderbufferStorageMultisampleEXT", "v:uiuii"},
+        {"glFramebufferTexture2DMultisampleIMG", "v:uuuuii"}, {"glRenderbufferStorageMultisampleIMG", "v:uiuii"},
+        {"glDiscardFramebufferEXT", "v:uip"}, {"glPushGroupMarkerEXT", "v:ip"}, {"glPopGroupMarkerEXT", "v:"},
+        {"glInsertEventMarkerEXT", "v:ip"}, {"glLabelObjectEXT", "v:uuip"}, {"glGetObjectLabelEXT", "v:uuipp"},
+        {"glGetProgramBinaryOES", "v:uippp"}, {"glProgramBinaryOES", "v:uupi"}, {"glTexStorage2DEXT", "v:uiuii"},
+        {"glBindVertexArrayOES", "v:u"}, {"glGenVertexArraysOES", "v:ip"}, {"glDeleteVertexArraysOES", "v:ip"},
+        {"glIsVertexArrayOES", "u:u"}, {"glQueryCounterEXT", "v:uu"}, {"glGetQueryObjectui64vEXT", "v:uup"},
+        {"glGetQueryObjecti64vEXT", "v:uup"}, {"glGenQueriesEXT", "v:ip"}, {"glDeleteQueriesEXT", "v:ip"},
+        {"glBeginQueryEXT", "v:uu"}, {"glEndQueryEXT", "v:u"}, {"glGetQueryObjectuivEXT", "v:uup"},
+        {"glDrawBuffersEXT", "v:ip"}, {"glDrawBuffersNV", "v:ip"}, {"glBlitFramebufferNV", "v:iiiiiiiiuu"},
+        {"glDrawArraysInstancedEXT", "v:uiii"}, {"glDrawElementsInstancedEXT", "v:uiuoi"},
+        {"glVertexAttribDivisorEXT", "v:uu"}, {"glTexStorage3DEXT", "v:uiuiii"},
     });
     // ---- OpenGL ES 1.1 entry points 2.0 does not have (fixed function). Pointers are pointer-or-offset (VBOs).
     add(kGl1, {

@@ -297,7 +297,96 @@ struct Runtime {
   std::string poisoned;
   bool touched = false;  ///< this boot changed guest state
   std::string failure;   ///< this boot's failure, for `poisoned`
+  std::string apk;       ///< the game's APK (the first boot's), where a guest dlopen finds assets/rb32/<lib>
+  /// Libraries a guest dlopen handed out a handle for, by handle index (handle = kDlModuleBase | index).
+  std::vector<const rb::loader::GuestModule*> dl_handles;
 };
+
+/// The thread running rb_runtime_boot (holding g_mu), or none. A guest dlopen (which runs in a host slot, holding the
+/// GGL, and so may not take g_mu) may load libraries when no boot runs or when the boot is its own thread's.
+std::atomic<std::thread::id> g_boot_owner{};
+
+const rb::loader::GuestModule* LoadWithNeeded(Runtime& rt, ApkZip& zip, const std::string& lib,
+                                              std::set<std::string>& in_progress, std::string* out);
+
+void Live(const std::string& s);
+
+constexpr std::uint32_t kDlModuleBase = 0xC0D00000u;  ///< | index: a library a guest dlopen loaded
+constexpr std::uint32_t kDlGlobal = 0xC0D8FFFFu;      ///< dlopen(NULL) / a system library: search everything
+constexpr std::uint32_t kRtldDefault = 0xFFFFFFFFu;   ///< bionic LP32 RTLD_DEFAULT
+constexpr std::uint32_t kRtldNext = 0xFFFFFFFEu;      ///< bionic LP32 RTLD_NEXT
+
+std::uint32_t DlHandle(Runtime& rt, const rb::loader::GuestModule* m) {
+  for (std::size_t i = 0; i < rt.dl_handles.size(); ++i) {
+    if (rt.dl_handles[i] == m) return kDlModuleBase | static_cast<std::uint32_t>(i);
+  }
+  rt.dl_handles.push_back(m);
+  return kDlModuleBase | static_cast<std::uint32_t>(rt.dl_handles.size() - 1);
+}
+
+/// A guest dlopen/android_dlopen_ext of `path`, answered with the game's own libraries (Unity's libmain dlopens
+/// libunity.so and libmono.so by their full /data/app path): the file name is looked up in assets/rb32/, loaded with
+/// its DT_NEEDED siblings, and constructed, as a device's linker would. System libraries answer with a handle whose
+/// dlsym goes to the host thunks. Runs in a host slot: the GGL is held (constructors nest under it).
+std::uint32_t GuestDlopen(Runtime& rt, const std::string& path, std::string* why) {
+  const std::thread::id owner = g_boot_owner.load();
+  if (owner != std::thread::id{} && owner != std::this_thread::get_id()) {
+    *why = "another library is starting on another thread";
+    return 0;
+  }
+  if (path.empty()) return kDlGlobal;  // dlopen(NULL): the "main program" — dlsym on it searches everything
+  const std::string base = path.substr(path.find_last_of('/') == std::string::npos ? 0 : path.find_last_of('/') + 1);
+  for (const auto& m : rt.proc->modules()) {
+    if (m->soname == base) return DlHandle(rt, m.get());  // already placed (the scope's libc/libm/libz, or an app)
+  }
+  if (const auto hit = rt.loaded.find(base); hit != rt.loaded.end()) return DlHandle(rt, hit->second);
+  static const char* const kHost[] = {"libGLESv1_CM.so", "libGLESv2.so", "libGLESv3.so", "libEGL.so", "libOpenSLES.so",
+                                      "libandroid.so", "liblog.so", "libjnigraphics.so", "libdl.so"};
+  for (const char* h : kHost) {
+    if (base == h) return kDlGlobal;  // answered by name through the host thunks (dlsym -> HostSlots::Resolve)
+  }
+  ApkZip zip;
+  std::string err;
+  if (rt.apk.empty() || !zip.Open(rt.apk, &err)) {
+    *why = "the game's APK cannot be read (" + err + ")";
+    return 0;
+  }
+  if (!zip.Has("assets/rb32/" + base)) {
+    *why = base + " is not one of the game's 32-bit libraries";
+    return 0;
+  }
+  std::set<std::string> in_progress;
+  const rb::loader::GuestModule* m = LoadWithNeeded(rt, zip, base, in_progress, rt.report);
+  if (m == nullptr) {
+    *why = base + " did not load (the runtime log says why)";
+    return 0;
+  }
+  std::string failed;
+  if (!rt.proc->RunConstructors(&failed)) {
+    *why = base + ": constructor " + failed;
+    return 0;
+  }
+  Live("dl: dlopen(\"" + path + "\") loaded " + base + " from assets/rb32/");
+  return DlHandle(rt, m);
+}
+
+/// A guest dlsym: in the library the handle names, then in every placed module, then the host thunks (GLES/EGL/...).
+std::optional<std::uint32_t> GuestDlsym(Runtime& rt, std::uint32_t handle, const std::string& name) {
+  if ((handle & 0xFFFF0000u) == kDlModuleBase && (handle & 0xFFFFu) < rt.dl_handles.size()) {
+    if (auto e = rt.dl_handles[handle & 0xFFFFu]->FindExport(name)) return e->tagged();
+  } else if (handle != kDlGlobal && handle != kRtldDefault && handle != kRtldNext) {
+    return std::nullopt;  // not a handle this runtime gave out
+  }
+  for (const auto& m : rt.proc->modules()) {
+    if (auto e = m->FindExport(name)) return e->tagged();
+  }
+  auto at = rt.slots->Resolve(name);
+  if (!at) {  // named once each: a NULL the game may call later (an engine probing for optional entry points)
+    static std::set<std::string> said;
+    if (said.insert(name).second) Live("dl: dlsym(\"" + name + "\") = NULL (no guest export, no host thunk)");
+  }
+  return at;
+}
 
 Runtime& R() {
   static Runtime* rt = new Runtime;
@@ -511,6 +600,12 @@ bool BootScope(Runtime& rt, ApkZip& zip, std::string* out) {
   }
   // libandroid and jnigraphics calls that take a Java object need the bridge (M4 Task 3).
   rb::launcher::RegisterAndroidThunks(*rt.slots, *rt.fwd, rt.vm);
+  // Guest dlopen/dlsym of the game's own libraries (Unity) and of system ones (dlsym'd GLES/EGL entry points).
+  {
+    Runtime* r = &rt;
+    rt.slots->SetDlHooks([r](const std::string& path, std::string* why) { return GuestDlopen(*r, path, why); },
+                         [r](std::uint32_t h, const std::string& name) { return GuestDlsym(*r, h, name); });
+  }
   // OpenSL ES (M4 Task 4): engines, output mixes, players and their buffer queues, as guest objects whose vtables are
   // host slots. Callbacks come back on the host's audio threads, which are adopted to call the guest there.
   {
@@ -706,6 +801,7 @@ const rb::loader::GuestModule* LoadWithNeeded(Runtime& rt, ApkZip& zip, const st
 /// The whole boot of one library. True only when the scope, the loads, every constructor and (when
 /// exported) `JNI_OnLoad` all returned.
 bool BootOne(Runtime& rt, const std::string& apk, const std::string& lib, std::string* out) {
+  if (rt.apk.empty()) rt.apk = apk;  // a guest dlopen reads its libraries from here
   if (apk.empty()) {
     Line(out, "FATAL: rb_runtime_boot: no APK path was given — the stub could not find the game's sourceDir");
     return false;
@@ -807,6 +903,8 @@ extern "C" int rb_runtime_boot(JavaVM* vm, const char* apk_path, const char* lib
   const std::string lib = lib_name != nullptr ? lib_name : "";
   const std::string apk = apk_path != nullptr ? apk_path : "";
   std::lock_guard<std::mutex> lock(g_mu);  // held until return: one boot at a time
+  g_boot_owner.store(std::this_thread::get_id());
+  struct OwnerReset { ~OwnerReset() { g_boot_owner.store(std::thread::id{}); } } owner_reset;
   Runtime& rt = R();
   if (rt.vm == nullptr) rt.vm = vm;  // one VM per process: the first stub's
   if (rt.booted.count(lib) != 0) {

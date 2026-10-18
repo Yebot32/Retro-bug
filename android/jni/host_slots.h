@@ -75,6 +75,17 @@ class HostSlots {
   /// unanswered (trapped, faulting by name). Also what `eglGetProcAddress` answers from.
   std::optional<std::uint32_t> Resolve(const std::string& name);
 
+  /// The runtime's answer to a guest dlopen/android_dlopen_ext of `path`: a handle (non-zero) for a library it can
+  /// provide — the game's own, in assets/rb32/, loaded with its DT_NEEDED and constructed — or 0 with `why` set.
+  using DlopenHook = std::function<std::uint32_t(const std::string& path, std::string* why)>;
+  /// The runtime's answer to a guest dlsym on a handle the hook gave out (or RTLD_DEFAULT): a code address, or nullopt.
+  using DlsymHook = std::function<std::optional<std::uint32_t>(std::uint32_t handle, const std::string& name)>;
+  /// Installed once the runtime can load libraries (after the scope booted). Called with the GGL held.
+  void SetDlHooks(DlopenHook open, DlsymHook sym) {
+    dlopen_hook_ = std::move(open);
+    dlsym_hook_ = std::move(sym);
+  }
+
   /// Turns the thunk set on. Each bound call goes to this device's library on the calling thread (GL/EGL: the
   /// game's own GLSurfaceView made its context current there). A call that cannot be forwarded returns 0 and is
   /// named (live log, once per name, and in `ReportThunks`).
@@ -107,6 +118,8 @@ class HostSlots {
   void ReportLog(const std::function<void(const std::string&)>& say) const;
 
  private:
+  DlopenHook dlopen_hook_;
+  DlsymHook dlsym_hook_;
   runtime::GuestProcess& p_;
   int target_sdk_;
   std::function<void(const std::string&)> live_log_;
