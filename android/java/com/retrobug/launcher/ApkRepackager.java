@@ -246,7 +246,7 @@ final class ApkRepackager {
                     ZipEntry e = en.nextElement();
                     String n = e.getName();
                     if (e.isDirectory() || n.equals(MANIFEST)) continue;
-                    if (n.startsWith("META-INF/")) { sigDropped.add(n); continue; }
+                    if (isSignatureFile(n)) { sigDropped.add(n); continue; }
                     if (nativeControl && n.startsWith("lib/")) {  // the control run keeps the 32-bit libraries as they are
                         claim(names, n);
                         if (n.endsWith(".so")) {  // except for zeroed section-header fields, which the platform refuses
@@ -475,6 +475,17 @@ final class ApkRepackager {
      * targeting API 30+ is refused unless its resources.arsc is uncompressed and 4-byte aligned (RepackSigner aligns
      * STORED entries), and some games ship it compressed.
      */
+    /**
+     * The old JAR/APK signature files: META-INF/MANIFEST.MF, *.SF, *.RSA, *.DSA, *.EC and SIG-* at the top of META-INF.
+     * Everything else there stays — META-INF/services/* is how libraries find their plug-ins at runtime (ServiceLoader).
+     */
+    static boolean isSignatureFile(String n) {
+        if (!n.startsWith("META-INF/") || n.indexOf('/', "META-INF/".length()) >= 0) return false;
+        String f = n.substring("META-INF/".length()).toUpperCase(java.util.Locale.ROOT);
+        return f.equals("MANIFEST.MF") || f.endsWith(".SF") || f.endsWith(".RSA") || f.endsWith(".DSA") || f.endsWith(".EC")
+                || f.startsWith("SIG-");
+    }
+
     private static void copy(ZipFile zip, ZipEntry src, ZipOutputStream zo) throws IOException {
         byte[] data;
         try (InputStream in = zip.getInputStream(src)) { data = readFully(in); }

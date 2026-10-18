@@ -86,6 +86,9 @@ public class ApkRepackagerTest {
         x.put("META-INF/CERT.RSA", b("rsa"));
         x.put("META-INF/CERT.SF", b("sf"));
         x.put("META-INF/MANIFEST.MF", b("mf"));
+        x.put("META-INF/services/kotlinx.coroutines.internal.MainDispatcherFactory", b("svc"));
+        x.put("META-INF/game_release.kotlin_module", b("km"));
+        x.put("META-INF/SIG-ANDROID.EC", b("ec"));
         x.put("assets/x.txt", b("hello asset"));
         x.put("assets/stored.bin", b("stored payload 00000001 bytes"));
         return x;
@@ -137,7 +140,11 @@ public class ApkRepackagerTest {
         check(Arrays.equals(o.get("assets/rb32sys/libstdc++.so"), b("SYS-libstdc++.so")), "rb32sys libstdc++");
         check(!o.containsKey("stub"), "the stub key is not itself an entry");
         check(!anyStartsWith(o, "lib/armeabi"), "no lib/armeabi* entries");
-        check(!anyStartsWith(o, "META-INF/"), "no META-INF entries");
+        check(!o.containsKey("META-INF/CERT.RSA") && !o.containsKey("META-INF/CERT.SF") && !o.containsKey("META-INF/MANIFEST.MF")
+                && !o.containsKey("META-INF/SIG-ANDROID.EC"), "the old signature files are dropped");
+        check(Arrays.equals(o.get("META-INF/services/kotlinx.coroutines.internal.MainDispatcherFactory"), b("svc")),
+                "META-INF/services (ServiceLoader) kept");
+        check(Arrays.equals(o.get("META-INF/game_release.kotlin_module"), b("km")), "other META-INF files kept");
         check(Arrays.equals(o.get("assets/x.txt"), b("hello asset")), "assets/x.txt unchanged");
         check(o.containsKey("resources.arsc"), "resources.arsc kept");
         check(r.stubs.equals(Arrays.asList("libbar.so", "libfoo.so")), "stubs sorted: " + r.stubs);
