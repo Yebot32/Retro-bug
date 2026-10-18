@@ -318,16 +318,28 @@ public class LauncherActivity extends Activity {
 
     private void show(Screen which) {
         screen_ = which;
+        View next;
         switch (which) {
-            case HOME: setContentView(library()); break;
-            case DEV: setContentView(homeScreen()); break;
-            case PREFS: setContentView(prefs()); break;
-            case LIBRARY: setContentView(libraryScreen()); break;
-            case SETTINGS: setContentView(settingsScreen()); break;
-            case DIAGNOSTICS: setContentView(diagnosticsScreen()); break;
-            case REPORT: setContentView(reportScreen()); break;
-            case RUN: setContentView(runScreen()); break;
+            case HOME: next = library(); break;
+            case DEV: next = homeScreen(); break;
+            case PREFS: next = prefs(); break;
+            case LIBRARY: next = libraryScreen(); break;
+            case SETTINGS: next = settingsScreen(); break;
+            case DIAGNOSTICS: next = diagnosticsScreen(); break;
+            case REPORT: next = reportScreen(); break;
+            case RUN: next = runScreen(); break;
+            default: return;
         }
+        // Theme.Holo keeps content transitions on, so the window adds each screen on top of the last one
+        // instead of replacing it. That was harmless while every screen was built fresh, but Home's library
+        // is one instance kept for the activity's lifetime (C11) — so it was still a child of the content
+        // view when Home was shown again, and setContentView() refuses a view that already has a parent.
+        // On the Tab S9 that made both ways out of Settings (DONE and Back) crash the app. Clear the
+        // container, detach the screen from wherever it is still held, and only then hand it to the window.
+        ViewGroup content = findViewById(android.R.id.content);
+        if (content != null) content.removeAllViews();
+        if (next.getParent() instanceof ViewGroup) ((ViewGroup) next.getParent()).removeView(next);
+        setContentView(next);
     }
 
     // ------------------------------------------------------------------ screens
