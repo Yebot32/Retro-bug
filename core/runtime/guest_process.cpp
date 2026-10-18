@@ -756,7 +756,7 @@ bool GuestProcess::RunConstructors(std::string* failed) {
     abi_->set_executor(engine(opts_.ctor_tier));
     exec::RunResult rr{};
     exec::MachineState exit{};
-    abi_->CallGuest(fn.tagged(), {}, abi::Shorty::For("V"), kCallBudget, &rr, &exit);
+    abi_->CallGuest(fn.tagged(), {}, abi::Shorty::For("V"), kInitBudget, &rr, &exit);
     if (rr.reason == exec::StopReason::Returned) {
       ++ctors_run_;
       return true;

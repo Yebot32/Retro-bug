@@ -863,8 +863,10 @@ bool BootOne(Runtime& rt, const std::string& apk, const std::string& lib, std::s
   rb::exec::RunResult rr{};
   rb::exec::MachineState exit{};
   rt.fwd->PushFrame();
+  // Initialisation, not a bounded call: a Unity title does its metadata and scripting setup here, and the 4M-step
+  // call budget stopped Nutty Fluffies halfway through it (C27). See GuestProcess::kInitBudget.
   const rb::abi::Ret32 ret = p.abi().CallGuest(onload->tagged(), {rb::abi::Value32::Ptr(rt.fwd->vm()), rb::abi::Value32::Ptr(0)},
-                                               rb::abi::Shorty::For("II"), GuestProcess::kCallBudget, &rr, &exit);
+                                               rb::abi::Shorty::For("II"), GuestProcess::kInitBudget, &rr, &exit);
   rt.fwd->PopFrame(0);
   if (rr.reason != rb::exec::StopReason::Returned) {
     Line(out, "JNI_OnLoad: did not return on Tier J after " + std::to_string(rr.instructions_executed) +

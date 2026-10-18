@@ -20,7 +20,7 @@ signals) plus JIT-shaped code, not a per-game bug.
 |---|---|---|---|---|---|---|
 | 1 | Angry Birds Go | com.rovio.angrybirdsgo | native | not installed | version downgrade (repack 226 < installed 261) | install log |
 | 2 | Angry Birds Go+ | com.rovio.angrybirdsgp | native | died | boot ANR, killed in background | logcat (contaminated) |
-| 3 | Angry Birds Epic | com.rovio.gold | Unity | died | `nativeRender` fetched address 0x0 | logcat |
+| 3 | Angry Birds Epic | com.rovio.gold | Unity | died | `nativeRender` fetched address 0x0 | logcat; re-run 2026-10-18 21:47: boot now finishes (JNI_OnLoad 35 steps) and `libunity.so` names 10 unanswered imports (6 × `ASensor*`, `__google_potentially_blocking_region_begin`/`_end`, 2 more) — C29 |
 | 4 | Blocky Roads | com.crescentmoongames.blocky_roads | native | **runs** | — (gameplay on screen) | screenshot |
 | 5 | Car Game | com.bertheussen.cargame | Unity | not installed | Play Protect verification failure | install log |
 | 6 | Cars 3 (Lightning) | com.disney.cars3_goo | Unity | died | guest native called `exit(127)` | logcat (screenshot contaminated) |
@@ -45,7 +45,7 @@ signals) plus JIT-shaped code, not a per-game bug.
 | 25 | Teeny Titans 2 | com.turner.ttgfigures2 | Unity | died | guest native called `exit(127)` | logcat (screenshot contaminated) |
 | 26 | Torture the Murderer | com.ningunosentertainment.TortureTheMurdererElectric | Unity + NativeActivity | died | `ANativeActivity_onCreate` undefined | logcat |
 | 27 | Turbo FAST | com.pikpok.turbo | native | not installed | Play Protect verification failure | install log |
-| 28 | Nutty Fluffies | com.UBI.A90.WW | Unity | died | `JNI_OnLoad` exceeded the 4M-step budget | logcat |
+| 28 | Nutty Fluffies | com.UBI.A90.WW | Unity | died | re-run 2026-10-18 21:46: `JNI_OnLoad` runs 147,666,044 steps (was stopped at 4,000,000) and faults on an unmapped guest read at 0xc0d900b3, pc 0x2410bc — a real memory fault, no longer the budget | logcat |
 | 29 | Where's My Mickey | com.disney.wheresmymickey_goo | native | **runs** | — age gate on screen | screenshot |
 | 30 | Among Us | com.innersloth.spacemafia | Unity (il2cpp) | converted, untested | conversion used to OOM; now converts (497 MB) | repack log 20:13 |
 
@@ -54,7 +54,7 @@ signals) plus JIT-shaped code, not a per-game bug.
 | Cause | Games | Tracked as |
 |---|---|---|
 | NativeActivity games (`ANativeActivity_onCreate`) | 4 | C31 — tile should say "not supported" |
-| Unity native init (budget, 0x0 fetch, `exit(127)`, obfuscated ctor) | 5 | C27 + per-game |
+| Unity native init (0x0 fetch, `exit(127)`, unmapped read at 0xc0d900b3, obfuscated ctor) | 5 | per-game (the step budget, C27, is no longer one of them) |
 | Thunk gaps (sensor looper callback, thread fetch 0x0) | 2 | C29/C30 |
 | Java/Android behaviour (reflection, foreground service, activity start, ANR) | 4 | per-game |
 | Install blocked by the device (Play Protect / downgrade) | 4 | needs the human |
@@ -65,6 +65,7 @@ signals) plus JIT-shaped code, not a per-game bug.
 1. Re-run the contaminated rows (2, 6, 25 and any duplicate screenshot) with the tablet idle; replace their verdicts.
 2. The four NativeActivity games are one fix: a clear "not supported yet" tile, or the `ANativeActivity_onCreate`
    stub. The tile message is the cheap half and stops these looking like engine bugs.
-3. C27 (the 4M-step budget on `JNI_OnLoad`) is a single-cause Unity failure; raise or remove the budget for
-   initialisation and re-test rows 3, 6, 25, 28.
+3. ~~C27 (the 4M-step budget on `JNI_OnLoad`)~~ — done 2026-10-18 (`kInitBudget`). Row 28 now runs 147M steps
+   and stops on a real unmapped read; row 3 was never budget-bound (its `JNI_OnLoad` returns in 35 steps). The
+   budget was hiding one fault, not four.
 4. Unity as a class stays blocked on C26 (Mono GC signals) — that is the engine milestone, not this table.

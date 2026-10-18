@@ -105,6 +105,11 @@ class GuestProcess {
   static constexpr std::uint32_t kTrapSlot = 16u;
   static constexpr std::uint32_t kMainStackBytes = 8u << 20;
   static constexpr unsigned kCallBudget = 4'000'000;
+  /// Constructors and JNI_OnLoad are the two calls whose length the engine does not bound: a Unity title loads its
+  /// metadata, builds its GC and starts its scripting runtime there, and 4M steps stopped Nutty Fluffies' JNI_OnLoad
+  /// halfway through initialisation (C27) — the boot report then recorded a fault for an engine that was working.
+  /// Initialisation gets the same budget as a thread turn; the cap still exists, it is just no longer the wall.
+  static constexpr unsigned kInitBudget = 1u << 30;
   static constexpr unsigned kJniArenaBytes = 1u << 20;
 
   static std::unique_ptr<GuestProcess> Create(const GuestProcessOptions& options, std::string* err);
