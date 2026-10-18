@@ -377,7 +377,8 @@ final class GameMenu {
         if (game.hasCode) {
             final TextView[] scaleValue = new TextView[1];
             list.addView(valueRow("Render scale", scaleText(), "Draws the game at fewer pixels and scales it up: smoother on "
-                    + "heavy games, softer picture. Takes effect the next time the game starts.", scaleValue,
+                    + "heavy games, softer picture. Experimental: some games then take taps in the wrong place; set it "
+                    + "back to Full if so. Takes effect the next time the game starts.", scaleValue,
                     new View.OnClickListener() {
                         @Override public void onClick(View v) {
                             settings.scale = settings.scale == 100 ? 75 : settings.scale == 75 ? 50 : 100;

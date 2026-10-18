@@ -210,6 +210,8 @@ public class LauncherActivity extends Activity {
                     String target = getIntent().getStringExtra("target");
                     ApkRepackager.targetFloor = target == null ? 0 : Integer.parseInt(target);
                     String rename = getIntent().getStringExtra("rename");
+                    // `-e settings 1`: the game's own settings (target, M6 patches, mods, aspect) apply, as in the library.
+                    if ("1".equals(getIntent().getStringExtra("settings"))) applyGameSettings(f, target == null);
                     repackGame(f, !"0".equals(getIntent().getStringExtra("install")),
                             rename == null || rename.equals("0") ? null
                                     : rename.equals("1") ? ApkRepackager.RENAME_SUFFIX : rename);
@@ -784,6 +786,18 @@ public class LauncherActivity extends Activity {
     /// "Make installable" (the scripted `-e repack` and the developer screens): rewrite the game for a 64-bit-only
     /// phone, sign it with the phone's repack key, keep it (and its report) under getExternalFilesDir(null)/repack/,
     /// then offer it to the installer. The work is ConvertJob's; one conversion at a time, shared with the library.
+    /** Sets the repackager's M6 inputs from the saved settings of the game `apk` is (scripted `-e settings 1` runs). */
+    private void applyGameSettings(File apk, boolean useTarget) {
+        android.content.pm.PackageInfo pi = getPackageManager().getPackageArchiveInfo(apk.getAbsolutePath(), 0);
+        if (pi == null) return;
+        GameSettings s = new GameSettingsStore(this).get(pi.packageName);
+        ApkRepackager.patches = Patch.enabled(PatchStore.available(this, pi.packageName), s.patches);
+        ApkRepackager.mods = Mod.enabled(ModStore.available(this, pi.packageName), s.mods);
+        ApkRepackager.aspect = s.aspect;
+        if (useTarget) ApkRepackager.targetFloor = s.target;  // as ConvertJob does, unless `-e target` was given
+        Log.i(TAG, "settings: " + pi.packageName + " patches=" + s.patches + " mods=" + s.mods + " aspect=" + s.aspect);
+    }
+
     private void repackGame(final File apk, final boolean install, final String renameTo) {
         if (!ConvertJob.claim()) {
             Toast.makeText(this, "A repack is already running", Toast.LENGTH_SHORT).show();
@@ -803,6 +817,9 @@ public class LauncherActivity extends Activity {
                 writeText(txt, out.toString());
                 final File toInstall = signed;
                 final File report = txt;
+                ApkRepackager.patches = java.util.Collections.emptyList();  // the scripted M6 inputs are one-shot
+                ApkRepackager.mods = java.util.Collections.emptyList();
+                ApkRepackager.aspect = "stretch";
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
                         ConvertJob.release();

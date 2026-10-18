@@ -52,3 +52,23 @@ Newest entries at the bottom. "Decision" lines are calls made on Yebot32's behal
   OBB copy in Download removed; Play Protect refused the original, so nothing else was installed.
 - Permission prompts seen during this work (Sonic Transformed copy: contacts, files; SpongeBob copy: location,
   phone, media) were all denied. Sonic's copy still holds READ_PROFILE from an earlier session (not granted by me).
+
+## M6 device verification (Tab S9, Gumball Lite)
+- Patch: a test .rbpatch (libgumball.so, "Gumball C++ LogLine" → "RetroBG C++ LogLine", SHA-256 guarded) added
+  through the Patches tab, turned on → tile said Update available → converted → the installed copy holds the
+  patched bytes; the game runs.
+- Mod: a test mod (Gumball + menu atlas `mm_icons@2x.png` colour-inverted, same sizes) added through the Mods tab,
+  turned on, converted, installed: the title screen showed the inverted Gumball and logo, game ran normally.
+  Re-adding a mod with the same id replaced it (one entry, 4 → 5 files). Note: `mm_character_gumball_main*` is not
+  the title art — the title screen draws from the `mm_icons@2x.png` atlas.
+- Off again: with the mod and patch turned off the converted copy's `mm_icons@2x.png` and `libgumball.so` are
+  byte-identical to the original's. Long-press → Remove took both out of the store ("No mods/patches yet").
+- Aspect Fit 4:3: "4 activities pinned to 4:3", Android letterboxes the game; menus work.
+- Render scale 50 %: the surface is drawn at 800×1067 and scaled up correctly, but Gumball's taps land in the
+  wrong place (its onTouchEvent maps touches against the view's `getWidth()` while the coordinates are scaled to
+  the surface). At Full the same tap opens Karate Chop. No single mapping fits games that mix the two, so
+  Decision: render scale stays, marked "Experimental … set it back to Full" in its description.
+- Bug found and fixed: the scripted `-e settings 1` conversion ignored the game's Android target (copies came out
+  at the original's 24 and the tile then said Update available). It now uses the game's setting, as the library's
+  Convert does, unless `-e target` is given.
+- Gumball left as found: Stretch, Full, no mods/patches, target 33 (receiver rule), tile READY, plays.
