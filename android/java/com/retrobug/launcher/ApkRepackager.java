@@ -64,7 +64,7 @@ final class ApkRepackager {
      */
     static final int RUNTIME_STAMP = 2;
     static final String RUNTIME_META = "com.retrobug.runtime";
-    /** The fingerprint (Patch.fingerprint) of the M6 patches applied to a copy; absent when none were. */
+    /** The fingerprint (Patch.fingerprint) of the M6 patches requested for a copy; absent when none were. */
     static final String PATCHES_META = "com.retrobug.patches";
     /** The patches to apply to the next conversion (set by ConvertJob from the game's settings); empty = none. */
     static volatile List<Patch> patches = java.util.Collections.emptyList();
@@ -245,8 +245,8 @@ final class ApkRepackager {
             ed.addMetaDataInt(RUNTIME_META, RUNTIME_STAMP);
             edited = true;
             r.report.add("stamp: <meta-data " + RUNTIME_META + "=" + RUNTIME_STAMP + ">");
-            // M6 patches: applied to the guest libraries' bytes before anything is written, so the manifest can carry the
-            // fingerprint of the set actually applied (the library compares it with the player's choice).
+            // M6 patches: applied to the guest libraries' bytes before anything is written (the manifest below carries the
+            // fingerprint of the requested set).
             Map<String, byte[]> patched = new HashMap<>();
             for (Patch p : patches) {
                 ZipEntry le = nativeControl ? null : zip.getEntry(guestDir + p.lib);
