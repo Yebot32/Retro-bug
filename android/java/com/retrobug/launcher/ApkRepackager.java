@@ -168,7 +168,8 @@ final class ApkRepackager {
             // Never below the install floor nor below the (new) minSdk; never lowered (LibraryRules, shared with the
             // library, which must know the target a copy will get). A native control is a diagnostic install on a
             // device whose Play Protect blocks old targets: current (34 makes registerReceiver without RECEIVER_* fatal).
-            int setting = Math.max(targetFloor, nativeControl ? 33 : 0);
+            // An explicitly asked-for target wins in a native control too (diagnosing a game that needs < 31).
+            int setting = targetFloor > 0 ? targetFloor : (nativeControl ? 33 : 0);
             int floorT = LibraryRules.outputTarget(oldT, oldMin, setting);
             if (oldT == null && oldMin != null && floorT == oldMin) {
                 // An absent targetSdk means "= minSdk"; writing the floor here would lower it.
@@ -248,7 +249,15 @@ final class ApkRepackager {
                     if (n.startsWith("META-INF/")) { sigDropped.add(n); continue; }
                     if (nativeControl && n.startsWith("lib/")) {  // the control run keeps the 32-bit libraries as they are
                         claim(names, n);
-                        copy(zip, e, zo);
+                        if (n.endsWith(".so")) {  // except for zeroed section-header fields, which the platform refuses
+                            byte[] lib;
+                            try (InputStream in = zip.getInputStream(e)) { lib = readFully(in); }
+                            byte[] fixed = ElfRepair.repair(lib);
+                            if (fixed != lib) r.report.add("elf: " + n + " — e_shentsize/e_shstrndx restored (zeroed by a protection wrapper)");
+                            putBytes(zo, n, fixed, e.getMethod() == ZipEntry.STORED ? ZipEntry.STORED : ZipEntry.DEFLATED);
+                        } else {
+                            copy(zip, e, zo);
+                        }
                         continue;
                     }
                     if (n.startsWith("lib/")) {
@@ -284,6 +293,16 @@ final class ApkRepackager {
                         putBytes(zo, n, arsc, ZipEntry.STORED);  // API 30+ installs only a STORED, aligned one
                         continue;
                     }
+                    if (n.startsWith("assets/") && e.getSize() >= 52 && e.getSize() < (64L << 20)) {
+                        // A library shipped as an asset and dlopen'd from files/ (a protection engine) gets the same
+                        // section-header repair as lib/; any other asset is copied byte for byte.
+                        byte[] data;
+                        try (InputStream in = zip.getInputStream(e)) { data = readFully(in); }
+                        byte[] fixed = ElfRepair.repair(data);
+                        if (fixed != data) r.report.add("elf: " + n + " — e_shentsize/e_shstrndx restored (zeroed by a protection wrapper)");
+                        putBytes(zo, n, fixed, e.getMethod() == ZipEntry.STORED ? ZipEntry.STORED : ZipEntry.DEFLATED);
+                        continue;
+                    }
                     copy(zip, e, zo);
                 }
                 r.risks = plan.riskReport(refs, addShims ? plan.shims : Collections.<String>emptyList());
@@ -303,6 +322,11 @@ final class ApkRepackager {
                     claim(names, dest);
                     byte[] lib;
                     try (InputStream in = zip.getInputStream(e)) { lib = readFully(in); }
+                    byte[] fixed = ElfRepair.repair(lib);  // zeroed header fields hide the JNI exports from the stub writer
+                    if (fixed != lib) {
+                        r.report.add("elf: " + name + " — e_shentsize/e_shstrndx restored (zeroed by a protection wrapper)");
+                        lib = fixed;
+                    }
                     putBytes(zo, dest, lib, ZipEntry.DEFLATED);
                     libBytes.put(name, lib);
                     // Only .so files are loaded by name through the linker; anything else (gdbserver, data

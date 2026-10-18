@@ -91,4 +91,5 @@ java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.GameSettingsTest
 java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.LibraryRulesTest
 # The Data tab: OBB names for the copy, and the copy's save export/import.
 java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ObbRulesTest
+java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ElfRepairTest
 java -cp "$(to_host "$OUT/classes")" com.retrobug.shim.SaveArchiveTest

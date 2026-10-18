@@ -381,6 +381,23 @@ public class ApkRepackagerTest {
                 .stringAttrOf("provider", ShimPlan.SAVES_PROVIDER_CLASS, "authorities") == null, "no certificate: no save provider");
     }
 
+    /** A protection wrapper's ELF shipped as an asset (SpongeBob's assets/ATG_E.sec, dlopen'd from files/) is repaired too. */
+    static void repairsElfAssets() throws Exception {
+        byte[] good = ElfRepairTest.elf(), broken = good.clone();
+        broken[46] = 0; broken[47] = 0; broken[50] = 0; broken[51] = 0;
+        Map<String, byte[]> x = new LinkedHashMap<>();
+        x.put("lib/armeabi-v7a/libfoo.so", b("V7A"));
+        x.put("assets/ATG_E.sec", broken);
+        x.put("assets/notelf.bin", b("plain data"));
+        File in = build("min_only", null, "elfassets", x);
+        File out = new File(scratch, "elfassets.out.apk");
+        ApkRepackager.Result r = ApkRepackager.transform(in, runtime(), out);
+        Map<String, byte[]> o = readAll(out);
+        check(Arrays.equals(o.get("assets/ATG_E.sec"), good), "the ELF asset's header fields are restored");
+        check(Arrays.equals(o.get("assets/notelf.bin"), b("plain data")), "other assets are untouched");
+        check(reportHas(r, "elf: assets/ATG_E.sec", "restored"), "the report names the repaired asset: " + r.report);
+    }
+
     static void shimsWhenNotNeededOrImpossible() throws Exception {
         Map<String, byte[]> x = new LinkedHashMap<>();
         x.put("classes.dex", Files.readAllBytes(new File(fixtures, "RiskyFixture.dex").toPath()));
@@ -543,6 +560,7 @@ public class ApkRepackagerTest {
         fixtures = new File(a[0]); scratch = new File(a[1]); aapt2 = a[2];
         addsShims();
         addsSaveProvider();
+        repairsElfAssets();
         shimsWhenNotNeededOrImpossible();
         renamesPackage();
         movesV7aAndStubs();
