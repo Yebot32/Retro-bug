@@ -23,6 +23,25 @@ public class GameSettingsTest {
         GameSettings r = GameSettings.parse(s.format());
         check("safe".equals(r.cpu) && r.overlay && r.target == 28, "round trip");
         check("fast".equals(GameSettings.parse("cpu=turbo").cpu), "an unknown cpu mode is the default");
+
+        // M6 keys: written only when not at their default (so older settings text is unchanged), and validated.
+        GameSettings m = new GameSettings();
+        m.patches = "skip-intro,no-ads";
+        m.mods = "hd-textures";
+        m.scale = 75;
+        m.aspect = "fit169";
+        String f = m.format();
+        check(f.contains("\npatches=skip-intro,no-ads\n") && f.contains("\nmods=hd-textures\n") && f.contains("\nscale=75\n")
+                && f.contains("\naspect=fit169\n"), "M6 keys written: " + f);
+        GameSettings back = GameSettings.parse(f);
+        check(back.patches.equals("skip-intro,no-ads") && back.mods.equals("hd-textures") && back.scale == 75
+                && back.aspect.equals("fit169"), "M6 keys round trip");
+        check(!new GameSettings().format().contains("patches") && !new GameSettings().format().contains("scale"),
+                "defaults are not written");
+        check(GameSettings.parse("scale=33").scale == 100 && GameSettings.parse("aspect=wide").aspect.equals("stretch"),
+                "unknown scale/aspect values read as the defaults");
+        check(GameSettings.parse("patches=ok-id,../evil,Bad Id").patches.equals("ok-id"), "only well-formed ids are kept");
+        check(m.hasPatch("no-ads") && !m.hasPatch("no-ad"), "hasPatch is exact");
         check(GameSettings.parse("target=99").target == 35, "a target past 36 is the default");
         check(GameSettings.parse("target=23").target == 35, "a target below 24 is the default");
         check(GameSettings.parse("target=abc").target == 35, "a non-number target is the default");

@@ -13,6 +13,27 @@ final class GameSettings {
     /** The targetSdk the converted copy is made for (24..36); 35 installs past Play Protect on both test devices. */
     int target = 35;
 
+    /** M6: enabled patch ids (comma separated), applied when the copy is made. */
+    String patches = "";
+    /** M6: enabled mod ids (comma separated), applied when the copy is made. */
+    String mods = "";
+    /** M6: render scale in percent (100, 75, 50) for games drawing through a SurfaceView; 100 = untouched. */
+    int scale = 100;
+    /** M6: "stretch" (fill the screen, as before), "fit169" or "fit43" (letterboxed to that shape). */
+    String aspect = "stretch";
+
+    boolean hasPatch(String id) { return ("," + patches + ",").contains("," + id + ","); }
+
+    /** Only well-formed ids (as Patch/Mod ids are) survive; anything else is dropped. */
+    static String ids(String csv) {
+        StringBuilder out = new StringBuilder();
+        for (String s : csv.split(",")) {
+            String t = s.trim();
+            if (t.matches("[a-z0-9][a-z0-9._-]*") && !t.contains("..")) out.append(out.length() == 0 ? "" : ",").append(t);
+        }
+        return out.toString();
+    }
+
     static GameSettings parse(String text) {
         GameSettings s = new GameSettings();
         if (text == null) return s;
@@ -35,6 +56,14 @@ final class GameSettings {
                         // the default stands
                     }
                     break;
+                case "patches": s.patches = ids(v); break;
+                case "mods": s.mods = ids(v); break;
+                case "scale":
+                    if (v.equals("100") || v.equals("75") || v.equals("50")) s.scale = Integer.parseInt(v);
+                    break;
+                case "aspect":
+                    if (v.equals("stretch") || v.equals("fit169") || v.equals("fit43")) s.aspect = v;
+                    break;
                 default:
                     break;  // a newer launcher's key: ignored
             }
@@ -43,6 +72,12 @@ final class GameSettings {
     }
 
     String format() {
-        return "cpu=" + cpu + "\noverlay=" + (overlay ? "1" : "0") + "\ntarget=" + target + "\n";
+        String s = "cpu=" + cpu + "\noverlay=" + (overlay ? "1" : "0") + "\ntarget=" + target + "\n";
+        // M6 keys only when set: older settings text stays exactly as it was.
+        if (!patches.isEmpty()) s += "patches=" + patches + "\n";
+        if (!mods.isEmpty()) s += "mods=" + mods + "\n";
+        if (scale != 100) s += "scale=" + scale + "\n";
+        if (!aspect.equals("stretch")) s += "aspect=" + aspect + "\n";
+        return s;
     }
 }

@@ -94,3 +94,4 @@ java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ObbRulesTest
 java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ElfRepairTest
 java -cp "$(to_host "$OUT/classes")" com.retrobug.shim.SaveArchiveTest
 java -cp "$(to_host "$OUT/classes")" com.retrobug.shim.PermissionPolicyTest
+java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.PatchTest
