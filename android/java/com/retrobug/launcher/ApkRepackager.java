@@ -72,6 +72,9 @@ final class ApkRepackager {
     static final String MODS_META = "com.retrobug.mods";
     /** The mods to apply to the next conversion (set by ConvertJob from the game's settings), in id order. */
     static volatile List<Mod> mods = java.util.Collections.emptyList();
+    /** M6 aspect of the next conversion: "stretch" (untouched), "fit169" or "fit43" (activities pinned to that shape). */
+    static volatile String aspect = "stretch";
+    static final String ASPECT_META = "com.retrobug.aspect";
 
     static final class Result {
         String packageName;      // the output's package (the new one when renamed)
@@ -277,6 +280,18 @@ final class ApkRepackager {
             Map<String, Mod> modFor = new TreeMap<>();
             for (Mod m : mods) for (String path : m.files()) modFor.put(path, m);
             if (!mods.isEmpty()) ed.addMetaDataString(MODS_META, Mod.fingerprint(mods));
+            // M6 aspect: every activity pinned to one shape (min = max ratio), not resizeable, so Android letterboxes it.
+            if (aspect.equals("fit169") || aspect.equals("fit43")) {
+                float ratio = aspect.equals("fit169") ? 16f / 9f : 4f / 3f;
+                int bits = Float.floatToIntBits(ratio);
+                int n = ed.setTypedAttr("activity", "maxAspectRatio", 0x01010560, AxmlEditor.TYPE_FLOAT, bits);
+                ed.setTypedAttr("activity", "minAspectRatio", 0x0101059b, AxmlEditor.TYPE_FLOAT, bits);
+                ed.setTypedAttr("activity", "resizeableActivity", 0x010104f6, AxmlEditor.TYPE_INT_BOOLEAN, 0);
+                ed.setTypedAttr("application", "resizeableActivity", 0x010104f6, AxmlEditor.TYPE_INT_BOOLEAN, 0);
+                ed.addMetaDataString(ASPECT_META, aspect);
+                r.report.add("aspect: " + n + " activit" + (n == 1 ? "y" : "ies") + " pinned to " + (aspect.equals("fit169") ? "16:9" : "4:3")
+                        + " (letterboxed by Android)");
+            }
             if (edited) manifest = ed.toBytes();
 
             List<ZipEntry> guest = new ArrayList<>();

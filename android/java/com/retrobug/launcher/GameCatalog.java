@@ -190,9 +190,11 @@ final class GameCatalog {
             String hasMods = copy.applicationInfo == null || copy.applicationInfo.metaData == null ? ""
                     : copy.applicationInfo.metaData.getString(ApkRepackager.MODS_META, "");
             String wantMods = Mod.fingerprint(Mod.enabled(ModStore.available(ctx, pkg), settings.get(pkg).mods));
+            String hasAspect = copy.applicationInfo == null || copy.applicationInfo.metaData == null ? "stretch"
+                    : copy.applicationInfo.metaData.getString(ApkRepackager.ASPECT_META, "stretch");
             boolean current = stamp == ApkRepackager.RUNTIME_STAMP && copy.applicationInfo != null
                     && copy.applicationInfo.targetSdkVersion == wantTarget && hasPatches.equals(wantPatches)
-                    && hasMods.equals(wantMods);
+                    && hasMods.equals(wantMods) && hasAspect.equals(settings.get(pkg).aspect);
             return current ? Game.State.READY : Game.State.UPDATE;
         } catch (PackageManager.NameNotFoundException e) {
             return Game.State.NOT_CONVERTED;

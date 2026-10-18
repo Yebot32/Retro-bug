@@ -37,7 +37,7 @@ final class AxmlEditor {
     private static final int POOL_SORTED_FLAG = 0x1;
     private static final int TYPE_STRING = 0x03;
     private static final int TYPE_INT_DEC = 0x10;
-    private static final int TYPE_INT_BOOLEAN = 0x12;
+    static final int TYPE_INT_BOOLEAN = 0x12;
     private static final int ATTR_SIZE = 20;
     private static final int NODE_HEADER = 16;
 
@@ -865,6 +865,36 @@ final class AxmlEditor {
             any |= removeAttrAt(i, attr);
         }
         return any;
+    }
+
+    static final int TYPE_FLOAT = 0x04;
+
+    /**
+     * Sets android:{@code attr} (resource id {@code resId}) to a typed value on every {@code <element>}: rewritten in
+     * place, or inserted in resource-id order. Returns how many elements were set.
+     */
+    int setTypedAttr(String element, String attr, int resId, int type, int data) throws IOException {
+        int nName = ensureAttrName(attr, resId);  // first: it may insert into the pool
+        int ns = indexOf(ANDROID_NS);
+        if (ns < 0) throw new IOException("manifest declares no android namespace");
+        int count = 0;
+        for (int i = 0; i < nodes.size(); i++) {
+            byte[] c = nodes.get(i);
+            if (u16(c, 0) != XML_START_ELEMENT || !element.equals(str(s32(c, NODE_HEADER + 4)))) continue;
+            int a = findAttr(c, attr);
+            if (a < 0) {
+                c = withAttribute(c, ns, nName, resId, data);
+                nodes.set(i, c);
+                a = findAttr(c, attr);
+            }
+            put32(c, a + 8, -1);
+            put16(c, a + 12, 8);
+            c[a + 14] = 0;
+            c[a + 15] = (byte) type;
+            put32(c, a + 16, data);
+            count++;
+        }
+        return count;
     }
 
     /** Removes attribute {@code attr} from the start element at node index {@code i}; true when it was there. */

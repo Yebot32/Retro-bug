@@ -509,6 +509,34 @@ public class ApkRepackagerTest {
                 "the copy carries the mods' fingerprint");
     }
 
+    /** M6 resolution: "fit43"/"fit169" pin every activity's aspect ratio (Android letterboxes); "stretch" leaves it. */
+    static void setsAspect() throws Exception {
+        Map<String, byte[]> x = new LinkedHashMap<>();
+        x.put("lib/armeabi-v7a/libfoo.so", b("V7A"));
+        File in = build("filters", null, "aspect", x);
+        File out = new File(scratch, "aspect.out.apk");
+        ApkRepackager.aspect = "fit43";
+        ApkRepackager.Result r;
+        try {
+            r = ApkRepackager.transform(in, runtime(), out);
+        } finally {
+            ApkRepackager.aspect = "stretch";
+        }
+        String t = xmltree(out);
+        int acts = t.split("E: activity").length - 1;
+        int max = t.split("maxAspectRatio\\(0x01010560\\)=1.333").length - 1;
+        int min = t.split("minAspectRatio\\(0x0101059b\\)=1.333").length - 1;
+        check(acts > 0 && max == acts && min == acts, "every activity pinned to 4:3: " + acts + " activities, " + max + "/" + min);
+        check(t.contains("resizeableActivity(0x010104f6)=false"), "not resizeable (so the system letterboxes)");
+        check(reportHas(r, "aspect", "4:3"), "report: " + r.report);
+        check("fit43".equals(AxmlEditor.parse(readAll(out).get("AndroidManifest.xml")).metaDataString(ApkRepackager.ASPECT_META)),
+                "the copy records its aspect");
+        File out2 = new File(scratch, "aspect2.out.apk");
+        ApkRepackager.transform(in, runtime(), out2);
+        String t2 = xmltree(out2);
+        check(!t2.contains("AspectRatio"), "stretch: no aspect attributes");
+    }
+
     static void shimsWhenNotNeededOrImpossible() throws Exception {
         Map<String, byte[]> x = new LinkedHashMap<>();
         x.put("classes.dex", Files.readAllBytes(new File(fixtures, "RiskyFixture.dex").toPath()));
@@ -676,6 +704,7 @@ public class ApkRepackagerTest {
         twoUsesSdk();
         appliesPatches();
         appliesMods();
+        setsAspect();
         shimsWhenNotNeededOrImpossible();
         renamesPackage();
         movesV7aAndStubs();
