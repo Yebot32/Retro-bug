@@ -46,10 +46,14 @@ final class LibraryRules {
         return t;
     }
 
-    /** Where the 32-bit ARM code is: in the base APK, only in a split, or nowhere a 64-bit phone would not run natively. */
-    static Kind classify(Set<String> baseAbis, Set<String> splitAbis) {
+    /**
+     * Where the 32-bit ARM code is: in a single base APK, or spread over a split install — and a split install is not
+     * playable either way, because a copy is made from one APK and the split's resources would be left behind (C7).
+     * A base that carries v7a *and* has splits used to be classified GAME for that reason.
+     */
+    static Kind classify(Set<String> baseAbis, Set<String> splitAbis, boolean hasSplits) {
         if (baseAbis.contains("arm64-v8a") || splitAbis.contains("arm64-v8a")) return Kind.NOT_32_BIT;
-        if (ApkScan.is32BitOnly(baseAbis)) return Kind.GAME;
+        if (ApkScan.is32BitOnly(baseAbis)) return hasSplits ? Kind.SPLIT : Kind.GAME;
         if (ApkScan.is32BitOnly(splitAbis)) return Kind.SPLIT;
         return Kind.NOT_32_BIT;
     }

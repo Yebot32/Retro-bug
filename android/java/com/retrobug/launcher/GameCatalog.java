@@ -141,7 +141,8 @@ final class GameCatalog {
             Log.w(TAG, "library: cannot read " + pkg + "'s APK, not listed: " + e);
             return null;
         }
-        switch (LibraryRules.classify(base, splits)) {
+        boolean hasSplits = ai.splitSourceDirs != null && ai.splitSourceDirs.length > 0;
+        switch (LibraryRules.classify(base, splits, hasSplits)) {
             case GAME:
                 g.state = stateOf(pm, pi);
                 return g;

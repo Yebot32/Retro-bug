@@ -46,11 +46,16 @@ public class LibraryRulesTest {
         check(LibraryRules.outputTarget(10, 9, 0) == ApkRepackager.INSTALL_FLOOR_SDK, "no setting: the install floor");
 
         // Review 3: where the 32-bit code is.
-        check(LibraryRules.classify(set("armeabi-v7a"), set()) == LibraryRules.Kind.GAME, "base has v7a: a game");
-        check(LibraryRules.classify(set(), set("armeabi-v7a")) == LibraryRules.Kind.SPLIT, "v7a only in a split: a split install");
-        check(LibraryRules.classify(set(), set("armeabi-v7a", "arm64-v8a")) == LibraryRules.Kind.NOT_32_BIT, "a split with arm64 too: runs natively");
-        check(LibraryRules.classify(set("arm64-v8a", "armeabi-v7a"), set()) == LibraryRules.Kind.NOT_32_BIT, "base with arm64: runs natively");
-        check(LibraryRules.classify(set(), set()) == LibraryRules.Kind.NOT_32_BIT, "no native code: not ours");
+        check(LibraryRules.classify(set("armeabi-v7a"), set(), false) == LibraryRules.Kind.GAME, "base has v7a, one APK: a game");
+        check(LibraryRules.classify(set("armeabi-v7a"), set(), true) == LibraryRules.Kind.SPLIT,
+                "base has v7a but the install has splits: a copy would miss their resources (C7)");
+        check(LibraryRules.classify(set("armeabi-v7a"), set("armeabi-v7a"), true) == LibraryRules.Kind.SPLIT,
+                "v7a in the base and in a split: still a split install");
+        check(LibraryRules.classify(set(), set("armeabi-v7a"), true) == LibraryRules.Kind.SPLIT, "v7a only in a split: a split install");
+        check(LibraryRules.classify(set(), set("armeabi-v7a", "arm64-v8a"), true) == LibraryRules.Kind.NOT_32_BIT, "a split with arm64 too: runs natively");
+        check(LibraryRules.classify(set("arm64-v8a", "armeabi-v7a"), set(), false) == LibraryRules.Kind.NOT_32_BIT, "base with arm64: runs natively");
+        check(LibraryRules.classify(set("arm64-v8a", "armeabi-v7a"), set(), true) == LibraryRules.Kind.NOT_32_BIT, "arm64 base with splits: runs natively");
+        check(LibraryRules.classify(set(), set(), false) == LibraryRules.Kind.NOT_32_BIT, "no native code: not ours");
 
         // Review 7: a backdrop is only ever shown blurred at ~320 px; decode to at most twice that.
         check(LibraryRules.backdropSample(4096, 4096) == 8, "4096² -> sample 8 (512 px)");
