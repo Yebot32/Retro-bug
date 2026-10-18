@@ -39,6 +39,8 @@ final class Patch {
     }
 
     String id, title, description = "", game, lib, sha256;
+    /** Shipped with RetroBug (assets/patches) rather than added by the player; set by PatchStore. */
+    boolean builtIn;
     long versionCode = -1;
     final List<Edit> edits = new ArrayList<>();
     /** The text it was parsed from (kept so the fingerprint covers the edits exactly). */
@@ -127,7 +129,9 @@ final class Patch {
         for (String s : csv == null ? new String[0] : csv.split(",")) if (!s.trim().isEmpty()) ids.add(s.trim());
         List<Patch> out = new ArrayList<>();
         for (Patch p : all) if (ids.contains(p.id)) out.add(p);
-        Collections.sort(out, (x, y) -> x.id.compareTo(y.id));
+        Collections.sort(out, new java.util.Comparator<Patch>() {  // no lambdas: the launcher build has no metafactory
+            @Override public int compare(Patch x, Patch y) { return x.id.compareTo(y.id); }
+        });
         return out;
     }
 

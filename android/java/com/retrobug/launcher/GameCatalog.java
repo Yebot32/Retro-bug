@@ -183,8 +183,12 @@ final class GameCatalog {
             ApplicationInfo oa = original.applicationInfo;
             int wantTarget = oa == null ? settings.get(pkg).target
                     : LibraryRules.outputTarget(oa.targetSdkVersion, oa.minSdkVersion, settings.get(pkg).target);
+            // M6: the copy was made with the patches the player has on now (fingerprints match; both "" when none).
+            String hasPatches = copy.applicationInfo == null || copy.applicationInfo.metaData == null ? ""
+                    : copy.applicationInfo.metaData.getString(ApkRepackager.PATCHES_META, "");
+            String wantPatches = Patch.fingerprint(Patch.enabled(PatchStore.available(ctx, pkg), settings.get(pkg).patches));
             boolean current = stamp == ApkRepackager.RUNTIME_STAMP && copy.applicationInfo != null
-                    && copy.applicationInfo.targetSdkVersion == wantTarget;
+                    && copy.applicationInfo.targetSdkVersion == wantTarget && hasPatches.equals(wantPatches);
             return current ? Game.State.READY : Game.State.UPDATE;
         } catch (PackageManager.NameNotFoundException e) {
             return Game.State.NOT_CONVERTED;

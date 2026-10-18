@@ -156,6 +156,10 @@ final class ConvertJob {
                     ApkRepackager.debuggable = false;
                     ApkRepackager.nativeControl = false;
                     ApkRepackager.targetFloor = settings.target;
+                    ApkRepackager.patches = PatchStore.enabled(app, game, settings);
+                    // Saves first: an update re-makes the copy (patches, mods, target), so its progress is kept aside.
+                    String backup = SaveClient.backup(app, game);
+                    if (backup != null) out.append("saves: backed up to ").append(backup).append('\n');
                     final File signed = convert(app, game.apk, ApkRepackager.RENAME_SUFFIX, game.copyPackage(), out);
                     writeText(new File(new File(app.getExternalFilesDir(null), "repack"), game.copyPackage() + ".txt"),
                             out.toString());
@@ -210,6 +214,7 @@ final class ConvertJob {
                     }
                 } finally {
                     ApkRepackager.targetFloor = 0;
+                    ApkRepackager.patches = java.util.Collections.emptyList();
                     if (!handedToInstaller) {
                         release();
                         main.post(new Runnable() {

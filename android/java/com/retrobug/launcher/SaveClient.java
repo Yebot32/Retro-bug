@@ -114,6 +114,31 @@ final class SaveClient {
         }
     }
 
+    /**
+     * Keeps a copy of the game's current saves in getFilesDir()/backups/<package>/<time>.zip (the newest three are kept)
+     * before RetroBug re-makes its copy. Returns the file's path, or null when there was nothing to back up (no copy,
+     * or a copy without the helper) or the backup failed (logged; the update still goes ahead).
+     */
+    static String backup(Context c, Game g) {
+        if (!available(c, g)) return null;
+        java.io.File dir = new java.io.File(c.getFilesDir(), "backups/" + g.packageName);
+        if (!dir.isDirectory() && !dir.mkdirs()) return null;
+        java.io.File to = new java.io.File(dir, new java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.ROOT)
+                .format(new java.util.Date()) + ".zip");
+        String why = export(c, g, Uri.fromFile(to));
+        if (why != null) {
+            android.util.Log.w("RetroBug", "saves backup for " + g.packageName + " failed: " + why);
+            to.delete();
+            return null;
+        }
+        java.io.File[] all = dir.listFiles();
+        if (all != null && all.length > 3) {
+            java.util.Arrays.sort(all);
+            for (int i = 0; i < all.length - 3; i++) all[i].delete();
+        }
+        return to.getAbsolutePath();
+    }
+
     static String undo(Context c, Game g) {
         try {
             Bundle b = call(c, g, "undo");

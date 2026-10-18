@@ -195,6 +195,8 @@ mkdir -p "$OUT/shim-classes" "$OUT/shim-dex"
   "$(to_host "$OUT/shim-classes.jar")" >/dev/null
 [ -s "$OUT/shim-dex/classes.dex" ] || { echo "d8 produced no shim classes.dex" >&2; exit 1; }
 cp "$OUT/shim-dex/classes.dex" "$OUT/stage/assets/rbshim.dex"
+# Built-in game patches (M6): android/patches/<package>/<id>.rbpatch, shipped as assets/patches/.
+if [ -d "$SRC/patches" ]; then mkdir -p "$OUT/stage/assets/patches"; cp -r "$SRC/patches/." "$OUT/stage/assets/patches/"; fi
 
 # ---- package
 # `aapt2 link` takes *compiled* resources, so the icon tree is compiled first. Until the icon the launcher
