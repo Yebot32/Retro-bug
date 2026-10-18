@@ -308,8 +308,7 @@ final class GameMenu {
             case 0: v = settingsTab(); break;
             case 1: v = emptyTab("No mods yet", "Texture packs, translations and music for this game will appear here, each "
                     + "with its own switch.", "Add a mod pack"); break;
-            case 2: v = emptyTab("No patches yet", "Code patches, fixes and cheats made for this game's version will appear "
-                    + "here, each with its own switch.", "Add a patch"); break;
+            case 2: v = patchesTab(); break;
             case DATA_TAB: v = dataTab(); break;
             default: v = deleteTab(); break;
         }
@@ -401,7 +400,72 @@ final class GameMenu {
         }
     }
 
-    // ------------------------------------------------------------------ Mods / Patches
+    // ------------------------------------------------------------------ Patches (M6)
+
+    /**
+     * The game's patches, each with a switch. A change takes effect when the copy is updated (the header's Update):
+     * patches are applied to the game's libraries as the copy is made, and the saves are backed up first.
+     */
+    private View patchesTab() {
+        LinearLayout list = list();
+        final java.util.List<Patch> all = PatchStore.available(c, game);
+        list.addView(section("Patches"));
+        if (all.isEmpty()) {
+            list.addView(row("No patches for this game yet", "A patch is a small .rbpatch file of fixes made for this "
+                    + "game's version. Add one below; it is checked against the game before it is used.", false, null));
+        } else {
+            list.addView(row("Changes apply when the game's copy is updated",
+                    "Your saves are backed up first. The original game is never changed.", false, null));
+        }
+        for (final Patch p : all) {
+            String last = PatchStore.lastResult(c, game, p.id);
+            String sub = (p.description.isEmpty() ? "" : p.description + "\n")
+                    + (p.versionCode >= 0 ? "Made for version " + p.versionCode + (p.versionCode == game.versionCode ? "" : " (this game is "
+                    + game.versionCode + ")") + ". " : "")
+                    + (last == null ? "" : "Last update: " + last + ". ") + (p.builtIn ? "Built in." : "Added by you; long press to remove.");
+            View r = switchRow(p.title, sub.trim(), settings.hasPatch(p.id), new CompoundButton.OnCheckedChangeListener() {
+                @Override public void onCheckedChanged(CompoundButton b, boolean on) {
+                    java.util.List<String> ids = new java.util.ArrayList<>();
+                    for (String s : settings.patches.split(",")) if (!s.isEmpty() && !s.equals(p.id)) ids.add(s);
+                    if (on) ids.add(p.id);
+                    settings.patches = GameSettings.ids(android.text.TextUtils.join(",", ids));
+                    store.put(game.packageName, settings);
+                    library.refresh();  // the tile now reads "Update available" until the copy is re-made
+                }
+            });
+            if (!p.builtIn) {
+                ((ViewGroup) r).getChildAt(0).setOnLongClickListener(new View.OnLongClickListener() {  // the row inside the divider wrapper
+                    @Override public boolean onLongClick(View v) {
+                        confirm("Remove this patch?", "\"" + p.title + "\" is removed from RetroBug. Update the game's copy "
+                                + "afterwards to take it out of the game.", "Remove", new Runnable() {
+                            @Override public void run() {
+                                PatchStore.remove(c, game, p);
+                                select(current);
+                            }
+                        });
+                        return true;
+                    }
+                });
+            }
+            list.addView(r);
+        }
+        list.addView(row("Add a patch file", "Pick a .rbpatch file made for this game", true, new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*");
+                library.pickFile(i, new Consumer<Uri>() {
+                    @Override public void accept(Uri uri) {
+                        String why = PatchStore.add(c, game, uri);
+                        Toast.makeText(c, why == null ? "Patch added. Turn it on, then update the game's copy." : why,
+                                Toast.LENGTH_LONG).show();
+                        select(current);
+                    }
+                });
+            }
+        }));
+        return scroll(list);
+    }
+
+    // ------------------------------------------------------------------ Mods
 
     private View emptyTab(String title, String body, String button) {
         LinearLayout box = list();
