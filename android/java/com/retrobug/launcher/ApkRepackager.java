@@ -248,7 +248,6 @@ final class ApkRepackager {
             // M6 patches: applied to the guest libraries' bytes before anything is written, so the manifest can carry the
             // fingerprint of the set actually applied (the library compares it with the player's choice).
             Map<String, byte[]> patched = new HashMap<>();
-            List<Patch> applied = new ArrayList<>();
             for (Patch p : patches) {
                 ZipEntry le = nativeControl ? null : zip.getEntry(guestDir + p.lib);
                 if (le == null) {
@@ -262,13 +261,14 @@ final class ApkRepackager {
                 Patch.Applied a = p.apply(base);
                 if (a.ok) {
                     patched.put(p.lib, a.bytes);
-                    applied.add(p);
                     r.report.add("patch " + p.id + ": applied to " + p.lib + " (" + p.edits.size() + " edit(s))");
                 } else {
                     r.report.add("patch " + p.id + ": not applied — " + a.why);
                 }
             }
-            if (!applied.isEmpty()) ed.addMetaDataString(PATCHES_META, Patch.fingerprint(applied));
+            // The requested set (not only the ones that fit): the library compares it with the player's choice, and a
+            // patch that does not fit this build must not leave the game "out of date" forever (the report says why).
+            if (!patches.isEmpty()) ed.addMetaDataString(PATCHES_META, Patch.fingerprint(patches));
             if (edited) manifest = ed.toBytes();
 
             List<ZipEntry> guest = new ArrayList<>();

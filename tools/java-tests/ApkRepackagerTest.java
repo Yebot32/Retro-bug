@@ -461,9 +461,9 @@ public class ApkRepackagerTest {
         check(Arrays.equals(o.get("assets/rb32/libbar.so"), b("V7A-bar")), "the other library is unchanged");
         check(reportHas(r, "patch fix-v", "applied") && reportHas(r, "patch wrong", "not applied"), "report: " + r.report);
         AxmlEditor e = AxmlEditor.parse(o.get("AndroidManifest.xml"));
-        check(Patch.fingerprint(Arrays.asList(fits)).equals(e.metaDataString(ApkRepackager.PATCHES_META)),
-                "the copy carries the fingerprint of the patches applied: " + e.metaDataString(ApkRepackager.PATCHES_META));
-        check(xmltree(out).contains("value(0x01010024)=\"" + Patch.fingerprint(Arrays.asList(fits)) + "\""),
+        check(Patch.fingerprint(Arrays.asList(fits, wrong)).equals(e.metaDataString(ApkRepackager.PATCHES_META)),
+                "the copy carries the fingerprint of the patches requested: " + e.metaDataString(ApkRepackager.PATCHES_META));
+        check(xmltree(out).contains("value(0x01010024)=\"" + Patch.fingerprint(Arrays.asList(fits, wrong)) + "\""),
                 "aapt2 reads the string meta-data");
         // No patches: no fingerprint entry at all.
         File out2 = new File(scratch, "unpatched.out.apk");
