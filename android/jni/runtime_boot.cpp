@@ -66,9 +66,9 @@ std::string SettingsText() {
     const std::string path = "/data/user/" + std::to_string(::getuid() / 100000) + "/" + pkg + "/files/rb-settings.properties";
     std::string s;
     if (FILE* f = std::fopen(path.c_str(), "rb")) {
-      char buf[1024];
-      const std::size_t n = std::fread(buf, 1, sizeof buf, f);
-      s.assign(buf, n);
+      // The whole file (patch and mod lists make it longer than a few keys), bounded to keep a corrupt file harmless.
+      char buf[4096];
+      for (std::size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0 && s.size() < (std::size_t{64} << 10);) s.append(buf, n);
       std::fclose(f);
     }
     return s;
@@ -76,9 +76,26 @@ std::string SettingsText() {
   return text;
 }
 
+/// The value of `key` in the settings ("key=value" lines, as GameSettings.format writes them), "" when absent.
+/// Exact key match: "overlay=10" is not "overlay=1", and "xcpu=safe" is not "cpu".
+std::string Setting(const std::string& key) {
+  const std::string& t = SettingsText();
+  std::size_t at = 0;
+  while (at < t.size()) {
+    std::size_t end = t.find('\n', at);
+    if (end == std::string::npos) end = t.size();
+    std::string line = t.substr(at, end - at);
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    const std::size_t eq = line.find('=');
+    if (eq != std::string::npos && line.compare(0, eq, key) == 0 && eq == key.size()) return line.substr(eq + 1);
+    at = end + 1;
+  }
+  return {};
+}
+
 /// The tier guest code runs on: Tier J (the JIT) unless the player chose "Safe" (Tier I, the interpreter).
 int Tier() {
-  static const int tier = SettingsText().find("cpu=safe") != std::string::npos ? 1 : 2;
+  static const int tier = Setting("cpu") == "safe" ? 1 : 2;
   return tier;
 }
 

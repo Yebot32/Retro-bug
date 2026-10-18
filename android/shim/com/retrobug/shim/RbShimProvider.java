@@ -36,8 +36,17 @@ public final class RbShimProvider extends ContentProvider {
             Log.i(Shims.TAG, "shims FAILED: could not read assets/" + CONFIG + ": " + t);
         }
         String settings = fetchSettings();
-        if (settings.contains("overlay=1")) Overlay.install(getContext());
+        if ("1".equals(setting(settings, "overlay"))) Overlay.install(getContext());
         return true;
+    }
+
+    /** The value of `key` in "key=value" settings text (GameSettings.format), null when absent. Exact key match. */
+    static String setting(String text, String key) {
+        for (String line : text.split("\n")) {
+            int eq = line.indexOf('=');
+            if (eq == key.length() && line.startsWith(key)) return line.substring(eq + 1).trim();
+        }
+        return null;
     }
 
     static final String SETTINGS_AUTHORITY = "com.retrobug.launcher.settings";
@@ -69,9 +78,10 @@ public final class RbShimProvider extends ContentProvider {
             return text;
         }
         try (java.io.InputStream in = new java.io.FileInputStream(file)) {
-            byte[] b = new byte[1024];
-            int n = in.read(b);
-            return n > 0 ? new String(b, 0, n, "UTF-8") : "";
+            java.io.ByteArrayOutputStream all = new java.io.ByteArrayOutputStream();
+            byte[] b = new byte[4096];
+            for (int n; (n = in.read(b)) > 0 && all.size() < (64 << 10); ) all.write(b, 0, n);
+            return all.toString("UTF-8");
         } catch (Throwable t) {
             return "";
         }
