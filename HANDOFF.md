@@ -26,6 +26,19 @@ versionName (`ApkRepackager.RUNTIME_STAMP`) so the library knows "Update availab
 Known: an install from the library goes through Android's installer, where Play Protect asks to "Scan app" (upload the
 copy to Google) — the human's choice; the scripted `-e repack` path installs over adb and is not asked.
 
+**Data tab (2026-10-18, branch `data-tab`):** the game menu's fifth tab. OBB: the source is the player's added .obb
+(files/obb/<pkg>/) or the original's Android/obb/<pkg>/ (readable by the launcher, which may install apps); it goes
+into Android/obb/<pkg>.rb/ named for <pkg>.rb (`ObbRules`). The **copy** must own the file (the game reads it as
+itself; a launcher-owned file is EACCES), so the copy's `RbSaveProvider` creates getObbDir() and opens each file and
+the launcher streams the bytes in (`ObbStore.install`); conversion installs the OBB right after a successful install.
+Saves: `RbSaveProvider` (exported, answers only com.retrobug.launcher signed with the cert SHA-256 recorded in
+rbshim.properties as launcherCert) zips files/, shared_prefs/, databases/ and external files (`SaveArchive`, host
+tested, zip-slip and other-game refusals), imports via staging + an undo zip in no_backup/, then ends its process.
+Runtime stamp moved from versionName ("-rb1" broke SMB Bounce, which loads assets/dex/main-<versionName>.jar) to
+`<meta-data com.retrobug.runtime=2>`: every older copy reads "Update available". Verified on the tablet: SMB Bounce
+stuck at "Loading 0%" → title screen with the OBB; export → import → export byte-identical (CRC32s); undo offered;
+adb shell refused. Teeny Titans 2 (Unity) stops earlier: libmain dlopens libunity.so by full path (engine gap).
+
 Final-review fix pass: the library's decisions live in the host-tested `LibraryRules` (converting state across rescans,
 the target a copy really gets — shared with `ApkRepackager` — split/ABI classification, backdrop sample size). Split
 installs and non-32-bit added APKs get a tile that says why; hasCode="false" games show CPU/overlay disabled; a tap on

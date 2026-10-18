@@ -177,8 +177,9 @@ final class GameCatalog {
     Game.State stateOf(PackageManager pm, PackageInfo original) {
         try {
             String pkg = original.packageName;
-            PackageInfo copy = pm.getPackageInfo(pkg + ApkRepackager.RENAME_SUFFIX, 0);
-            int stamp = ApkRepackager.stampOf(copy.versionName);
+            PackageInfo copy = pm.getPackageInfo(pkg + ApkRepackager.RENAME_SUFFIX, PackageManager.GET_META_DATA);
+            int stamp = copy.applicationInfo == null || copy.applicationInfo.metaData == null ? -1
+                    : copy.applicationInfo.metaData.getInt(ApkRepackager.RUNTIME_META, -1);
             ApplicationInfo oa = original.applicationInfo;
             int wantTarget = oa == null ? settings.get(pkg).target
                     : LibraryRules.outputTarget(oa.targetSdkVersion, oa.minSdkVersion, settings.get(pkg).target);

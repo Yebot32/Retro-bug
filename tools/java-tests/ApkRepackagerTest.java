@@ -352,6 +352,35 @@ public class ApkRepackagerTest {
                 && Arrays.equals(o2.get("classes2.dex"), risky), "shim dex goes to classes3.dex: " + r2.shimDex);
     }
 
+    /** The Data tab's save provider: exported (the launcher asks it), beside the unexported shim provider. */
+    static void addsSaveProvider() throws Exception {
+        Map<String, byte[]> x = new LinkedHashMap<>();
+        x.put("classes.dex", Files.readAllBytes(new File(fixtures, "RiskyFixture.dex").toPath()));
+        x.put("lib/armeabi/libgumball.so", b("ARM-gum"));
+        File in = build("min_only", null, "saves", x);
+        File out = new File(scratch, "saves.out.apk");
+        Map<String, byte[]> rt = runtimeWithShims();
+        rt.put(ShimPlan.LAUNCHER_CERT_KEY, b("ab12cd"));
+        ApkRepackager.transform(in, rt, out);
+        Map<String, byte[]> o = readAll(out);
+        String cfg = new String(o.get(ShimPlan.CONFIG_ENTRY), StandardCharsets.UTF_8);
+        check(cfg.endsWith("\nlauncherCert=ab12cd\n"), "config records the launcher's certificate: " + cfg);
+        check(!o.containsKey(ShimPlan.LAUNCHER_CERT_KEY), "the launchercert key is not itself an entry");
+        AxmlEditor e = AxmlEditor.parse(o.get("AndroidManifest.xml"));
+        check("com.retrobug.fixture.rbsaves".equals(e.stringAttrOf("provider", ShimPlan.SAVES_PROVIDER_CLASS, "authorities")),
+                "save provider authorities: " + e.stringAttrOf("provider", ShimPlan.SAVES_PROVIDER_CLASS, "authorities"));
+        String t = xmltree(out);
+        check(t.contains("name(0x01010003)=\"com.retrobug.shim.RbSaveProvider\""), "aapt2: save provider name");
+        int save = t.indexOf("com.retrobug.shim.RbSaveProvider");
+        check(save > 0 && t.indexOf("exported(0x01010010)=true", save) > save, "aapt2: the save provider is exported");
+        check(t.contains("exported(0x01010010)=false"), "aapt2: the shim provider stays unexported");
+        // Without the launcher's certificate (a launcher build that could not read it) no save provider is added.
+        File out2 = new File(scratch, "saves2.out.apk");
+        ApkRepackager.transform(in, runtimeWithShims(), out2);
+        check(AxmlEditor.parse(readAll(out2).get("AndroidManifest.xml"))
+                .stringAttrOf("provider", ShimPlan.SAVES_PROVIDER_CLASS, "authorities") == null, "no certificate: no save provider");
+    }
+
     static void shimsWhenNotNeededOrImpossible() throws Exception {
         Map<String, byte[]> x = new LinkedHashMap<>();
         x.put("classes.dex", Files.readAllBytes(new File(fixtures, "RiskyFixture.dex").toPath()));
@@ -483,27 +512,37 @@ public class ApkRepackagerTest {
         }
     }
 
-    /** A converted copy's versionName carries the runtime stamp the library reads back (Ready vs Update available). */
-    static void stampsVersionName() throws Exception {
+    /**
+     * A converted copy carries the runtime stamp the library reads back (Ready vs Update available) as
+     * <meta-data android:name="com.retrobug.runtime" android:value=N/> — never in its versionName, which games read
+     * (SMB Bounce loads assets/dex/main-<versionName>.jar).
+     */
+    static void stampsRuntime() throws Exception {
         File in = build("min_only", null, "stamp-none", fullExtras());
         File out = new File(scratch, "stamp-none.out.apk");
         ApkRepackager.transform(in, runtime(), out);
-        String none = AxmlEditor.parse(readAll(out).get("AndroidManifest.xml")).versionName();
-        check(("rb" + ApkRepackager.RUNTIME_STAMP).equals(none), "no versionName -> rb<stamp>: " + none);
+        AxmlEditor none = AxmlEditor.parse(readAll(out).get("AndroidManifest.xml"));
+        check(none.versionName() == null, "no versionName stays absent: " + none.versionName());
+        check(Integer.valueOf(ApkRepackager.RUNTIME_STAMP).equals(none.metaDataInt(ApkRepackager.RUNTIME_META)),
+                "runtime meta-data: " + none.metaDataInt(ApkRepackager.RUNTIME_META));
         AxmlEditor ed = AxmlEditor.parse(fixture("min_only"));
-        ed.setVersionName("2.5");
+        ed.setVersionName("1.2.12");
         File in2 = build("min_only", ed.toBytes(), "stamp-25", fullExtras());
         File out2 = new File(scratch, "stamp-25.out.apk");
         ApkRepackager.transform(in2, runtime(), out2);
-        String v = AxmlEditor.parse(readAll(out2).get("AndroidManifest.xml")).versionName();
-        check(("2.5-rb" + ApkRepackager.RUNTIME_STAMP).equals(v), "2.5 -> 2.5-rb<stamp>: " + v);
-        check(ApkRepackager.stampOf("2.5-rb7") == 7 && ApkRepackager.stampOf("rb3") == 3, "stampOf reads the stamp");
-        check(ApkRepackager.stampOf("2.5") == -1 && ApkRepackager.stampOf(null) == -1, "stampOf: no stamp is -1");
+        AxmlEditor v = AxmlEditor.parse(readAll(out2).get("AndroidManifest.xml"));
+        check("1.2.12".equals(v.versionName()), "versionName unchanged: " + v.versionName());
+        check(Integer.valueOf(ApkRepackager.RUNTIME_STAMP).equals(v.metaDataInt(ApkRepackager.RUNTIME_META)), "stamped");
+        String t = xmltree(out2);
+        check(t.contains("E: meta-data") && t.contains("name(0x01010003)=\"com.retrobug.runtime\"")
+                && t.contains("value(0x01010024)=" + ApkRepackager.RUNTIME_STAMP), "aapt2 reads the meta-data: " + t);
+        check(ApkRepackager.RUNTIME_STAMP >= 2, "stamp raised past the versionName-stamped copies (rb1)");
     }
 
     public static void main(String[] a) throws Exception {
         fixtures = new File(a[0]); scratch = new File(a[1]); aapt2 = a[2];
         addsShims();
+        addsSaveProvider();
         shimsWhenNotNeededOrImpossible();
         renamesPackage();
         movesV7aAndStubs();
@@ -517,7 +556,7 @@ public class ApkRepackagerTest {
         generatesStubs();
         refusals();
         storesCompressedArsc();
-        stampsVersionName();
+        stampsRuntime();
         System.out.println(checks + " checks, " + failures + " failures");
         System.exit(failures == 0 ? 0 : 1);
     }

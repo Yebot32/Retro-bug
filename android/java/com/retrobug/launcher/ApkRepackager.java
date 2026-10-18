@@ -57,16 +57,13 @@ final class ApkRepackager {
     private static final String GUEST_DIR = "assets/rb32/";
     private static final String MANIFEST = "AndroidManifest.xml";
     private static final String ARSC = "resources.arsc";
-    /** The runtime generation a converted copy was made by, carried as its versionName suffix `-rb<N>`. Raise it when
-     *  the runtime changes in a way copies must be re-made for; the library then shows "Update available". */
-    static final int RUNTIME_STAMP = 1;
-
-    /** The stamp in a versionName (`2.5-rb3` or `rb3`), -1 when there is none. */
-    static int stampOf(String versionName) {
-        if (versionName == null) return -1;
-        java.util.regex.Matcher m = java.util.regex.Pattern.compile("(?:^|-)rb(\\d+)$").matcher(versionName);
-        return m.find() ? Integer.parseInt(m.group(1)) : -1;
-    }
+    /**
+     * The runtime generation a converted copy was made by, carried as {@code <meta-data RUNTIME_META=N>}. Raise it when
+     * the runtime changes in a way copies must be re-made for; the library then shows "Update available". 2: the stamp
+     * left the versionName (generation 1 put "-rb1" there) and copies gained save export/import.
+     */
+    static final int RUNTIME_STAMP = 2;
+    static final String RUNTIME_META = "com.retrobug.runtime";
 
     static final class Result {
         String packageName;      // the output's package (the new one when renamed)
@@ -202,6 +199,11 @@ final class ApkRepackager {
             } else {
                 ed.addProvider(ShimPlan.PROVIDER_CLASS, r.packageName + ShimPlan.AUTHORITY_SUFFIX, Integer.MAX_VALUE);
                 ed.addQueriesProvider(ShimPlan.SETTINGS_AUTHORITY);
+                if (runtimeFiles.containsKey(ShimPlan.LAUNCHER_CERT_KEY)) {
+                    // Save export/import for the Data tab; it answers only the launcher with that certificate.
+                    ed.addProvider(ShimPlan.SAVES_PROVIDER_CLASS, r.packageName + ShimPlan.SAVES_AUTHORITY_SUFFIX, 0, true);
+                    r.report.add("saves: " + ShimPlan.SAVES_PROVIDER_CLASS + " (exported; answers only the RetroBug launcher)");
+                }
                 edited = true;
                 addShims = true;
             }
@@ -223,13 +225,11 @@ final class ApkRepackager {
                 edited = true;
                 r.report.add("uses-library: org.apache.http.legacy (required=false), on the classpath before API 28");
             }
-            {
-                String v = ed.versionName();
-                String stamped = (v == null || v.isEmpty() ? "" : v + "-") + "rb" + RUNTIME_STAMP;
-                ed.setVersionName(stamped);
-                edited = true;
-                r.report.add("versionName: " + (v == null ? "absent" : v) + " -> " + stamped);
-            }
+            // The runtime stamp, for the library's "Update available": a meta-data entry, never the versionName (games
+            // read their own versionName — SMB Bounce loads assets/dex/main-<versionName>.jar).
+            ed.addMetaDataInt(RUNTIME_META, RUNTIME_STAMP);
+            edited = true;
+            r.report.add("stamp: <meta-data " + RUNTIME_META + "=" + RUNTIME_STAMP + ">");
             if (edited) manifest = ed.toBytes();
 
             List<ZipEntry> guest = new ArrayList<>();
@@ -325,7 +325,10 @@ final class ApkRepackager {
                     claim(names, dexName);
                     putBytes(zo, dexName, shimDex, ZipEntry.DEFLATED);
                     claim(names, ShimPlan.CONFIG_ENTRY);
-                    putBytes(zo, ShimPlan.CONFIG_ENTRY, plan.config().getBytes(StandardCharsets.UTF_8), ZipEntry.DEFLATED);
+                    byte[] cert = runtimeFiles.get(ShimPlan.LAUNCHER_CERT_KEY);
+                    String config = plan.config()
+                            + (cert == null ? "" : "launcherCert=" + new String(cert, StandardCharsets.UTF_8).trim() + "\n");
+                    putBytes(zo, ShimPlan.CONFIG_ENTRY, config.getBytes(StandardCharsets.UTF_8), ZipEntry.DEFLATED);
                     r.shims = new ArrayList<>(plan.shims);
                     r.shimDex = dexName;
                     r.report.add("shims: " + plan.shims + " (in-process targetSdk " + plan.originalTarget + ") — provider "
@@ -334,7 +337,8 @@ final class ApkRepackager {
 
                 for (Map.Entry<String, byte[]> f : runtimeFiles.entrySet()) {
                     if (nativeControl && (f.getKey().startsWith("lib/") || f.getKey().startsWith("assets/rb32"))) continue;
-                    if (f.getKey().equals(STUB_KEY) || f.getKey().equals(ShimPlan.SHIM_DEX_KEY)) continue;
+                    if (f.getKey().equals(STUB_KEY) || f.getKey().equals(ShimPlan.SHIM_DEX_KEY)
+                            || f.getKey().equals(ShimPlan.LAUNCHER_CERT_KEY)) continue;
                     claim(names, f.getKey());
                     putBytes(zo, f.getKey(), f.getValue(), ZipEntry.DEFLATED);
                 }

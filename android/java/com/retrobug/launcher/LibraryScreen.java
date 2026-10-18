@@ -29,7 +29,15 @@ final class LibraryScreen extends LinearLayout {
     interface Host {
         void addApk();
         void openSettings();
+        /** A document picker; `done` gets the chosen file (not called when the player backs out). */
+        void pickFile(Intent intent, Consumer<android.net.Uri> done);
+        /** A picked file's display name, or null. */
+        String nameOf(android.net.Uri uri);
     }
+
+    void pickFile(Intent intent, Consumer<android.net.Uri> done) { host.pickFile(intent, done); }
+
+    String nameOf(android.net.Uri uri) { return host.nameOf(uri); }
 
     private static final int RECEIVER_NOT_EXPORTED = 0x4;  // Context.RECEIVER_NOT_EXPORTED (API 33)
 
@@ -195,6 +203,11 @@ final class LibraryScreen extends LinearLayout {
                 if (!ok) {
                     Toast.makeText(c, "Couldn't make " + g.label + " playable. Long press it for details.",
                             Toast.LENGTH_LONG).show();
+                } else if (report != null && report.contains("\nobb: ") && !report.contains("\nobb: installed")) {
+                    // Installed, but its OBB copy failed: the game would sit at its loading screen without saying why.
+                    String why = report.substring(report.lastIndexOf("\nobb: ") + 6).trim();
+                    Toast.makeText(c, g.label + " is ready, but its OBB wasn't copied: " + why
+                            + ". Long press it → Data to try again.", Toast.LENGTH_LONG).show();
                 }
                 refresh();
             }

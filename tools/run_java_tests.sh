@@ -46,7 +46,7 @@ done
 
 # Never trust a piped exit status: the source list is built into an array first, and javac runs bare.
 mapfile -t SRCS < <(grep -L 'import android\.' "$ROOT"/android/java/com/retrobug/launcher/*.java)
-SRCS+=("$ROOT"/tools/java-tests/*.java)
+SRCS+=("$ROOT"/tools/java-tests/*.java "$ROOT"/android/shim/com/retrobug/shim/SaveArchive.java)
 HOST_SRCS=(); for s in "${SRCS[@]}"; do HOST_SRCS+=("$(to_host "$s")"); done
 javac -encoding UTF-8 -nowarn -Xlint:-options -d "$(to_host "$OUT/classes")" "${HOST_SRCS[@]}"
 
@@ -89,3 +89,6 @@ java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ApkScanTest "$(to_hos
 java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ArtPickerTest
 java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.GameSettingsTest
 java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.LibraryRulesTest
+# The Data tab: OBB names for the copy, and the copy's save export/import.
+java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ObbRulesTest
+java -cp "$(to_host "$OUT/classes")" com.retrobug.shim.SaveArchiveTest
