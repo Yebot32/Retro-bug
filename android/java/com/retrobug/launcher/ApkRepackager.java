@@ -64,6 +64,10 @@ final class ApkRepackager {
      */
     static final int RUNTIME_STAMP = 2;
     static final String RUNTIME_META = "com.retrobug.runtime";
+    /** The fingerprint (Patch.fingerprint) of the M6 patches applied to a copy; absent when none were. */
+    static final String PATCHES_META = "com.retrobug.patches";
+    /** The patches to apply to the next conversion (set by ConvertJob from the game's settings); empty = none. */
+    static volatile List<Patch> patches = java.util.Collections.emptyList();
 
     static final class Result {
         String packageName;      // the output's package (the new one when renamed)
@@ -241,6 +245,30 @@ final class ApkRepackager {
             ed.addMetaDataInt(RUNTIME_META, RUNTIME_STAMP);
             edited = true;
             r.report.add("stamp: <meta-data " + RUNTIME_META + "=" + RUNTIME_STAMP + ">");
+            // M6 patches: applied to the guest libraries' bytes before anything is written, so the manifest can carry the
+            // fingerprint of the set actually applied (the library compares it with the player's choice).
+            Map<String, byte[]> patched = new HashMap<>();
+            List<Patch> applied = new ArrayList<>();
+            for (Patch p : patches) {
+                ZipEntry le = nativeControl ? null : zip.getEntry(guestDir + p.lib);
+                if (le == null) {
+                    r.report.add("patch " + p.id + ": not applied — the game has no " + guestDir + p.lib);
+                    continue;
+                }
+                byte[] base = patched.get(p.lib);
+                if (base == null) {
+                    try (InputStream in = zip.getInputStream(le)) { base = ElfRepair.repair(readFully(in)); }
+                }
+                Patch.Applied a = p.apply(base);
+                if (a.ok) {
+                    patched.put(p.lib, a.bytes);
+                    applied.add(p);
+                    r.report.add("patch " + p.id + ": applied to " + p.lib + " (" + p.edits.size() + " edit(s))");
+                } else {
+                    r.report.add("patch " + p.id + ": not applied — " + a.why);
+                }
+            }
+            if (!applied.isEmpty()) ed.addMetaDataString(PATCHES_META, Patch.fingerprint(applied));
             if (edited) manifest = ed.toBytes();
 
             List<ZipEntry> guest = new ArrayList<>();
@@ -337,6 +365,7 @@ final class ApkRepackager {
                         r.report.add("elf: " + name + " — e_shentsize/e_shstrndx restored (zeroed by a protection wrapper)");
                         lib = fixed;
                     }
+                    if (patched.containsKey(name)) lib = patched.get(name);  // M6 patches (already repaired, then edited)
                     putBytes(zo, dest, lib, ZipEntry.DEFLATED);
                     libBytes.put(name, lib);
                     // Only .so files are loaded by name through the linker; anything else (gdbserver, data

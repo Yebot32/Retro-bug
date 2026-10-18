@@ -630,14 +630,29 @@ final class AxmlEditor {
      * Adds {@code <meta-data android:name=name android:value=value/>} (an integer) as the last child of
      * {@code <application>}; PackageManager hands it back in ApplicationInfo.metaData (GET_META_DATA).
      */
-    void addMetaDataInt(String name, int value) throws IOException {
+    void addMetaDataInt(String name, int value) throws IOException { addMetaData(name, value, null); }
+
+    /** As {@link #addMetaDataInt}, with a string android:value. */
+    void addMetaDataString(String name, String value) throws IOException { addMetaData(name, 0, value); }
+
+    /** The string android:value of {@code <meta-data android:name=name>}, or null. */
+    String metaDataString(String name) {
+        for (byte[] c : nodes) {
+            if (u16(c, 0) != XML_START_ELEMENT || !"meta-data".equals(str(s32(c, NODE_HEADER + 4)))) continue;
+            if (!name.equals(stringValue(c, findAttr(c, "name")))) continue;
+            return stringValue(c, findAttr(c, "value"));
+        }
+        return null;
+    }
+
+    private void addMetaData(String name, int intValue, String strValue) throws IOException {
         int app = findElement("application");
         if (app < 0) throw new IOException("manifest has no <application> element");
         int nName = ensureAttrName("name", ATTR_NAME);
         int nValue = ensureAttrName("value", ATTR_VALUE);
         int ns = indexOf(ANDROID_NS);
         if (ns < 0) throw new IOException("manifest declares no android namespace to attach the meta-data to");
-        int tag = poolString("meta-data"), vName = poolString(name);
+        int tag = poolString("meta-data"), vName = poolString(name), vStr = strValue == null ? -1 : poolString(strValue);
         int end = -1;
         for (int i = nodes.size() - 1; i > app && end < 0; i--) {
             byte[] c = nodes.get(i);
@@ -654,8 +669,12 @@ final class AxmlEditor {
         put16(start, NODE_HEADER + 12, 2);
         int a = NODE_HEADER + 20;
         putStringAttr(start, a, ns, nName, vName);
-        put32(start, a + ATTR_SIZE, ns); put32(start, a + ATTR_SIZE + 4, nValue);
-        putTyped(start, a + ATTR_SIZE, value);
+        if (strValue != null) {
+            putStringAttr(start, a + ATTR_SIZE, ns, nValue, vStr);
+        } else {
+            put32(start, a + ATTR_SIZE, ns); put32(start, a + ATTR_SIZE + 4, nValue);
+            putTyped(start, a + ATTR_SIZE, intValue);
+        }
         byte[] close = new byte[NODE_HEADER + 8];
         put16(close, 0, XML_END_ELEMENT); put16(close, 2, NODE_HEADER); put32(close, 4, close.length);
         put32(close, 8, line); put32(close, 12, -1);

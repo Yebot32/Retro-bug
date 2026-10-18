@@ -440,6 +440,38 @@ public class ApkRepackagerTest {
         check(!t.contains("minSdkVersion(0x0101020c)=10"), "no element keeps the old minSdk 10");
     }
 
+    /** M6: enabled patches are applied to the guest library bytes; one that does not fit is reported, not applied. */
+    static void appliesPatches() throws Exception {
+        Map<String, byte[]> x = new LinkedHashMap<>();
+        x.put("lib/armeabi-v7a/libfoo.so", b("V7A-foo"));
+        x.put("lib/armeabi-v7a/libbar.so", b("V7A-bar"));
+        File in = build("min_only", null, "patched", x);
+        File out = new File(scratch, "patched.out.apk");
+        Patch fits = Patch.parse("id=fix-v\ntitle=V to X\nlib=libfoo.so\nedit=0 56 -> 58\n");
+        Patch wrong = Patch.parse("id=wrong\ntitle=Wrong bytes\nlib=libbar.so\nedit=0 00 -> 01\n");
+        ApkRepackager.patches = Arrays.asList(fits, wrong);
+        ApkRepackager.Result r;
+        try {
+            r = ApkRepackager.transform(in, runtime(), out);
+        } finally {
+            ApkRepackager.patches = java.util.Collections.emptyList();
+        }
+        Map<String, byte[]> o = readAll(out);
+        check(Arrays.equals(o.get("assets/rb32/libfoo.so"), b("X7A-foo")), "the fitting patch is applied to the guest lib");
+        check(Arrays.equals(o.get("assets/rb32/libbar.so"), b("V7A-bar")), "the other library is unchanged");
+        check(reportHas(r, "patch fix-v", "applied") && reportHas(r, "patch wrong", "not applied"), "report: " + r.report);
+        AxmlEditor e = AxmlEditor.parse(o.get("AndroidManifest.xml"));
+        check(Patch.fingerprint(Arrays.asList(fits)).equals(e.metaDataString(ApkRepackager.PATCHES_META)),
+                "the copy carries the fingerprint of the patches applied: " + e.metaDataString(ApkRepackager.PATCHES_META));
+        check(xmltree(out).contains("value(0x01010024)=\"" + Patch.fingerprint(Arrays.asList(fits)) + "\""),
+                "aapt2 reads the string meta-data");
+        // No patches: no fingerprint entry at all.
+        File out2 = new File(scratch, "unpatched.out.apk");
+        ApkRepackager.transform(in, runtime(), out2);
+        check(AxmlEditor.parse(readAll(out2).get("AndroidManifest.xml")).metaDataString(ApkRepackager.PATCHES_META) == null,
+                "no patches: no fingerprint");
+    }
+
     static void shimsWhenNotNeededOrImpossible() throws Exception {
         Map<String, byte[]> x = new LinkedHashMap<>();
         x.put("classes.dex", Files.readAllBytes(new File(fixtures, "RiskyFixture.dex").toPath()));
@@ -605,6 +637,7 @@ public class ApkRepackagerTest {
         repairsElfAssets();
         dropsSharedUserAndMaxSdk();
         twoUsesSdk();
+        appliesPatches();
         shimsWhenNotNeededOrImpossible();
         renamesPackage();
         movesV7aAndStubs();
