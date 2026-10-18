@@ -37,6 +37,8 @@ public final class RbShimProvider extends ContentProvider {
         }
         String settings = fetchSettings();
         if ("1".equals(setting(settings, "overlay"))) Overlay.install(getContext());
+        String scale = setting(settings, "scale");  // M6 render scale (75 / 50); absent = 100, untouched
+        if ("75".equals(scale) || "50".equals(scale)) RenderScale.install(getContext(), Integer.parseInt(scale));
         return true;
     }
 

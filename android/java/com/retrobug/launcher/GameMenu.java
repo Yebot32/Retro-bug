@@ -374,11 +374,39 @@ final class GameMenu {
                 : "Make the game playable first", copy, new View.OnClickListener() {
             @Override public void onClick(View v) { appInfo(); }
         }));
-        list.addView(row("Resolution", "Coming with M6", false, null));
+        if (game.hasCode) {
+            final TextView[] scaleValue = new TextView[1];
+            list.addView(valueRow("Render scale", scaleText(), "Draws the game at fewer pixels and scales it up: smoother on "
+                    + "heavy games, softer picture. Takes effect the next time the game starts.", scaleValue,
+                    new View.OnClickListener() {
+                        @Override public void onClick(View v) {
+                            settings.scale = settings.scale == 100 ? 75 : settings.scale == 75 ? 50 : 100;
+                            store.put(game.packageName, settings);
+                            scaleValue[0].setText(scaleText());
+                        }
+                    }));
+        }
+        final TextView[] aspectValue = new TextView[1];
+        list.addView(valueRow("Aspect", aspectText(), "Stretch fills the screen; Fit keeps the game's shape with black bars. "
+                + "Changing it updates the copy.", aspectValue, new View.OnClickListener() {
+                    @Override public void onClick(View v) {
+                        settings.aspect = settings.aspect.equals("stretch") ? "fit169"
+                                : settings.aspect.equals("fit169") ? "fit43" : "stretch";
+                        store.put(game.packageName, settings);
+                        aspectValue[0].setText(aspectText());
+                        library.refresh();  // the copy now reads "Update available"
+                    }
+                }));
         return scroll(list);
     }
 
     private String cpuText() { return settings.cpu.equals("safe") ? "Safe" : "Fast"; }
+
+    private String scaleText() { return settings.scale == 100 ? "Full" : settings.scale + " %"; }
+
+    private String aspectText() {
+        return settings.aspect.equals("fit169") ? "Fit 16:9" : settings.aspect.equals("fit43") ? "Fit 4:3" : "Stretch";
+    }
 
     private static String version(int sdk) {
         switch (sdk) {
