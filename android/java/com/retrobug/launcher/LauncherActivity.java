@@ -191,11 +191,14 @@ public class LauncherActivity extends Activity {
         if (stage != null && !stage.isEmpty()) {
             File src = new File(getExternalFilesDir(null), new File(stage).getName());
             File dest = new File(gamesDir(), src.getName().replaceAll("[^A-Za-z0-9._-]", "_"));
-            try (InputStream in = new java.io.FileInputStream(src); OutputStream out = new FileOutputStream(dest)) {
+            File temp = new File(dest.getParentFile(), dest.getName() + ".part");
+            try (InputStream in = new java.io.FileInputStream(src); OutputStream out = new FileOutputStream(temp)) {
                 byte[] buf = new byte[1 << 16];
                 for (int n = in.read(buf); n > 0; n = in.read(buf)) out.write(buf, 0, n);
+                if (!temp.renameTo(dest)) throw new IOException("could not finish the copy");
                 Log.i(TAG, "stage: added " + dest + " (" + dest.length() + " bytes)");
             } catch (IOException e) {
+                temp.delete();
                 Log.e(TAG, "stage: could not copy " + src + ": " + e.getMessage());
             }
         }
@@ -1135,7 +1138,11 @@ public class LauncherActivity extends Activity {
     private List<File> games() {
         File[] files = gamesDir().listFiles();
         if (files == null) return new ArrayList<>();
-        List<File> out = new ArrayList<>(Arrays.asList(files));
+        List<File> out = new ArrayList<>();
+        for (File f : files) {
+            // Only real APKs: an interrupted add leaves a `.part` beside the name, and it must never become a tile.
+            if (f.isFile() && f.getName().toLowerCase(java.util.Locale.ROOT).endsWith(".apk")) out.add(f);
+        }
         Collections.sort(out, new java.util.Comparator<File>() {
             @Override public int compare(File a, File b) { return a.getName().compareToIgnoreCase(b.getName()); }
         });
@@ -1194,14 +1201,19 @@ public class LauncherActivity extends Activity {
         new Thread(new Runnable() {
             @Override public void run() {
                 String problem = null;
+                // Copy beside the final name first (C15): a copy that fails halfway used to leave a truncated file
+                // under the game's real name, which the library then showed as a broken tile that could not play.
+                final File temp = new File(dest.getParentFile(), dest.getName() + ".part");
                 try (InputStream in = getContentResolver().openInputStream(uri);
-                     OutputStream out = new FileOutputStream(dest)) {
+                     OutputStream out = new FileOutputStream(temp)) {
                     if (in == null) throw new IOException("the picker returned a stream this app cannot open");
                     byte[] buf = new byte[1 << 16];
                     for (int n = in.read(buf); n > 0; n = in.read(buf)) out.write(buf, 0, n);
                 } catch (IOException | SecurityException e) {
                     problem = e.getClass().getSimpleName() + ": " + e.getMessage();
                 }
+                if (problem == null && !temp.renameTo(dest)) problem = "could not finish the copy";
+                if (problem != null) temp.delete();
                 final String message = problem == null
                         ? "Added " + dest.getName() + " (" + (dest.length() >> 20) + " MB)"
                         : "Could not copy the file — " + problem;

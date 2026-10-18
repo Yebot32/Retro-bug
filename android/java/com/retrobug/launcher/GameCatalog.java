@@ -53,36 +53,63 @@ final class GameCatalog {
         bg.execute(new Runnable() {
             @Override public void run() {
                 Map<String, Game> seen = new LinkedHashMap<>();
-                PackageManager pm = ctx.getPackageManager();
-                Intent launcher = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
-                String shows = SettingsScreen.libraryShows(ctx);  // Settings > Library shows
-                for (ResolveInfo ri : shows.equals("added") ? java.util.Collections.<ResolveInfo>emptyList()
-                        : pm.queryIntentActivities(launcher, 0)) {
-                    String pkg = ri.activityInfo.packageName;
-                    // RetroBug's own apps (this launcher, test probes) and converted copies are not games to offer.
-                    if (seen.containsKey(pkg) || pkg.startsWith("com.retrobug.") || pkg.endsWith(ApkRepackager.RENAME_SUFFIX))
-                        continue;
-                    Game g = installed(pm, pkg);
-                    if (g == null) continue;
-                    seen.put(pkg, g);
-                    post(l, g);
-                }
-                File[] files = shows.equals("installed") ? null : gamesDir(ctx).listFiles();
-                if (files != null) {
-                    java.util.Arrays.sort(files);
-                    for (File f : files) {
-                        if (!f.getName().toLowerCase().endsWith(".apk")) continue;
-                        Game g = added(pm, f, seen);
-                        if (g == null) continue;
-                        boolean joined = seen.containsKey(g.key);
-                        seen.put(g.key, g);
-                        if (!joined) post(l, g);  // an installed game's tile is already up; the final list carries the merge
+                // The scan must always reach onDone (C22): an exception used to escape this runnable and the library
+                // sat on "Looking for your games…" forever. One unreadable package now skips itself, and the final
+                // list is posted from a finally.
+                try {
+                    PackageManager pm = ctx.getPackageManager();
+                    Intent launcher = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
+                    String shows = SettingsScreen.libraryShows(ctx);  // Settings > Library shows
+                    java.util.List<ResolveInfo> activities;
+                    try {
+                        activities = shows.equals("added") ? java.util.Collections.<ResolveInfo>emptyList()
+                                : pm.queryIntentActivities(launcher, 0);
+                    } catch (RuntimeException e) {
+                        Log.w(TAG, "catalog: could not list activities: " + e);
+                        activities = java.util.Collections.emptyList();
                     }
+                    for (ResolveInfo ri : activities) {
+                        String pkg = ri.activityInfo.packageName;
+                        // RetroBug's own apps (this launcher, test probes) and converted copies are not games to offer.
+                        if (seen.containsKey(pkg) || pkg.startsWith("com.retrobug.") || pkg.endsWith(ApkRepackager.RENAME_SUFFIX))
+                            continue;
+                        Game g;
+                        try {
+                            g = installed(pm, pkg);
+                        } catch (RuntimeException e) {
+                            Log.w(TAG, "catalog: skipped " + pkg + ": " + e);
+                            continue;
+                        }
+                        if (g == null) continue;
+                        seen.put(pkg, g);
+                        post(l, g);
+                    }
+                    File[] files = shows.equals("installed") ? null : gamesDir(ctx).listFiles();
+                    if (files != null) {
+                        java.util.Arrays.sort(files);
+                        for (File f : files) {
+                            if (!f.getName().toLowerCase().endsWith(".apk")) continue;
+                            Game g;
+                            try {
+                                g = added(pm, f, seen);
+                            } catch (RuntimeException e) {
+                                Log.w(TAG, "catalog: skipped " + f.getName() + ": " + e);
+                                continue;
+                            }
+                            if (g == null) continue;
+                            boolean joined = seen.containsKey(g.key);
+                            seen.put(g.key, g);
+                            if (!joined) post(l, g);  // an installed game's tile is already up; the final list carries the merge
+                        }
+                    }
+                } catch (RuntimeException e) {
+                    Log.e(TAG, "catalog scan failed: " + e);
+                } finally {
+                    final java.util.List<Game> all = new java.util.ArrayList<>(seen.values());
+                    main.post(new Runnable() {
+                        @Override public void run() { l.onDone(all); }
+                    });
                 }
-                final java.util.List<Game> all = new java.util.ArrayList<>(seen.values());
-                main.post(new Runnable() {
-                    @Override public void run() { l.onDone(all); }
-                });
             }
         });
     }

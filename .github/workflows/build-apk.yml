@@ -179,13 +179,8 @@ jobs:
           body: |
             RetroBug launcher APK, built from ${{ github.sha }} by the `build-apk` workflow.
 
-            This is a *probe*, not the emulator's release: it installs the engine inside an Android app and
-            runs a 32-bit ARM (`armeabi-v7a`) library on both execution tiers, reporting whether the values
-            match what the same bytes produced natively on hardware.
-
-            What to look for on the phone: open "RetroBug" and read the line about 32-bit support. On a
-            64-bit-only phone it says this device cannot run 32-bit ARM at all, and every ARMv7 instruction
-            behind the results below was executed by RetroBug in that process. On a 32-bit-capable phone it
-            says so, and the PASS only means the engine agrees with the phone.
+            The launcher is the app a 32-bit game runs inside: its library lists 32-bit games on the device,
+            converts one into a playable copy, and runs it. Built as a debuggable dev build unless the
+            workflow is asked for a release.
           files: build/launcher-apk/rbguest-launcher.apk
           fail_on_unmatched_files: true

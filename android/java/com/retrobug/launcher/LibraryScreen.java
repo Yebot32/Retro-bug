@@ -161,6 +161,13 @@ final class LibraryScreen extends LinearLayout {
         return null;
     }
 
+    /** The live entry for a key, or null when the library no longer lists it. A menu can outlive the Game it opened
+     *  with (a target change re-scans), and acting on the stale object would launch the old copy (C14). */
+    Game current(String key) {
+        for (Game g : games) if (g.key.equals(key)) return g;
+        return null;
+    }
+
     void tap(final Game g) {
         Context c = getContext();
         switch (g.state) {

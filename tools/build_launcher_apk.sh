@@ -180,7 +180,7 @@ fi
 # The launcher's classes go to d8 as one jar: d8.bat is a cmd script, and a growing list of .class paths
 # on its command line runs into cmd's 8191-character limit.
 (cd "$OUT/classes" && jar -cf "$(to_host "$OUT/launcher-classes.jar")" .)
-"$BT/d8.bat" --lib "$(to_host "$AJ")" --min-api 26 --output "$(to_host "$OUT/dex")" \
+"$BT/d8.bat" --release --lib "$(to_host "$AJ")" --min-api 26 --output "$(to_host "$OUT/dex")" \
   "$(to_host "$OUT/launcher-classes.jar")" "$(to_host "$APKSIG")" >/dev/null
 [ -s "$OUT/dex/classes.dex" ] || { echo "d8 produced no classes.dex" >&2; exit 1; }
 if [ -e "$OUT/dex/classes2.dex" ]; then
@@ -191,7 +191,7 @@ fi
 # own `-e shimcheck`. --min-api 24 because that is the lowest minSdk a repackaged game declares.
 mkdir -p "$OUT/shim-classes" "$OUT/shim-dex"
 (cd "$OUT/classes" && jar -cf "$(to_host "$OUT/shim-classes.jar")" com/retrobug/shim)
-"$BT/d8.bat" --lib "$(to_host "$AJ")" --min-api 24 --output "$(to_host "$OUT/shim-dex")" \
+"$BT/d8.bat" --release --lib "$(to_host "$AJ")" --min-api 24 --output "$(to_host "$OUT/shim-dex")" \
   "$(to_host "$OUT/shim-classes.jar")" >/dev/null
 [ -s "$OUT/shim-dex/classes.dex" ] || { echo "d8 produced no shim classes.dex" >&2; exit 1; }
 cp "$OUT/shim-dex/classes.dex" "$OUT/stage/assets/rbshim.dex"
@@ -287,7 +287,4 @@ echo "Not installed: this script runs no adb. To run it,"
 echo "  adb install -r -g $(to_host "$OUT/rbguest-launcher.apk")"
 echo "  adb shell am start -n com.retrobug.launcher/.LauncherActivity"
 echo "  adb logcat -s RBLAUNCH"
-echo "Expected on a PASS: for each of the six seeds, a 'JNI_OnLoad tier=I' / 'tier=J' pair and a"
-echo "'mathProbe seed=N tier=I' / 'tier=J' pair, all PASS, then 'summary: 4 PASS, 0 FAIL over 4 calls'."
-echo "The values are the ones the same bytes produced natively on the SM-X710 via"
-echo "tools/build-guest-apk.sh's oracle_linked."
+echo "build is ${RB_RELEASE:+a release build}${RB_RELEASE:-debuggable (the -e paths work; RB_RELEASE=1 turns that off)}"

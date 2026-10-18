@@ -49,6 +49,8 @@ final class GameMenu {
     private final GameSettings settings;
     private final Dialog dialog;
     private final FrameLayout content;
+    private View headerView;
+    private final android.content.ComponentCallbacks configCallbacks;
     private TextView details;
     private final TextView[] tabViews = new TextView[TABS.length];
 
@@ -67,9 +69,8 @@ final class GameMenu {
         LinearLayout root = new LinearLayout(c);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(HoloTheme.PANEL);
-        int sh0 = c.getResources().getDisplayMetrics().heightPixels;
-        root.addView(header(art), new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
-                Math.max(HoloTheme.dp(c, 200), (int) (sh0 * 0.88f * 0.38f))));
+        headerView = header(art);
+        root.addView(headerView, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, headerHeight()));
         details = HoloTheme.text(c, "", 13, HoloTheme.TEXT_2, android.graphics.Typeface.MONOSPACE);
         int dp16 = HoloTheme.dp(c, 16);
         details.setPadding(HoloTheme.dp(c, 20), dp16, HoloTheme.dp(c, 20), dp16);
@@ -82,12 +83,39 @@ final class GameMenu {
         root.addView(content, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
         dialog.setContentView(root);
         select(0);
-        Window w = dialog.getWindow();
-        if (w != null) {
-            w.setBackgroundDrawable(new ColorDrawable(HoloTheme.PANEL));
-            int sw = c.getResources().getDisplayMetrics().widthPixels, sh = c.getResources().getDisplayMetrics().heightPixels;
-            w.setLayout(Math.min((int) (sw * 0.94f), HoloTheme.dp(c, 760)), (int) (sh * 0.88f));
+        applyWindowSize();
+        // The panel is sized from the display, so a rotation has to redo it: the menu used to keep its portrait size
+        // and be clipped in landscape (C13). The callback is dropped when the dialog closes.
+        configCallbacks = new android.content.ComponentCallbacks() {
+            @Override public void onConfigurationChanged(android.content.res.Configuration newConfig) { applyWindowSize(); }
+            @Override public void onLowMemory() { }
+        };
+        c.getApplicationContext().registerComponentCallbacks(configCallbacks);
+        dialog.setOnDismissListener(new DialogInterface.OnDismissListener() {
+            @Override public void onDismiss(DialogInterface d) {
+                c.getApplicationContext().unregisterComponentCallbacks(configCallbacks);
+            }
+        });
+    }
+
+    private int headerHeight() {
+        int sh = c.getResources().getDisplayMetrics().heightPixels;
+        return Math.max(HoloTheme.dp(c, 200), (int) (sh * 0.88f * 0.38f));
+    }
+
+    private void applyWindowSize() {
+        if (headerView != null) {
+            ViewGroup.LayoutParams lp = headerView.getLayoutParams();
+            if (lp != null) {
+                lp.height = headerHeight();
+                headerView.setLayoutParams(lp);
+            }
         }
+        Window w = dialog.getWindow();
+        if (w == null) return;
+        w.setBackgroundDrawable(new ColorDrawable(HoloTheme.PANEL));
+        int sw = c.getResources().getDisplayMetrics().widthPixels, sh = c.getResources().getDisplayMetrics().heightPixels;
+        w.setLayout(Math.min((int) (sw * 0.94f), HoloTheme.dp(c, 760)), (int) (sh * 0.88f));
     }
 
     // ------------------------------------------------------------------ header (the game's page)
@@ -137,7 +165,10 @@ final class GameMenu {
         action.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
                 dialog.dismiss();
-                library.tap(game);
+                // The menu can outlive the Game it opened with: changing the target re-scans the library, and the
+                // old object still says READY, so tapping it launched the previous copy (C14). Use the live entry.
+                Game current = library.current(game.key);
+                library.tap(current != null ? current : game);
             }
         });
         boolean narrow = c.getResources().getConfiguration().screenWidthDp < 600;
