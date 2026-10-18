@@ -92,7 +92,11 @@ final class HoloTheme {
 
     static TextView buttonView(Context c, String label, boolean primary) {
         TextView b = text(c, label, 16, primary ? 0xFF0B2A36 : TEXT, MEDIUM);
-        if (primary) b.setTextColor(darkOn(accent(c)));
+        // The disabled slab is near-black (0xFF202020). A primary label is dark-on-accent, so a disabled one was
+        // dark-on-black and read as an empty button (C16). The text colour follows the enabled state instead.
+        b.setTextColor(new android.content.res.ColorStateList(
+                new int[][] {{-android.R.attr.state_enabled}, {}},
+                new int[] {TEXT_3, primary ? darkOn(accent(c)) : TEXT}));
         b.setGravity(Gravity.CENTER);
         b.setAllCaps(true);
         b.setLetterSpacing(0.05f);
