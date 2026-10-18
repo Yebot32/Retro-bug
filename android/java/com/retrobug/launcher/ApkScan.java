@@ -1,10 +1,12 @@
 // RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
 //
-// What the library needs to know about an APK without unpacking it: the ABIs under lib/ (is this a 32-bit game?) and
-// the pixel size of every image inside, read from the image's own header — PNG's IHDR, JPEG's first SOF marker, WebP's
-// VP8 / VP8L / VP8X chunk. No image is decoded here; ArtPicker chooses from these sizes and ArtCache decodes one.
+// What the library needs to know about an APK without unpacking it: the ABIs under lib/ (is this a 32-bit game?), the
+// pixel size of every image inside, read from the image's own header — PNG's IHDR, JPEG's first SOF marker, WebP's
+// VP8 / VP8L / VP8X chunk — and whether the launcher activity is a NativeActivity (C31). No image is decoded here;
+// ArtPicker chooses from these sizes and ArtCache decodes one.
 package com.retrobug.launcher;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -12,6 +14,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.zip.ZipEntry;
@@ -22,6 +25,21 @@ final class ApkScan {
 
     /** At most this much of an image entry is read: a JPEG's SOF can sit behind a large EXIF or ICC segment. */
     static final int HEAD_BYTES = 128 * 1024;
+
+    /** The platform class whose onCreate() is what runs a game's own activity loop. */
+    static final String NATIVE_ACTIVITY = "Landroid/app/NativeActivity;";
+
+    /** The platform loads classes.dex, classes2.dex, ... up to the first gap; so does the walk below. */
+    private static final int MAX_DEX = 32;
+
+    /** A DEX bigger than this is not read at all: the answer is then "not known to be a NativeActivity". */
+    private static final int MAX_DEX_BYTES = 32 << 20;
+
+    /** The entry library is read whole to look at its exports; libmain.so is 18-34 KB in every game measured. */
+    private static final int MAX_ENTRY_LIB = 4 << 20;
+
+    /** A hierarchy deeper than this is not a real one; it bounds the walk against a malformed DEX. */
+    private static final int MAX_STEPS = 64;
 
     static final class Image {
         final String path;
@@ -61,6 +79,66 @@ final class ApkScan {
 
     static boolean is32BitOnly(Set<String> abis) {
         return (abis.contains("armeabi") || abis.contains("armeabi-v7a")) && !abis.contains("arm64-v8a");
+    }
+
+    /**
+     * Whether {@code className} — a launcher activity — is, or descends from, android.app.NativeActivity, according to
+     * the APK's own classes*.dex. This is the platform's rule and not an inference from the native code: it is
+     * NativeActivity.onCreate that dlopen()s the game's library and dlsym()s ANativeActivity_onCreate, and a repacked
+     * copy's stub exports only the library's Java_* names and JNI_OnLoad, so that lookup fails and the process dies
+     * with "undefined symbol" before a frame of the game runs (C31).
+     *
+     * <p>An export of ANativeActivity_onCreate in the game's library is not the same question and is not a substitute:
+     * MadTruck's libmain.so exports it and MadTruck runs, because its launcher activity is UnityPlayerActivity, a plain
+     * Java class that never calls it. It is asked first, though, because it costs a few tens of KB against a DEX's
+     * megabytes — a library that does not export it cannot be the one the platform fails to bind, so the DEX of such a
+     * game is never read. Only {@code libmain.so} is looked at: it is the platform's own default when the activity
+     * declares no {@code android.app.lib_name}, as all four measured NativeActivity games do. A game that names its
+     * library another way is left unmarked and fails exactly as it did before this check existed.
+     *
+     * <p>A chain that leaves one DEX is followed in the next, since a game may split its classes. An unreadable or
+     * oversized DEX leaves the answer false: the tile keeps whatever state it would have had.
+     */
+    static boolean isNativeActivity(File apk, String className, Set<String> abis) throws IOException {
+        if (className == null || className.isEmpty()) return false;
+        String cur = "L" + className.replace('.', '/') + ";";
+        try (ZipFile zip = new ZipFile(apk)) {
+            if (!entryExportsNativeActivity(zip, abis)) return false;
+            for (int i = 1; i <= MAX_DEX; i++) {
+                ZipEntry e = zip.getEntry(i == 1 ? "classes.dex" : "classes" + i + ".dex");
+                if (e == null) break;
+                byte[] dex;
+                try (InputStream in = zip.getInputStream(e)) { dex = readCapped(in, MAX_DEX_BYTES); }
+                if (dex == null) continue;  // too big to hold: this DEX cannot answer, a later one still might
+                Map<String, String> up = DexScanner.superclasses(dex);
+                for (int step = 0; step < MAX_STEPS; step++) {
+                    String sup = up.get(cur);
+                    if (sup == null) break;                  // not defined in this DEX: look in the next one
+                    if (sup.equals(NATIVE_ACTIVITY)) return true;
+                    if (sup.equals(cur)) break;              // malformed: a class cannot extend itself
+                    cur = sup;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** Whether the library the platform would dlopen for this game's 32-bit code exports the NativeActivity entry. */
+    private static boolean entryExportsNativeActivity(ZipFile zip, Set<String> abis) throws IOException {
+        for (String abi : new String[] {"armeabi-v7a", "armeabi"}) {
+            if (!abis.contains(abi)) continue;
+            ZipEntry e = zip.getEntry("lib/" + abi + "/libmain.so");
+            if (e == null) return false;
+            byte[] lib;
+            try (InputStream in = zip.getInputStream(e)) { lib = readCapped(in, MAX_ENTRY_LIB); }
+            if (lib == null) return false;
+            try {
+                return StubElfWriter.definesNativeActivity(lib);
+            } catch (IOException ex) {
+                return false;  // not a 32-bit ELF this build can read: no answer, and nothing for the scan to catch
+            }
+        }
+        return false;
     }
 
     static Info scan(File apk) throws IOException {
@@ -145,5 +223,16 @@ final class ApkScan {
         byte[] out = new byte[n];
         System.arraycopy(buf, 0, out, 0, n);
         return out;
+    }
+
+    /** The entry's bytes, or null as soon as it is known to be longer than {@code max} — nothing is read past that. */
+    private static byte[] readCapped(InputStream in, int max) throws IOException {
+        ByteArrayOutputStream o = new ByteArrayOutputStream(1 << 16);
+        byte[] buf = new byte[1 << 16];
+        for (int n; (n = in.read(buf)) > 0; ) {
+            if (o.size() + n > max) return null;
+            o.write(buf, 0, n);
+        }
+        return o.toByteArray();
     }
 }

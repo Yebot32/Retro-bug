@@ -28,6 +28,8 @@ final class Game {
     boolean hasCode = true;
     /** Why an UNREADABLE game cannot be offered, in the player's words; null for the plain "can't read this file". */
     String why;
+    /** The class the launcher starts, as the scan found it: what decides whether the game is a NativeActivity (C31). */
+    String launcher;
 
     Game(String key, String packageName, String label, long versionCode, File apk, boolean installed, boolean added,
          State state) {

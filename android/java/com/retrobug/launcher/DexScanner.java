@@ -1,8 +1,9 @@
 // RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
 //
 // Lists the method references in a DEX file ("Lpkg/Class;->name"), so the repack report can name the risky
-// platform calls a game makes (ShimPlan.riskReport). Only the three id tables that spell a method reference
-// are read — string_ids, type_ids, method_ids — following the layout in the DEX format documentation
+// platform calls a game makes (ShimPlan.riskReport), and the class hierarchy the library needs to tell a
+// NativeActivity game from a Java one (C31). Only the id tables are read — string_ids, type_ids, method_ids,
+// class_defs — following the layout in the DEX format documentation
 // (source.android.com/docs/core/runtime/dex-format). A reference names the class used at the call site,
 // so a call made through a subclass (`this.bindService(...)` in an Activity) appears under that subclass;
 // the risk table matches such names by method name alone.
@@ -11,6 +12,8 @@
 package com.retrobug.launcher;
 
 import java.io.IOException;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 
@@ -41,6 +44,50 @@ final class DexScanner {
             return out;
         } catch (IndexOutOfBoundsException ex) {
             throw new IOException("DEX malformed: " + ex, ex);
+        }
+    }
+
+    /**
+     * Every class this DEX defines, as its descriptor to its superclass's ({@code "Lpkg/Sub;" -> "Lpkg/Base;"}): what
+     * the library walks to find out whether a launcher activity is a NativeActivity (C31). A class with no superclass —
+     * java/lang/Object, and every interface — is left out, so a walk that reaches one simply stops.
+     */
+    static Map<String, String> superclasses(byte[] dex) throws IOException {
+        if (dex.length < 0x70 || dex[0] != 'd' || dex[1] != 'e' || dex[2] != 'x' || dex[3] != '\n')
+            throw new IOException("not a DEX file (no \"dex\\n\" magic)");
+        try {
+            Ids ids = new Ids(dex);
+            int nClass = s32(dex, 0x60), classOff = s32(dex, 0x64);
+            Map<String, String> out = new HashMap<>();
+            for (int i = 0; i < nClass; i++) {
+                int cd = classOff + 32 * i;   // class_def_item: class_idx, access_flags, superclass_idx, ...
+                int sup = s32(dex, cd + 8);
+                if (sup == -1) continue;      // NO_INDEX
+                out.put(ids.descriptor(s32(dex, cd)), ids.descriptor(sup));
+            }
+            return out;
+        } catch (IndexOutOfBoundsException ex) {
+            throw new IOException("DEX malformed: " + ex, ex);
+        }
+    }
+
+    /** The header fields a descriptor lookup needs, read once per DEX. */
+    private static final class Ids {
+        final byte[] dex;
+        final int nStr, strOff, nType, typeOff;
+
+        Ids(byte[] dex) {
+            this.dex = dex;
+            nStr = s32(dex, 0x38); strOff = s32(dex, 0x3c);
+            nType = s32(dex, 0x40); typeOff = s32(dex, 0x44);
+        }
+
+        /** The descriptor of type_ids[{@code typeIdx}] ({@code "Lpkg/Class;"}), through its string_data_item. */
+        String descriptor(int typeIdx) throws IOException {
+            if (typeIdx < 0 || typeIdx >= nType) throw new IOException("type_id " + typeIdx + " outside its table");
+            int desc = s32(dex, typeOff + 4 * typeIdx);
+            if (desc < 0 || desc >= nStr) throw new IOException("type_id " + typeIdx + " points outside string_ids");
+            return string(dex, s32(dex, strOff + 4 * desc));
         }
     }
 

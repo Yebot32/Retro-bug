@@ -1,10 +1,11 @@
 // RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
 //
-// Host tests for ApkScan: which ABIs an APK carries (the library's "is this a 32-bit game" filter) and the pixel sizes
-// of its images, read from the image headers alone. The images are hand-built header bytes of known sizes, so a wrong
-// offset in any of the three formats fails a row.
+// Host tests for ApkScan: which ABIs an APK carries (the library's "is this a 32-bit game" filter), the pixel sizes
+// of its images, read from the image headers alone, and whether the launcher activity is a NativeActivity (C31). The
+// images are hand-built header bytes of known sizes, so a wrong offset in any of the three formats fails a row; the
+// hierarchy rows read d8-built fixtures and real 32-bit ELFs, as a game's classes.dex and libmain.so are.
 //
-// args: <scratch dir>
+// args: <scratch dir> <fixture dir> <libmain.so with ANativeActivity_onCreate|none> <libmain.so without|none>
 package com.retrobug.launcher;
 
 import java.io.ByteArrayOutputStream;
@@ -13,12 +14,13 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 public class ApkScanTest {
     static int checks = 0, failures = 0;
-    static File scratch;
+    static File scratch, fixtures, naLib, jniLib;
 
     static void check(boolean ok, String what) {
         checks++;
@@ -116,10 +118,74 @@ public class ApkScanTest {
         check(ApkScan.imageSize(new byte[] {1, 2, 3}) == null, "unknown bytes have no size");
     }
 
+    /**
+     * The NativeActivity walk (C31), against d8 output and real 32-bit ELFs: a plain Java activity, one whose base class
+     * is in the same DEX, a chain into android.app.NativeActivity, a class the DEX does not define, and both library
+     * exports — a NativeActivity build's libmain.so, and a Java activity's (JNI_OnLoad alone, which is what MadTruck and
+     * Angry Birds Epic ship).
+     */
+    static void nativeActivity() throws Exception {
+        if (naLib == null || jniLib == null) {
+            System.out.println("ApkScanTest: NativeActivity rows skipped (no NDK)");
+            return;
+        }
+        byte[] dex = read(new File(fixtures, "ActivityFixture.dex"));
+        Map<String, String> up = DexScanner.superclasses(dex);
+        check("Landroid/app/NativeActivity;".equals(up.get("Lrb/fx/ActivityFixture$Native;")),
+                "Native extends NativeActivity: " + up.get("Lrb/fx/ActivityFixture$Native;"));
+        check("Lrb/fx/ActivityFixture$Base;".equals(up.get("Lrb/fx/ActivityFixture$Derived;")),
+                "Derived extends Base: " + up.get("Lrb/fx/ActivityFixture$Derived;"));
+        check(!up.containsKey("Landroid/app/Activity;"), "a class the DEX does not define is not in the map");
+
+        Set<String> v7a = new java.util.TreeSet<>(java.util.Arrays.asList("armeabi-v7a"));
+        Map<String, byte[]> m = new LinkedHashMap<>();
+        m.put("classes.dex", dex);
+        m.put("lib/armeabi-v7a/libmain.so", read(naLib));
+        File apk = zip("activity.apk", m);
+        check(ApkScan.isNativeActivity(apk, "rb.fx.ActivityFixture$Native", v7a), "a NativeActivity subclass");
+        check(ApkScan.isNativeActivity(apk, "rb.fx.ActivityFixture$NativeDerived", v7a), "two levels below it");
+        check(!ApkScan.isNativeActivity(apk, "rb.fx.ActivityFixture$Plain", v7a), "a plain Activity is not one");
+        check(!ApkScan.isNativeActivity(apk, "rb.fx.ActivityFixture$Derived", v7a),
+                "a base class in the same DEX is not one");
+        check(!ApkScan.isNativeActivity(apk, "rb.fx.NotHere", v7a), "a class no DEX defines is not one");
+        check(!ApkScan.isNativeActivity(apk, null, v7a), "an unknown launcher class is not one");
+
+        // The same DEX over a library built for a Java activity: the platform never dlopen()s it for this reason, and
+        // MadTruck proves the pair is real (its libmain.so exports the entry point and it still runs).
+        Map<String, byte[]> javaLib = new LinkedHashMap<>();
+        javaLib.put("classes.dex", dex);
+        javaLib.put("lib/armeabi-v7a/libmain.so", read(jniLib));
+        check(!ApkScan.isNativeActivity(zip("activity3.apk", javaLib), "rb.fx.ActivityFixture$Native", v7a),
+                "a library with no ANativeActivity_onCreate settles it without reading the DEX");
+
+        // The class in classes2.dex, as a game that splits its code has it: the walk must leave classes.dex and go on.
+        Map<String, byte[]> split = new LinkedHashMap<>();
+        split.put("classes.dex", read(new File(fixtures, "CleanFixture.dex")));
+        split.put("classes2.dex", dex);
+        split.put("lib/armeabi-v7a/libmain.so", read(naLib));
+        check(ApkScan.isNativeActivity(zip("activity2.apk", split), "rb.fx.ActivityFixture$NativeDerived", v7a),
+                "a chain that starts in classes2.dex");
+
+        // No libmain.so at all: a NativeActivity game that names its library through android.app.lib_name is not
+        // recognised, which is the documented limit of the cheap half — it fails exactly as it did before C31.
+        Map<String, byte[]> noLib = new LinkedHashMap<>();
+        noLib.put("classes.dex", dex);
+        check(!ApkScan.isNativeActivity(zip("nolibmain.apk", noLib), "rb.fx.ActivityFixture$Native", v7a),
+                "no libmain.so leaves the tile alone");
+    }
+
+    static byte[] read(File f) throws IOException {
+        return java.nio.file.Files.readAllBytes(f.toPath());
+    }
+
     public static void main(String[] a) throws Exception {
         scratch = new File(a[0]);
+        fixtures = new File(a[1]);
+        naLib = a.length > 2 && !a[2].equals("none") ? new File(a[2]) : null;
+        jniLib = a.length > 3 && !a[3].equals("none") ? new File(a[3]) : null;
         abis();
         images();
+        nativeActivity();
         System.out.println("ApkScanTest: " + checks + " checks, " + failures + " failures");
         System.exit(failures == 0 ? 0 : 1);
     }

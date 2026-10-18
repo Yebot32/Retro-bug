@@ -16,6 +16,19 @@ final class LibraryRules {
     /** A backdrop is only shown blurred at ~320 px: decode it to at most this on its longer side. */
     static final int BACKDROP_MAX = 640;
 
+    /**
+     * What a NativeActivity game's tile says (C31). It is the platform's NativeActivity.onCreate that dlopen()s the
+     * game's library and dlsym()s ANativeActivity_onCreate, and a repacked copy's stub exports only the library's
+     * {@code Java_*} names and {@code JNI_OnLoad} — so that lookup fails and the process dies with "undefined symbol"
+     * before a frame of the game runs, which reads as an engine fault rather than the gap it is. Running such a game
+     * means providing ANativeActivityCallbacks and the guest-side activity loop, so until then the tile says so.
+     *
+     * <p>Two lines of a toast, which is where a tap on the tile shows it: a longer sentence is ellipsized, and the
+     * part that would be cut is the part that says the game is not at fault.
+     */
+    static final String NATIVE_ACTIVITY_WHY = "RetroBug can't run this game yet: it starts from native code (a "
+            + "NativeActivity). The game and its APK are fine.";
+
     /** A rescan's games keep CONVERTING while their conversion runs; every other game takes the rescan's state. */
     static void keepConverting(List<Game> fresh, Set<String> converting) {
         for (Game g : fresh) if (converting.contains(g.key)) g.state = Game.State.CONVERTING;

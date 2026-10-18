@@ -52,7 +52,7 @@ javac -encoding UTF-8 -nowarn -Xlint:-options -d "$(to_host "$OUT/classes")" "${
 
 # DEX fixtures for the risk scan: real javac + d8 output, as in a game's classes.dex. Compiled against
 # android.jar so the references are the platform's own descriptors; never loaded or run.
-for f in RiskyFixture CleanFixture NativeFixture JniFixture ReceiverFixture; do
+for f in RiskyFixture CleanFixture NativeFixture JniFixture ReceiverFixture ActivityFixture; do
   mkdir -p "$OUT/dexsrc/$f" "$OUT/dexout/$f"
   javac -encoding UTF-8 -nowarn -Xlint:-options --release 8 -classpath "$(to_host "$AJ")" \
     -d "$(to_host "$OUT/dexsrc/$f")" "$(to_host "$ROOT/tools/java-tests/dexfixtures/$f.java")"
@@ -68,6 +68,12 @@ FX32="$OUT/fixtures/libjnibridge_fixture.so"
 "$NDK_BIN/clang.exe" --target=armv7-none-linux-androideabi26 --sysroot="$(to_host "$NDK_BIN/../sysroot")" -mthumb \
   -mfloat-abi=softfp -fPIC -shared -nostdlib -Os -fno-vectorize -fno-slp-vectorize \
   -o "$(to_host "$FX32")" "$(to_host "$ROOT/tests/corpus/jni_bridge_fixture.c")" -lc 2>/dev/null || FX32=""
+
+# libmain.so as a NativeActivity build ships it, for the library's C31 rows (also skipped without the NDK).
+FXNA="$OUT/fixtures/libmain_native_activity.so"
+"$NDK_BIN/clang.exe" --target=armv7-none-linux-androideabi26 --sysroot="$(to_host "$NDK_BIN/../sysroot")" -mthumb \
+  -mfloat-abi=softfp -fPIC -shared -nostdlib -Os \
+  -o "$(to_host "$FXNA")" "$(to_host "$ROOT/tests/corpus/native_activity_fixture.c")" -lc 2>/dev/null || FXNA=""
 
 java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ShimPlanTest "$(to_host "$OUT/fixtures")"
 
@@ -89,7 +95,10 @@ java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.StubElfWriterTest \
   "$(to_host "$OUT/scratch")" "$(to_host "$NDK_BIN/llvm-readelf.exe")" "${FX32:+$(to_host "$FX32")}"
 
 # The Holo launcher's pure parts (docs/superpowers/plans/2026-10-18-holo-launcher-ui.md).
-java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ApkScanTest "$(to_host "$OUT/scratch")"
+NA_ARG=none; [ -z "$FXNA" ] || NA_ARG="$(to_host "$FXNA")"
+JNI_ARG=none; [ -z "$FX32" ] || JNI_ARG="$(to_host "$FX32")"
+java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ApkScanTest "$(to_host "$OUT/scratch")" \
+  "$(to_host "$OUT/fixtures")" "$NA_ARG" "$JNI_ARG"
 java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ArtPickerTest
 java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.GameSettingsTest
 java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.LibraryRulesTest

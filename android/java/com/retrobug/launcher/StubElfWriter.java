@@ -179,6 +179,27 @@ final class StubElfWriter {
 
     /** The {@code Java_*} and {@code JNI_OnLoad} functions a 32-bit ARM ELF defines in its .dynsym. */
     static Set<String> jniExportsOf(byte[] elf) throws IOException {
+        Set<String> out = new TreeSet<>();
+        for (String name : definedFunctions(elf))
+            if (name.startsWith("Java_") || name.equals(ONLOAD)) out.add(name);
+        return out;
+    }
+
+    /** The platform's entry point for an activity that runs its own native loop; see {@link #definesNativeActivity}. */
+    static final String NATIVE_ACTIVITY = "ANativeActivity_onCreate";
+
+    /**
+     * Whether {@code elf} defines {@code ANativeActivity_onCreate}: what the platform dlsym()s from the library a
+     * NativeActivity's onCreate() dlopen()s, and what a generated stub never exports (C31). Asked of the game's
+     * {@code libmain.so} — a few tens of KB — as the cheap half of the library's question; whether the platform asks
+     * at all is decided by the launcher activity's own class (ApkScan.isNativeActivity).
+     */
+    static boolean definesNativeActivity(byte[] elf) throws IOException {
+        return definedFunctions(elf).contains(NATIVE_ACTIVITY);
+    }
+
+    /** Every global function a 32-bit ARM ELF defines in its .dynsym (the names, not their addresses). */
+    static Set<String> definedFunctions(byte[] elf) throws IOException {
         if (elf.length < 52 || elf[0] != 0x7f || elf[1] != 'E' || elf[2] != 'L' || elf[3] != 'F' || elf[4] != 1 || elf[5] != 1)
             throw new IOException("not a 32-bit little-endian ELF");
         ByteBuffer b = ByteBuffer.wrap(elf).order(ByteOrder.LITTLE_ENDIAN);
@@ -193,8 +214,7 @@ final class StubElfWriter {
                 for (int s = off + 16; s + 16 <= off + size; s += 16) {
                     int info = elf[s + 12] & 0xff, shndx = b.getShort(s + 14) & 0xffff;
                     if (shndx == 0 || (info & 0xf) != 2 || (info >> 4) == 0) continue;  // defined, FUNC, not LOCAL
-                    String name = cstr(elf, strOff + b.getInt(s));
-                    if (name.startsWith("Java_") || name.equals(ONLOAD)) out.add(name);
+                    out.add(cstr(elf, strOff + b.getInt(s)));
                 }
                 return out;
             }

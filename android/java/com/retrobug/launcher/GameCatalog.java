@@ -75,7 +75,7 @@ final class GameCatalog {
                             continue;
                         Game g;
                         try {
-                            g = installed(pm, pkg);
+                            g = installed(pm, pkg, ri.activityInfo.name);
                         } catch (RuntimeException e) {
                             Log.w(TAG, "catalog: skipped " + pkg + ": " + e);
                             continue;
@@ -116,9 +116,10 @@ final class GameCatalog {
 
     /**
      * An installed original built for 32-bit ARM only. One whose 32-bit code sits in a split APK gets a tile that says
-     * so; a 64-bit or Java-only app, one whose APK cannot be read, or one that vanished mid-scan, is null.
+     * so, as does one that starts itself from native code (a NativeActivity, C31); a 64-bit or Java-only app, one whose
+     * APK cannot be read, or one that vanished mid-scan, is null.
      */
-    private Game installed(PackageManager pm, String pkg) {
+    private Game installed(PackageManager pm, String pkg, String launcher) {
         ApplicationInfo ai;
         PackageInfo pi;
         try {
@@ -144,6 +145,8 @@ final class GameCatalog {
         boolean hasSplits = ai.splitSourceDirs != null && ai.splitSourceDirs.length > 0;
         switch (LibraryRules.classify(base, splits, hasSplits)) {
             case GAME:
+                g.launcher = launcher;
+                if (startsAsNativeActivity(apk, pkg, launcher, base)) return g.unplayable(LibraryRules.NATIVE_ACTIVITY_WHY);
                 g.state = stateOf(pm, pi);
                 return g;
             case SPLIT:
@@ -151,6 +154,16 @@ final class GameCatalog {
                         + "APK for now. Add the game's full APK instead.");
             default:
                 return null;
+        }
+    }
+
+    /** C31's question, asked off the scan's own thread of control: an unreadable DEX leaves the tile as it was. */
+    private boolean startsAsNativeActivity(File apk, String pkg, String launcher, java.util.Set<String> abis) {
+        try {
+            return ApkScan.isNativeActivity(apk, launcher, abis);
+        } catch (Exception e) {
+            Log.w(TAG, "library: cannot read " + pkg + "'s APK for its start, not checked: " + e);
+            return false;
         }
     }
 
@@ -178,11 +191,14 @@ final class GameCatalog {
             Game have = seen.get(pkg);
             Game g;
             if (have != null && have.state == Game.State.UNREADABLE) {
-                // A split install's tile: the added full APK is what a conversion reads.
+                // A split install's tile: the added full APK is what a conversion reads. The C31 question is asked of
+                // that APK in turn, because an added file cannot change what the launcher activity is.
                 g = new Game(pkg, pkg, have.label, have.versionCode, f, true, true, stateOf(pm, pi));
+                if (startsAsNativeActivity(f, pkg, have.launcher, abis)) g.unplayable(LibraryRules.NATIVE_ACTIVITY_WHY);
             } else if (have != null) {
                 g = new Game(pkg, pkg, have.label, have.versionCode, have.apk, true, true, have.state);
                 hasCode = have.hasCode;
+                g.launcher = have.launcher;
             } else {
                 String label = String.valueOf(pi.applicationInfo.loadLabel(pm));
                 g = new Game(pkg, pkg, label, versionCode(pi), f, false, true, stateOf(pm, pi));
