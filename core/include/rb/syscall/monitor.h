@@ -143,6 +143,31 @@ constexpr std::uint32_t kSetTidAddress = 256;
 constexpr std::uint32_t kClockGettime = 263;
 constexpr std::uint32_t kClockNanosleep = 265;
 constexpr std::uint32_t kTgkill = 268;
+/// `tkill` is *not* `tgkill` and was missed by the first survey of what a Unity boot asks for: the same fatal
+/// pair is written down here twice under two numbers, and a scan for 268 alone reads a process that never
+/// signals anything. Measured (SM-X710 2026-10-19): Cars 3 asks 264, then 238, then 363, and leaves through
+/// `exit_group(127)` two microseconds later — the refusal, not the signal, is what ends it.
+constexpr std::uint32_t kTkill = 238;
+/// `rt_tgsigqueueinfo`: `tgkill` carrying a `siginfo_t`. Same family, same answer.
+constexpr std::uint32_t kRtTgsigqueueinfo = 363;
+/// The gaps C34 names, each one a call that has a true answer on the host and had none here. `clock_getres`
+/// is the first of them: Cars 3 asks it immediately before the two signal calls above.
+constexpr std::uint32_t kClockGetres = 264;
+constexpr std::uint32_t kUname = 122;
+constexpr std::uint32_t kSysinfo = 116;
+constexpr std::uint32_t kSchedSetaffinity = 241;
+constexpr std::uint32_t kSchedGetaffinity = 242;
+constexpr std::uint32_t kPrlimit64 = 369;
+/// The scheduler family a Mono game reaches the moment it starts a GC thread. Measured (SM-X710 2026-10-19):
+/// once the signal calls above stopped ending Cars 3, it asked 155, 156, 159 and 160 in a tight loop — the
+/// calls a thread makes when it sets its own scheduling policy before parking. Each has a true answer here.
+constexpr std::uint32_t kSchedGetparam = 155;
+constexpr std::uint32_t kSchedSetscheduler = 156;
+constexpr std::uint32_t kSchedGetscheduler = 157;
+constexpr std::uint32_t kSchedGetPriorityMax = 159;
+constexpr std::uint32_t kSchedGetPriorityMin = 160;
+constexpr std::uint32_t kSetpriority = 97;
+constexpr std::uint32_t kGetpriority = 96;
 constexpr std::uint32_t kOpenat = 322;
 /// ARM's name for what the 64-bit ABIs call `newfstatat`: there is no separate `newfstatat` number here,
 /// and the NDK header has only this one (`unistd-eabi.h:291`).

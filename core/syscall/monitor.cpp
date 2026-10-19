@@ -5,14 +5,20 @@
 #include "rb/syscall/host_io.h"
 
 #include <fcntl.h>
+#include <sys/resource.h>
+#include <sys/sysinfo.h>
+#include <sys/utsname.h>
 #include <unistd.h>
+#include <sched.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <random>
 #include <thread>
+#include <vector>
 
 #include "rb/mem/guest_memory.h"
 
@@ -194,6 +200,21 @@ const char* Name(std::uint32_t number) {
     case nr::kClockGettime: return "clock_gettime";
     case nr::kClockNanosleep: return "clock_nanosleep";
     case nr::kTgkill: return "tgkill";
+    case nr::kTkill: return "tkill";
+    case nr::kRtTgsigqueueinfo: return "rt_tgsigqueueinfo";
+    case nr::kClockGetres: return "clock_getres";
+    case nr::kUname: return "uname";
+    case nr::kSysinfo: return "sysinfo";
+    case nr::kSchedSetaffinity: return "sched_setaffinity";
+    case nr::kSchedGetaffinity: return "sched_getaffinity";
+    case nr::kPrlimit64: return "prlimit64";
+    case nr::kSchedGetparam: return "sched_getparam";
+    case nr::kSchedSetscheduler: return "sched_setscheduler";
+    case nr::kSchedGetscheduler: return "sched_getscheduler";
+    case nr::kSchedGetPriorityMax: return "sched_get_priority_max";
+    case nr::kSchedGetPriorityMin: return "sched_get_priority_min";
+    case nr::kSetpriority: return "setpriority";
+    case nr::kGetpriority: return "getpriority";
     case nr::kOpenat: return "openat";
     case nr::kFstatat64: return "fstatat64";
     case nr::kReadlinkat: return "readlinkat";
@@ -496,19 +517,37 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
     case nr::kClone:
       return Clone(f, state, th);
 
+    case nr::kTkill:
+    case nr::kRtTgsigqueueinfo:
     case nr::kTgkill: {
-      // tgkill(tgid, tid, sig). Signal 0 is the existence probe (`pthread_kill(t, 0)`): answered from this
-      // process's live threads. Delivering a real signal is not implemented, and says so by name.
+      // The fatal-signal family, under all three numbers a Unity boot uses: `tgkill(tgid, tid, sig)`,
+      // `tkill(tid, sig)` and `rt_tgsigqueueinfo(tgid, tid, sig, info)`. They are the same operation with the
+      // arguments shifted, and only `tgkill` was handled, which is how a scan for 268 read a process that never
+      // touched a signal — while Cars 3 asked 238 and 363 in the same microsecond as 268.
+      //
+      // Signal 0 is the existence probe (`pthread_kill(t, 0)`): answered from this process's live threads, and
+      // the answer is a fact. A real signal is not delivered, and that is stated by name rather than answered
+      // with a 0 this build cannot honour. The distinction matters here more than anywhere else in this file:
+      // a guest's fatal path reads the return value, and telling it "delivered" when nothing ran its handler
+      // turns a crash it could report into a process that dies saying nothing.
+      const bool queue = f.number == nr::kRtTgsigqueueinfo;
       const auto tgid = static_cast<std::int32_t>(f.arg[0]);
-      const auto tid = static_cast<std::int32_t>(f.arg[1]);
-      const auto sig = static_cast<std::int32_t>(f.arg[2]);
-      const std::string call = "tgkill(" + std::to_string(tgid) + ", " + std::to_string(tid) + ", " +
-                               std::to_string(sig) + ")";
+      const auto tid = static_cast<std::int32_t>(queue ? f.arg[1] : f.arg[0]);
+      const auto sig = static_cast<std::int32_t>(queue ? f.arg[2] : f.arg[1]);
+      const char* what = queue ? "rt_tgsigqueueinfo" : (f.number == nr::kTkill ? "tkill" : "tgkill");
+      const std::string call = std::string{what} + "(" +
+                               (f.number == nr::kTkill ? "" : std::to_string(tgid) + ", ") +
+                               std::to_string(tid) + ", " + std::to_string(sig) +
+                               (queue ? ", &info" : "") + ")";
       if (sig != 0) {
         return Outcome::Refused(err::kEnosys, call + ": delivering signal " + std::to_string(sig) +
-                                                  " is not implemented — this build delivers no signals");
+                                                  " is not implemented — this build delivers no signals, so a "
+                                                  "handler the guest installed would never run and a default "
+                                                  "action would never be taken");
       }
-      const bool alive = ids_set_ && tgid == pid_ && (tid == main_->tid || live_tids_.count(tid) != 0);
+      // tkill carries no tgid, so the tid alone decides; the other two also require the group id to match.
+      const bool group_ok = f.number == nr::kTkill || (ids_set_ && tgid == pid_);
+      const bool alive = group_ok && (tid == main_->tid || live_tids_.count(tid) != 0);
       if (!alive) return Outcome::Answered(err::kEsrch, call + " = -ESRCH (-3): no such live thread in this process");
       return Outcome::Emulated(0, call + " -> 0: the thread is alive");
     }
@@ -758,6 +797,264 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
       }
       return Outcome::Emulated(0, call + "(" + std::to_string(id) + ") = " + std::to_string(sec) + "s " +
                                       std::to_string(nsec) + "ns");
+    }
+
+    case nr::kClockGetres: {
+      // clock_getres(clockid, &res). The resolution of a clock is a fact about the host that is running this
+      // guest, not a number to invent, so it is asked for and written back — and the guest's `timespec` is the
+      // legacy arm32 shape (two 4-byte fields), exactly as in the case above.
+      //
+      // This call is in the Cars 3 death path: measured (SM-X710 2026-10-19) it is the first of three refusals
+      // — 264, then 238 (`tkill`), then 363 (`rt_tgsigqueueinfo`) — after which the game calls exit_group(127).
+      const std::int32_t id = static_cast<std::int32_t>(f.arg[0]);
+      const std::string call = "clock_getres(" + std::to_string(id) + ")";
+      if (memory_ == nullptr) {
+        return Outcome::Refused(err::kEnosys, call + ": no guest memory is attached to this monitor, so there "
+                                                   "is nowhere to write the timespec");
+      }
+      timespec host{};
+      if (::clock_getres(static_cast<clockid_t>(id), &host) != 0) {
+        // EINVAL is the kernel's own answer for a clock id it does not know, and this is the one clock call whose
+        // refusal is not about this build: the host has the same table a device would.
+        return Outcome::Answered(err::kEinval, call + " = -EINVAL (-22): no clock with that id");
+      }
+      const std::uint32_t at = f.arg[1];
+      // A resolution of zero is what a kernel reports for a clock it cannot measure; hosts do this for
+      // CLOCK_THREAD_CPUTIME_ID under some hypervisors. Written through rather than replaced, because a caller
+      // that reads 0 and divides defensively is better served than one handed a plausible non-zero lie.
+      const std::uint32_t words[2] = {static_cast<std::uint32_t>(host.tv_sec),
+                                      static_cast<std::uint32_t>(host.tv_nsec)};
+      if (at != 0 && !memory_->Write(at, words, sizeof words)) {
+        return Outcome::Answered(err::kEfault, call + ": the timespec at 0x" + Hex(at) +
+                                                   " is not writable guest memory");
+      }
+      return Outcome::Emulated(0, call + " = " + std::to_string(host.tv_sec) + "s " +
+                                      std::to_string(host.tv_nsec) + "ns");
+    }
+
+    case nr::kUname: {
+      // uname(&buf). The machine field is the one that has to differ from the host's: this guest is ARM32 and
+      // asks what it is running on, so "armv7l" is the true answer to the question it asked, and the host's
+      // "aarch64" would be the answer to a question nobody put. Every other field is the host's own.
+      // `struct utsname` is six 65-byte fields on both the arm32 and the arm64 kernel ABI, so the copy is the
+      // same shape; only that one field is corrected.
+      struct utsname u {};
+      if (::uname(&u) != 0) {
+        return Outcome::Answered(err::kEfault, "uname: the host refused to describe itself");
+      }
+      std::memset(u.machine, 0, sizeof u.machine);
+      std::snprintf(u.machine, sizeof u.machine, "armv7l");
+      const std::uint32_t at = f.arg[0];
+      if (at != 0 && !memory_->Write(at, &u, sizeof u)) {
+        return Outcome::Answered(err::kEfault, "uname: the utsname at 0x" + Hex(at) +
+                                                   " is not writable guest memory");
+      }
+      return Outcome::Emulated(0, "uname -> {sysname " + std::string{u.sysname} + ", release " +
+                                      std::string{u.release} + ", machine armv7l}");
+    }
+
+    case nr::kSchedGetaffinity: {
+      // sched_getaffinity(pid, cpusetsize, &mask). A guest asking which CPUs it may run on deserves the host's
+      // real answer, truncated to the first 32 bits the arm32 `cpu_set_t` holds — not a fabricated "all of
+      // them", which is what makes a thread pool size itself wrong on a phone that is thermally capped.
+      const auto pid = static_cast<std::int32_t>(f.arg[0]);
+      const std::uint32_t size = f.arg[1];
+      const std::string call = "sched_getaffinity(" + std::to_string(pid) + ", " + std::to_string(size) + ")";
+      if (memory_ == nullptr) {
+        return Outcome::Refused(err::kEnosys, call + ": no guest memory is attached to this monitor");
+      }
+      cpu_set_t host;
+      CPU_ZERO(&host);
+      if (::sched_getaffinity(pid == 0 ? 0 : static_cast<pid_t>(pid), sizeof host, &host) != 0) {
+        return Outcome::Answered(err::kEsrch, call + " = -ESRCH (-3): the host has no such thread");
+      }
+      // The arm32 cpu_set_t is 1024 bits (128 bytes) with the same bit-per-CPU layout, so the leading words map
+      // straight across; anything the guest asked for beyond that is zero-filled, as a kernel does.
+      std::vector<std::uint8_t> guest(size, 0);
+      const std::size_t from_host = std::min<std::size_t>(size, sizeof host);
+      std::memcpy(guest.data(), &host, from_host);
+      if (size != 0 && !memory_->Write(f.arg[2], guest.data(), size)) {
+        return Outcome::Answered(err::kEfault, call + ": the cpu_set at 0x" + Hex(f.arg[2]) +
+                                                   " is not writable guest memory");
+      }
+      unsigned cpus = 0;
+      for (int i = 0; i < CPU_SETSIZE; ++i) cpus += CPU_ISSET(i, &host) ? 1u : 0u;
+      return Outcome::Emulated(0, call + " -> " + std::to_string(cpus) + " CPU(s)");
+    }
+
+    case nr::kSchedSetaffinity: {
+      // sched_setaffinity(pid, cpusetsize, &mask). Applying a guest's request to the *host* thread would move
+      // the emulator itself, which is not what the guest asked for and is not this build's to decide; the
+      // request is read back and reported, and the guest is told it took, because the set it named is one the
+      // host can already schedule on. The deviation is stated rather than hidden.
+      const auto pid = static_cast<std::int32_t>(f.arg[0]);
+      const std::uint32_t size = f.arg[1];
+      const std::string call = "sched_setaffinity(" + std::to_string(pid) + ", " + std::to_string(size) + ")";
+      if (memory_ == nullptr) {
+        return Outcome::Refused(err::kEnosys, call + ": no guest memory is attached to this monitor");
+      }
+      std::vector<std::uint8_t> bits(size, 0);
+      if (size != 0 && !memory_->Read(f.arg[2], bits.data(), size)) {
+        return Outcome::Answered(err::kEfault, call + ": the cpu_set at 0x" + Hex(f.arg[2]) +
+                                                   " is not readable guest memory");
+      }
+      return Outcome::Emulated(0, call + " = 0: recorded, not applied — the guest's threads already run on a "
+                                         "superset of the CPUs a phone would give them, and moving the host "
+                                         "threads that run them is not this build's decision");
+    }
+
+    case nr::kPrlimit64: {
+      // prlimit64(pid, resource, &new, &old). The arm32 kernel's `struct rlimit64` is two 8-byte fields, so the
+      // guest's shape is fixed by the ABI. RLIMIT_NOFILE and RLIMIT_STACK are the two a game's loader actually
+      // reads, and both have a true host answer.
+      const auto pid = static_cast<std::int32_t>(f.arg[0]);
+      const auto resource = static_cast<std::int32_t>(f.arg[1]);
+      const std::string call = "prlimit64(" + std::to_string(pid) + ", " + std::to_string(resource) + ")";
+      if (memory_ == nullptr) {
+        return Outcome::Refused(err::kEnosys, call + ": no guest memory is attached to this monitor");
+      }
+      rlimit host{};
+      if (::prlimit(pid == 0 ? 0 : static_cast<pid_t>(pid), resource, nullptr, &host) != 0) {
+        return Outcome::Answered(err::kEinval, call + " = -EINVAL (-22): no such resource, or no such process");
+      }
+      // A limit of RLIM_INFINITY does not survive the trip into a 32-bit field, so it is clamped to the widest
+      // value the guest's own type can hold rather than wrapped to zero.
+      constexpr std::uint64_t kInf = ~static_cast<std::uint64_t>(0);
+      const auto clamp = [](rlim_t v) -> std::uint64_t {
+        return v == RLIM_INFINITY ? kInf : static_cast<std::uint64_t>(v);
+      };
+      const std::uint64_t old_pair[2] = {clamp(host.rlim_cur), clamp(host.rlim_max)};
+      if (f.arg[3] != 0 && !memory_->Write(f.arg[3], old_pair, sizeof old_pair)) {
+        return Outcome::Answered(err::kEfault, call + ": the old rlimit at 0x" + Hex(f.arg[3]) +
+                                                   " is not writable guest memory");
+      }
+      if (f.arg[2] != 0) {
+        const std::uint64_t asked[2] = {clamp(host.rlim_cur), clamp(host.rlim_max)};
+        return Outcome::Emulated(0, call + " = 0: cur " + std::to_string(asked[0]) + ", max " +
+                                        std::to_string(asked[1]) + " (the request was read, not applied: this "
+                                        "build does not lower the host's own limits)");
+      }
+      return Outcome::Emulated(0, call + " -> cur " + std::to_string(old_pair[0]) + ", max " +
+                                      std::to_string(old_pair[1]));
+    }
+
+    case nr::kSysinfo: {
+      // sysinfo(&info). A game reads totalram/freeram to size its own caches, and the host has those numbers.
+      // The arm32 and arm64 kernels agree on the field layout of the leading `uptime`, `loads` and `totalram`
+      // group, so only the leading prefix is copied: the struct grew over kernel versions and writing the
+      // host's full 112 bytes over the guest's smaller one would overrun the caller's buffer.
+      const std::uint32_t at = f.arg[0];
+      const std::string call = "sysinfo";
+      if (memory_ == nullptr) {
+        return Outcome::Refused(err::kEnosys, call + ": no guest memory is attached to this monitor");
+      }
+      struct ::sysinfo host {};
+      if (::sysinfo(&host) != 0) {
+        return Outcome::Answered(err::kEfault, call + " = -EFAULT (-14): the host refused to describe itself");
+      }
+      // The arm32 `struct sysinfo` prefix, field for field: uptime, loads[3], totalram, freeram, sharedram,
+      // bufferram, totalswap, freeswap, procs. Written field by field so the widths are the guest's, not the
+      // host's — `long` is 4 bytes on one side of this ABI pair and 8 on the other.
+      const std::uint32_t words[10] = {
+          static_cast<std::uint32_t>(host.uptime),
+          static_cast<std::uint32_t>(host.loads[0]), static_cast<std::uint32_t>(host.loads[1]),
+          static_cast<std::uint32_t>(host.loads[2]),
+          static_cast<std::uint32_t>(host.totalram), static_cast<std::uint32_t>(host.freeram),
+          static_cast<std::uint32_t>(host.sharedram), static_cast<std::uint32_t>(host.bufferram),
+          static_cast<std::uint32_t>(host.totalswap), static_cast<std::uint32_t>(host.freeswap)};
+      if (at != 0 && !memory_->Write(at, words, sizeof words)) {
+        return Outcome::Answered(err::kEfault, call + ": the sysinfo at 0x" + Hex(at) +
+                                                   " is not writable guest memory");
+      }
+      return Outcome::Emulated(0, call + " -> totalram " + std::to_string(host.totalram) + "B, freeram " +
+                                      std::to_string(host.freeram) + "B, procs " +
+                                      std::to_string(host.procs));
+    }
+
+    case nr::kSchedGetparam:
+    case nr::kSchedGetscheduler:
+    case nr::kSchedGetPriorityMin:
+    case nr::kSchedGetPriorityMax: {
+      // The scheduler queries a Mono/Boehm GC thread makes before it parks itself: sched_getparam(pid, &param),
+      // sched_getscheduler(pid), sched_get_priority_min/max(policy). All four are facts about the *host* thread
+      // that is running this guest thread, and each has a real answer.
+      //
+      // Measured (SM-X710 2026-10-19): Cars 3 asked 155, 156, 159 and 160 in a tight loop once the signal
+      // refusals stopped ending it, so these are the next wall rather than a hypothetical gap.
+      const auto pid = static_cast<std::int32_t>(f.arg[0]);
+      const pid_t host_pid = pid == 0 ? 0 : static_cast<pid_t>(pid);
+      const std::string call = std::string{Name(f.number)} + "(" + std::to_string(pid) +
+                               (f.number == nr::kSchedGetPriorityMin || f.number == nr::kSchedGetPriorityMax
+                                    ? ", " + std::to_string(f.arg[1]) + ")"
+                                    : ")");
+      if (f.number == nr::kSchedGetparam) {
+        if (memory_ == nullptr) {
+          return Outcome::Refused(err::kEnosys, call + ": no guest memory is attached to this monitor");
+        }
+        struct sched_param host {};
+        if (::sched_getparam(host_pid, &host) != 0) {
+          return Outcome::Answered(err::kEsrch, call + " = -ESRCH (-3): the host has no such thread");
+        }
+        // The arm32 `struct sched_param` is a single `int sched_priority`, so the copy is four bytes.
+        const std::int32_t prio = host.sched_priority;
+        if (f.arg[1] != 0 && !memory_->Write(f.arg[1], &prio, 4)) {
+          return Outcome::Answered(err::kEfault, call + ": the sched_param at 0x" + Hex(f.arg[1]) +
+                                                     " is not writable guest memory");
+        }
+        return Outcome::Emulated(0, call + " -> priority " + std::to_string(prio));
+      }
+      if (f.number == nr::kSchedGetscheduler) {
+        const int policy = ::sched_getscheduler(host_pid);
+        if (policy < 0) {
+          return Outcome::Answered(err::kEsrch, call + " = -ESRCH (-3): the host has no such thread");
+        }
+        return Outcome::Emulated(static_cast<std::int32_t>(policy),
+                                 call + " -> policy " + std::to_string(policy));
+      }
+      // The priority bounds are per policy, and the host's table is the same one a device uses.
+      const int policy = static_cast<int>(f.arg[1]);
+      const int bound = f.number == nr::kSchedGetPriorityMin ? ::sched_get_priority_min(policy)
+                                                             : ::sched_get_priority_max(policy);
+      if (bound < 0) {
+        return Outcome::Answered(err::kEinval, call + " = -EINVAL (-22): no such scheduling policy");
+      }
+      return Outcome::Emulated(bound, call + " -> " + std::to_string(bound));
+    }
+
+    case nr::kSchedSetscheduler: {
+      // sched_setscheduler(pid, policy, &param). Accepted and reported, not applied: this would change the
+      // *host* thread that runs the guest, and a guest asking for SCHED_FIFO on a phone that would refuse it
+      // is better told the truth than given a real-time priority the emulator then holds. The deviation is
+      // named in the detail rather than hidden behind a bare 0.
+      const std::string call = "sched_setscheduler(" + std::to_string(f.arg[0]) + ", " +
+                               std::to_string(f.arg[1]) + ")";
+      return Outcome::Emulated(0, call + " = 0: recorded, not applied — the scheduling policy of the host "
+                                         "threads that run this guest is not a guest's to set, and a phone "
+                                         "would refuse a real-time policy to an untrusted app anyway");
+    }
+
+    case nr::kGetpriority:
+    case nr::kSetpriority: {
+      // getpriority/setpriority(which, who). These are the nice-value pair a Mono GC thread reads; the host's
+      // answer is the true one for the thread running the guest. The set is recorded, not applied, for the
+      // same reason as sched_setscheduler.
+      const auto which = static_cast<std::int32_t>(f.arg[0]);
+      const auto who = static_cast<std::int32_t>(f.arg[1]);
+      const std::string call = std::string{Name(f.number)} + "(" + std::to_string(which) + ", " +
+                               std::to_string(who) + ")";
+      if (f.number == nr::kGetpriority) {
+        errno = 0;
+        // A kernel returns the nice value biased by 20 so it is never negative; that bias is part of the ABI
+        // and is reproduced here rather than replaced with the raw value.
+        const int prio = ::getpriority(which, static_cast<id_t>(who));
+        if (prio == -1 && errno != 0) {
+          return Outcome::Answered(err::kEsrch, call + " = -ESRCH (-3): no such process, group or user");
+        }
+        return Outcome::Emulated(prio, call + " -> " + std::to_string(prio) + " (nice " +
+                                          std::to_string(prio - 20) + ")");
+      }
+      return Outcome::Emulated(0, call + " = 0: recorded, not applied — this build does not re-nice the "
+                                         "host threads that run the guest");
     }
 
     case nr::kGetrandom: {
