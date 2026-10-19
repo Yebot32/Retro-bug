@@ -200,3 +200,39 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
 - Gates: engine lanes 17 suites + dynarmic's 200,561 assertions, 0 failures; both advisory lanes green.
 - Still true, and stated plainly: no Unity game draws a frame yet. What changed is that the failures are now named
   — module + offset, with a call chain — instead of "address 0".
+
+## 2026-10-19, Unity step 2 — `tkill` is not `tgkill`, and C26 is step one after all
+
+- **What was wrong with step 1's conclusion.** Step 1 scanned eight Unity boots for `tgkill` (268), found none, and
+  concluded that no signal is ever sent — so C26 (no signal delivery) could not be what kills a Unity game. The scan
+  was right and the conclusion was wrong: **Mono suspends a thread with `tkill` (238)**, a different number, and a
+  scan for 268 alone reads a process that never signals. This is the most expensive kind of error — a true measurement
+  of the wrong symbol — and it is why C26 was parked.
+- **How it surfaced.** Cars 3's death path named three refusals in its last two microseconds: `svc #264`
+  (`clock_getres`), `svc #238` (`tkill`), `svc #363` (`rt_tgsigqueueinfo`), then `exit_group(127)`. The numbers were
+  checked against the NDK's own `arm-linux-androideabi/asm/unistd-eabi.h`, not from memory.
+- **C34 implemented** (`36ce9ac`): `clock_getres`, `uname` (machine corrected to `armv7l` — the guest is ARM32 and
+  `aarch64` answers a question it did not ask), `sysinfo`, `sched_get/setaffinity`, `prlimit64`, and the scheduler
+  pair `sched_getparam`/`sched_getscheduler`/`sched_get_priority_min`/`max` plus `getpriority`/`setpriority`. The
+  scheduler set is *measured*, not assumed: once the signal refusals stopped ending Cars 3, it asked 155/156/159/160
+  in a tight loop. Each answers with the host's real fact, field by field where `long` differs across the ABI pair.
+- **`tkill`, `tgkill` and `rt_tgsigqueueinfo` are now one case.** They are the same operation with shifted arguments.
+  Signal 0 stays the existence probe; a real signal is still refused by name — telling a guest "delivered" when
+  nothing ran its handler turns a crash it could report into a process that dies saying nothing.
+- **Measured effect on Cars 3: it no longer dies on an unimplemented call at all.** Every syscall refusal in its run
+  is gone (was a stream of 241/156/155/160/116/264/238/363). It now reaches the real wall and the log says what it
+  is: `tkill(tid, 30)` — **signal 30 is SIGPWR**, Mono's GC thread-suspend — and when delivery is refused the runtime
+  aborts (`rt_tgsigqueueinfo(..., 6, ...)`, SIGABRT) and calls `exit(127)`.
+- **MadTruck confirms it independently.** It boots to its own dialog, is alive, and dies the same way on the same two
+  calls ~7 minutes in. Two games, one wall, both named. Step 1's "the signal handlers install and no signal is sent"
+  reading is retired.
+- So: **C26 is step one.** Not because a stop-the-world was assumed, but because two games now stop at exactly one.
+  The work is signal *delivery* — a guest thread must take SIGPWR into the handler it installed at 39/36/38 — and it
+  is the largest single piece left in the engine.
+- Gates: engine lanes 25/25 exit 0 on the tablet (dynarmic 200,561 assertions in 47 cases), re-run after each change.
+- Build note for whoever is next: the engine is baked into every converted game's APK, so a fix needs the game
+  re-repacked (the step-1 loop above). `cars.apk` on the tablet is **Gameloft** Cars, not Disney Cars 3 — the Disney
+  original is `build/m5/com.disney.cars3_goo/orig.apk`. Also: under this session's file sandbox, msys `bash` and
+  `ninja` cannot create their signal pipes, so a build needs the escalation path; the SDK's own `cmake\ninja.exe`
+  drives `build/launcher-arm64` directly and worked.
+

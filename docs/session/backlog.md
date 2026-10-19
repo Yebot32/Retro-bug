@@ -13,7 +13,7 @@ on a device.
 | A1 | Analysis → this backlog | done |
 | A2 | Data tab: device edge cases, fixes, merge into the session branch | done (9ec4366) |
 | A3 | SpongeBob Game Station: playable offline (patch on the `.rb` copy only) | blocked (G-Presto anti-tamper; see spongebob-gamestation.md) |
-| A4 | M5: compatibility table for every 32-bit game on the Tab S9 (`docs/compatibility.md`) | done (4 rows need a clean re-run) |
+| A4 | M5: compatibility table for every 32-bit game on the Tab S9 (`docs/compatibility.md`) | done (rows 6 and 17 re-run 2026-10-19; 2 rows still need a clean re-run) |
 | A5 | M6: patches, mods, resolution | done (device-verified 2026-10-18) |
 | A6 | Polish | todo |
 | A7 | Release prep, final summary | todo |
@@ -67,15 +67,15 @@ refused, no-OBB status text.
 | C23 | gap | Permission shim asks for every dangerous permission at once (SMS, contacts, location…) | shim/Shims.java:122-172 | todo (ask only what is needed) |
 | C24 | gap | Settings parsed with `contains`, 1 KiB cap — blocks M6 lists | shim RbShimProvider:39,72-74; jni/runtime_boot.cpp:66-81 | done (93d258c) |
 | C25 | gap | dlopen/dlsym stubbed → all Unity games fail (Teeny Titans 2, FC All-Stars) | jni/host_slots.cpp:315-340 | done (44096c0) |
-| C26 | gap | No signals delivered (Mono/Boehm GC) — Unity/Mono needs this too | core/syscall/monitor.cpp:507-510 | deferred (engine milestone) |
+| C26 | gap | No signals delivered (Mono/Boehm GC). **Measured 2026-10-19: this is Unity's step one.** Mono suspends with `tkill(tid, SIGPWR)` (238), not `tgkill` (268) — a scan for 268 alone missed it. Cars 3 and MadTruck both end here. | core/syscall/monitor.cpp:507-510 | todo (now the top engine item) |
 | C27 | bug | JNI_OnLoad/constructors run under a 4M-step budget that poisons the process | jni/runtime_boot.cpp:753-754 | done (88106a1; the budget was hiding a real fault, see compatibility.md row 28) |
 | C28 | bug | ARM32 vs AArch64 `O_*` flags not translated (O_LARGEFILE→O_NOFOLLOW, O_DIRECTORY→O_DIRECT) | core/syscall/host_io.cpp:291,297 | todo |
-| C29 | gap | Missing GLES2 ext / GLES1 fixed-point / GLES3 / sensor teardown thunks | jni/thunks.cpp | todo (per M5 evidence) |
+| C29 | gap | Missing GLES2 ext / GLES1 fixed-point / GLES3 / sensor teardown thunks | jni/thunks.cpp | done (sensor + weak-import halves, d11c5f9; GLES ext still open) |
 | C30 | gap | `glGetString` advertises ES 3.2 + extensions with no thunks | jni/host_slots.cpp:471-481 | todo |
 | C31 | gap | NativeActivity games unsupported (no ANativeActivity_onCreate) | ApkScan.java:isNativeActivity | half done (tile says so, b4fbdba; running them needs ANativeActivityCallbacks) |
 | C32 | perf | Always-on profiler map grows forever | jni/runtime_boot.cpp:542-582 | todo |
 | C33 | risk | `rb_runtime_boot` returns JNI_VERSION_1_6 even on failure | jni/runtime_boot.cpp:860 | todo |
-| C34 | gap | Many syscalls ENOSYS (uname, sysinfo, sched_*affinity, prlimit64…) | core/syscall/monitor.cpp:1403-1418 | todo (per M5 evidence) |
+| C34 | gap | Many syscalls ENOSYS (uname, sysinfo, sched_*affinity, prlimit64…) | core/syscall/monitor.cpp | done (36ce9ac: clock_getres, uname, sysinfo, sched_get/setaffinity, prlimit64, sched_getparam/setscheduler/get_priority_min/max, get/setpriority, and tkill/rt_tgsigqueueinfo folded into tgkill) |
 
 ## D. Release prep (from C)
 

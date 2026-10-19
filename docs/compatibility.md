@@ -13,8 +13,10 @@ Tally: 30 games — **11 stayed alive**, **14 died during boot or play**, **4 co
 converted** (fixed since: `8b3d22e`, proven on Among Us — 497 MB copy, no OOM).
 
 Engine split: **16 non-Unity, 14 Unity.** Non-Unity: ~9 reach a visible screen, 4–5 playable. Unity: **0 reach
-gameplay** — they boot, then stop in native init or stay alive without drawing. That is the C26 gap (Mono's GC needs
-signals) plus JIT-shaped code, not a per-game bug.
+gameplay** — they boot, then stop in native init or stay alive without drawing. Measured 2026-10-19, the class's
+single confirmed wall is **C26 (no signal delivery)**: Mono's GC suspends a thread with `tkill(tid, SIGPWR)` and
+aborts when it cannot be delivered. An earlier reading that "no signal is ever sent" was a scan for `tgkill` (268)
+that missed `tkill` (238); two games now name the same call.
 
 | # | Game | Package | Engine | Result | Where it stops | Evidence |
 |---|---|---|---|---|---|---|
@@ -23,7 +25,7 @@ signals) plus JIT-shaped code, not a per-game bug.
 | 3 | Angry Birds Epic | com.rovio.gold | Unity (il2cpp) | died | `nativeRender` calls a null function pointer: `ldr lr, [r4, #0xcc]; blx lr` at `libunity.so+0x597b3c` | logcat 2026-10-18 23:01 with the new stop report: boot completes (370 constructors), GL context is real (Unity logs the Adreno extension list), then the null call. The 12 unanswered `libunity.so` imports are answered since C29's sensor half landed, and the two weak `__google_potentially_blocking_region_*` are no longer 0 |
 | 4 | Blocky Roads | com.crescentmoongames.blocky_roads | native | **runs** | — (gameplay on screen) | screenshot |
 | 5 | Car Game | com.bertheussen.cargame | Unity | not installed | Play Protect verification failure | install log |
-| 6 | Cars 3 (Lightning) | com.disney.cars3_goo | Unity | died | guest native called `exit(127)` | logcat (screenshot contaminated) |
+| 6 | Cars 3 (Lightning) | com.disney.cars3_goo | Unity (Mono) | died | re-run 2026-10-19 05:05: boot completes (316 constructors, real GL context), every syscall refusal gone, then `tkill(tid, 30)` — SIGPWR, Mono's GC suspend — is refused, the runtime aborts (SIGABRT) and calls `exit(127)` | logcat; C34 landed, C26 is now the wall |
 | 7 | Crash Drive 2 | com.spilgames.a10.google.crashdrive2 | Unity | ran, then died | guest thread fetched 0x0 | logcat |
 | 8 | Derby Quest | com.tapsy.derbyquesthd | Unity + NativeActivity | died | `ANativeActivity_onCreate` undefined — tile now says so (C31, 0.1.236) | logcat; tile |
 | 9 | FC All-Stars | com.turner.fcallstars | Unity + NativeActivity | died | `ANativeActivity_onCreate` undefined — tile now says so (C31, 0.1.236) | logcat; tile |
@@ -34,7 +36,7 @@ signals) plus JIT-shaped code, not a per-game bug.
 | 14 | KitKat Challenge | com.doubleleft.androidkitkat | native | **runs** | — playable | screenshot + played |
 | 15 | LEGO Mighty Micros | com.lego.superheroes.dccomicsmightymicros | Unity + NativeActivity | died | `ANativeActivity_onCreate` undefined — tile now says so (C31, 0.1.236) | logcat; tile |
 | 16 | Looney Tunes Dash | com.zynga.looney | native | **runs** | — age gate on screen | screenshot |
-| 17 | MadTruck | com.spilgames.mtc | Unity | ran, black screen | nothing drawn after boot | screenshot |
+| 17 | MadTruck | com.spilgames.mtc | Unity (Mono) | died | re-run 2026-10-19 05:11: boots clean, draws its own mod dialog and holds it; on Close it reaches the same `tkill(tid, 30)` (SIGPWR) refusal as row 6, then SIGABRT and `exit(127)`. Its `libunity.so` is down to 2 unanswered imports (`ANativeWindow_lock`/`unlockAndPost`) | logcat + screenshot; the dialog is the mod's own ("Credits for mod to Tiger"), not an engine fault |
 | 18 | Oreo | com.pikpok.oreo | native | not installed | Play Protect verification failure | install log |
 | 19 | Rabbids Runner | com.ubisoft.rabbidsrunner | native | **runs** | — splash; legacy-storage permission refused | screenshot |
 | 20 | Rolling Sky | com.turbochilli.rollingsky | Unity | died | `NoSuchFieldError libcore.util.EmptyArray.INT` | logcat |
@@ -69,8 +71,10 @@ signals) plus JIT-shaped code, not a per-game bug.
 3. ~~C27 (the 4M-step budget on `JNI_OnLoad`)~~ — done 2026-10-18 (`kInitBudget`). Row 28 now runs 147M steps
    and stops on a real unmapped read; row 3 was never budget-bound (its `JNI_OnLoad` returns in 35 steps). The
    budget was hiding one fault, not four.
-4. Unity as a class is no longer waiting on C26 first: measured 2026-10-18, every Unity boot installs Mono's three
-   signal handlers (`rt_sigaction` on 39/36/38) and never issues a `tgkill`, so no Unity game here has died on a
-   dropped signal yet. The class's remaining blockers are per-game null function pointers in `libunity.so` (Angry
-   Birds Epic: `+0x597b3c`, a table entry at `+0xcc` in the object at r4) and the Java side never calling
-   `nativeRender` (MadTruck). C26 stays open for the first GC stop-the-world.
+4. **Unity's wall is signal delivery, and it is now measured on two games.** Step 1 read eight Unity boots for
+   `tgkill` (268), found none, and retired C26; that scan missed **`tkill` (238)**, which is what Mono actually
+   suspends a thread with. With C34 landed (`36ce9ac`) Cars 3 dies on nothing but `tkill(tid, 30)` — SIGPWR, the GC
+   thread-suspend — followed by SIGABRT and `exit(127)` when delivery is refused; MadTruck reaches the identical
+   pair. So **C26 is step one**, and the work is a guest thread taking a delivered signal into the handler it
+   installed, not a per-game null pointer. Angry Birds Epic's `libunity.so+0x597b3c` null table entry (row 3) is
+   still open behind it, and MadTruck's Java never calling `nativeRender` remains its own per-game issue.
