@@ -201,6 +201,24 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
 - Still true, and stated plainly: no Unity game draws a frame yet. What changed is that the failures are now named
   — module + offset, with a call chain — instead of "address 0".
 
+## 2026-10-19, OnePlus acceptance — the 64-bit-only target, first run since M4
+
+- **Why it mattered.** The OnePlus CPH2573 (`75ff8cd3`) is the only genuinely 64-bit-only device here
+  (`ro.product.cpu.abilist32` is empty; the Tab S9 is 32-bit-capable). It still ran versionCode 1 / versionName 1
+  from 2026-10-18 03:01 — it had never seen M5, M6 or anything after. Every acceptance claim since M4 was made on a
+  device that *can* run 32-bit code natively, which is not the target this project exists for.
+- **Installed 0.1.238** (the HEAD build at the time; `adb install -r -g` worked, no ColorOS silent-drop this time).
+  Launcher opens clean: all four tiles render with icons and badges, no exception in logcat.
+- **FN Skittles (`com.halfbrick.fruitninjavsskittles.rb`), launched by its icon:** engine boot reports
+  `constructors: 483 ran on Tier J`, `JNI_OnLoad returned 0x10004`, and **`RESULT: startup finished with no fault`**.
+  The permission prompt (C23 — the shim asks for every dangerous permission at once) appeared; once answered the
+  game reached its menu, rendered correctly, and played. **yebot's own verdict, a non-developer who plays it on
+  32-bit hardware: he "couldn't tell a difference compared to playing it on a real 32 bit device".** That is the
+  strongest acceptance signal this project has produced, and it is a real-time game under emulation.
+- This closes the previous handoff's item 1 ("install 0.1.236 on the OnePlus and re-run the icon-launch
+  acceptance") and the older "nothing has been proven on the 64-bit-only target since M4".
+- Left as found: no PIN entered, no prompt tapped on the human's behalf beyond what he answered himself.
+
 ## 2026-10-19, Unity step 2 — `tkill` is not `tgkill`, and C26 is step one after all
 
 - **What was wrong with step 1's conclusion.** Step 1 scanned eight Unity boots for `tgkill` (268), found none, and
