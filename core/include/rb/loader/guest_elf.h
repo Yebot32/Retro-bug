@@ -128,6 +128,13 @@ struct GuestModule {
   std::string soname;
   std::uint32_t base = 0;      ///< Guest address the image was placed at.
   std::uint32_t extent = 0;    ///< Guest bytes covered, rounded to guest pages.
+  /// The first writable PT_LOAD's guest address. This is the fact `data_start`/`__data_start` names:
+  /// a linker-script data symbol, not a function. Boehm and Mono use it to bound the data segment, and
+  /// binding it to a function trap slot (the unresolved-import fallback) hands them a code address.
+  std::uint32_t data_start = 0;
+  /// The end of the last writable PT_LOAD. `_end`/`__end__` (and the `_edata` family) name this end of
+  /// the data segment; Boehm uses start and end together as the range it scans.
+  std::uint32_t data_end = 0;
   CodeAddress entry;           ///< e_entry, already biased by `base`.
   CodeAddress init;            ///< DT_INIT, biased. Absent (addr 0) on NDK images, which use init_array.
   CodeAddress fini;            ///< DT_FINI, biased.

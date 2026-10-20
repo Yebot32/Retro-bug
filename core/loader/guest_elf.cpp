@@ -388,6 +388,12 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
         return cannot("mapping the BSS of PT_LOAD at");
       }
     }
+    // The writable segments bound the data segment: `data_start`/`__data_start` name its start and
+    // `_end`/`__end__` its end. Boehm and Mono use the pair as the range they scan.
+    if ((p.p_flags & PF_W) != 0) {
+      if (mod.data_start == 0) mod.data_start = base + p.p_vaddr;
+      mod.data_end = std::max(mod.data_end, base + p.p_vaddr + p.p_memsz);
+    }
     rollback.ranges.emplace_back(s.vaddr, s.size);
     segs.push_back(s);
   }
@@ -633,6 +639,19 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
         std::uint32_t sym_addr = 0;
         if (have_sym && sym.st_shndx != SHN_UNDEF) {
           sym_addr = (sym.st_shndx == SHN_ABS) ? sym.st_value : base + sym.st_value;
+        } else if (have_sym && mod.data_start != 0 &&
+                   (sname == "data_start" || sname == "__data_start")) {
+          // A linker-script data symbol with no definition in any loaded image. The unresolved-import
+          // path would bind it to a function trap slot — a code address where the guest expects its
+          // data segment. The module's own first writable PT_LOAD is the fact this name asks for;
+          // Boehm/Mono use it to bound the range they scan.
+          sym_addr = mod.data_start;
+        } else if (have_sym && mod.data_end != 0 &&
+                   (sname == "__end__" || sname == "_end" || sname == "end" || sname == "_edata" ||
+                    sname == "__edata" || sname == "edata")) {
+          // The same range's end. With only the start answered, Boehm got [data_start, trap) — a "range"
+          // whose top is a code address — and its scan/abort path followed it (TT2, 2026-10-20).
+          sym_addr = mod.data_end;
         } else if (have_sym && !opts.resolve) {
           if (ELF32_ST_BIND(sym.st_info) != STB_WEAK) {
             if (err) *err = Stage("imported symbol has no resolver", sname);
