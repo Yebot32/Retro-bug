@@ -22,18 +22,19 @@ then docs/session/backlog.md (statuses are current as of now).
 
 1. Where things stand
 ---------------------
-- Branch session/m5-m6, head 492db4b (2026-10-19 05:2x) PLUS the uncommitted C26 work (2026-10-20).
-  Not merged, not pushed (needs yebot). `main` is 80 commits ahead of `origin/main`; the whole project is
-  local-only.
-- **C26 IS DELIVERED (uncommitted, device-verified 2026-10-20).** The signal wall is gone: Cars 3 delivers
-  `tkill(tid, 30)` (SIGPWR) and the nested `tkill(tid, 24)` (SIGXCPU) into Mono's handler, both
+- Branch session/m5-m6, head 8b5e7a1 (2026-10-20). The C26 work is committed (687faa2 engine, 8b5e7a1
+  docs) and the branch is **pushed to origin/session/m5-m6** (GitHub offers a PR:
+  https://github.com/Yebot32/Retro-bug/pull/new/session/m5-m6). Not merged into main; `main` is still
+  local-only. The two unrelated untracked files (`Open Rocket Launch.bat`, `rocket-launch.html`) are not
+  part of the project and were deliberately left out.
+- **C26 IS DELIVERED (committed 687faa2, device-verified 2026-10-20).** The signal wall is gone: Cars 3
+  delivers `tkill(tid, 30)` (SIGPWR) and the nested `tkill(tid, 24)` (SIGXCPU) into Mono's handler, both
   `rt_sigreturn`s restore, and the Mono GC suspend/restart protocol completes repeatedly on two threads
   while the game runs on. The full story and the four bugs it exposed are in docs/session/worklog.md
-  under 2026-10-20. The next wall is a **hang**: Cars 3 does real Unity startup for ~8 s (GL extensions,
-  OnLevelWasLoaded, Crittercism init) at 115 M instr/s, then the guest stops executing and all 74 threads
-  sleep on a black screen (evidence build/m5/com.disney.cars3_goo/c26f-runtime.log). That is the game's
-  Java/SDK side, not C26; no Unity game has drawn a frame yet. MadTruck boots to its dialog and stays idle.
-- **POST-C26 (same day, uncommitted): a liveness supervisor and the ALooper thunks.**
+  under 2026-10-20. The next wall is **Unity scene activation/UI**, not signals: the native original reaches
+  MainMenu; JDWP is healthy; the stall report names adopted tid 4245 in a libunity `pthread_cond_wait`;
+  Cecil tracing stops in Graphic.OnEnable. MadTruck and Teeny Titans 2 now render their first screens.
+- **POST-C26 (same day, committed 687faa2): a liveness supervisor and the ALooper thunks.**
   * `GuestThread` now records what it waits in (futex/sleep/host slot + last syscall), and the launcher's
     10 s profiler prints `stall:` lines with pc/lr/sp named against modules, the futex word and a stack
     scan when no guest instruction retires. That is what named the Cars 3 stall (adopted tid 4245 in a
@@ -49,6 +50,11 @@ then docs/session/backlog.md (statuses are current as of now).
     freezes there (main at the return sentinel, adopted UI thread in a libunity condvar, 31 workers on one
     pool futex). `QueueSignal` now also respects the target's blocked mask before waking a futex (kernel
     semantics), so a blocked signal can no longer cause a spurious EINTR.
+  * Pre-commit review hardening (also in 687faa2): the sampler is joined not detached; rt_sigaction queries
+    return the recorded disposition; sa_mask is applied; VFP state is saved in the delivery record; a
+    sleeper registers before the GGL is released; standard signals coalesce; signal numbers are validated;
+    the frame page precheck is page-aligned; handler CPSR IT bits are cleared. Gate: 23/23, monitor 216,
+    guest_thread 646.
   * VPhoneGaga was analysed: a full QEMU-TCG 32-bit Android VM (GPL components; nothing copyable). The
     liveness-supervisor idea is the transferable part and is now implemented. Details in the worklog.
 - NEW SINCE THIS FILE WAS WRITTEN (2026-10-19, four commits d11c5f9..492db4b):
