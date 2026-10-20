@@ -64,6 +64,10 @@ then docs/session/backlog.md (statuses are current as of now).
   * `rt_sigsuspend` (179) landed in 2da7ec5: the temporary mask, a FutexTable signal wait, EINTR, and the
     pre-suspend mask restored after the handler's rt_sigreturn. Monitor lane now 223 checks. This is what
     let MadTruck reach its 3D gameplay.
+  * Loader fix 8dc8c76: `data_start`/`__data_start` and `_end`/`__end__`/`_edata` are linker-script **data**
+    symbols; the unresolved-import fallback had bound them to function trap slots. The loader now answers
+    them with the first/last writable PT_LOAD. TT2 and CD2's libil2cpp import lists are clean; neither game's
+    remaining wall moved (so those walls are not the data range).
   * Still open: Cars 3 (Mono) freezes in Unity scene activation/UI (C37; the adopted UnityMain thread in a
     libunity condvar, before any sigsuspend; native original reaches MainMenu); Teeny Titans 2 (IL2CPP) now
     reaches its own SIGABRT handler at boot and exits with a crash dump (C40; the earlier title freeze is

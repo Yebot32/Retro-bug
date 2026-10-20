@@ -83,6 +83,7 @@ refused, no-OBB status text.
 | C39 | gap | `rt_sigsuspend` (179) refused with ENOSYS — Mono's suspend handler could not wait for its restart signal | core/syscall/monitor.cpp, futex_table | done (2026-10-20: temp mask, signal wait, EINTR, pre-suspend mask restored after rt_sigreturn; monitor lane 223 checks) |
 | C40 | gap | Teeny Titans 2 (IL2CPP) now reaches its own SIGABRT handler at boot (Unity `E/CRASH`, pc in libc `abort`, stack 0xff) and exits; an earlier run froze at the title | Unity IL2CPP, libunity | todo (the crash is visible now; the abort caller is not in the dump; stack pattern open) |
 | C41 | gap | Crash Drive 2 and Angry Birds Epic call a null platform-table entry (pc 0x4 after `blx`); re-tested 2026-10-20 and unchanged by the signal fixes | Unity libunity platform layer | todo (disassemble the lr call site, `libunity+0x…`; identify the table the platform layer should fill) |
+| C42 | bug | `data_start`/`__end__` (linker-script data symbols) bound to function trap slots; Boehm/Mono scan the data range | core/loader/guest_elf.cpp | done (2026-10-20: first/last writable PT_LOAD recorded; TT2/CD2 import lists clean; TT2's abort and CD2's null call are elsewhere) |
 
 ## D. Release prep (from C)
 

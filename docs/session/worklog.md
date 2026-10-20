@@ -401,3 +401,15 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
   host-ART `NoSuchFieldError`, and Gumball's DRM `libgvradio` fault.
 - **Working now:** MadTruck (Unity Mono, 3D menu/map/race), plus the previously working native titles
   (Blocky Roads, Sonic Transformed, Gumball Lite, KitKat, FN Skittles, etc.).
+
+### Loader: data symbols are not function traps
+
+- `data_start`/`__data_start` and `_end`/`__end__`/`_edata` are linker-script **data** symbols. The
+  unresolved-import fallback bound them to per-name **function trap slots** — a code address where a data
+  range was asked for. Boehm (Unity IL2CPP) and Mono use the pair as the bounds of the data segment they
+  scan, so a trap value there is a wrong fact at both ends.
+- `GuestModule` now records the first and last writable PT_LOAD; the loader answers those names with
+  `data_start`/`data_end` before the unresolved-import path. TT2's `libil2cpp.so` unanswered list is now
+  empty (only libmain's three `__cxa_*` remain), and Crash Drive 2's is clean too.
+- It did **not** stop TT2's early SIGABRT (C40) or Crash Drive 2's null platform-table call (C41); both
+  remain open, now with the data-range explanation ruled out. Gate: 23/23; guest libc 147 checks.
