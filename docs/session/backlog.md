@@ -81,7 +81,8 @@ refused, no-OBB status text.
 | C37 | gap | Cars 3 stalls in Unity scene activation/UI (libunity condvar); native original reaches MainMenu | core/runtime (guest), Unity UI | todo (next tool: EHABI unwind; JDWP healthy; Cecil trace stops in Graphic.OnEnable) |
 | C38 | gap | MadTruck spins in Android Native billing/semaphore after the splash | game Java/C#, semaphore waits | done (2026-10-20: the wall was the missing `rt_sigsuspend`; MadTruck now runs menu -> level map -> level 1 on the 3D track) |
 | C39 | gap | `rt_sigsuspend` (179) refused with ENOSYS — Mono's suspend handler could not wait for its restart signal | core/syscall/monitor.cpp, futex_table | done (2026-10-20: temp mask, signal wait, EINTR, pre-suspend mask restored after rt_sigreturn; monitor lane 223 checks) |
-| C40 | gap | Teeny Titans 2 renders its title screen (IL2CPP) and freezes on a libunity condvar | Unity IL2CPP, libunity | todo (stall report: adopted UI thread + 31 pool workers; native original comparison needed) |
+| C40 | gap | Teeny Titans 2 (IL2CPP) now reaches its own SIGABRT handler at boot (Unity `E/CRASH`, pc in libc `abort`, stack 0xff) and exits; an earlier run froze at the title | Unity IL2CPP, libunity | todo (the crash is visible now; the abort caller is not in the dump; stack pattern open) |
+| C41 | gap | Crash Drive 2 and Angry Birds Epic call a null platform-table entry (pc 0x4 after `blx`); re-tested 2026-10-20 and unchanged by the signal fixes | Unity libunity platform layer | todo (disassemble the lr call site, `libunity+0x…`; identify the table the platform layer should fill) |
 
 ## D. Release prep (from C)
 

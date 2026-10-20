@@ -385,3 +385,19 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
   a remaining engine gap (C37). Teeny Titans 2 (IL2CPP) renders its title screen and freezes (C40).
 - Gate: 23/23 engine suites on the SM-X710; `rb_syscall_monitor_tests` 223 checks (sigsuspend lane),
   `rb_guest_thread_tests` 646, tier-diff 1011.
+
+## 2026-10-20/21 — remaining Unity games re-tested
+
+- **Crash Drive 2** (Unity 2017.4 IL2CPP, 3.51) with C26 + ALooper + `rt_sigsuspend`: boot reaches the GL list,
+  then `guest thread tid 4249 stopped: instruction fetch failed at 0x0` with pc 0x4, lr in libunity. It is the
+  same null platform-table call recorded on 2026-10-18, not a signal-path wall; the signal fixes do not touch it.
+- **Teeny Titans 2** with `rt_sigsuspend` again: instead of freezing at the title it now reaches its own
+  SIGABRT handler during boot — Unity's `E/CRASH` dump (signal 6, pc in libc `abort`, the dumped stack filled
+  with 0xff) — and exits. The crash is finally visible; the abort's caller cannot be recovered from the dump,
+  and the stack pattern suggests the abort frame is not where the handler looked. Open as C40.
+- **What remains, named:** C37 Cars 3 (Unity UI/libunity condvar; native original reaches MainMenu), C40 TT2
+  (IL2CPP early SIGABRT with a lost caller), C41 the null platform-table call shared by Crash Drive 2 and
+  Angry Birds Epic (pc 0x4 after `blx` through a null table entry), C31 NativeActivity titles, Rolling Sky's
+  host-ART `NoSuchFieldError`, and Gumball's DRM `libgvradio` fault.
+- **Working now:** MadTruck (Unity Mono, 3D menu/map/race), plus the previously working native titles
+  (Blocky Roads, Sonic Transformed, Gumball Lite, KitKat, FN Skittles, etc.).

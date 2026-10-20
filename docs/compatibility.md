@@ -28,7 +28,7 @@ and mask-aware futex interrupts.
 | 4 | Blocky Roads | com.crescentmoongames.blocky_roads | native | **runs** | — (gameplay on screen) | screenshot |
 | 5 | Car Game | com.bertheussen.cargame | Unity | not installed | Play Protect verification failure | install log |
 | 6 | Cars 3 (Lightning) | com.disney.cars3_goo | Unity (Mono) | stalled | re-run 2026-10-20: boot completes and the Mono GC cycles now run, but the game freezes in Unity scene activation/UI — the adopted UnityMain thread waits in a libunity `pthread_cond_wait` (black screen); the native original reaches MainMenu on the same tablet | logcat + screenshots; see C37 in the backlog, worklog 2026-10-20 |
-| 7 | Crash Drive 2 | com.spilgames.a10.google.crashdrive2 | Unity | ran, then died | guest thread fetched 0x0 | logcat |
+| 7 | Crash Drive 2 | com.spilgames.a10.google.crashdrive2 | Unity (IL2CPP) | died | re-run 2026-10-20 with C26 + ALooper + `rt_sigsuspend`: boot reaches GL, then a guest thread fetches 0x0 (pc 0x4, lr libunity+…); the same null platform-table call as before — not a signal-path wall | logcat `build/m5/com.spilgames.a10.google.crashdrive2/cd2-new.png`; C41 |
 | 8 | Derby Quest | com.tapsy.derbyquesthd | Unity + NativeActivity | died | `ANativeActivity_onCreate` undefined — tile now says so (C31, 0.1.236) | logcat; tile |
 | 9 | FC All-Stars | com.turner.fcallstars | Unity + NativeActivity | died | `ANativeActivity_onCreate` undefined — tile now says so (C31, 0.1.236) | logcat; tile |
 | 10 | Fruit Ninja vs Skittles | com.halfbrick.fruitninjavsskittles | native | **runs** | — playable | screenshot + played |
@@ -46,7 +46,7 @@ and mask-aware futex interrupts.
 | 22 | SMB Bounce | com.sega.smbbounce | native | **runs** | — title screen with its OBB | screenshot |
 | 23 | Sonic Transformed | com.sega.sonic.transformed | native | **runs** | — title screen (needs its 851 MB OBB) | screenshot |
 | 24 | Tap Tap Revenge 4 | com.tapulous.taptaprevenge4 | native | died | foreground `PushService` start refused | logcat |
-| 25 | Teeny Titans 2 | com.turner.ttgfigures2 | Unity (2018.4, IL2CPP) | stalled | re-run 2026-10-20: renders its title screen (instead of `exit(127)`) and freezes there — the adopted UI thread waits in a libunity condvar, 31 workers on one pool futex | logcat + `build/m5/com.turner.ttgfigures2/c26-tt2.png` |
+| 25 | Teeny Titans 2 | com.turner.ttgfigures2 | Unity (2018.4, IL2CPP) | aborted | 2026-10-20: an earlier run rendered the title screen and froze; with the review fixes + `rt_sigsuspend` it reaches its **own SIGABRT handler** at boot (Unity `E/CRASH` dump, pc in libc `abort`, stack filled with 0xff) and exits. The crash is now visible instead of a silent freeze; the abort's caller is unrecoverable from the dump | logcat + `build/m5/com.turner.ttgfigures2/tt2-sig.png`; C40 |
 | 26 | Torture the Murderer | com.ningunosentertainment.TortureTheMurdererElectric | Unity + NativeActivity | died | `ANativeActivity_onCreate` undefined — tile now says so (C31, 0.1.236) | logcat; tile |
 | 27 | Turbo FAST | com.pikpok.turbo | native | not installed | Play Protect verification failure | install log |
 | 28 | Nutty Fluffies | com.UBI.A90.WW | Unity | died | re-run 2026-10-18 21:46: `JNI_OnLoad` runs 147,666,044 steps (was stopped at 4,000,000) and faults on an unmapped guest read at 0xc0d900b3, pc 0x2410bc — a real memory fault, no longer the budget | logcat |

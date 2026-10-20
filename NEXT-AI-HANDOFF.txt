@@ -65,8 +65,10 @@ then docs/session/backlog.md (statuses are current as of now).
     pre-suspend mask restored after the handler's rt_sigreturn. Monitor lane now 223 checks. This is what
     let MadTruck reach its 3D gameplay.
   * Still open: Cars 3 (Mono) freezes in Unity scene activation/UI (C37; the adopted UnityMain thread in a
-    libunity condvar, before any sigsuspend; native original reaches MainMenu); Teeny Titans 2 (IL2CPP)
-    renders its title screen and freezes (C40).
+    libunity condvar, before any sigsuspend; native original reaches MainMenu); Teeny Titans 2 (IL2CPP) now
+    reaches its own SIGABRT handler at boot and exits with a crash dump (C40; the earlier title freeze is
+    retired, the abort caller is lost in a 0xff stack); Crash Drive 2 and Angry Birds Epic still call a null
+    platform-table entry (C41, pc 0x4 — unchanged by the signal fixes).
   * VPhoneGaga was analysed: a full QEMU-TCG 32-bit Android VM (GPL components; nothing copyable). The
     liveness-supervisor idea is the transferable part and is now implemented. Details in the worklog.
 - NEW SINCE THIS FILE WAS WRITTEN (2026-10-19, four commits d11c5f9..492db4b):
