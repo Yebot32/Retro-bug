@@ -254,3 +254,111 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
   `ninja` cannot create their signal pipes, so a build needs the escalation path; the SDK's own `cmake\ninja.exe`
   drives `build/launcher-arm64` directly and worked.
 
+
+## 2026-10-20, C26 — signal delivery lands, and the frame wrote 24 bytes too far
+
+- **What was done.** The uncommitted C26 work from the 01:42 session was finished and device-verified:
+  `rt_sigaction` records the guest's `{handler, flags, restorer, mask}`; `tkill`/`tgkill`/`rt_tgsigqueueinfo`
+  queue a real signal for a live tid instead of refusing; delivery happens at the ABI's slice boundary (every
+  200,000 instructions, every syscall, and the first instruction of every turn — so clone()d threads, adopted
+  host threads and the main thread all get it); the measured Aarch32 `rt_sigframe` is built on the guest stack;
+  `rt_sigreturn` restores the interrupted register file from the frame; a futex or nanosleep wait for the
+  target returns `EINTR` first; and deliveries nest (Mono's SIGPWR suspend handler waits for the SIGXCPU
+  restart signal to run *inside* it). Two lanes were added: 614 checks in `rb_guest_thread_tests`, including
+  a blocked-futex interrupt and the nested stack.
+- **Device evidence, Cars 3 (`com.disney.cars3_goo.rb`).** `tkill(4246, 30)` and then `tkill(4246, 24)` are
+  queued and delivered into Mono's handler at `libmono.so+0x2bdb59`; the restart signal nests inside the
+  suspend handler; both `rt_sigreturn`s restore; the thread resumes inside libc's `syscall()` wrapper and the
+  game keeps running at ~115 M guest instr/s. The SIGPWR/SIGXCPU pairs then repeat on two threads (4246 and
+  the adopted 4286) — Mono's stop-the-world is working. This is the wall from 2026-10-19 gone.
+- **The bug that made it visible, and the one it found.** The first game run after the signal fix delivered
+  both signals and then died on a null read at `libc+0x78468` (`__futex_wait_ex`'s error path, `ldr r0,[r4]`
+  with r4=0). The register dump (now in every fatal thread stop) showed the *interrupted* state already had
+  r4=0, on the instruction after `svc` inside libc's generic `syscall()` wrapper. The cause was in the frame
+  writer: the zeroing loop wrote 64-byte chunks for a 872-byte frame, so its last chunk ran 24 bytes past the
+  frame — and the 16 at `SP..SP+16` are the interrupted `syscall()` wrapper's saved `r4..r7`. The `pop`
+  restored zeros, and bionic read through the null errno pointer. The loop now shortens its last chunk, and
+  the delivery test leaves a sentinel at `SP..SP+16` and fails if a byte there changes.
+- **Three more defects the lanes caught.** `uc_sigmask` held the handler's mask instead of the interrupted
+  mask (the signal stayed blocked after the first delivery); `rt_sigreturn`'s outcome r0 overwrote the
+  restored r0 (the futex returned 0 instead of -EINTR); and the test fixture's `pc` was Thumb-tagged while
+  `mode` said Thumb, which this engine's front end rejects — the frame stores a clean pc and CPSRs mode bit.
+- **Gates.** 23/23 engine lanes, 0 failures on the SM-X710; `rb_guest_thread_tests` 614 checks (was 563).
+  The full suite was re-run after the last frame change. `/data/local/tmp` fixtures unchanged.
+- **What is left, stated plainly.** Cars 3 no longer dies of signals but still presents a **black screen**.
+  Its first ~8 seconds are real Unity startup — the GL extension list, `OnLevelWasLoaded` on LoadingFader,
+  Crittercism init — at 115 M guest instr/s; then the guest stops executing entirely and all 74 host threads
+  are asleep (last profiler line 04:17:09, no further RBRUNTIME output; evidence
+  `build/m5/com.disney.cars3_goo/c26f-runtime.log`). So the next wall is a **hang once the game's Java/SDK
+  side starts**, not a rendering loop and not C26. MadTruck boots to its own Information dialog and stays
+  idle there (0 M instr/s); its previous ~7-minute death needs interaction to reach and was not reproduced,
+  so MadTruck's signal path is unverified beyond "boots and does not die". No Unity game has drawn a frame yet.
+- **Tooling.** The build tree is still driven by the SDK's own `cmake/ninja.exe` directly (the sandbox-pipe
+  note in the handoff stands); the launcher APK is packaged with `build/build_launcher_noclean.sh`. The
+  repack loop is the one in the handoff: stage the original in the launcher's external files dir, force-stop,
+  `am start ... -e stage <f> -e repack <name> -e install 0 -e settings 1 -e rename 1`, pull
+  `files/repack/<label>.rb.apk`, `adb install -r`.
+
+## 2026-10-20, after C26 — VPhoneGaga, a liveness supervisor, and MadTruck's ALooper wall
+
+- **VPhoneGaga 5.0.6 was analysed, not copied.** It is a whole virtual 32-bit Android phone: a downloaded
+  userspace (bionic + ART + zygote + system_server) inside a user-space kernel, with **QEMU linux-user TCG**
+  translating ARM32 (`libtranslator.so`: `accel/tcg`, `target/arm/tcg`) and Box64/FEX for the Wine/x86 path.
+  `libuserkernel32.so`/`libloader32.so` are ELF32 guest blobs; the 32-bit image is a first-run download
+  (`androidfs_*.7z`, `block.img`), not in the APK. Nothing is copyable into an Apache-2.0 clean-room tree —
+  QEMU is GPL-2.0, emugl is GPL lineage, Wine LGPL, OpenSSL 1.1.1 Apache-incompatible. The transferable
+  lessons are architectural: a **liveness supervisor** (its `shell_process`/`notify_rendered`), a
+  **no-unbounded-wait contract** for virtualized services, and pollable pseudo-devices. The full 32-bit
+  image is a 6–12 month alternative and contradicts AD-3; not recommended next.
+- **The liveness supervisor landed** (uncommitted): `GuestThread` carries wait markers (futex/sleep/host
+  held/host released, slot, last syscall); the launcher's profiler now says `stall: no guest instruction
+  retired in the last 10 s` and dumps one line per guest thread with pc/lr/sp named against modules, the
+  futex word, a stack scan for module-shaped return addresses, and the futex table's counters. That turned
+  "black screen" into a named thread and a call chain. Tests: the futex lane checks the marker.
+- **Cars 3 is not signals and not Crittercism.** The native original (32-bit) reaches MainMenu on the same
+  Tab S9 in ~18 s, so the game and its dead backend are not the cause. JDWP showed the Java side healthy
+  (main idle in the Looper, UnityMain inside `nativeRender`); the stall report names **adopted tid 4245**
+  parked in a libunity `pthread_cond_wait` (refcounted-object wait). Cecil-injected `RBTRACE` logs narrowed
+  the managed side to the Unity **scene activation / UI OnEnable** phase (UIBehaviour, MaskableGraphic,
+  Graphic), and emptying `Crittercism.Awake`/`CrittercismAndroid.Init` did **not** move the stall. Next
+  tool: an EHABI unwind of the guest stack (the scan is not enough) or a UI-asset-level comparison.
+- **MadTruck's next wall was a missing thunk, and is fixed.** With C26 it reached `nativeRender` and died on
+  `ALooper_pollAll` (unanswered import, trap 0xfffe0230). `thunks_android.cpp` now answers
+  `ALooper_pollAll`/`pollOnce` with `ALOOPER_POLL_TIMEOUT` (-3) (the engine has no guest input queue on a
+  looper; polling the host looper would consume the host's events and could block forever) and `ALooper_wake`
+  as a no-op. MadTruck now renders the Spil Games splash and runs at 60–127 M guest instr/s. Its new wall is
+  a **billing/semaphore spin**: UnityMain at 100% CPU repeats "Failed to wait on a semaphore (Interrupted
+  system call)" after the Android Native billing plugin's `AN_Connect`/`AN_RetrieveProducDetails`; no crash.
+- **Teeny Titans 2 (Unity 2018.4, IL2CPP) now renders its title screen** — it previously died with
+  `exit(127)`, the same signal wall. Its stall report shows the main thread at the return sentinel with
+  libil2cpp stack words and the adopted UI thread in a libunity `pthread_cond_wait`; 31 workers wait on one
+  pool futex. It is frozen on the title screen, not crash-looping, and that is the next named wall.
+- **The futex interrupt now respects the target's blocked mask.** `Monitor::QueueSignal` asks the runtime for
+  the target `GuestThread` and only wakes a futex wait if the signal is not blocked there, as the kernel
+  does. MadTruck's repeated semaphore EINTRs are from unblocked SIGPWR/SIGXCPU (kernel-correct), but a
+  blocked signal can no longer manufacture a spurious EINTR.
+- Compatibility summary after the session: Blocky Roads / Sonic Transformed / Gumball Lite still run;
+  Teeny Titans 2 and MadTruck now render their first screens; Cars 3 still freezes in UI; Angry Birds Epic's
+  null table entry and the NativeActivity titles are unchanged. No new Unity game reaches gameplay yet.
+- Gates: 23 engine suites green on the SM-X710; `rb_guest_thread_tests` 618 checks (the marker check now
+  waits for the marker; its first form raced the enqueue). The diagnostic C# patches and decompiled trees
+  live under `build/` (ignored) and are not shipped; the installed Cars 3 was restored to the clean C26
+  build, the installed MadTruck/launcher carry the ALooper thunks.
+
+### Pre-commit review hardening (2026-10-20, same session)
+
+- An independent reviewer audited the staged diff. Applied: the liveness sampler is now owned and **joined**
+  (never detached) so a failed scope boot cannot leave it reading a freed GuestProcess; `rt_sigaction`
+  answers a query from the recorded disposition (and reports EFAULT instead of installing a default);
+  the sigaction's **sa_mask** is ORed into the handler mask; the interrupted **VFP file** is saved in the
+  delivery record and restored on `rt_sigreturn` (the kernel's VFP sigcontext block is still not modelled —
+  a named gap); a sleeper registers **before** the GGL is released (tkill can no longer miss it); standard
+  pending signals coalesce (a tkill loop cannot grow the queue); a signal number outside 1..64 is EINVAL;
+  the frame's page precheck starts at the containing page; the handler's CPSR has its IT bits cleared; and
+  two stale no-signal comments are corrected.
+- One reviewer finding was rejected with evidence: `adopted_` is **not** raced — `AdoptCurrentHostThread`
+  takes the GGL at entry and `RetireAdopted` takes it before touching the list; `StallReport`'s deliberate
+  no-GGL read is a stall-only diagnostic.
+- New lanes: a blocked signal must leave a futex wait parked (lookup + mask), and a sigaction query returns
+  the previous handler without erasing it. Gate: 23/23 suites; `rb_syscall_monitor_tests` 216 checks,
+  `rb_guest_thread_tests` 646, `rb_exec_tier_diff_tests` 1011; launcher APK packages.

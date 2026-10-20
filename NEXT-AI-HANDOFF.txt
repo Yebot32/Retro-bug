@@ -1,0 +1,211 @@
+RetroBug — handoff for the next AI session (2026-10-18, 22:30)
+==============================================================
+
+THIS FILE IS THE NEWEST STATE. HANDOFF.md and docs/session/* hold the detail; this file
+says where we are and what is next. Read this, then the tail of docs/session/worklog.md,
+then docs/session/backlog.md (statuses are current as of now).
+
+
+0. The human, and the standing rules
+------------------------------------
+- yebot is not a developer. He wants old 32-bit Android games running on 64-bit-only phones.
+  He gives broad directives and licenses depth ("analyze, take your time"), but hates idle
+  waiting and half-finished passes. Evidence and numbers beat adjectives.
+- Device dialogs are his: never enter a PIN, never tap through install/security prompts without
+  him, never merge or push without him, never replace the tablet's natively installed originals
+  (com.twentysixdigital.gumballlite, com.rovio.angrybirdsgo).
+- Devices: Tab S9 (SM-X710) is 32-bit-capable — everything converts/runs there. The OnePlus
+  CPH2573 is 64-bit-only — the real target, used for icon-launch acceptance.
+- He sometimes redirects mid-session to something adjacent. Do it, document it, pull back when
+  he says so.
+
+
+1. Where things stand
+---------------------
+- Branch session/m5-m6, head 492db4b (2026-10-19 05:2x) PLUS the uncommitted C26 work (2026-10-20).
+  Not merged, not pushed (needs yebot). `main` is 80 commits ahead of `origin/main`; the whole project is
+  local-only.
+- **C26 IS DELIVERED (uncommitted, device-verified 2026-10-20).** The signal wall is gone: Cars 3 delivers
+  `tkill(tid, 30)` (SIGPWR) and the nested `tkill(tid, 24)` (SIGXCPU) into Mono's handler, both
+  `rt_sigreturn`s restore, and the Mono GC suspend/restart protocol completes repeatedly on two threads
+  while the game runs on. The full story and the four bugs it exposed are in docs/session/worklog.md
+  under 2026-10-20. The next wall is a **hang**: Cars 3 does real Unity startup for ~8 s (GL extensions,
+  OnLevelWasLoaded, Crittercism init) at 115 M instr/s, then the guest stops executing and all 74 threads
+  sleep on a black screen (evidence build/m5/com.disney.cars3_goo/c26f-runtime.log). That is the game's
+  Java/SDK side, not C26; no Unity game has drawn a frame yet. MadTruck boots to its dialog and stays idle.
+- **POST-C26 (same day, uncommitted): a liveness supervisor and the ALooper thunks.**
+  * `GuestThread` now records what it waits in (futex/sleep/host slot + last syscall), and the launcher's
+    10 s profiler prints `stall:` lines with pc/lr/sp named against modules, the futex word and a stack
+    scan when no guest instruction retires. That is what named the Cars 3 stall (adopted tid 4245 in a
+    libunity condvar) instead of a black screen.
+  * The native 32-bit original of Cars 3 reaches MainMenu on the same Tab S9, so the game is fine; the
+    stall is in Unity scene activation/UI (Cecil `RBTRACE` reaches UIBehaviour/MaskableGraphic/Graphic;
+    emptying Crittercism does not move it). Next tool: an EHABI unwind.
+  * MadTruck's next wall was `ALooper_pollAll` (unanswered import -> trap). `thunks_android.cpp` now
+    answers `ALooper_pollAll`/`pollOnce` (-3) and `ALooper_wake` (0). MadTruck renders the Spil splash and
+    runs; its new wall is a billing/semaphore spin (`AN_Connect`/`AN_RetrieveProducDetails`, UnityMain at
+    100% CPU, "Failed to wait on a semaphore (Interrupted system call)"). No crash.
+  * Teeny Titans 2 (Unity 2018.4 IL2CPP) now renders its **title screen** instead of `exit(127)`; it
+    freezes there (main at the return sentinel, adopted UI thread in a libunity condvar, 31 workers on one
+    pool futex). `QueueSignal` now also respects the target's blocked mask before waking a futex (kernel
+    semantics), so a blocked signal can no longer cause a spurious EINTR.
+  * VPhoneGaga was analysed: a full QEMU-TCG 32-bit Android VM (GPL components; nothing copyable). The
+    liveness-supervisor idea is the transferable part and is now implemented. Details in the worklog.
+- NEW SINCE THIS FILE WAS WRITTEN (2026-10-19, four commits d11c5f9..492db4b):
+  * The Unity step 1 work was COMMITTED (it had been left uncommitted in the tree).
+  * OnePlus CPH2573 acceptance PASSED — see item 1 below, it is done.
+  * C34 landed (36ce9ac): clock_getres, uname, sysinfo, sched_get/setaffinity, prlimit64, the
+    scheduler pair, get/setpriority, and tkill/rt_tgsigqueueinfo folded into tgkill.
+  * **THE BIG ONE: C26 is Unity's step one after all.** The step-1 conclusion in this file ("no
+    signal is ever sent") is WRONG and is retracted. That scan looked for `tgkill` (268); Mono
+    suspends a thread with **`tkill` (238)**, a different number. Cars 3 and MadTruck both now
+    reach `tkill(tid, 30)` — signal 30 is SIGPWR, Mono's GC thread-suspend — and abort
+    (SIGABRT, exit 127) because this build cannot deliver it. Two games, same wall, both named.
+- Tab S9 runs launcher 0.1.243 with the C26 engine (rebuilt and installed 2026-10-20 04:0x). It has
+  re-converted copies of Disney Cars 3 (com.disney.cars3_goo.rb) and MadTruck
+  (com.spilgames.mtc.rb) carrying that engine (build/m5/.../c26e-cars3.rb.apk and c26-mtc.rb.apk).
+  Cars 3 boots and survives the Mono GC cycles (black screen); MadTruck boots to its Information
+  dialog. NOTE: `cars.apk` on the tablet is **Gameloft** Cars, not Disney Cars 3 — the Disney
+  original is build/m5/com.disney.cars3_goo/orig.apk.
+- The OnePlus is in yebot's hands for another project as of 2026-10-19; ask before using it.
+- M5 is delivered: docs/compatibility.md (30 games). M6 is device-verified.
+
+
+
+2. What was done on 2026-10-18, evening (newest last)
+----------------------------------------------------
+- C11 device check: Settings > DONE, Settings > Back and Add APK all crashed with
+  "The specified child already has a parent" (Theme.Holo keeps content transitions on, so the
+  window stacks screens; the retained library still had a parent). Fixed in 5b25229, re-verified.
+- C15 device check: an invalid added file becomes a tile that says "CAN'T READ THIS FILE" and a
+  tap says "Can't read this file"; a stray `.part` leaves no tile; Remove deletes the file.
+- C12 verified as a side effect: declining the install prompt frees the tile at once.
+- D6 (2410054): label is @string/app_name.
+- C3 (25057e3): scripted repack flags are set only after ConvertJob.claim(); stubcheck claims too.
+- C7 (e088907): a split install is SPLIT even when the base carries v7a (the copy would miss the
+  split's resources).
+- C27 (88106a1): kInitBudget = 1 << 30 for constructors and JNI_OnLoad. Measured: Nutty Fluffies
+  now runs JNI_OnLoad 147,666,044 steps (was 4,000,000) and fails on a real unmapped read at
+  0xc0d900b3; Angry Birds Epic's JNI_OnLoad returns in 35 steps and its boot completes, naming
+  10 unanswered libunity.so imports (6 × ASensor* — that is C29). The budget hid one fault, it
+  did not unlock four games.
+- C16 (2dcf3df): a disabled primary button's label is readable (state-list colour).
+- C31's cheap half (b4fbdba, docs eb56d3b): the four NativeActivity games (Derby Quest,
+  FC All-Stars, LEGO Mighty Micros, Torture the Murderer) now read CAN'T PLAY HERE, and a tap
+  explains why in two lines. The decision is the launcher activity's own class chain, because
+  that is what makes the platform dlsym ANativeActivity_onCreate — NOT the library's exports:
+  MadTruck exports the same symbol and runs, since its activity is a plain UnityPlayerActivity.
+  The export is only a 30 KB pre-filter (the 30-game library holds 180 MB of DEX). Verified on
+  the tablet: four tiles red, 26 untouched, menu action disabled, Delete still offered.
+- Gates after all of it: engine lanes 25/25 exit 0; host Java suites 16/16 exit 0. The engine
+  was not touched by C31, so its lanes were not re-run after it.
+
+
+3. What is left, in the order I would do it
+-------------------------------------------
+APP (small, shippable):
+  1. ~~Install 0.1.236 on the OnePlus and re-run the icon-launch acceptance there.~~ DONE
+     2026-10-19: 0.1.238 installed on the CPH2573, FN Skittles launched by its icon booted with
+     no fault (483 constructors, JNI_OnLoad 0x10004) and played. yebot plays it on 32-bit
+     hardware and says he could not tell the difference. The 64-bit-only target is proven.
+  2. Polish: C17 (badge colours), C18 (developer corner; Back from DEV), C20 (icon stretching,
+     ArtCache), C21 (empty state + Add button), C23 (ask only the permissions a game needs).
+  3. D5: the icon is still the platform mascot. Needs ARTWORK from yebot, not code.
+  4. B11: export shows the save size before writing.
+  5. C31's remaining edges, if they ever matter: running a NativeActivity game (needs
+     ANativeActivityCallbacks + the guest-side activity loop), a game that names its entry
+     library through android.app.lib_name (not recognised), and an APK added for a game that is
+     not installed (no launcher class to ask about — it converts and fails at launch, as before).
+ENGINE (what runs):
+  6. ~~C29/C30 sensor thunks~~ C29's sensor and weak-import halves are DONE (d11c5f9): Angry Birds
+     Epic's libunity unanswered-import line went 12 -> 0. GLES extension coverage (C30) is open.
+  7. ~~C34 (ENOSYS syscalls)~~ DONE (36ce9ac). Cars 3's run now contains no syscall refusal at all.
+     C28 (O_* flag translation), C32/C33 (profiler map growth, rb_runtime_boot JNI version) open.
+  8. ~~C26: signal DELIVERY~~ **DONE (uncommitted, 2026-10-20; see worklog).** Dispositions are
+     recorded from the guest's `struct sigaction`, `tkill`/`tgkill`/`rt_tgsigqueueinfo` queue a
+     signal for a live tid, delivery runs at the ABI's slice boundary, the measured Aarch32
+     rt_sigframe is built on the guest stack, `rt_sigreturn` restores it, futex/nanosleep waits
+     return EINTR first, and deliveries nest (Mono's SIGPWR suspend handler + SIGXCPU restart).
+     Cars 3 runs through repeated Mono GC cycles on two threads — the wall is gone.
+     **The next wall (measured later on 2026-10-20) is Unity scene activation/UI**, not the SDK:
+     the native original reaches MainMenu; JDWP is healthy; the stall report names adopted tid
+     4245 in a libunity `pthread_cond_wait`; Cecil `RBTRACE` reaches UIBehaviour/MaskableGraphic/
+     Graphic and stops; emptying Crittercism does not move it. Next tool: an EHABI unwind (the stack
+     scan is not enough) or a UI-asset comparison. **MadTruck is past its old ALooper wall** and
+     renders the Spil splash; its next wall is a billing/semaphore spin (see §1). The old per-game
+     faults behind these are still true: Angry Birds Epic's null table entry at libunity.so+0x597b3c
+     (`ldr lr, [r4, #0xcc]; blx lr`) and the 0xc0d900b3 read in Nutty Fluffies.
+RELEASE:
+  9. A6/A7: final polish pass and release summary. D4 (CI key) is yebot's.
+  10. Merge session/m5-m6 into main and push — yebot's call, and the biggest single risk now.
+      It is 4 commits further ahead than when this file was written.
+DATA HYGIENE:
+  11. Re-run the contaminated M5 rows (rovio.angrybirdsgp, ttgfigures2 + the duplicate-screenshot
+      runs) with the tablet idle; update docs/compatibility.md. cars3_goo's row was re-run
+      2026-10-19 and now carries a real verdict.
+
+
+4. Tooling notes and gotchas
+----------------------------
+- Build the launcher WITHOUT the bulk clean (both build scripts trip the session's safe-delete
+  guard). Same trick for each:
+      sed 's|^rm -rf "\$OUT"$|mkdir -p "$OUT"|' tools/build_launcher_apk.sh > build/build_launcher_noclean.sh
+      sed 's|^rm -rf "\$OUT"; mkdir -p|mkdir -p|' tools/run_java_tests.sh > build/run_java_noclean.sh
+  ROOT resolves correctly because the copies sit one level down. Delete them afterwards.
+- Version: versionCode = `git rev-list --count HEAD`, versionName = `0.1.<count>`;
+  RB_VERSION_CODE / RB_VERSION_NAME override. So committing changes the next build's version:
+  the code at eb56d3b+2 uncommitted built as 0.1.238, and the same code committed is 0.1.240.
+- **Under a DSH file sandbox, msys `bash` and `ninja` cannot create their signal pipes** ("fatal
+  error - couldn't create signal pipe, Win32 error 5"), so every `.sh` build script dies before
+  doing anything and `ninja` hangs with no child compiler. Two ways through: run the build with
+  the sandbox widened, or drive the already-configured tree directly with the SDK's own ninja as
+  a native exe — `"$LOCALAPPDATA\Android\Sdk\cmake\3.31.6\bin\ninja.exe" -C build/launcher-arm64`
+  (that compiles and links the engine fine; only the APK packaging step needs the script).
+- The engine is baked into every CONVERTED game's APK, so an engine fix needs the game re-repacked
+  before it can be tested — the loop is in §3's item and in docs/session/worklog.md.
+- Debuggable dev builds allow the -e extras (C4 gate). RB_RELEASE=1 builds a release that
+  ignores every -e path.
+- `-e repack <name>` keeps the ORIGINAL package name. To make a `.rb` copy add `-e rename 1` —
+  without it the signed APK collides with the installed original and `adb install` fails with
+  "signatures do not match".
+- `adb install` cannot read a device path: `adb pull` the signed APK first, then install it.
+  That bypasses PackageInstaller, so a test conversion needs no dialog.
+- Scripted device work: `-e stage <file>` copies from getExternalFilesDir, `-e repack <name>
+  -e install 0` converts without installing. FORCE-STOP the launcher between intents — the
+  activity only reads extras in onCreate.
+- `adb shell` from Git Bash mangles `/sdcard/...` into a Windows path: prefix the command with
+  MSYS_NO_PATHCONV=1.
+- The tablet can be in landscape (a game rotates it), and then every hard-coded tap misses.
+  Read bounds from `uiautomator dump` instead of scaling a screenshot.
+- `uiautomator dump` can hand back a STALE tree: it reported "READY" on the four tiles that
+  were already painted CAN'T PLAY HERE. Take `adb exec-out screencap -p` as the truth and use
+  the dump only for tap coordinates.
+- Reading one file out of an installed APK without pulling 500 MB:
+  `adb exec-out "unzip -p <apk> lib/armeabi-v7a/libmain.so" > x.so` (the device has
+  /system/bin/unzip), then llvm-nm from the NDK on it.
+- The launcher's own logcat tag is RetroBug; the guest runtime's is RBRUNTIME. A stalled run now prints
+  `stall:` lines (one per guest thread, adopted first) after 10 s with no retired guest instruction; they
+  name pc/lr/sp against modules, the wait kind and futex word, and a stack scan.
+- Java stacks on a stalled repack: repack with `-e debuggable 1`, then
+  `adb forward tcp:8700 jdwp:<pid>` and `jdb -connect com.sun.jdi.SocketAttach:hostname=localhost,port=8700`
+  (`suspend`, then `where all`, then `resume`). `kill -3` writes to tombstoned and is not in a bugreport.
+- Managed-method tracing: `build/patch/` holds a PowerShell + Mono.Cecil tracer (`trace.ps1`/`trace2.ps1`)
+  that prepends `Debug.Log("RBTRACE <type.method>")` to every Awake/Start/OnEnable, plus `zipapk.ps1` to
+  rebuild an APK with patched managed DLLs; hand it to the normal `-e stage`/`-e repack` path. `dotnet`
+  has no SDK installed; load Cecil with `[Reflection.Assembly]::Load([IO.File]::ReadAllBytes(...))`
+  (Add-Type refuses the Downloads path). These tools live under build/ (ignored) and are not shipped.
+- M5 per-game evidence: build/m5/<pkg>/ (repack.txt, logcat.txt, shot1/2.png, final.txt).
+- A converted copy's boot report is logcat tag RBRUNTIME plus
+  /data/user/0/<pkg>/files/rb-report.txt (readable with `run-as` only for the launcher; for a
+  copy use logcat).
+
+
+5. Parked
+---------
+- SpongeBob Game Station: build/sbgs-4.9.0-infinite.apk works (hearts/keys pinned at 99,
+  location+billing permissions gone, IAP crash fixed). Full record in
+  docs/session/spongebob-gamestation.md. Turning it into a .rbpatch needs file-replacement
+  support in the patch format first. Parked at yebot's request.
+- G-Presto analysis (3.4.0) stands: any converted copy trips it; the untouched 4.9.0 build has
+  none. Do not attempt to defeat it.
+- iOS sideload version: docs/ios-notes.txt.

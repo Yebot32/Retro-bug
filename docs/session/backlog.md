@@ -67,7 +67,7 @@ refused, no-OBB status text.
 | C23 | gap | Permission shim asks for every dangerous permission at once (SMS, contacts, location…) | shim/Shims.java:122-172 | todo (ask only what is needed) |
 | C24 | gap | Settings parsed with `contains`, 1 KiB cap — blocks M6 lists | shim RbShimProvider:39,72-74; jni/runtime_boot.cpp:66-81 | done (93d258c) |
 | C25 | gap | dlopen/dlsym stubbed → all Unity games fail (Teeny Titans 2, FC All-Stars) | jni/host_slots.cpp:315-340 | done (44096c0) |
-| C26 | gap | No signals delivered (Mono/Boehm GC). **Measured 2026-10-19: this is Unity's step one.** Mono suspends with `tkill(tid, SIGPWR)` (238), not `tgkill` (268) — a scan for 268 alone missed it. Cars 3 and MadTruck both end here. | core/syscall/monitor.cpp:507-510 | todo (now the top engine item) |
+| C26 | gap | No signals delivered (Mono/Boehm GC). **Measured 2026-10-19: this is Unity's step one.** Mono suspends with `tkill(tid, SIGPWR)` (238), not `tgkill` (268) — a scan for 268 alone missed it. Cars 3 and MadTruck both end here. | core/syscall/monitor.cpp:507-510 | done (uncommitted 2026-10-20: dispositions recorded, signals queued, delivery at ABI slice boundaries, rt_sigframe + rt_sigreturn, futex/sleep EINTR, nested SIGPWR/SIGXCPU; Cars 3 runs through repeated Mono GC cycles, 23/23 engine lanes green) |
 | C27 | bug | JNI_OnLoad/constructors run under a 4M-step budget that poisons the process | jni/runtime_boot.cpp:753-754 | done (88106a1; the budget was hiding a real fault, see compatibility.md row 28) |
 | C28 | bug | ARM32 vs AArch64 `O_*` flags not translated (O_LARGEFILE→O_NOFOLLOW, O_DIRECTORY→O_DIRECT) | core/syscall/host_io.cpp:291,297 | todo |
 | C29 | gap | Missing GLES2 ext / GLES1 fixed-point / GLES3 / sensor teardown thunks | jni/thunks.cpp | done (sensor + weak-import halves, d11c5f9; GLES ext still open) |
@@ -76,6 +76,10 @@ refused, no-OBB status text.
 | C32 | perf | Always-on profiler map grows forever | jni/runtime_boot.cpp:542-582 | todo |
 | C33 | risk | `rb_runtime_boot` returns JNI_VERSION_1_6 even on failure | jni/runtime_boot.cpp:860 | todo |
 | C34 | gap | Many syscalls ENOSYS (uname, sysinfo, sched_*affinity, prlimit64…) | core/syscall/monitor.cpp | done (36ce9ac: clock_getres, uname, sysinfo, sched_get/setaffinity, prlimit64, sched_getparam/setscheduler/get_priority_min/max, get/setpriority, and tkill/rt_tgsigqueueinfo folded into tgkill) |
+| C35 | gap | `ALooper_pollAll`/`pollOnce`/`wake` unanswered — MadTruck's nativeRender died on the trap | jni/thunks_android.cpp | done (uncommitted 2026-10-20: poll returns ALOOPER_POLL_TIMEOUT, wake is a no-op; MadTruck renders its splash) |
+| C36 | gap | No stall visibility: a black screen named no thread | core/runtime/guest_process.cpp, jni/runtime_boot.cpp | done (uncommitted: wait markers + `stall:` report with pc/lr/sp, futex word, stack scan) |
+| C37 | gap | Cars 3 stalls in Unity scene activation/UI (libunity condvar); native original reaches MainMenu | core/runtime (guest), Unity UI | todo (next tool: EHABI unwind; JDWP healthy; Cecil trace stops in Graphic.OnEnable) |
+| C38 | gap | MadTruck spins in Android Native billing/semaphore after the splash | game Java/C#, semaphore waits | todo (AN_Connect/AN_RetrieveProducDetails; UnityMain 100% CPU; "Failed to wait on a semaphore (EINTR)") |
 
 ## D. Release prep (from C)
 
