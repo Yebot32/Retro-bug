@@ -2,21 +2,23 @@
 
 Built 2026-10-18 from the M5 batch in `build/m5/` (one folder per game: `repack.txt`, `logcat.txt`, `shot1/2.png`,
 `final.txt`), plus the re-runs noted below. Device: Samsung Tab S9 (SM-X710, 32-bit capable), RetroBug launcher
-`session/m5-m6` @ `8b3d22e`. Each game was converted from its installed original at its own targetSdk, installed as
-`<pkg>.rb`, launched, left ~60 s, then the process state and the first fault were recorded.
+`session/m5-m6` @ 2026-10-20 (C26 signal delivery + the ALooper thunks + `rt_sigsuspend`). Each game was converted
+from its installed original at its own targetSdk, installed as `<pkg>.rb`, launched, left ~60 s, then the process
+state and the first fault were recorded. Rows re-run on 2026-10-20 note it.
 
 **Read the "Evidence" column before trusting a row.** The batch ran while the tablet was in use: several screenshots
 show an unrelated app (a classroom video) and two runs were killed by ANRs that the user's own app caused. Those rows
 are marked *contaminated* and need a clean re-run.
 
-Tally: 30 games — **11 stayed alive**, **14 died during boot or play**, **4 could not be installed**, **1 could not be
+Tally: 30 games — **12 stayed alive**, **13 died during boot or play**, **4 could not be installed**, **1 could not be
 converted** (fixed since: `8b3d22e`, proven on Among Us — 497 MB copy, no OOM).
 
-Engine split: **16 non-Unity, 14 Unity.** Non-Unity: ~9 reach a visible screen, 4–5 playable. Unity: **0 reach
-gameplay** — they boot, then stop in native init or stay alive without drawing. Measured 2026-10-19, the class's
-single confirmed wall is **C26 (no signal delivery)**: Mono's GC suspends a thread with `tkill(tid, SIGPWR)` and
-aborts when it cannot be delivered. An earlier reading that "no signal is ever sent" was a scan for `tgkill` (268)
-that missed `tkill` (238); two games now name the same call.
+Engine split: **16 non-Unity, 14 Unity.** Non-Unity: ~9 reach a visible screen, 4–5 playable. Unity: **1 reaches
+gameplay — MadTruck, 2026-10-20** (menu, level map, goal screen, level 1 race with working input). The class's wall
+was **C26 (no signal delivery)**: Mono's GC suspends a thread with `tkill(tid, SIGPWR)` and aborts when it cannot be
+delivered. An earlier reading that "no signal is ever sent" was a scan for `tgkill` (268) that missed `tkill` (238).
+The path from there: C26 delivery and nested SIGPWR/SIGXCPU, the `ALooper_pollAll` thunks, `rt_sigsuspend` (179),
+and mask-aware futex interrupts.
 
 | # | Game | Package | Engine | Result | Where it stops | Evidence |
 |---|---|---|---|---|---|---|
@@ -25,7 +27,7 @@ that missed `tkill` (238); two games now name the same call.
 | 3 | Angry Birds Epic | com.rovio.gold | Unity (il2cpp) | died | `nativeRender` calls a null function pointer: `ldr lr, [r4, #0xcc]; blx lr` at `libunity.so+0x597b3c` | logcat 2026-10-18 23:01 with the new stop report: boot completes (370 constructors), GL context is real (Unity logs the Adreno extension list), then the null call. The 12 unanswered `libunity.so` imports are answered since C29's sensor half landed, and the two weak `__google_potentially_blocking_region_*` are no longer 0 |
 | 4 | Blocky Roads | com.crescentmoongames.blocky_roads | native | **runs** | — (gameplay on screen) | screenshot |
 | 5 | Car Game | com.bertheussen.cargame | Unity | not installed | Play Protect verification failure | install log |
-| 6 | Cars 3 (Lightning) | com.disney.cars3_goo | Unity (Mono) | died | re-run 2026-10-19 05:05: boot completes (316 constructors, real GL context), every syscall refusal gone, then `tkill(tid, 30)` — SIGPWR, Mono's GC suspend — is refused, the runtime aborts (SIGABRT) and calls `exit(127)` | logcat; C34 landed, C26 is now the wall |
+| 6 | Cars 3 (Lightning) | com.disney.cars3_goo | Unity (Mono) | stalled | re-run 2026-10-20: boot completes and the Mono GC cycles now run, but the game freezes in Unity scene activation/UI — the adopted UnityMain thread waits in a libunity `pthread_cond_wait` (black screen); the native original reaches MainMenu on the same tablet | logcat + screenshots; see C37 in the backlog, worklog 2026-10-20 |
 | 7 | Crash Drive 2 | com.spilgames.a10.google.crashdrive2 | Unity | ran, then died | guest thread fetched 0x0 | logcat |
 | 8 | Derby Quest | com.tapsy.derbyquesthd | Unity + NativeActivity | died | `ANativeActivity_onCreate` undefined — tile now says so (C31, 0.1.236) | logcat; tile |
 | 9 | FC All-Stars | com.turner.fcallstars | Unity + NativeActivity | died | `ANativeActivity_onCreate` undefined — tile now says so (C31, 0.1.236) | logcat; tile |
@@ -36,7 +38,7 @@ that missed `tkill` (238); two games now name the same call.
 | 14 | KitKat Challenge | com.doubleleft.androidkitkat | native | **runs** | — playable | screenshot + played |
 | 15 | LEGO Mighty Micros | com.lego.superheroes.dccomicsmightymicros | Unity + NativeActivity | died | `ANativeActivity_onCreate` undefined — tile now says so (C31, 0.1.236) | logcat; tile |
 | 16 | Looney Tunes Dash | com.zynga.looney | native | **runs** | — age gate on screen | screenshot |
-| 17 | MadTruck | com.spilgames.mtc | Unity (Mono) | died | re-run 2026-10-19 05:11: boots clean, draws its own mod dialog and holds it; on Close it reaches the same `tkill(tid, 30)` (SIGPWR) refusal as row 6, then SIGABRT and `exit(127)`. Its `libunity.so` is down to 2 unanswered imports (`ANativeWindow_lock`/`unlockAndPost`) | logcat + screenshot; the dialog is the mod's own ("Credits for mod to Tiger"), not an engine fault |
+| 17 | MadTruck | com.spilgames.mtc | Unity (Mono) | **runs (3D)** | — menu, Egypt level map, goal screen and level 1 race render and accept input (2026-10-20); Unity logs non-fatal "Failed to wait on a semaphore (EINTR)" during GC and a `fork` ENOSYS from its crash reporter | screenshots `build/m5/com.spilgames.mtc/mtc-sig2.png` (menu), `mtc-play.png` (level map), `mtc-level1.png` (goals), `mtc-race.png`/`mtc-race2.png` (race); the path: C26 delivery, nested signals, ALooper thunks, `rt_sigsuspend`, mask-aware futex interrupts |
 | 18 | Oreo | com.pikpok.oreo | native | not installed | Play Protect verification failure | install log |
 | 19 | Rabbids Runner | com.ubisoft.rabbidsrunner | native | **runs** | — splash; legacy-storage permission refused | screenshot |
 | 20 | Rolling Sky | com.turbochilli.rollingsky | Unity | died | `NoSuchFieldError libcore.util.EmptyArray.INT` | logcat |
@@ -44,7 +46,7 @@ that missed `tkill` (238); two games now name the same call.
 | 22 | SMB Bounce | com.sega.smbbounce | native | **runs** | — title screen with its OBB | screenshot |
 | 23 | Sonic Transformed | com.sega.sonic.transformed | native | **runs** | — title screen (needs its 851 MB OBB) | screenshot |
 | 24 | Tap Tap Revenge 4 | com.tapulous.taptaprevenge4 | native | died | foreground `PushService` start refused | logcat |
-| 25 | Teeny Titans 2 | com.turner.ttgfigures2 | Unity | died | guest native called `exit(127)` | logcat (screenshot contaminated) |
+| 25 | Teeny Titans 2 | com.turner.ttgfigures2 | Unity (2018.4, IL2CPP) | stalled | re-run 2026-10-20: renders its title screen (instead of `exit(127)`) and freezes there — the adopted UI thread waits in a libunity condvar, 31 workers on one pool futex | logcat + `build/m5/com.turner.ttgfigures2/c26-tt2.png` |
 | 26 | Torture the Murderer | com.ningunosentertainment.TortureTheMurdererElectric | Unity + NativeActivity | died | `ANativeActivity_onCreate` undefined — tile now says so (C31, 0.1.236) | logcat; tile |
 | 27 | Turbo FAST | com.pikpok.turbo | native | not installed | Play Protect verification failure | install log |
 | 28 | Nutty Fluffies | com.UBI.A90.WW | Unity | died | re-run 2026-10-18 21:46: `JNI_OnLoad` runs 147,666,044 steps (was stopped at 4,000,000) and faults on an unmapped guest read at 0xc0d900b3, pc 0x2410bc — a real memory fault, no longer the budget | logcat |

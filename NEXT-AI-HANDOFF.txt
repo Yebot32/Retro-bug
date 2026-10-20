@@ -22,11 +22,17 @@ then docs/session/backlog.md (statuses are current as of now).
 
 1. Where things stand
 ---------------------
-- Branch session/m5-m6, head 8b5e7a1 (2026-10-20). The C26 work is committed (687faa2 engine, 8b5e7a1
-  docs) and the branch is **pushed to origin/session/m5-m6** (GitHub offers a PR:
+- Branch session/m5-m6, head **2da7ec5** (engine) plus this docs commit (2026-10-20/21). Commits:
+  687faa2 (C26 engine), 8b5e7a1/c29dfa1 (docs), **2da7ec5 (`rt_sigsuspend` engine)**, and the docs
+  commit that follows. The branch is **pushed to origin/session/m5-m6** (GitHub offers a PR:
   https://github.com/Yebot32/Retro-bug/pull/new/session/m5-m6). Not merged into main; `main` is still
   local-only. The two unrelated untracked files (`Open Rocket Launch.bat`, `rocket-launch.html`) are not
   part of the project and were deliberately left out.
+- **MadTruck is the first 3D Unity game running** (2026-10-20): after its own mod dialog it renders the
+  Spil splash, main menu, Egypt level map, GOALS screen and the level-1 race (3D track, HUD, tilt/rocket
+  controls), and the tutorial dismisses and controls respond. The missing call was **`rt_sigsuspend` (179)**
+  in Mono's suspend handler — refused with ENOSYS before, so the GC handshake never settled. C38/C39 are
+  closed. Evidence: build/m5/com.spilgames.mtc/mtc-sig2.png, mtc-play.png, mtc-level1.png, mtc-race2.png.
 - **C26 IS DELIVERED (committed 687faa2, device-verified 2026-10-20).** The signal wall is gone: Cars 3
   delivers `tkill(tid, 30)` (SIGPWR) and the nested `tkill(tid, 24)` (SIGXCPU) into Mono's handler, both
   `rt_sigreturn`s restore, and the Mono GC suspend/restart protocol completes repeatedly on two threads
@@ -55,6 +61,12 @@ then docs/session/backlog.md (statuses are current as of now).
     sleeper registers before the GGL is released; standard signals coalesce; signal numbers are validated;
     the frame page precheck is page-aligned; handler CPSR IT bits are cleared. Gate: 23/23, monitor 216,
     guest_thread 646.
+  * `rt_sigsuspend` (179) landed in 2da7ec5: the temporary mask, a FutexTable signal wait, EINTR, and the
+    pre-suspend mask restored after the handler's rt_sigreturn. Monitor lane now 223 checks. This is what
+    let MadTruck reach its 3D gameplay.
+  * Still open: Cars 3 (Mono) freezes in Unity scene activation/UI (C37; the adopted UnityMain thread in a
+    libunity condvar, before any sigsuspend; native original reaches MainMenu); Teeny Titans 2 (IL2CPP)
+    renders its title screen and freezes (C40).
   * VPhoneGaga was analysed: a full QEMU-TCG 32-bit Android VM (GPL components; nothing copyable). The
     liveness-supervisor idea is the transferable part and is now implemented. Details in the worklog.
 - NEW SINCE THIS FILE WAS WRITTEN (2026-10-19, four commits d11c5f9..492db4b):

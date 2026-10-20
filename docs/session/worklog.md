@@ -362,3 +362,26 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
 - New lanes: a blocked signal must leave a futex wait parked (lookup + mask), and a sigaction query returns
   the previous handler without erasing it. Gate: 23/23 suites; `rb_syscall_monitor_tests` 216 checks,
   `rb_guest_thread_tests` 646, `rb_exec_tier_diff_tests` 1011; launcher APK packages.
+
+## 2026-10-20/21 — `rt_sigsuspend` was the missing call, and MadTruck runs (3D Unity)
+
+- **The gap.** Cars 3's runtime log had `svc #179 is not implemented; refusing with ENOSYS` at the edge of the
+  Mono GC. 179 is `rt_sigsuspend` (NDK `arm-linux-androideabi/asm/unistd-eabi.h`), and it is exactly what
+  Mono's suspend handler calls while it waits for its restart signal. Without it the SIGPWR handler could not
+  park, the stop-the-world handshake did not settle, and the game stopped making progress.
+- **What landed.** The monitor answers `rt_sigsuspend(mask, 8)`: it installs the temporary mask, registers a
+  signal wait under the GGL, blocks until a deliverable signal is queued, and returns `-EINTR`; the signal stays
+  pending and is entered at the next ABI boundary. `ReturnFromSignal` puts the pre-suspend mask back after the
+  handler's `rt_sigreturn` (the kernel's order: the handler runs under the temporary mask). FutexTable gained
+  `BeginSignalWait`/`WaitForSignal`, woken by `Interrupt` only for signals the target has not blocked.
+- **MadTruck now runs — the first 3D Unity game to reach gameplay.** After the mod's own Information dialog it
+  renders the Spil splash, the **main menu**, the **Egypt level map**, the **GOALS screen**, and the **level 1
+  race** (3D track, HUD, tilt/rocket controls), and the tutorial dismisses and the controls respond. Unity still
+  logs non-fatal "Failed to wait on a semaphore (Interrupted system call)" during GC and a `fork` ENOSYS from its
+  crash reporter; neither stops the game. Evidence: `build/m5/com.spilgames.mtc/mtc-sig2.png` (menu),
+  `mtc-play.png` (map), `mtc-level1.png` (goals), `mtc-race.png`/`mtc-race2.png` (race).
+- **What did not move.** Cars 3 still freezes in Unity scene activation/UI (the adopted UnityMain thread in a
+  libunity `pthread_cond_wait`) before it reaches a sigsuspend; the native original reaches MainMenu, so this is
+  a remaining engine gap (C37). Teeny Titans 2 (IL2CPP) renders its title screen and freezes (C40).
+- Gate: 23/23 engine suites on the SM-X710; `rb_syscall_monitor_tests` 223 checks (sigsuspend lane),
+  `rb_guest_thread_tests` 646, tier-diff 1011.

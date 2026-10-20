@@ -79,7 +79,9 @@ refused, no-OBB status text.
 | C35 | gap | `ALooper_pollAll`/`pollOnce`/`wake` unanswered — MadTruck's nativeRender died on the trap | jni/thunks_android.cpp | done (uncommitted 2026-10-20: poll returns ALOOPER_POLL_TIMEOUT, wake is a no-op; MadTruck renders its splash) |
 | C36 | gap | No stall visibility: a black screen named no thread | core/runtime/guest_process.cpp, jni/runtime_boot.cpp | done (uncommitted: wait markers + `stall:` report with pc/lr/sp, futex word, stack scan) |
 | C37 | gap | Cars 3 stalls in Unity scene activation/UI (libunity condvar); native original reaches MainMenu | core/runtime (guest), Unity UI | todo (next tool: EHABI unwind; JDWP healthy; Cecil trace stops in Graphic.OnEnable) |
-| C38 | gap | MadTruck spins in Android Native billing/semaphore after the splash | game Java/C#, semaphore waits | todo (AN_Connect/AN_RetrieveProducDetails; UnityMain 100% CPU; "Failed to wait on a semaphore (EINTR)") |
+| C38 | gap | MadTruck spins in Android Native billing/semaphore after the splash | game Java/C#, semaphore waits | done (2026-10-20: the wall was the missing `rt_sigsuspend`; MadTruck now runs menu -> level map -> level 1 on the 3D track) |
+| C39 | gap | `rt_sigsuspend` (179) refused with ENOSYS — Mono's suspend handler could not wait for its restart signal | core/syscall/monitor.cpp, futex_table | done (2026-10-20: temp mask, signal wait, EINTR, pre-suspend mask restored after rt_sigreturn; monitor lane 223 checks) |
+| C40 | gap | Teeny Titans 2 renders its title screen (IL2CPP) and freezes on a libunity condvar | Unity IL2CPP, libunity | todo (stall report: adopted UI thread + 31 pool workers; native original comparison needed) |
 
 ## D. Release prep (from C)
 
