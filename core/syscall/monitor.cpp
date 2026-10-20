@@ -187,6 +187,7 @@ const char* Name(std::uint32_t number) {
     case nr::kRtSigaction: return "rt_sigaction";
     case nr::kRtSigreturn: return "rt_sigreturn";
     case nr::kRtSigprocmask: return "rt_sigprocmask";
+    case nr::kRtSigsuspend: return "rt_sigsuspend";
     case nr::kMmap2: return "mmap2";
     case nr::kFstat64: return "fstat64";
     case nr::kGetdents64: return "getdents64";
@@ -1124,6 +1125,47 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
       }
       return Outcome::Emulated(static_cast<std::int32_t>(len),
                                "getrandom(" + std::to_string(len) + ") from the host's entropy pool");
+    }
+
+    case nr::kRtSigsuspend: {
+      // rt_sigsuspend(mask, sigsetsize). The arm32 compat sigset is 8 bytes (the same rule as
+      // rt_sigprocmask). It swaps the blocked mask, sleeps until a deliverable signal is queued, and
+      // returns -EINTR; the handler runs at the next ABI boundary. The temporary mask must stay in place
+      // while the handler runs — the kernel delivers against it — and the old mask goes back after the
+      // handler's rt_sigreturn (ReturnFromSignal checks sigsuspend_restore).
+      if (f.arg[1] != 8) {
+        return Outcome::Answered(err::kEinval, "rt_sigsuspend(sigsetsize=" + std::to_string(f.arg[1]) +
+                                                   ") = -EINVAL (-22): the arm32 compat sigset is 8 bytes");
+      }
+      if (memory_ == nullptr) {
+        return Outcome::Refused(err::kEnosys, "rt_sigsuspend: no guest memory is attached to this monitor");
+      }
+      std::uint64_t incoming = 0;
+      if (!memory_->Read(f.arg[0], &incoming, sizeof incoming)) {
+        return Outcome::Answered(err::kEfault, "rt_sigsuspend: the mask at 0x" + Hex(f.arg[0]) +
+                                                   " is not readable guest memory");
+      }
+      // A nested sigsuspend is not Mono's shape; keep the outermost old mask rather than overwriting it.
+      if (!th.sigsuspend_restore) th.sigsuspend_old_mask = th.signal_mask;
+      th.sigsuspend_restore = true;
+      th.signal_mask = incoming;
+      const std::string call = "rt_sigsuspend(mask 0x" + Hex(static_cast<std::uint32_t>(incoming)) + ")";
+      if (HasDeliverablePending(th.tid, incoming)) {
+        return Outcome::Answered(err::kEintr, call + " = -EINTR (-4): a signal is already pending");
+      }
+      runtime::FutexTable* table = futex_;
+      const std::int32_t tid = th.tid;
+      // Register under the GGL the caller holds, so a tkill after the pending check above cannot miss
+      // the waiter (a tkill is serialized by the same GGL).
+      if (table != nullptr) table->BeginSignalWait(tid);
+      Outcome o{Verdict::kBlocking, 0, call + " — sleeping until a signal", {}};
+      o.block = [table, tid, call] {
+        if (table != nullptr && table->WaitForSignal(tid)) {
+          return Outcome::Answered(err::kEintr, call + " = -EINTR (-4): a signal is pending");
+        }
+        return Outcome::Answered(err::kEintr, call + " = -EINTR (-4): the process is exiting");
+      };
+      return o;
     }
 
     case nr::kRtSigprocmask: {

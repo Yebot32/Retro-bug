@@ -1427,6 +1427,11 @@ void signal_delivery_enters_the_guest_handler_and_resumes(int tier) {
   const std::uint32_t sp_before = t.state.r[13];
   const std::uint32_t r3_before = t.state.r[3];
   const std::uint32_t mask_before = static_cast<std::uint32_t>(t.signal_mask);
+  // A sigsuspend in progress: the temporary mask is 1<<5 (signal 6), the pre-suspend mask is mask_before
+  // (0). The handler must run with the temporary mask, and rt_sigreturn must put the old one back.
+  t.sigsuspend_restore = true;
+  t.sigsuspend_old_mask = t.signal_mask;
+  t.signal_mask = 1ull << 5;
   const std::uint32_t pristine = 0xaaaa'aaaa;
   CHECK(m.Write(kData + 0x40, &pristine, 4));
 

@@ -138,6 +138,11 @@ constexpr std::uint32_t kPrctl = 172;
 constexpr std::uint32_t kRtSigreturn = 173;
 constexpr std::uint32_t kRtSigaction = 174;
 constexpr std::uint32_t kRtSigprocmask = 175;
+/// `rt_sigsuspend` (179, from the NDK's arm-linux-androideabi/asm/unistd-eabi.h): the call Mono's suspend
+/// handler makes while it waits for its restart signal. It swaps the blocked mask, sleeps until a
+/// deliverable signal is queued, then returns EINTR; delivery runs at the next ABI boundary and the old
+/// mask is put back after the handler's `rt_sigreturn`.
+constexpr std::uint32_t kRtSigsuspend = 179;
 constexpr std::uint32_t kMmap2 = 192;
 constexpr std::uint32_t kFstat64 = 197;
 constexpr std::uint32_t kGetdents64 = 217;
@@ -469,6 +474,17 @@ class Monitor {
     it->second.erase(it->second.begin());
     if (it->second.empty()) pending_.erase(it);
     return sig;
+  }
+  /// True when a signal for `tid` is pending and its bit is clear in `mask`. `rt_sigsuspend` uses this to
+  /// answer without blocking when the signal it waits for is already there.
+  [[nodiscard]] bool HasDeliverablePending(std::int32_t tid, std::uint64_t mask) const {
+    std::lock_guard<std::mutex> lk(sig_mu_);
+    const auto it = pending_.find(tid);
+    if (it == pending_.end()) return false;
+    for (const int sig : it->second) {
+      if (sig >= 1 && sig <= 64 && (mask & (1ull << (sig - 1))) == 0) return true;
+    }
+    return false;
   }
   [[nodiscard]] std::size_t signals_queued() const { return signals_queued_.load(); }
   [[nodiscard]] std::size_t signals_delivered() const { return signals_delivered_.load(); }

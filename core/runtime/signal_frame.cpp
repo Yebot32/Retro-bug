@@ -257,6 +257,12 @@ bool ReturnFromSignal(GuestThread& t, mem::GuestMemory& mem, std::string* why) {
   } else {
     t.signal_mask = d.saved_mask;
   }
+  // A handler entered while the thread was in rt_sigsuspend ran with the temporary mask; the kernel puts
+  // the pre-suspend mask back when the handler returns.
+  if (t.sigsuspend_restore) {
+    t.signal_mask = t.sigsuspend_old_mask;
+    t.sigsuspend_restore = false;
+  }
   // This handler is over. If an outer one is on the stack, its interrupted state is exactly what the
   // sigcontext just restored, so the next `rt_sigreturn` reads the outer frame in turn.
   t.deliveries.pop_back();
@@ -295,14 +301,25 @@ bool DeliverPendingSignal(GuestThread& t, mem::GuestMemory& mem, syscall::Monito
   const syscall::Monitor::Disposition disp = monitor.disposition(sig);
   if (!disp.catches()) {
     // SIG_DFL / SIG_IGN. This build runs no default action, and it says so rather than pretending the
-    // signal was handled: the guest asked for a disposition it did not install a handler for.
+    // signal was handled: the guest asked for a disposition it did not install a handler for. A
+    // sigsuspend waiting for it has ended (the syscall already returned EINTR), so put its old mask back.
+    if (t.sigsuspend_restore) {
+      t.signal_mask = t.sigsuspend_old_mask;
+      t.sigsuspend_restore = false;
+    }
     *why = "signal " + std::to_string(sig) + " has disposition " +
            (disp.handler == 0 ? "SIG_DFL, and this build runs no default action" : "SIG_IGN") +
            "; nothing is entered";
     return false;
   }
   SignalDelivery d;
-  if (!DeliverSignal(t, mem, disp, sig, &d, why)) return false;
+  if (!DeliverSignal(t, mem, disp, sig, &d, why)) {
+    if (t.sigsuspend_restore) {
+      t.signal_mask = t.sigsuspend_old_mask;
+      t.sigsuspend_restore = false;
+    }
+    return false;
+  }
   monitor.CountDelivered();
   return true;  // `why` keeps DeliverSignal's success description: the live log is built from it
 }

@@ -76,6 +76,10 @@ struct GuestThread {
   GuestAddr robust_head = 0;      ///< set_robust_list
   std::uint32_t robust_len = 0;
   std::uint64_t signal_mask = 0;  ///< rt_sigprocmask (the arm32 kernel's 8-byte sigset)
+  /// A `rt_sigsuspend` in progress: it installed a temporary mask, and this is the mask to put back after
+  /// the signal handler returns through `rt_sigreturn` (the kernel restores the pre-suspend mask then).
+  bool sigsuspend_restore = false;
+  std::uint64_t sigsuspend_old_mask = 0;
   /// C26: the signal deliveries this thread is inside, innermost last. A stack, not one record, because
   /// Mono's GC suspend is a two-signal protocol: SIGPWR enters the suspend handler, which waits for the
   /// restart signal (SIGXCPU, also installed by Mono) to run *inside* it before it returns. Delivery

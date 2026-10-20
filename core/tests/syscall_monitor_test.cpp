@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -920,6 +921,42 @@ void sigreturn_outside_a_delivery_is_refused_by_name() {
   CHECK_CTX(o.detail.find("rt_sigreturn") != std::string::npos, o.detail);
 }
 
+/// `rt_sigsuspend` (179) installs its temporary mask, sleeps until a deliverable signal is queued, and
+/// returns -EINTR; the signal stays pending for the delivery path. Mono's suspend handler uses this to wait
+/// for its restart signal; before C26's follow-up the call was refused with ENOSYS and the GC handshake
+/// never settled (Cars 3, `svc #179` in the runtime log).
+void sigsuspend_waits_for_a_signal_and_returns_eintr() {
+  sc::Monitor m;
+  auto window = Window();
+  if (!window) return;
+  m.set_memory(window.get());
+  std::string werr;
+  CHECK_CTX(window->Map(0, 0x8000, mem::kRead | mem::kWrite, &werr), werr);
+  m.set_ids(GuestProcessIds::kPid, GuestProcessIds::kMainTid);
+  runtime::FutexTable ft;
+  m.set_futex_table(&ft);
+  runtime::GuestThread t;
+  t.tid = GuestProcessIds::kMainTid;
+  m.set_thread_lookup([&t](std::int32_t tid) { return tid == t.tid ? &t : nullptr; });
+  const std::uint64_t mask = 0;  // everything deliverable
+  CHECK(window->Write(0x400, &mask, sizeof mask));
+  exec::MachineState s = State(sc::nr::kRtSigsuspend);
+  s.r[0] = 0x400;
+  s.r[1] = 8;
+  sc::Outcome o = m.Begin(s, 0, &t);
+  CHECK_CTX(o.verdict == sc::Verdict::kBlocking, sc::Name(o.verdict));
+  CHECK_CTX(t.sigsuspend_restore && t.signal_mask == mask, "the temporary mask is installed for the suspend");
+
+  sc::Outcome got;
+  std::thread waiter([&] { got = o.block(); });
+  m.QueueSignal(GuestProcessIds::kMainTid, 30);
+  waiter.join();
+  CHECK_CTX(got.r0 == -static_cast<std::int32_t>(sc::err::kEintr), "sigsuspend returns -EINTR");
+  CHECK_CTX(m.HasDeliverablePending(GuestProcessIds::kMainTid, mask), "the signal is still pending for delivery");
+  CHECK_CTX(m.TakePendingSignal(GuestProcessIds::kMainTid) == 30, "taken once");
+  t.sigsuspend_restore = false;  // no handler ran in this lane; a real delivery restores it at rt_sigreturn
+}
+
 int main() {
   frame_takes_the_number_from_r7_not_the_encoding();
   r7_is_the_number_not_a_masked_remainder();
@@ -947,6 +984,7 @@ int main() {
   sigaction_and_faccessat_answer_their_facts();
   signal_dispositions_are_what_the_guest_installed();
   a_signal_to_a_live_thread_is_queued_and_taken_once();
+  sigsuspend_waits_for_a_signal_and_returns_eintr();
   sigreturn_outside_a_delivery_is_refused_by_name();
 
   std::printf("%d checks, %d failures\n", checks, failures);

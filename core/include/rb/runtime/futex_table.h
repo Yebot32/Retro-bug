@@ -81,6 +81,11 @@ class FutexTable {
   /// despite a pending unblocked signal.
   void BeginSleep(std::int32_t tid);
 
+  /// A `rt_sigsuspend` waiter: registered under the GGL before the block, woken by `Interrupt` when a
+  /// deliverable signal is queued. `WaitForSignal` returns false when the table shut down.
+  void BeginSignalWait(std::int32_t tid);
+  bool WaitForSignal(std::int32_t tid);
+
   /// A sleep (nanosleep, clock_nanosleep) that `Shutdown` or a signal for `tid` can cut short. `tid` 0
   /// means the bare single-threaded monitor, which has no signal delivery and no interrupt.
   SleepResult SleepUntil(Clock::time_point deadline, std::int32_t tid = 0);
@@ -105,6 +110,9 @@ class FutexTable {
   /// EINTR for a signal that was already delivered.
   std::set<std::int32_t> sleepers_;
   std::set<std::int32_t> interrupted_sleepers_;
+  std::set<std::int32_t> signal_waiters_;  ///< tids blocked in rt_sigsuspend
+  std::set<std::int32_t> signal_wake_;     ///< the subset a deliverable signal has woken
+  std::condition_variable signal_cv_;
   bool shutdown_ = false;
   std::uint64_t blocked_ = 0, woken_ = 0, timed_out_ = 0;
 };

@@ -96,7 +96,26 @@ int FutexTable::Interrupt(std::int32_t tid) {
     interrupted_sleepers_.insert(tid);
     sleep_cv_.notify_all();
   }
+  if (signal_waiters_.count(tid) != 0) {
+    signal_wake_.insert(tid);
+    signal_cv_.notify_all();
+  }
   return count;
+}
+
+void FutexTable::BeginSignalWait(std::int32_t tid) {
+  if (tid == 0) return;
+  std::lock_guard<std::mutex> lk(mu_);
+  signal_wake_.erase(tid);
+  signal_waiters_.insert(tid);
+}
+
+bool FutexTable::WaitForSignal(std::int32_t tid) {
+  std::unique_lock<std::mutex> lk(mu_);
+  signal_cv_.wait(lk, [&] { return shutdown_ || signal_wake_.count(tid) != 0; });
+  signal_waiters_.erase(tid);
+  const bool woke = signal_wake_.erase(tid) != 0;
+  return woke && !shutdown_;
 }
 
 void FutexTable::BeginSleep(std::int32_t tid) {
@@ -127,6 +146,7 @@ void FutexTable::Shutdown() {
     for (auto& w : d) w->cv.notify_all();
   }
   sleep_cv_.notify_all();
+  signal_cv_.notify_all();
 }
 
 bool FutexTable::shut_down() const {
