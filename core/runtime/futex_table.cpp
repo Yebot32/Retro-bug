@@ -9,10 +9,12 @@
 
 namespace rb::runtime {
 
-std::shared_ptr<FutexTable::Waiter> FutexTable::Enqueue(exec::GuestAddr addr, std::uint32_t bitset) {
+std::shared_ptr<FutexTable::Waiter> FutexTable::Enqueue(exec::GuestAddr addr, std::uint32_t bitset,
+                                                        std::int32_t tid) {
   auto w = std::make_shared<Waiter>();
   w->addr = addr;
   w->bitset = bitset;
+  w->tid = tid;
   std::lock_guard<std::mutex> lk(mu_);
   if (shutdown_) {
     w->woken = true;  // nothing will ever wake it: let Block report the shutdown at once
@@ -25,12 +27,23 @@ std::shared_ptr<FutexTable::Waiter> FutexTable::Enqueue(exec::GuestAddr addr, st
 FutexTable::WaitResult FutexTable::Block(const std::shared_ptr<Waiter>& w, std::optional<Clock::time_point> deadline) {
   std::unique_lock<std::mutex> lk(mu_);
   ++blocked_;
-  const auto ready = [&] { return w->woken || shutdown_; };
+  const auto ready = [&] { return w->woken || w->interrupted || shutdown_; };
   bool got = true;
   if (deadline) {
     got = w->cv.wait_until(lk, *deadline, ready);
   } else {
     w->cv.wait(lk, ready);
+  }
+  // Interrupted wins over woken: the thread must take its pending signal before it retries the futex,
+  // and a wake that arrived in the same instant must not be consumed by a thread about to run a handler.
+  if (w->interrupted && !shutdown_) {
+    const auto q = queues_.find(w->addr);
+    if (q != queues_.end()) {
+      auto& d = q->second;
+      d.erase(std::remove(d.begin(), d.end(), w), d.end());
+      if (d.empty()) queues_.erase(q);
+    }
+    return WaitResult::kInterrupted;
   }
   if (w->woken && !shutdown_) return WaitResult::kWoken;
   // Not woken (timed out, or shut down): take it off its queue so no later wake counts it.
@@ -53,7 +66,7 @@ int FutexTable::Wake(exec::GuestAddr addr, int n, std::uint32_t bitset) {
   if (q == queues_.end()) return 0;
   auto& d = q->second;
   for (auto it = d.begin(); it != d.end() && count < n;) {
-    if (((*it)->bitset & bitset) == 0) {
+    if (((*it)->bitset & bitset) == 0 || (*it)->interrupted) {
       ++it;
       continue;
     }
@@ -67,9 +80,44 @@ int FutexTable::Wake(exec::GuestAddr addr, int n, std::uint32_t bitset) {
   return count;
 }
 
-bool FutexTable::SleepUntil(Clock::time_point deadline) {
+int FutexTable::Interrupt(std::int32_t tid) {
+  if (tid == 0) return 0;
+  std::lock_guard<std::mutex> lk(mu_);
+  int count = 0;
+  for (auto& [addr, d] : queues_) {
+    for (auto& w : d) {
+      if (w->tid != tid || w->woken || w->interrupted) continue;
+      w->interrupted = true;
+      w->cv.notify_all();
+      ++count;
+    }
+  }
+  if (sleepers_.count(tid) != 0) {
+    interrupted_sleepers_.insert(tid);
+    sleep_cv_.notify_all();
+  }
+  return count;
+}
+
+void FutexTable::BeginSleep(std::int32_t tid) {
+  if (tid == 0) return;
+  std::lock_guard<std::mutex> lk(mu_);
+  sleepers_.insert(tid);
+}
+
+FutexTable::SleepResult FutexTable::SleepUntil(Clock::time_point deadline, std::int32_t tid) {
   std::unique_lock<std::mutex> lk(mu_);
-  return !sleep_cv_.wait_until(lk, deadline, [&] { return shutdown_; });
+  if (tid != 0) sleepers_.insert(tid);  // idempotent with BeginSleep; covers a direct SleepUntil caller
+  sleep_cv_.wait_until(lk, deadline, [&] {
+    return shutdown_ || (tid != 0 && interrupted_sleepers_.count(tid) != 0);
+  });
+  bool interrupted = false;
+  if (tid != 0) {
+    sleepers_.erase(tid);
+    interrupted = interrupted_sleepers_.erase(tid) != 0;
+  }
+  if (shutdown_) return SleepResult::kShutdown;
+  return interrupted ? SleepResult::kInterrupted : SleepResult::kSlept;
 }
 
 void FutexTable::Shutdown() {

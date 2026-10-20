@@ -16,6 +16,7 @@
 #include "runtime_boot.h"
 
 #include <chrono>
+#include <condition_variable>
 #include <thread>
 #include <atomic>
 #include <android/log.h>
@@ -300,6 +301,12 @@ struct Runtime {
   std::string apk;       ///< the game's APK (the first boot's), where a guest dlopen finds assets/rb32/<lib>
   /// Libraries a guest dlopen handed out a handle for, by handle index (handle = kDlModuleBase | index).
   std::vector<const rb::loader::GuestModule*> dl_handles;
+  /// The liveness supervisor. Owned and joined (never detached) because `DropScope` frees `proc` on a failed
+  /// boot: a detached sampler would hold a dangling GuestProcess for up to its next 10 s window.
+  std::thread profiler;
+  std::mutex profiler_mu;
+  std::condition_variable profiler_cv;
+  bool profiler_stop = false;
 };
 
 /// The thread running rb_runtime_boot (holding g_mu), or none. A guest dlopen (which runs in a host slot, holding the
@@ -564,6 +571,14 @@ namespace {
 /// A scope that did not boot leaves nothing worth keeping; the next call starts over. Torn down users first: the
 /// dispatcher and the bridge bind and unbind slots on the process's AbiContext, so they go before it does.
 void DropScope(Runtime& rt) {
+  // Stop and join the sampler before the GuestProcess it reads goes away (see Runtime::profiler).
+  {
+    std::lock_guard<std::mutex> lk(rt.profiler_mu);
+    rt.profiler_stop = true;
+  }
+  rt.profiler_cv.notify_all();
+  if (rt.profiler.joinable()) rt.profiler.join();
+  rt.profiler_stop = false;
   rt.sles.reset();
   rt.inbound.reset();
   rt.fwd.reset();
@@ -665,10 +680,17 @@ bool BootScope(Runtime& rt, ApkZip& zip, std::string* out) {
       ++prof->slices;
     });
     auto* jit = dynamic_cast<rb::exec::JitExecutor*>(&rt.proc->engine(2));
-    std::thread([prof, jit] {
+    // The liveness supervisor: a window with no slice is a stall, and the one thing a black screen never
+    // says is which thread is waiting on what. `Runtime` is a process-lifetime singleton (see `get_rt`).
+    rb::runtime::GuestProcess* proc = rt.proc.get();
+    rt.profiler = std::thread([prof, jit, proc, &rt] {
       std::uint64_t last_t = 0, last_i = 0;
+      int quiet_windows = 0;
       for (int round = 0; round < 60; ++round) {
-        std::this_thread::sleep_for(std::chrono::seconds(10));
+        {
+          std::unique_lock<std::mutex> lk(rt.profiler_mu);
+          if (rt.profiler_cv.wait_for(lk, std::chrono::seconds(10), [&rt] { return rt.profiler_stop; })) return;
+        }
         std::vector<std::pair<std::uint32_t, std::uint32_t>> top;
         std::uint64_t slices = 0;
         {
@@ -688,9 +710,21 @@ bool BootScope(Runtime& rt, ApkZip& zip, std::string* out) {
           last_t = t;
           last_i = inv;
         }
-        if (slices != 0) Live(line);
+        if (slices != 0) {
+          quiet_windows = 0;
+          Live(line);
+        } else if (proc != nullptr && !proc->monitor().group_exited()) {
+          // No guest instruction retired for 10 s: dump every guest thread's pc and what it waits on.
+          // Three windows up front, then every sixth, so a long stall does not flood logcat.
+          ++quiet_windows;
+          if (quiet_windows <= 3 || quiet_windows % 6 == 0) {
+            Live("stall: no guest instruction retired in the last 10 s (window " +
+                 std::to_string(quiet_windows) + "):");
+            for (const std::string& line : proc->StallReport()) Live("stall:   " + line);
+          }
+        }
       }
-    }).detach();
+    });
   }
   {
     // The first host-I/O answers go to logcat as they happen: what a game's file and network code did is otherwise
@@ -711,6 +745,10 @@ bool BootScope(Runtime& rt, ApkZip& zip, std::string* out) {
                                line.find("faccessat(") != std::string::npos);
       if (((error && !probe_miss) || !routine) && left->fetch_sub(1) > 0) Live("io: " + line);
     });
+    // Signal dispositions on their own channel, uncapped relative to the I/O trace and never deduplicated:
+    // the set of handlers a guest installs is the fact C26's delivery is built from, and a report that could
+    // show only the first three was the reason a wrong conclusion about signals survived a session.
+    rt.proc->monitor().set_signal_trace([](const std::string& line) { Live("sig: " + line); });
   }
   std::vector<std::uint8_t> sys[3];
   const char* const names[3] = {"libc.so", "libm.so", "libz.so"};

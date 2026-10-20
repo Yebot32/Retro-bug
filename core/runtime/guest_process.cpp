@@ -19,6 +19,7 @@
 
 #include "rb/linker/guest_linker.h"
 #include "rb/loader/elf_defs.h"
+#include "rb/runtime/signal_frame.h"
 
 namespace rb::runtime {
 namespace {
@@ -330,6 +331,44 @@ std::unique_ptr<GuestProcess> GuestProcess::Create(const GuestProcessOptions& op
     p->abi_->set_adopter([owner](std::string* why) { return owner->AdoptCurrentHostThread(why); });
     // A fault at a trap slot names the import bound there, whichever thread made the call.
     p->abi_->set_fault_namer([owner](GuestAddr pc) { return owner->TrapName(pc); });
+    // C26: the restorer's `rt_sigreturn` restores the frame the delivery wrote. The monitor sits below
+    // this layer and cannot know the frame layout, so the runtime owns this half.
+    // The monitor needs to know a target's blocked mask before deciding to wake its futex wait (see
+    // Monitor::QueueSignal): a blocked signal must not interrupt a wait the kernel would leave alone.
+    p->monitor_->set_thread_lookup([owner](std::int32_t tid) -> GuestThread* {
+      GuestThread& main = owner->abi_->main_thread();
+      if (tid == main.tid) return &main;
+      {
+        std::lock_guard<std::mutex> lk(owner->threads_mu_);
+        for (const auto& rec : owner->threads_) {
+          if (!rec->done.load(std::memory_order_acquire) && rec->guest->tid == tid) return rec->guest.get();
+        }
+      }
+      for (const auto& t : owner->adopted_) {  // GGL-protected; QueueSignal runs under the GGL
+        if (t->tid == tid) return t.get();
+      }
+      return nullptr;
+    });
+    p->monitor_->set_signal_return([owner](GuestThread& thread) -> syscall::Outcome {
+      std::string why;
+      if (!ReturnFromSignal(thread, *owner->mem_, &why)) {
+        return syscall::Outcome::Refused(syscall::err::kEnosys, "rt_sigreturn: " + why);
+      }
+      return syscall::Outcome::Emulated(0, why);
+    });
+    // C26: entry into a queued signal's handler, at the ABI's slice boundaries. Every thread runs there —
+    // the main thread and adopted host threads included, not only `ThreadMain`'s clone()d ones — and a
+    // futex cut short by EINTR passes through the boundary before it can retry. Quiet about "none" and
+    // "blocked" (both are ordinary at every slice); loud about a handler that cannot be entered.
+    p->abi_->set_signal_deliver([owner](GuestThread& thread) {
+      std::string why;
+      if (DeliverPendingSignal(thread, *owner->mem_, *owner->monitor_, &why)) {
+        owner->Log("signals: " + why);
+      } else if (why.find("no signal is pending") == std::string::npos &&
+                 why.find("is blocked in this thread's mask") == std::string::npos) {
+        owner->Log("signals: not delivered — " + why);
+      }
+    });
   }
 
   // The JNIEnv maps its own table and arena from a page-aligned base; a free run is found for it now,
@@ -826,6 +865,8 @@ void GuestProcess::ThreadMain(HostThread* rec) {
   // Re-entered while the turn's budget (or the per-turn syscall cap) runs out: a guest thread runs until it
   // calls `exit`, stops with the process, or faults.
   for (;;) {
+    // Signal delivery happens inside `RunThread`, at every slice boundary (C26): it covers every kind of
+    // guest thread and is far more responsive than this 2^30-instruction turn. Nothing to do here.
     rr = abi_->RunThread(t, kThreadTurnBudget);
     if (rr.reason == exec::StopReason::Budget && !monitor_->group_exited()) continue;
     break;
@@ -836,9 +877,10 @@ void GuestProcess::ThreadMain(HostThread* rec) {
   if (!clean) {
     // A fault or a refusal that stopped a guest thread ends the process, as a fatal signal in one thread
     // does on a device — the other threads must not carry on around a dead one (a joiner would wait forever).
+    std::string regs = " pc " + Hex(t.state.pc) + " lr " + Hex(t.state.r[14]) + " sp " + Hex(t.state.r[13]);
+    for (unsigned i = 0; i < 13; ++i) regs += " r" + std::to_string(i) + " " + Hex(t.state.r[i]);
     const std::string why = "guest thread tid " + std::to_string(t.tid) + " stopped: " + ReasonName(rr.reason) +
-                            (rr.detail.empty() ? "" : " (" + rr.detail + ")") + " at pc " + Hex(t.state.pc) +
-                            " lr " + Hex(t.state.r[14]);
+                            (rr.detail.empty() ? "" : " (" + rr.detail + ")") + " at" + regs;
     {
       std::lock_guard<std::mutex> lk(threads_mu_);
       thread_faults_.push_back(why);
@@ -881,6 +923,76 @@ bool GuestProcess::WaitForThreads(std::chrono::milliseconds limit) {
 std::vector<std::string> GuestProcess::thread_faults() const {
   std::lock_guard<std::mutex> lk(threads_mu_);
   return thread_faults_;
+}
+
+std::vector<std::string> GuestProcess::StallReport() {
+  const auto name = [this](GuestAddr a) {
+    for (const auto& m : modules_) {
+      if (m != nullptr && a >= m->base && a - m->base < m->extent) {
+        return (m->soname.empty() ? m->path : m->soname) + "+" + Hex(a - m->base);
+      }
+    }
+    return Hex(a);
+  };
+  // Return addresses still on the thread's stack, named against the modules — a scan, not an unwind, the
+  // same technique the fatal-stop report uses. It names the call chain that reached the wait.
+  const auto stack = [this, &name](const GuestThread& t) {
+    constexpr std::size_t kWindow = 512, kMaxFrames = 6;
+    std::string out;
+    std::size_t frames = 0;
+    for (std::size_t i = 0; i < kWindow / 4 && frames < kMaxFrames; ++i) {
+      std::uint32_t word = 0;
+      if (!mem_->Read(t.state.r[13] + static_cast<std::uint32_t>(i) * 4u, &word, 4)) break;
+      for (const auto& m : modules_) {
+        if (m != nullptr && word >= m->base && word - m->base < m->extent) {
+          out += (out.empty() ? "" : " <- ") + name(word);
+          ++frames;
+          break;
+        }
+      }
+    }
+    return out;
+  };
+  const auto one = [this, &name, &stack](const GuestThread& t, const char* kind, bool with_stack) {
+    static const char* const kWaitNames[] = {"running", "futex", "sleep", "host(held GGL)",
+                                             "host(GGL released)"};
+    const int wk = t.wait_kind.load();
+    std::string s = std::string{kind} + " tid " + std::to_string(t.tid) + ": pc " + name(t.state.pc) +
+                    ", lr " + name(t.state.r[14]) + ", sp " + Hex(t.state.r[13]) + ", last syscall " +
+                    std::to_string(t.last_syscall.load()) + ", " +
+                    (wk >= 0 && wk <= 4 ? kWaitNames[wk] : "wait?");
+    if (wk == static_cast<int>(GuestThread::WaitKind::kFutex)) {
+      std::uint32_t word = 0xdead'beefu;
+      if (!mem_->Read(t.wait_arg.load(), &word, 4)) word = 0xdead'beefu;
+      s += " " + Hex(t.wait_arg.load()) + " (word " + Hex(word) + ")";
+    }
+    if (wk >= static_cast<int>(GuestThread::WaitKind::kHostHeld)) s += " slot " + std::to_string(t.wait_slot.load());
+    if (with_stack) {
+      const std::string frames = stack(t);
+      if (!frames.empty()) s += ", stack: " + frames;
+    }
+    return s;
+  };
+
+  std::vector<std::string> out;
+  // `adopted_` is GGL-protected. This report is taken only after guest progress has stopped, and it is a
+  // diagnostic: reading the list without taking the GGL (which a stalled thread could hold) is deliberate.
+  for (const auto& t : adopted_) out.push_back(one(*t, "adopted", true));
+  out.push_back(one(abi_->main_thread(), "main", true));
+  std::size_t clones = 0, shown = 0;
+  {
+    std::lock_guard<std::mutex> lk(threads_mu_);
+    for (const auto& rec : threads_) {
+      if (rec->done.load(std::memory_order_acquire)) continue;
+      ++clones;
+      if (shown++ < 24) out.push_back(one(*rec->guest, "clone", false));
+    }
+  }
+  out.push_back(std::to_string(clones) + " clone'd thread(s), " + std::to_string(adopted_.size()) +
+                " adopted (clone'd beyond 24 not listed); futex waits queued " +
+                std::to_string(futex_.waiters()) + ", blocked " + std::to_string(futex_.blocked()) +
+                ", woken " + std::to_string(futex_.woken()) + ", timeouts " + std::to_string(futex_.timed_out()));
+  return out;
 }
 
 void GuestProcess::StopThreads() {

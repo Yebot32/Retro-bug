@@ -185,6 +185,7 @@ const char* Name(std::uint32_t number) {
     case nr::kWritev: return "writev";
     case nr::kPrctl: return "prctl";
     case nr::kRtSigaction: return "rt_sigaction";
+    case nr::kRtSigreturn: return "rt_sigreturn";
     case nr::kRtSigprocmask: return "rt_sigprocmask";
     case nr::kMmap2: return "mmap2";
     case nr::kFstat64: return "fstat64";
@@ -423,6 +424,8 @@ bool Monitor::ServesItself(const Frame& f) {
 
 Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::GuestThread* thread) {
   runtime::GuestThread& th = thread != nullptr ? *thread : *main_;
+  // Diagnostics for a stall dump: the last call this thread asked for, even if it is now blocked in it.
+  th.last_syscall.store(f.number);
   if (host_io_ && memory_ != nullptr && HostIo::Handles(f.number) && !ServesItself(f)) {
     return HostIo::Serve(f, *memory_);
   }
@@ -456,8 +459,9 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
 
     case nr::kNanosleep: {
       // nanosleep(req, rem) with the arm32 kernel's 32-bit `struct timespec` {tv_sec, tv_nsec}. The request
-      // is read and validated here, under the GGL; only the sleep itself runs unlocked. No signal is ever
-      // delivered by this build, so the sleep is never interrupted and `rem` is never written.
+      // is read and validated here, under the GGL; only the sleep itself runs unlocked. A signal for this
+      // thread cuts the sleep short with EINTR; `rem` is not written, which is a named gap (the answer
+      // says so) rather than a fabricated remaining time.
       if (memory_ == nullptr) {
         return Outcome::Refused(err::kEnosys, "nanosleep: no guest memory is attached to this monitor");
       }
@@ -472,7 +476,7 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
                                                    "}) = -EINVAL (-22): tv_sec < 0 or tv_nsec outside [0, 1e9)");
       }
       const std::int64_t nanos = static_cast<std::int64_t>(req[0]) * 1'000'000'000 + req[1];
-      return Sleep("nanosleep({" + std::to_string(req[0]) + ", " + std::to_string(req[1]) + "})", nanos);
+      return Sleep("nanosleep({" + std::to_string(req[0]) + ", " + std::to_string(req[1]) + "})", nanos, th);
     }
 
     case nr::kClockNanosleep: {
@@ -500,7 +504,7 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
       }
       const std::int64_t t = static_cast<std::int64_t>(req[0]) * 1'000'000'000 + req[1];
       const std::int64_t nanos = (flags & 1u) != 0 ? std::max<std::int64_t>(0, t - now) : t;
-      return Sleep(call, nanos);
+      return Sleep(call, nanos, th);
     }
 
     case nr::kExitGroup: {
@@ -525,31 +529,53 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
       // arguments shifted, and only `tgkill` was handled, which is how a scan for 268 read a process that never
       // touched a signal — while Cars 3 asked 238 and 363 in the same microsecond as 268.
       //
-      // Signal 0 is the existence probe (`pthread_kill(t, 0)`): answered from this process's live threads, and
-      // the answer is a fact. A real signal is not delivered, and that is stated by name rather than answered
-      // with a 0 this build cannot honour. The distinction matters here more than anywhere else in this file:
-      // a guest's fatal path reads the return value, and telling it "delivered" when nothing ran its handler
-      // turns a crash it could report into a process that dies saying nothing.
-      const bool queue = f.number == nr::kRtTgsigqueueinfo;
+      // C26: a real signal is now QUEUED for its target thread instead of refused. The target takes it at the
+      // ABI's next slice boundary and enters the handler the guest installed (see `DeliverPendingSignal` in
+      // the runtime). Measured, and this is what the whole change is for (SM-X710 2026-10-19): Cars 3 installs
+      // a handler for signal 30 at libmono.so+0x2bdb59, then `tkill(tid, 30)` — SIGPWR, Mono's GC
+      // thread-suspend — was refused, so the runtime aborted (SIGABRT) and called `exit(127)`. MadTruck died on
+      // the identical pair. The return value stays the kernel's 0, which is now also the truth: the signal is
+      // pending.
+      const bool queued = f.number == nr::kRtTgsigqueueinfo;
       const auto tgid = static_cast<std::int32_t>(f.arg[0]);
-      const auto tid = static_cast<std::int32_t>(queue ? f.arg[1] : f.arg[0]);
-      const auto sig = static_cast<std::int32_t>(queue ? f.arg[2] : f.arg[1]);
-      const char* what = queue ? "rt_tgsigqueueinfo" : (f.number == nr::kTkill ? "tkill" : "tgkill");
+      const auto tid = static_cast<std::int32_t>(queued ? f.arg[1] : f.arg[0]);
+      const auto sig = static_cast<std::int32_t>(queued ? f.arg[2] : f.arg[1]);
+      const char* what = queued ? "rt_tgsigqueueinfo" : (f.number == nr::kTkill ? "tkill" : "tgkill");
       const std::string call = std::string{what} + "(" +
                                (f.number == nr::kTkill ? "" : std::to_string(tgid) + ", ") +
                                std::to_string(tid) + ", " + std::to_string(sig) +
-                               (queue ? ", &info" : "") + ")";
-      if (sig != 0) {
-        return Outcome::Refused(err::kEnosys, call + ": delivering signal " + std::to_string(sig) +
-                                                  " is not implemented — this build delivers no signals, so a "
-                                                  "handler the guest installed would never run and a default "
-                                                  "action would never be taken");
+                               (queued ? ", &info" : "") + ")";
+      if (sig < 0 || sig > 64) {
+        return Outcome::Answered(err::kEinval, call + " = -EINVAL (-22): " + std::to_string(sig) +
+                                                   " is not a signal number on this ABI (0..64)");
       }
       // tkill carries no tgid, so the tid alone decides; the other two also require the group id to match.
       const bool group_ok = f.number == nr::kTkill || (ids_set_ && tgid == pid_);
       const bool alive = group_ok && (tid == main_->tid || live_tids_.count(tid) != 0);
       if (!alive) return Outcome::Answered(err::kEsrch, call + " = -ESRCH (-3): no such live thread in this process");
-      return Outcome::Emulated(0, call + " -> 0: the thread is alive");
+      if (sig == 0) return Outcome::Emulated(0, call + " -> 0: the thread is alive");
+      // A signal is checked against the guest's own dispositions, so a report says which of the three things
+      // happened: entered a handler, ran a default action, or ignored. SIGKILL/SIGSTOP cannot be caught, and
+      // saying so is better than a generic delivery.
+      const Disposition d = disposition(sig);
+      if (d.handler == 1) {
+        return Outcome::Emulated(0, call + " -> 0: signal " + std::to_string(sig) +
+                                        " is SIG_IGN for this guest, so it is dropped");
+      }
+      if (sig == 9 || sig == 19) {
+        return Outcome::Refused(err::kEnosys, call + ": signal " + std::to_string(sig) +
+                                                  " cannot be caught and this build does not run default "
+                                                  "actions; refusing rather than pretending it took");
+      }
+      QueueSignal(tid, sig);
+      if (signal_trace_) {
+        signal_trace_("sig: " + call + " -> 0: queued for delivery" +
+                      (d.catches() ? ", handler 0x" + Hex(d.handler) + " (restorer 0x" + Hex(d.restorer) + ")"
+                                   : ", no handler installed — the default action will be reported, not run"));
+      }
+      return Outcome::Emulated(0, call + " -> 0: signal " + std::to_string(sig) + " queued for tid " +
+                                      std::to_string(tid) +
+                                      (d.catches() ? " (a handler is installed)" : " (no handler installed)"));
     }
 
     case nr::kMadvise: {
@@ -1144,7 +1170,7 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
       }
       return Outcome::Emulated(0, "rt_sigprocmask(how=" + std::to_string(how) + ") -> mask 0x" +
                                       Hex(th.signal_mask) +
-                                      " (modelled in the monitor; this build delivers no signals)");
+                                      " (modelled on the calling thread; delivery reads it)");
     }
 
     case nr::kPrctl: {
@@ -1532,7 +1558,7 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
     }
 
     case nr::kFutex: {
-      if (futex_ != nullptr) return Futex(f);
+      if (futex_ != nullptr) return Futex(f, th);
       // No futex table: a bare single-threaded monitor. The two ops bionic's pthread layer actually drives
       // are answered and the rest stay refusals. WAIT's immediate path is the kernel's own (value already
       // changed -> EAGAIN); a matching value would park a device's caller, and answering 0 says out loud
@@ -1579,18 +1605,88 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
     }
 
     case nr::kRtSigaction: {
-      // Accepted, recorded, never delivered: the host raises no signals into this build, and the call's
-      // job in startup code is to install a handler — a fact about the guest's own state. `oldact` is
-      // zeroed so a caller reading back the previous handler sees NULL, not whatever the buffer held.
-      if (f.arg[2] != 0 && memory_ != nullptr) {
-        const std::uint32_t zero[5] = {};  // arm32 struct sigaction: handler, flags, restorer, mask[2]
-        memory_->Write(f.arg[2], zero, sizeof(zero));
+      // Accepted and recorded: the call's job in startup code is to install a handler, and the record is
+      // what a guest-sent signal (tkill/tgkill/rt_tgsigqueueinfo) is delivered through.
+      //
+      // The signal number is read out of the guest's `struct sigaction` and named in the answer, because the
+      // *set* of signals a guest installs handlers for is the thing signal delivery has to be built against,
+      // and the deduplicated boot-report note could not answer it: it recorded only the first three handlers
+      // (39/36/38) before the run had finished starting threads that install more. Measured on native 32-bit
+      // Cars 3 (SM-X710, /proc/<pid>/status SigCgt): it catches 17 signals, 30 (SIGPWR) among them — so a
+      // build that can only see three of them is not seeing the guest, it is seeing its own log cap.
+      //
+      // `handler` is captured too. Zero means SIG_DFL and one means SIG_IGN, which are not handler addresses;
+      // anything else is guest code a delivery would have to enter.
+      const std::int32_t sig = static_cast<std::int32_t>(f.arg[0]);
+      if (sig < 1 || sig > 64) {
+        return Outcome::Answered(err::kEinval, "rt_sigaction(sig=" + std::to_string(sig) +
+                                                   ") = -EINVAL (-22): a signal number is 1..64");
       }
-      const std::string why = "rt_sigaction(sig=" + std::to_string(f.arg[0]) +
-                              ") accepted and recorded; no signal is ever delivered by this build, and "
-                              "the previous handler reads back as NULL";
+      Disposition incoming;
+      bool install = false;
+      if (f.arg[1] != 0) {
+        if (memory_ == nullptr) {
+          return Outcome::Refused(err::kEnosys, "rt_sigaction: no guest memory is attached to this monitor");
+        }
+        // The layout read off the guest (see Disposition in monitor.h): {handler, flags, restorer, mask}.
+        std::uint32_t handler = 0, flags = 0, mask[2] = {0, 0}, restorer = 0;
+        if (!memory_->Read(f.arg[1], &handler, 4) || !memory_->Read(f.arg[1] + 4, &flags, 4) ||
+            !memory_->Read(f.arg[1] + 8, &restorer, 4) || !memory_->Read(f.arg[1] + 12, mask, sizeof mask)) {
+          return Outcome::Answered(err::kEfault, "rt_sigaction(sig=" + std::to_string(sig) + "): the act at 0x" +
+                                                     Hex(f.arg[1]) + " is not readable guest memory");
+        }
+        incoming = Disposition{handler, flags, restorer,
+                               (static_cast<std::uint64_t>(mask[1]) << 32) | mask[0]};
+        install = true;
+      }
+      // oldact is the disposition from *before* this call, and a query (act == NULL) must not erase the
+      // handler delivery depends on. The kernel copies the new act in first, then the old act out.
+      if (f.arg[2] != 0) {
+        const Disposition old = disposition(sig);
+        const std::uint32_t out[5] = {old.handler, old.flags, old.restorer,
+                                      static_cast<std::uint32_t>(old.mask),
+                                      static_cast<std::uint32_t>(old.mask >> 32)};
+        if (memory_ == nullptr || !memory_->Write(f.arg[2], out, sizeof out)) {
+          return Outcome::Answered(err::kEfault, "rt_sigaction(sig=" + std::to_string(sig) +
+                                                     "): the oldact at 0x" + Hex(f.arg[2]) +
+                                                     " is not writable guest memory");
+        }
+      }
+      if (install) sig_dispositions_[sig] = incoming;
+      const Disposition now = disposition(sig);
+      const char* kind = now.handler == 0 ? "SIG_DFL" : (now.handler == 1 ? "SIG_IGN" : "a handler");
+      const std::string why = "rt_sigaction(sig=" + std::to_string(sig) + ")" +
+                              (install ? " = 0: recorded " : " query = 0: ") + kind + " at 0x" +
+                              Hex(now.handler) + ", flags 0x" + Hex(now.flags) + ", restorer 0x" +
+                              Hex(now.restorer) + " (" + std::to_string(installed_handler_count()) +
+                              " handler(s) installed so far)";
+      // Straight to the live trace as well as the report: this is the line that has to survive the notes'
+      // dedup and cap, because it is the record signal delivery will be built from.
+      if (signal_trace_) signal_trace_(why);
       Observe(why);
       return Outcome::Emulated(0, why);
+    }
+
+    // `rt_sigreturn` (173): the end of a handler. The restorer the guest registered issues it, and the
+    // answer is "put back the state the handler interrupted" — which is the delivery's own record, not a
+    // value the kernel hands back. A call with no delivery in progress is refused by name: answering 0
+    // would resume the handler's own `svc` instruction in place, an infinite loop where the guest should
+    // have had an error. Both are the same posture as everywhere else in this file — a fact, or a refusal
+    // that names itself.
+    case nr::kRtSigreturn: {
+      if (!SignalReturnHooked() || th.deliveries.empty()) {
+        return Outcome::Refused(err::kEnosys,
+                                "rt_sigreturn: no signal delivery is in progress on this thread, so there "
+                                "is no frame to restore (this build delivers a signal only into a handler "
+                                "the guest installed with rt_sigaction)");
+      }
+      // The runtime performs the restore: it owns the frame layout, and the monitor sits below it. A
+      // sigreturn does not return, so `r0` carries nothing back from the call — but `Complete` writes the
+      // outcome's r0 unconditionally, and the interrupted r0 the frame just restored is the value the
+      // resumed code must see. Carry it through rather than replacing it with 0.
+      Outcome restored = SignalReturn(th);
+      if (restored.verdict == Verdict::kEmulated) restored.r0 = static_cast<std::int32_t>(state.r[0]);
+      return restored;
     }
 
     case nr::kFaccessat: {
@@ -1744,22 +1840,47 @@ std::string Monitor::group_exit_reason() const {
   return group_exit_reason_;
 }
 
-Outcome Monitor::Sleep(const std::string& what, std::int64_t nanos) {
+Outcome Monitor::Sleep(const std::string& what, std::int64_t nanos, runtime::GuestThread& th) {
   // Blocking in the GGL's sense: the sleep runs with the lock released, so other guest threads run
-  // meanwhile. With a futex table it is the table's sleep, which `exit_group` cuts short (the thread then
-  // stops at the bridge's next check); no signal is ever delivered, so `rem` is never written.
-  const std::string why = what + " -> 0, slept on the host with the GGL released (no signal ever interrupts it)";
+  // meanwhile. With a futex table it is the table's sleep, which `exit_group` or a signal for this thread
+  // cuts short. `rem` is not written: a named gap in the EINTR answer rather than a made-up value.
+  const std::string why = what + " (host sleep, GGL released)";
   Outcome o{Verdict::kBlocking, 0, why, {}};
   runtime::FutexTable* table = futex_;
-  o.block = [nanos, why, table] {
+  runtime::GuestThread* wait_thread = &th;
+  const std::int32_t tid = th.tid;
+  // Register before the GGL is released for the block: a tkill in that window must find the sleeper.
+  if (table != nullptr) table->BeginSleep(tid);
+  o.block = [nanos, why, table, tid, wait_thread] {
+    const int prior_kind = wait_thread != nullptr ? wait_thread->wait_kind.load() : 0;
+    const std::uint32_t prior_arg = wait_thread != nullptr ? wait_thread->wait_arg.load() : 0u;
+    struct Restore {
+      runtime::GuestThread* t;
+      int kind;
+      std::uint32_t arg;
+      ~Restore() {
+        if (t != nullptr) {
+          t->wait_kind.store(kind);
+          t->wait_arg.store(arg);
+        }
+      }
+    } restore{wait_thread, prior_kind, prior_arg};
+    if (wait_thread != nullptr) {
+      wait_thread->wait_kind.store(static_cast<int>(runtime::GuestThread::WaitKind::kSleep));
+      wait_thread->wait_arg.store(static_cast<std::uint32_t>(nanos));
+    }
     if (table != nullptr) {
-      if (!table->SleepUntil(runtime::FutexTable::Clock::now() + std::chrono::nanoseconds(nanos))) {
-        return Outcome::Answered(err::kEintr, why + " — cut short: the process is exiting");
+      switch (table->SleepUntil(runtime::FutexTable::Clock::now() + std::chrono::nanoseconds(nanos), tid)) {
+        case runtime::FutexTable::SleepResult::kSlept: break;
+        case runtime::FutexTable::SleepResult::kInterrupted:
+          return Outcome::Answered(err::kEintr, why + " — cut short by a signal (EINTR; `rem` is not written)");
+        case runtime::FutexTable::SleepResult::kShutdown:
+          return Outcome::Answered(err::kEintr, why + " — cut short: the process is exiting");
       }
     } else {
       std::this_thread::sleep_for(std::chrono::nanoseconds(nanos));
     }
-    return Outcome::Emulated(0, why);
+    return Outcome::Emulated(0, why + " -> 0, slept");
   };
   return o;
 }
@@ -1847,7 +1968,7 @@ Outcome Monitor::ThreadExit(const Frame& f, runtime::GuestThread& th) {
                      ": " + cleared};
 }
 
-Outcome Monitor::Futex(const Frame& f) {
+Outcome Monitor::Futex(const Frame& f, runtime::GuestThread& th) {
   // futex(uaddr, op, val, timeout|val2, uaddr2, val3). FUTEX_PRIVATE_FLAG (128) is the same table here (one
   // process); FUTEX_CLOCK_REALTIME (256) picks the clock of WAIT_BITSET's absolute timeout.
   const std::uint32_t uaddr = f.arg[0];
@@ -1898,14 +2019,32 @@ Outcome Monitor::Futex(const Frame& f) {
       return Outcome::Answered(err::kEagain, call + " = -EAGAIN (-11): the word holds " + Hex(cur) +
                                                  ", not the expected value");
     }
-    auto waiter = futex_->Enqueue(uaddr, bitset);
+    auto waiter = futex_->Enqueue(uaddr, bitset, th.tid);
     runtime::FutexTable* table = futex_;
     Outcome o{Verdict::kBlocking, 0, call + " WAIT", {}};
-    o.block = [table, waiter, deadline, call] {
+    runtime::GuestThread* wait_thread = &th;
+    o.block = [table, waiter, deadline, call, wait_thread, uaddr] {
+      // Diagnostics: name this wait while it blocks, and put back what the thread was doing before (a
+      // host call that itself waits re-enters here).
+      const int prior_kind = wait_thread->wait_kind.load();
+      const std::uint32_t prior_arg = wait_thread->wait_arg.load();
+      wait_thread->wait_kind.store(static_cast<int>(runtime::GuestThread::WaitKind::kFutex));
+      wait_thread->wait_arg.store(uaddr);
+      struct Restore {
+        runtime::GuestThread* t;
+        int kind;
+        std::uint32_t arg;
+        ~Restore() {
+          t->wait_kind.store(kind);
+          t->wait_arg.store(arg);
+        }
+      } restore{wait_thread, prior_kind, prior_arg};
       switch (table->Block(waiter, deadline)) {
         case runtime::FutexTable::WaitResult::kWoken: return Outcome::Emulated(0, call + " WAIT -> 0, woken");
         case runtime::FutexTable::WaitResult::kTimedOut:
           return Outcome::Answered(err::kEtimedout, call + " WAIT = -ETIMEDOUT (-110)");
+        case runtime::FutexTable::WaitResult::kInterrupted:
+          return Outcome::Answered(err::kEintr, call + " WAIT = -EINTR (-4): a signal is pending for this thread");
         case runtime::FutexTable::WaitResult::kShutdown: break;
       }
       return Outcome::Answered(err::kEintr, call + " WAIT = -EINTR (-4): the process is exiting");
@@ -1960,7 +2099,10 @@ Outcome Monitor::Complete(exec::MachineState& state, Outcome o) {
   // Only four success sites called `Observe` before, so every refusal reached the report as a tally
   // entry with no reason attached — the exact silent-ignore shape the note machinery was built to
   // prevent.
-  if (LooksLikeError(o.r0)) {  // an mmap address above 0x80000000 is negative as an int32, and a success
+  // An mmap address above 0x80000000 is negative as an int32 and a success. rt_sigreturn's r0 is the
+  // *interrupted* thread's register, restored from the frame, so a negative value there is not an error the
+  // monitor answered. A refused rt_sigreturn (verdict kUnsupported) still counts.
+  if (LooksLikeError(o.r0) && !(o.verdict == Verdict::kEmulated && o.detail.rfind("rt_sigreturn:", 0) == 0)) {
     ++refusals_;
     Observe(o.detail);
   }

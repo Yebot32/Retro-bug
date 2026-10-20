@@ -566,8 +566,8 @@ Outcome HostIo::Serve(const Frame& f, mem::GuestMemory& mem) {
         break;
       }
       case a32::kSigaltstack: {
-        // Guest signals are never delivered on a host stack (spec: signals recorded, handlers never installed on
-        // the host), so the alternate stack is accepted and reported back as disabled.
+        // Delivery happens only at the ABI's slice boundaries, never inside a host call, so a signal is never
+        // delivered on this host stack; the alternate stack is accepted and reported back as disabled.
         const std::uint32_t old[3] = {0, 2 /*SS_DISABLE*/, 0};
         r = a[1] != 0 && !m.Write(a[1], old, 12) ? -EFAULT : 0;
         break;

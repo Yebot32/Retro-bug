@@ -536,6 +536,11 @@ exec::RunResult AbiContext::RunThread(runtime::GuestThread& thread, unsigned bud
     // stops here, at its next slice boundary, syscall or host call, instead of running guest code in a process
     // that has finished (Review Focus: no host thread is left running guest code).
     if (group_stop()) break;
+    // C26: a queued signal enters the handler the guest installed before any more guest code runs. This is
+    // the kernel's "deliver on the way back to user mode", at this engine's natural boundary (every
+    // kSliceSteps, every syscall, and the first instruction of a turn). A blocked signal is re-queued and
+    // the thread runs on untouched.
+    if (signal_deliver_) signal_deliver_(thread);
     if (held >= kSliceSteps) {
       // The slice boundary: hand the GGL to the longest waiter (the lock is a FIFO ticket lock, so this
       // thread queues behind it), then carry on. State is consistent here — the executor stopped on a
@@ -638,6 +643,26 @@ exec::RunResult AbiContext::RunThread(runtime::GuestThread& thread, unsigned bud
     }
     SlotRef slot;  // our own reference: a `Bind` while this slot runs (GGL released) replaces, never frees, it
     if (const auto it = bound_.find(run.host_slot); it != bound_.end()) slot = it->second;
+    // Diagnostics: if a stall dump runs while this host function blocks, name the slot and whether the
+    // GGL was released. Restored afterwards (a nested guest call re-enters this path).
+    const int prior_kind = thread.wait_kind.load();
+    const std::uint32_t prior_arg = thread.wait_arg.load();
+    const int prior_slot = thread.wait_slot.load();
+    thread.wait_kind.store(static_cast<int>(slot && slot->lock == SlotLock::kHoldsGgl
+                                               ? runtime::GuestThread::WaitKind::kHostHeld
+                                               : runtime::GuestThread::WaitKind::kHostReleased));
+    thread.wait_slot.store(static_cast<int>(run.host_slot));
+    struct RestoreWait {
+      runtime::GuestThread& t;
+      int kind;
+      std::uint32_t arg;
+      int slot;
+      ~RestoreWait() {
+        t.wait_kind.store(kind);
+        t.wait_arg.store(arg);
+        t.wait_slot.store(slot);
+      }
+    } restore_wait{thread, prior_kind, prior_arg, prior_slot};
     bool ok = false;
     if (slot) {
       if (slot->lock == SlotLock::kHoldsGgl) {

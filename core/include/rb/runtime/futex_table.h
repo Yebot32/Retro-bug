@@ -30,6 +30,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <unordered_map>
 
 #include "rb/exec/machine_state.h"
@@ -45,11 +46,14 @@ class FutexTable {
   struct Waiter {
     exec::GuestAddr addr = 0;
     std::uint32_t bitset = kMatchAny;
-    bool woken = false;  ///< set by Wake (under the table's mutex)
+    std::int32_t tid = 0;  ///< the guest thread parked here; a signal for it interrupts this wait
+    bool woken = false;    ///< set by Wake (under the table's mutex)
+    bool interrupted = false;  ///< set by Interrupt for a pending signal: the wait returns EINTR
     std::condition_variable cv;
   };
 
-  enum class WaitResult { kWoken, kTimedOut, kShutdown };
+  enum class WaitResult { kWoken, kTimedOut, kShutdown, kInterrupted };
+  enum class SleepResult { kSlept, kInterrupted, kShutdown };
 
   FutexTable() = default;
   FutexTable(const FutexTable&) = delete;
@@ -57,7 +61,7 @@ class FutexTable {
 
   /// Step 2 of a wait: queue a waiter on `addr`. Called with the GGL held, after the caller read the word
   /// and found the expected value (see the header).
-  std::shared_ptr<Waiter> Enqueue(exec::GuestAddr addr, std::uint32_t bitset = kMatchAny);
+  std::shared_ptr<Waiter> Enqueue(exec::GuestAddr addr, std::uint32_t bitset = kMatchAny, std::int32_t tid = 0);
 
   /// Step 3: block (GGL released) until woken, `deadline` passes, or `Shutdown`. A waiter that was not
   /// woken is removed from the queue before this returns, so a later wake cannot count it.
@@ -67,8 +71,19 @@ class FutexTable {
   /// held. Returns how many were woken.
   int Wake(exec::GuestAddr addr, int n, std::uint32_t bitset = kMatchAny);
 
-  /// A sleep (nanosleep, clock_nanosleep) that `Shutdown` can cut short. False when it was cut short.
-  bool SleepUntil(Clock::time_point deadline);
+  /// C26: a signal for `tid` reaches a blocked guest thread as the kernel's EINTR. Marks that thread's
+  /// futex waiter(s) interrupted and its sleep, wakes it, and returns how many futex waits were cut.
+  /// Called when a signal is queued for the tid (the sender holds the GGL; this only touches this table).
+  int Interrupt(std::int32_t tid);
+
+  /// Marks `tid` as about to sleep, *before* the GGL is released for the block. Without this a tkill that
+  /// lands between the release and `SleepUntil`'s own registration finds no sleeper and the full sleep runs
+  /// despite a pending unblocked signal.
+  void BeginSleep(std::int32_t tid);
+
+  /// A sleep (nanosleep, clock_nanosleep) that `Shutdown` or a signal for `tid` can cut short. `tid` 0
+  /// means the bare single-threaded monitor, which has no signal delivery and no interrupt.
+  SleepResult SleepUntil(Clock::time_point deadline, std::int32_t tid = 0);
 
   /// Wakes everyone and makes every later wait return at once (`kShutdown`). Irreversible.
   void Shutdown();
@@ -85,6 +100,11 @@ class FutexTable {
   mutable std::mutex mu_;
   std::condition_variable sleep_cv_;
   std::unordered_map<exec::GuestAddr, std::deque<std::shared_ptr<Waiter>>> queues_;
+  /// Sleeper tids present in `SleepUntil`, and the subset a signal has interrupted. A tid is only put in
+  /// the interrupt set while it is actually sleeping, so a stale interrupt cannot make a later sleep return
+  /// EINTR for a signal that was already delivered.
+  std::set<std::int32_t> sleepers_;
+  std::set<std::int32_t> interrupted_sleepers_;
   bool shutdown_ = false;
   std::uint64_t blocked_ = 0, woken_ = 0, timed_out_ = 0;
 };

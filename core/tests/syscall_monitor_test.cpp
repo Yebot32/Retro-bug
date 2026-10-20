@@ -727,9 +727,8 @@ void futex_answers_the_single_threaded_truth() {
   CHECK_CTX(wb.r0 == 0 && wb.verdict == sc::Verdict::kEmulated, wb.detail);
 }
 
-/// `rt_sigaction` installs without a delivery mechanism: 0 back, the previous handler reads NULL
-/// rather than stale bytes, and the note says no signal is ever delivered. `faccessat` goes through
-/// the same provider as `openat` and answers ENOENT for what the provider does not serve.
+/// `rt_sigaction` records a disposition, answers a query with the previous one, and names what it recorded.
+/// `faccessat` goes through the same provider as `openat` and answers ENOENT for what the provider does not serve.
 void sigaction_and_faccessat_answer_their_facts() {
   sc::Monitor m;
   auto window = Window();
@@ -769,6 +768,158 @@ void sigaction_and_faccessat_answer_their_facts() {
   CHECK_CTX(m.Handle(miss, 0).r0 == -static_cast<std::int32_t>(sc::err::kEnoent), "want ENOENT");
 }
 
+/// The ids this lane uses. `Monitor::set_ids` is what makes a tid live, and these are the values
+/// `GuestProcess` itself uses, so the lane reads like the real launch path.
+namespace GuestProcessIds {
+constexpr std::int32_t kPid = 4242;
+constexpr std::int32_t kMainTid = 4243;
+}  // namespace GuestProcessIds
+
+/// A signal number, passed through unchanged. It exists so the loop below reads as "the uncatchable
+/// signals" rather than as two bare integers beside an assertion about being uncatchable.
+constexpr int Uncatchable(int sig) { return sig; }
+
+/// ---- C26: signal delivery.
+///
+/// The three facts these pin down, in the order delivery needs them: (1) what the guest installed is
+/// readable back — bionic's arm32 `struct sigaction` is `{handler, flags, restorer, mask}`, which the
+/// measured probe in tests/corpus/sigframe-arm-layout.txt confirms (flags at +4, not the mask); (2) a
+/// signal aimed at a live thread is *queued*, not refused, and is taken exactly once; (3) `rt_sigreturn`
+/// with no frame in progress is refused by name rather than answered with a 0 that would resume the
+/// handler's own `svc` forever.
+void signal_dispositions_are_what_the_guest_installed() {
+  sc::Monitor m;
+  auto window = Window();
+  if (!window) return;
+  m.set_memory(window.get());
+  std::string werr;
+  CHECK_CTX(window->Map(0, 0x8000, mem::kRead | mem::kWrite, &werr),
+            "could not map the fixture pages: " + werr);
+
+  // The values libmono actually passes for SIGPWR (measured, Cars 3 on an SM-X710):
+  // act = {handler 0x5fab59, flags 0x14000000 (SA_RESTART|SA_RESTORER), restorer 0x1a7240, mask 0xffffbfd9}.
+  const std::uint32_t act[5] = {0x005f'ab59u, 0x1400'0000u, 0x001a'7240u, 0xffff'bfd9u, 0};
+  CHECK(window->Write(0x300, act, sizeof act));
+  exec::MachineState sig = State(sc::nr::kRtSigaction);
+  sig.r[0] = 30;     // SIGPWR, Mono's GC thread-suspend
+  sig.r[1] = 0x300;  // the struct a device reads
+  sig.r[2] = 0;      // no previous handler wanted
+  CHECK_CTX(m.Handle(sig, 0).r0 == 0, "rt_sigaction with a guest struct must be recorded");
+
+  const sc::Monitor::Disposition d = m.disposition(30);
+  CHECK_CTX(d.handler == 0x005f'ab59u, "handler was not read out of the guest struct");
+  CHECK_CTX(d.flags == 0x1400'0000u, "flags are at +4; reading the mask there is the classic mistake");
+  CHECK_CTX(d.restorer == 0x001a'7240u, "the restorer is required on AArch32 and is what delivery returns through");
+  CHECK_CTX(d.mask == 0x0000'0000ffff'bfd9ull, "the blocked mask is at +12, as two 32-bit words");
+  CHECK_CTX(d.catches(), "a handler above 1 catches");
+  CHECK_CTX(m.installed_handler_count() == 1, "one handler installed so far");
+
+  // A query (act == NULL) returns the recorded disposition in oldact and must not erase it.
+  exec::MachineState q = State(sc::nr::kRtSigaction);
+  q.r[0] = 30;
+  q.r[1] = 0;
+  q.r[2] = 0x340;
+  CHECK_CTX(m.Handle(q, 0).r0 == 0, "a query is answered");
+  std::uint32_t old[5] = {};
+  CHECK_CTX(window->Read(0x340, old, sizeof old), "oldact is written");
+  CHECK_CTX(old[0] == 0x005f'ab59u && old[2] == 0x001a'7240u,
+            "oldact is the previous handler and restorer");
+  CHECK_CTX(m.disposition(30).handler == 0x005f'ab59u, "a query must not erase the handler");
+
+  // SIG_DFL (0) and SIG_IGN (1) are not handler addresses; a delivery must not enter them.
+  const std::uint32_t ign[5] = {1, 0, 0, 0, 0};
+  CHECK(window->Write(0x320, ign, sizeof ign));
+  exec::MachineState s2 = State(sc::nr::kRtSigaction);
+  s2.r[0] = 15;  // SIGTERM
+  s2.r[1] = 0x320;
+  CHECK_CTX(m.Handle(s2, 0).r0 == 0, "SIG_IGN is a valid disposition");
+  CHECK_CTX(m.disposition(15).handler == 1, "SIG_IGN is recorded as 1");
+  CHECK_CTX(!m.disposition(15).catches(), "SIG_IGN does not catch, so it is dropped rather than entered");
+  CHECK_CTX(m.installed_handler_count() == 1, "SIG_IGN is not an installed handler");
+}
+
+void a_signal_to_a_live_thread_is_queued_and_taken_once() {
+  sc::Monitor m;
+  auto window = Window();
+  if (!window) return;
+  m.set_memory(window.get());
+  std::string werr;
+  CHECK_CTX(window->Map(0, 0x8000, mem::kRead | mem::kWrite, &werr), werr);
+  m.set_ids(GuestProcessIds::kPid, GuestProcessIds::kMainTid);
+
+  // Signal 0 stays the existence probe even for a live thread: it must answer 0 and queue nothing.
+  exec::MachineState probe = State(sc::nr::kTkill);
+  probe.r[0] = GuestProcessIds::kMainTid;
+  probe.r[1] = 0;
+  CHECK_CTX(m.Handle(probe, 0).r0 == 0, "signal 0 is an existence probe");
+  CHECK_CTX(m.signals_queued() == 0, "a probe queues nothing");
+  CHECK_CTX(m.TakePendingSignal(GuestProcessIds::kMainTid) == 0, "and nothing is waiting");
+
+  // A real signal, with a handler installed.
+  const std::uint32_t act[5] = {0x005f'ab59u, 0x1400'0000u, 0x001a'7240u, 0, 0};
+  CHECK(window->Write(0x300, act, sizeof act));
+  exec::MachineState sa = State(sc::nr::kRtSigaction);
+  sa.r[0] = 30;
+  sa.r[1] = 0x300;
+  CHECK(m.Handle(sa, 0).r0 == 0);
+
+  exec::MachineState kill = State(sc::nr::kTkill);
+  kill.r[0] = GuestProcessIds::kMainTid;
+  kill.r[1] = 30;
+  const sc::Outcome o = m.Handle(kill, 0);
+  // 0, which is the kernel's answer *and* the truth: the signal is pending, not delivered yet.
+  CHECK_CTX(o.r0 == 0, "tkill of a live thread with a handler must answer 0, not -ENOSYS: " + o.detail);
+  CHECK_CTX(o.verdict == sc::Verdict::kEmulated, sc::Name(o.verdict));
+  CHECK_CTX(m.signals_queued() == 1, "one signal queued");
+
+  // Taken exactly once: a second look must not re-enter the handler (Mono would deadlock on a
+  // suspend it never asked for the second time).
+  CHECK_CTX(m.TakePendingSignal(GuestProcessIds::kMainTid) == 30, "the queued signal is taken");
+  CHECK_CTX(m.TakePendingSignal(GuestProcessIds::kMainTid) == 0, "and not taken again");
+
+  // A thread that does not exist is still ESRCH — a queued signal would be a lie.
+  exec::MachineState dead = State(sc::nr::kTkill);
+  dead.r[0] = 99999;
+  dead.r[1] = 30;
+  CHECK_CTX(m.Handle(dead, 0).r0 == -static_cast<std::int32_t>(sc::err::kEsrch), "no such thread is -ESRCH");
+
+  // SIGKILL and SIGSTOP cannot be caught; this build does not run default actions, so they are refused
+  // by name rather than queued into a delivery that would never happen.
+  for (const int uncatchable : {9, 19}) {
+    exec::MachineState k = State(sc::nr::kTkill);
+    k.r[0] = GuestProcessIds::kMainTid;
+    k.r[1] = Uncatchable(uncatchable);
+    CHECK_CTX(m.Handle(k, 0).r0 == -static_cast<std::int32_t>(sc::err::kEnosys),
+              "signal " + std::to_string(uncatchable) + " cannot be caught and must be refused by name");
+  }
+
+  // Outside the ABI's 1..64 there is no signal to queue; the kernel answers EINVAL, not 0.
+  for (const int bad : {65, -1}) {
+    exec::MachineState k = State(sc::nr::kTkill);
+    k.r[0] = GuestProcessIds::kMainTid;
+    k.r[1] = static_cast<std::uint32_t>(bad);
+    CHECK_CTX(m.Handle(k, 0).r0 == -static_cast<std::int32_t>(sc::err::kEinval),
+              "signal " + std::to_string(bad) + " is EINVAL");
+  }
+}
+
+/// `rt_sigreturn` (173) closes a delivery. Without one in progress it is refused by name — answering 0
+/// would resume the handler's own `svc` in place, which is an infinite loop rather than an error.
+void sigreturn_outside_a_delivery_is_refused_by_name() {
+  sc::Monitor m;
+  auto window = Window();
+  if (!window) return;
+  m.set_memory(window.get());
+  std::string werr;
+  CHECK_CTX(window->Map(0, 0x8000, mem::kRead | mem::kWrite, &werr), werr);
+
+  exec::MachineState s = State(sc::nr::kRtSigreturn);
+  const sc::Outcome o = m.Handle(s, 0);
+  CHECK_CTX(o.verdict == sc::Verdict::kUnsupported, sc::Name(o.verdict));
+  CHECK_CTX(o.r0 == -static_cast<std::int32_t>(sc::err::kEnosys), std::to_string(o.r0));
+  CHECK_CTX(o.detail.find("rt_sigreturn") != std::string::npos, o.detail);
+}
+
 int main() {
   frame_takes_the_number_from_r7_not_the_encoding();
   r7_is_the_number_not_a_masked_remainder();
@@ -794,6 +945,9 @@ int main() {
   console_writes_are_captured_and_answered_as_written();
   futex_answers_the_single_threaded_truth();
   sigaction_and_faccessat_answer_their_facts();
+  signal_dispositions_are_what_the_guest_installed();
+  a_signal_to_a_live_thread_is_queued_and_taken_once();
+  sigreturn_outside_a_delivery_is_refused_by_name();
 
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;

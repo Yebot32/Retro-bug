@@ -189,6 +189,12 @@ class GuestProcess {
   /// One line per `clone`d guest thread that stopped other than through `exit` (a fault, a refused call):
   /// such a stop ends the whole process, as a fatal signal in one thread does on a device.
   [[nodiscard]] std::vector<std::string> thread_faults() const;
+  /// A diagnostic line per guest thread: pc/lr/sp, the last syscall, and what it is blocked in
+  /// (futex/sleep/host slot). The launcher's liveness supervisor prints one per line when guest instructions
+  /// stop retiring, which is how a silent stall gets a name instead of a black screen. Adopted threads come
+  /// first (a Java thread calling native is where a stuck game is usually stuck). Reads guest state without
+  /// the GGL: it is only taken when the process is stalled, and it is a report, not control flow.
+  [[nodiscard]] std::vector<std::string> StallReport();
   /// The budget one `RunThread` turn of a `clone`d thread gets (it is re-entered until the thread exits).
   static constexpr unsigned kThreadTurnBudget = 1u << 30;
 

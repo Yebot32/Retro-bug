@@ -313,6 +313,13 @@ class AbiContext : public exec::HostDispatch {
   /// and adopted host thread runs there. Called under the GGL. Set once, at setup.
   using FaultNamer = std::function<std::string(GuestAddr pc)>;
   void set_fault_namer(FaultNamer namer) { fault_namer_ = std::move(namer); }
+  /// C26: called at every slice boundary and before the first guest instruction of a turn, with the thread
+  /// about to run. The runtime uses it to enter a handler for a queued signal. At the ABI layer rather than
+  /// a caller's loop because every thread runs here — clone()d threads, adopted host threads and the main
+  /// thread — and because a `futex` woken with EINTR must take its signal before it retries. Called under
+  /// the GGL. Set once, at setup.
+  using SignalDeliver = std::function<void(runtime::GuestThread& thread)>;
+  void set_signal_deliver(SignalDeliver deliver) { signal_deliver_ = std::move(deliver); }
   [[nodiscard]] syscall::Monitor* monitor() const { return monitor_; }
 
   /// Set when a call ended in `StopReason::Exited`; the status the guest passed to `exit_group`.
@@ -420,6 +427,7 @@ class AbiContext : public exec::HostDispatch {
   runtime::GuestThread main_;
   /// Diagnostics (M4 profiling): told the guest pc at every slice boundary, with the GGL held. Unset: nothing runs.
   std::function<void(std::uint32_t pc)> slice_probe_;
+  SignalDeliver signal_deliver_;
   std::atomic<std::uint64_t> slices_{0};
   std::atomic<std::uint64_t> contended_slices_{0};
   GuestAddr slot_base_;

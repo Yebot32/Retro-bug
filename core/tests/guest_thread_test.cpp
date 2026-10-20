@@ -36,6 +36,7 @@
 #include "rb/exec/jit.h"
 #include "rb/mem/guest_memory.h"
 #include "rb/runtime/ggl.h"
+#include "rb/runtime/signal_frame.h"
 #include "rb/runtime/guest_process.h"
 #include "rb/runtime/guest_thread.h"
 #include "rb/syscall/monitor.h"
@@ -1338,6 +1339,397 @@ void guest_pthreads(int tier) {
 
 }  // namespace
 
+/// ---- C26: signal delivery into a handler the guest installed.
+///
+/// The whole point of the piece: a guest thread with a queued signal must *enter* the handler the guest
+/// installed with `rt_sigaction`, and when the handler returns through the restorer's `rt_sigreturn`, the
+/// interrupted code must resume where it stopped, with its registers and blocked mask put back.
+///
+/// The assertions are the guest's own register file and the memory the handler wrote — not a log line. The
+/// handler is real Thumb code both tiers execute, so a delivery that built the frame wrong fails here
+/// rather than in a game.
+void signal_delivery_enters_the_guest_handler_and_resumes(int tier) {
+  Rig r = Build(tier);
+  if (!r.ok) return;
+  mem::GuestMemory& m = *r.mem;
+
+  // A page of its own for the handler, the restorer and the code being interrupted: `Build` already
+  // turned the shared code page read-only-execute, and a handler is written before it is run. The
+  // encodings are raw Thumb because this lane runs on the device, where there is no assembler; each
+  // comment is the instruction it is.
+  const exec::GuestAddr kPage = kCode + 0x1000;  // the page after the shared blob page
+  std::string perr;
+  CHECK_CTX(m.Map(kPage, mem::kGuestPage, mem::kRead | mem::kWrite, &perr), "map the handler page: " + perr);
+  const std::uint16_t code[] = {
+      0x4b01, 0x6018, 0x4770, 0x0000,  // 0x00 handler: ldr r3,[pc,#4]; str r0,[r3]; bx lr; padding
+      0x0040, 0x0101,                  // 0x08 .word kData + 0x40, little-endian pair
+      0x27ad, 0xdf00, 0xe7fe,          // 0x0c restorer: movs r7, #173 (rt_sigreturn); svc #0; b .
+      0x2007, 0x4770,                  // 0x12 victim: movs r0, #7; bx lr
+  };
+  CHECK_CTX(m.Write(kPage, code, sizeof code), "write the handler bytes while the page is still writable");
+  CHECK_CTX(m.Protect(kPage, mem::kGuestPage, mem::kRead | mem::kExec, &perr), "make it executable: " + perr);
+  const exec::GuestAddr kHandler = kPage + 0x00;      // the clean entry; the ABI tag is on the handler value
+  const exec::GuestAddr kRestorer = kPage + 0x0c + 1; // +1: Thumb
+  const exec::GuestAddr kVictimPc = kPage + 0x12;     // clean, mode carried separately (this codebase's rule)
+
+  GuestThread& t = r.abi->main_thread();
+
+  // The runtime's half of the return path, which `GuestProcess` installs in a real launch: without it
+  // `rt_sigreturn` is a named refusal, so a lane that forgot it would be testing nothing.
+  r.mon->set_signal_return([&m](GuestThread& th) -> syscall::Outcome {
+    std::string why;
+    if (!ReturnFromSignal(th, m, &why)) return syscall::Outcome::Refused(syscall::err::kEnosys, why);
+    return syscall::Outcome::Emulated(0, why);
+  });
+
+  // rt_sigaction(sig=30, &act, NULL) in the measured arm32 layout {handler, flags, restorer, mask}.
+  // A Thumb handler is tagged |1, exactly as bionic's own `rt_sigaction` callers pass it.
+  // sa_mask blocks SIGQUIT (3) in the handler: delivery must add it to the interrupted mask.
+  const std::uint32_t act[5] = {kHandler | 1u, 0x1400'0000u /* SA_RESTART|SA_RESTORER */, kRestorer,
+                                1u << (3 - 1), 0};
+  CHECK(m.Write(kData + 0x20, act, sizeof act));
+  exec::MachineState sa{};
+  sa.mode = isa::Mode::Thumb;
+  sa.pc = kReturn;
+  sa.r[7] = syscall::nr::kRtSigaction;
+  sa.r[0] = 30;
+  sa.r[1] = kData + 0x20;
+  r.mon->Handle(sa, 0, &t);
+  CHECK_CTX(r.mon->disposition(30).catches(), "the handler is recorded before a delivery can enter it");
+
+  // Nothing to deliver yet, and saying so is not a delivery.
+  CHECK_CTX(t.deliveries.empty(), "no delivery is in progress before a signal is queued");
+  std::string why;
+  CHECK_CTX(!DeliverPendingSignal(t, m, *r.mon, &why), "no pending signal means no delivery: " + why);
+
+  // Put the thread at the victim, with r1 aimed at the word the handler stores into — that is the
+  // interrupted state the frame must preserve.
+  t.state.mode = isa::Mode::Thumb;
+  // A real interrupted state has the mode and CPSR bit 5 agreeing (both tiers keep that invariant); the
+  // frame saves CPSR and the return derives the mode from it, so a fixture with only `mode` set would
+  // resume in ARM.
+  t.state.cpsr = exec::CpsrWithMode(t.state.cpsr, isa::Mode::Thumb);
+  t.state.pc = kVictimPc;
+  t.state.r[15] = kVictimPc;
+  t.state.r[1] = kData + 0x40;  // the interrupted r1 the handler's argument overwrites, and must get back
+  t.state.r[3] = 0xcafe'0001u;  // a scratch register the handler never touches: must survive
+  // The ABI tags its return sentinel with the caller's mode (`return_address | T` in PlaceArgs); an even
+  // sentinel would make the victim's `bx lr` switch to ARM, which is correct CPU behaviour and not what
+  // the interrupted thread was doing.
+  t.state.r[14] = kReturn | 1u;
+  // Move off the very top of the stack, so the words at SP..SP+16 are mapped: they are the interrupted
+  // function's saved r4..r7 (the generic `syscall()` wrapper keeps them there), and delivery must not
+  // write a byte at or above SP. The bug this pins: a 64-byte zero chunk overran the 872-byte frame and
+  // zeroed exactly these, so the pop restored r4=0 (Cars 3, 2026-10-20).
+  t.state.r[13] = kStacks + kStackBytes - 0x100;
+  const std::uint32_t above_sp[4] = {0x1111'1111u, 0x2222'2222u, 0x3333'3333u, 0x4444'4444u};
+  CHECK(m.Write(t.state.r[13], above_sp, sizeof above_sp));
+  const std::uint32_t sp_before = t.state.r[13];
+  const std::uint32_t r3_before = t.state.r[3];
+  const std::uint32_t mask_before = static_cast<std::uint32_t>(t.signal_mask);
+  const std::uint32_t pristine = 0xaaaa'aaaa;
+  CHECK(m.Write(kData + 0x40, &pristine, 4));
+
+  // Queue one the way `tkill` does, then deliver at a block boundary — the seam the run loop uses.
+  r.mon->QueueSignal(t.tid, 30);
+  CHECK_CTX(DeliverPendingSignal(t, m, *r.mon, &why), "a queued signal with a handler must be delivered: " + why);
+
+  // --- what the handler was entered with.
+  CHECK_CTX(t.state.pc == kHandler, "pc must be the handler's clean entry, is " +
+                                        std::to_string(static_cast<unsigned long long>(t.state.pc)));
+  CHECK_CTX(t.state.mode == isa::Mode::Thumb && (t.state.cpsr & 0x20u) != 0,
+            "the handler is entered in Thumb, with the mode bit in CPSR agreeing");
+  CHECK_CTX(t.state.r[0] == 30, "the handler's first argument is the signal");
+  const std::uint32_t frame = t.deliveries.empty() ? 0 : t.deliveries.back().frame;
+  CHECK_CTX(t.state.r[1] + 128 == frame, "r1 is &siginfo, immediately before the ucontext");
+  CHECK_CTX(t.state.r[2] == frame, "r2 is &ucontext");
+  CHECK_CTX(t.state.r[14] == kRestorer, "lr must be the restorer the guest registered");
+  CHECK_CTX(t.state.r[13] < sp_before, "the frame is below the interrupted stack pointer");
+  CHECK_CTX(sp_before - t.state.r[13] >= 872, "the frame is at least one rt_sigframe deep");
+  CHECK_CTX((t.state.r[13] & 7u) == 0, "the frame is 8-byte aligned");
+  CHECK_CTX(!t.deliveries.empty() && t.deliveries.back().frame != 0, "the delivery is recorded on the thread");
+  CHECK_CTX(t.deliveries.back().sig == 30, "the record names the signal");
+  CHECK_CTX((t.signal_mask & (1ull << 2)) != 0,
+            "the handler runs with the sigaction's sa_mask (SIGQUIT) blocked");
+  CHECK_CTX((t.signal_mask & (1ull << 29)) != 0,
+            "and with the signal itself blocked (no SA_NODEFER)");
+  CHECK_CTX(r.mon->signals_delivered() == 1, "the delivery is counted");
+  CHECK_CTX(r.mon->TakePendingSignal(t.tid) == 0, "the signal was taken, so a second look delivers nothing");
+
+  // --- the handler runs, returns through the restorer's `rt_sigreturn`, and the victim resumes.
+  // `RunThread` is the real run loop, so the `svc #173` in the restorer is answered by the monitor and the
+  // frame is restored — exactly the path a game takes.
+  exec::RunResult rr = r.abi->RunThread(t, 100000);
+  CHECK_CTX(rr.reason == exec::StopReason::Returned || rr.reason == exec::StopReason::Budget,
+            "the handler must run to its restorer and the victim must return, reason " +
+                std::to_string(static_cast<int>(rr.reason)) + ": " + rr.detail);
+
+  std::uint32_t written = 0;
+  CHECK_CTX(m.Read(kData + 0x40, &written, 4) && written == 30,
+            "the handler ran: it must have stored the signal number, found " + std::to_string(written));
+  CHECK_CTX(t.deliveries.empty(), "rt_sigreturn pops the delivery record");
+  std::uint32_t above_now[4] = {};
+  CHECK_CTX(m.Read(sp_before, above_now, sizeof above_now) &&
+                std::memcmp(above_now, above_sp, sizeof above_sp) == 0,
+            "delivery wrote nothing at or above SP: the interrupted function's saved r4..r7 survive");
+  CHECK_CTX(t.state.r[3] == r3_before, "the interrupted register file came back (r3)");
+  CHECK_CTX(t.state.r[1] == kData + 0x40, "the interrupted r1 came back after the handler used it for &info");
+  CHECK_CTX(t.state.r[13] == sp_before, "the stack pointer is back where it was interrupted");
+  CHECK_CTX(static_cast<std::uint32_t>(t.signal_mask) == mask_before,
+            "the blocked mask is back to what it was before the handler (the frame holds the old mask)");
+  // The victim ran after the return: its first instruction is `movs r0, #7`, so r0 says it resumed there
+  // and not somewhere else, and its `bx lr` reached the ABI's return sentinel.
+  CHECK_CTX(t.state.r[0] == 7, "the victim resumed and ran after the handler returned, r0 is " +
+                                   std::to_string(t.state.r[0]));
+  CHECK_CTX(t.state.pc == kReturn, "execution resumed at the victim and returned to the sentinel");
+  CHECK_CTX(t.state.mode == isa::Mode::Thumb && (t.state.cpsr & 0x20u) != 0,
+            "the resumed mode is the interrupted state's Thumb, not the handler's leftovers");
+}
+
+/// ---- C26: a signal interrupts a blocked futex wait, and the handler runs before the guest retries.
+///
+/// This is the shape Mono's GC suspend takes in a real game: a worker is parked on a futex and the GC
+/// thread sends SIGPWR. The kernel wakes the wait with EINTR and the thread takes the handler; delivery
+/// that only happened at a `RunThread` turn boundary would never reach a parked thread. The handler's
+/// store is the proof it ran; the futex's -EINTR is the proof the wake happened for the right reason.
+void a_signal_interrupts_a_blocked_futex_and_enters_the_handler(int tier) {
+  Watchdog wd(std::string{"futex_signal/"} + TierName(tier), std::chrono::seconds(30));
+  Rig r = Build(tier);
+  if (!r.ok) return;
+  mem::GuestMemory& m = *r.mem;
+  runtime::FutexTable ft;
+  r.mon->set_futex_table(&ft);
+
+  const exec::GuestAddr kPage = kCode + 0x2000;
+  std::string perr;
+  CHECK_CTX(m.Map(kPage, mem::kGuestPage, mem::kRead | mem::kWrite, &perr), "map the futex page: " + perr);
+  const std::uint16_t code[] = {
+      0x4803,                  // 0x00 ldr r0, [pc, #12] -> the uaddr word at 0x10
+      0x6802,                  // 0x02 ldr r2, [r0]      (the expected value, 0)
+      0x2100,                  // 0x04 movs r1, #0       (FUTEX_WAIT)
+      0x2300,                  // 0x06 movs r3, #0       (no timeout)
+      0x27f0,                  // 0x08 movs r7, #240     (futex)
+      0xdf00,                  // 0x0a svc #0
+      0x6020,                  // 0x0c str r0, [r4]      (the wait's return value)
+      0x4770,                  // 0x0e bx lr
+      0x0060, 0x0101,          // 0x10 .word kData + 0x60 (the futex word)
+      0x0000, 0x0000,          // 0x14 padding
+      0x6028, 0x4770,          // 0x18 handler: str r0, [r5]; bx lr
+      0x27ad, 0xdf00, 0xe7fe,  // 0x1c restorer: movs r7, #173; svc #0; b .
+  };
+  CHECK_CTX(m.Write(kPage, code, sizeof code), "write the wait and handler bytes");
+  CHECK_CTX(m.Protect(kPage, mem::kGuestPage, mem::kRead | mem::kExec, &perr), "make it executable: " + perr);
+  const exec::GuestAddr kHandler = kPage + 0x18 + 1;
+  const exec::GuestAddr kRestorer = kPage + 0x1c + 1;
+  const std::uint32_t zero = 0;
+  CHECK(m.Write(kData + 0x60, &zero, 4));
+
+  // The three hooks a real launch installs: handler install, the rt_sigreturn restore, and delivery at
+  // the ABI's boundaries.
+  const std::uint32_t act[5] = {kHandler, 0x1400'0000u /* SA_RESTART|SA_RESTORER */, kRestorer, 0, 0};
+  CHECK(m.Write(kData + 0x20, act, sizeof act));
+  exec::MachineState sa{};
+  sa.mode = isa::Mode::Thumb;
+  sa.pc = kReturn;
+  sa.r[7] = syscall::nr::kRtSigaction;
+  sa.r[0] = 30;
+  sa.r[1] = kData + 0x20;
+  r.mon->Handle(sa, 0, &r.abi->main_thread());
+  CHECK_CTX(r.mon->disposition(30).catches(), "the handler is recorded");
+  r.mon->set_signal_return([&m](GuestThread& th) -> syscall::Outcome {
+    std::string why;
+    if (!ReturnFromSignal(th, m, &why)) return syscall::Outcome::Refused(syscall::err::kEnosys, why);
+    return syscall::Outcome::Emulated(0, why);
+  });
+  r.abi->set_signal_deliver([&m, &r](GuestThread& th) {
+    std::string why;
+    (void)DeliverPendingSignal(th, m, *r.mon, &why);  // "nothing pending" is the ordinary answer
+  });
+
+  GuestThread t;
+  Prepare(t, 1, 6001);
+  t.state.pc = kPage;
+  t.state.r[15] = kPage;
+  t.state.cpsr = exec::CpsrWithMode(t.state.cpsr, isa::Mode::Thumb);
+  t.state.r[4] = kData + 0x50;  // where the futex return value lands
+  t.state.r[5] = kData + 0x54;  // where the handler writes the signal it saw
+  t.state.r[14] = kReturn | 1u;
+
+  std::atomic<bool> done{false};
+  exec::RunResult rr{};
+  std::thread worker([&] {
+    if (!runtime::BindCurrentHostThread(t)) {
+      std::fprintf(stderr, "FATAL: the futex fixture thread could not be bound (line %d)\n", __LINE__);
+      std::abort();
+    }
+    rr = r.abi->RunThread(t, 400000);
+    done.store(true);
+  });
+  CHECK_CTX(WaitFor([&] { return ft.waiters() != 0; }, std::chrono::seconds(5)),
+            "the guest thread parked in futex WAIT");
+  // The waiter is enqueued under the GGL just before the block lambda sets the marker, so wait for the marker
+  // rather than sampling at the enqueue instant.
+  CHECK_CTX(WaitFor([&] {
+              return t.wait_kind.load() == static_cast<int>(GuestThread::WaitKind::kFutex) &&
+                     t.wait_arg.load() == kData + 0x60;
+            }, std::chrono::seconds(5)),
+            "the stall marker names the blocked futex and its address");
+  r.mon->QueueSignal(6001, 30);
+  CHECK_CTX(WaitFor([&] { return done.load(); }, std::chrono::seconds(5)),
+            "the signal cut the wait and the thread ran to its return");
+  worker.join();
+
+  std::uint32_t result = 0, handler_saw = 0;
+  CHECK_CTX(m.Read(kData + 0x50, &result, 4), "read the futex result");
+  CHECK_CTX(m.Read(kData + 0x54, &handler_saw, 4), "read the handler's word");
+  CHECK_CTX(result == static_cast<std::uint32_t>(-4),
+            "the blocked futex returned -EINTR, is " + std::to_string(result));
+  CHECK_CTX(handler_saw == 30, "the handler ran before the guest resumed, saw " + std::to_string(handler_saw));
+  CHECK_CTX(rr.reason == exec::StopReason::Returned, "the thread returned: " + rr.detail);
+  CHECK_CTX(t.deliveries.empty(), "the delivery was closed by rt_sigreturn");
+  CHECK_CTX(t.wait_kind.load() == static_cast<int>(GuestThread::WaitKind::kNone),
+            "the wait marker is cleared after the wait");
+}
+
+/// ---- C26: a second signal nests inside the first, and each `rt_sigreturn` peels one layer.
+///
+/// Mono's suspend handler (SIGPWR) waits for the restart signal (SIGXCPU) to run inside it, so delivery
+/// must stack: the inner return restores the suspend handler's state, and the outer return restores the
+/// code the GC interrupted. One record would overwrite the first frame and resume in the wrong place.
+void nested_delivery_restores_the_outer_handler_first() {
+  Rig r = Build(2);
+  if (!r.ok) return;
+  mem::GuestMemory& m = *r.mem;
+
+  const exec::GuestAddr kSuspendHandler = 0x005f'ab59u;   // Mono's handler, Thumb
+  const exec::GuestAddr kRestartHandler = 0x005f'ab79u;   // the same code, one entry further
+  const exec::GuestAddr kRestorer = 0x001a'7240u;         // not executed here: no run, just frames
+  const auto install = [&](int sig, std::uint32_t handler) {
+    const std::uint32_t act[5] = {handler, 0x1400'0000u, kRestorer, 0, 0};
+    const exec::GuestAddr at = kData + 0x20 + static_cast<exec::GuestAddr>(sig) * 0x20;
+    CHECK(m.Write(at, act, sizeof act));
+    exec::MachineState sa{};
+    sa.mode = isa::Mode::Thumb;
+    sa.pc = kReturn;
+    sa.r[7] = syscall::nr::kRtSigaction;
+    sa.r[0] = static_cast<std::uint32_t>(sig);
+    sa.r[1] = at;
+    r.mon->Handle(sa, 0, &r.abi->main_thread());
+  };
+  install(30, kSuspendHandler);
+  install(24, kRestartHandler);
+  CHECK_CTX(r.mon->disposition(30).catches() && r.mon->disposition(24).catches(),
+            "both of Mono's signal dispositions are installed");
+
+  GuestThread& t = r.abi->main_thread();
+  const exec::GuestAddr kVictimPc = 0x0100'0124u;  // clean, Thumb
+  t.state.mode = isa::Mode::Thumb;
+  t.state.cpsr = exec::CpsrWithMode(t.state.cpsr, isa::Mode::Thumb);
+  t.state.pc = kVictimPc;
+  t.state.r[15] = kVictimPc;
+  t.state.r[3] = 0xcafe'0003u;
+  t.state.r[14] = kReturn | 1u;
+  const std::uint32_t sp_interrupted = t.state.r[13];
+
+  std::string why;
+  r.mon->QueueSignal(t.tid, 30);
+  CHECK_CTX(DeliverPendingSignal(t, m, *r.mon, &why), "the suspend signal is delivered: " + why);
+  CHECK_CTX(t.deliveries.size() == 1 && t.state.pc == (kSuspendHandler & ~1u),
+            "depth 1, inside the suspend handler");
+  const std::uint32_t suspend_sp = t.state.r[13];  // the handler's stack starts at the frame, not at its ucontext
+
+  r.mon->QueueSignal(t.tid, 24);
+  CHECK_CTX(DeliverPendingSignal(t, m, *r.mon, &why), "the restart signal nests: " + why);
+  CHECK_CTX(t.deliveries.size() == 2 && t.state.pc == (kRestartHandler & ~1u),
+            "depth 2, inside the restart handler");
+  CHECK_CTX(t.state.r[13] < suspend_sp, "the inner frame sits below the suspend handler's stack");
+  CHECK_CTX(t.state.r[0] == 24, "the inner handler's first argument is the restart signal");
+
+  CHECK_CTX(ReturnFromSignal(t, m, &why), "the inner handler returns: " + why);
+  CHECK_CTX(t.deliveries.size() == 1, "one delivery remains");
+  CHECK_CTX(t.state.pc == (kSuspendHandler & ~1u), "the suspend handler's pc is back");
+  CHECK_CTX(t.state.r[0] == 30, "the suspend handler's r0 (the signal it was entered with) is back");
+  CHECK_CTX(t.state.r[13] == suspend_sp, "the suspend handler's stack pointer is back");
+
+  CHECK_CTX(ReturnFromSignal(t, m, &why), "the outer handler returns: " + why);
+  CHECK_CTX(t.deliveries.empty(), "no delivery remains");
+  CHECK_CTX(t.state.pc == kVictimPc, "the interrupted pc is back");
+  CHECK_CTX(t.state.r[3] == 0xcafe'0003u, "the interrupted register file is back");
+  CHECK_CTX(t.state.r[13] == sp_interrupted, "the interrupted stack pointer is back");
+}
+
+/// ---- C26: a signal the thread has BLOCKED must not wake its futex wait.
+///
+/// The kernel only interrupts a futex for a deliverable signal. This lane is the counterpart of the one
+/// above: same parked thread, same tkill queueing path, but signal 30 is in the thread's mask and stays
+/// pending — the wait must run on and return 0 when a real wake arrives, not EINTR. The lookup is what
+/// `GuestProcess` installs in a launch; without it the monitor cannot know the target's mask.
+void a_blocked_signal_leaves_a_futex_wait_alone(int tier) {
+  Watchdog wd(std::string{"blocked_futex_signal/"} + TierName(tier), std::chrono::seconds(30));
+  Rig r = Build(tier);
+  if (!r.ok) return;
+  mem::GuestMemory& m = *r.mem;
+  runtime::FutexTable ft;
+  r.mon->set_futex_table(&ft);
+
+  const exec::GuestAddr kPage = kCode + 0x3000;
+  std::string perr;
+  CHECK_CTX(m.Map(kPage, mem::kGuestPage, mem::kRead | mem::kWrite, &perr), "map the futex page: " + perr);
+  const std::uint16_t code[] = {
+      0x4803,                  // 0x00 ldr r0, [pc, #12] -> the uaddr word at 0x10
+      0x6802,                  // 0x02 ldr r2, [r0]
+      0x2100,                  // 0x04 movs r1, #0       (FUTEX_WAIT)
+      0x2300,                  // 0x06 movs r3, #0       (no timeout)
+      0x27f0,                  // 0x08 movs r7, #240     (futex)
+      0xdf00,                  // 0x0a svc #0
+      0x6020,                  // 0x0c str r0, [r4]
+      0x4770,                  // 0x0e bx lr
+      0x0060, 0x0101,          // 0x10 .word kData + 0x60
+  };
+  CHECK_CTX(m.Write(kPage, code, sizeof code), "write the wait bytes");
+  CHECK_CTX(m.Protect(kPage, mem::kGuestPage, mem::kRead | mem::kExec, &perr), "make it executable: " + perr);
+  const std::uint32_t zero = 0;
+  CHECK(m.Write(kData + 0x60, &zero, 4));
+
+  GuestThread t;
+  Prepare(t, 1, 6002);
+  t.state.pc = kPage;
+  t.state.r[15] = kPage;
+  t.state.cpsr = exec::CpsrWithMode(t.state.cpsr, isa::Mode::Thumb);
+  t.state.r[4] = kData + 0x50;  // the futex result
+  t.state.r[13] = kStacks + kStackBytes - 0x100;
+  t.state.r[14] = kReturn | 1u;
+  t.signal_mask = 1ull << (30 - 1);  // SIGPWR is blocked on this thread
+  r.mon->set_thread_lookup([&t](std::int32_t tid) { return tid == t.tid ? &t : nullptr; });
+
+  std::atomic<bool> done{false};
+  exec::RunResult rr{};
+  std::thread worker([&] {
+    if (!runtime::BindCurrentHostThread(t)) {
+      std::fprintf(stderr, "FATAL: the blocked-futex fixture thread could not be bound (line %d)\n", __LINE__);
+      std::abort();
+    }
+    rr = r.abi->RunThread(t, 400000);
+    done.store(true);
+  });
+  CHECK_CTX(WaitFor([&] { return ft.waiters() != 0; }, std::chrono::seconds(5)),
+            "the guest thread parked in futex WAIT");
+  r.mon->QueueSignal(t.tid, 30);
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  CHECK_CTX(ft.waiters() == 1 && t.wait_kind.load() == static_cast<int>(GuestThread::WaitKind::kFutex),
+            "a blocked signal must not interrupt the futex wait");
+  CHECK_CTX(r.mon->TakePendingSignal(t.tid) == 30, "the blocked signal stayed pending");
+  CHECK_CTX(ft.Wake(kData + 0x60, 1) == 1, "wake the waiter directly");
+  CHECK_CTX(WaitFor([&] { return done.load(); }, std::chrono::seconds(5)),
+            "the real wake let the thread return");
+  worker.join();
+
+  std::uint32_t result = 0xdead'beefu;
+  CHECK_CTX(m.Read(kData + 0x50, &result, 4), "read the futex result");
+  CHECK_CTX(result == 0, "the futex returned 0 (woken), not -EINTR: " + std::to_string(result));
+  CHECK_CTX(rr.reason == exec::StopReason::Returned, "the thread returned: " + rr.detail);
+}
+
 int main() {
   monitor_blocking_verdict();
   ggl_handoff_latency();
@@ -1352,7 +1744,11 @@ int main() {
     unbound_host_thread_is_refused(tier);
     each_thread_has_its_own_tid(tier);
     guest_pthreads(tier);
+    signal_delivery_enters_the_guest_handler_and_resumes(tier);
+    a_signal_interrupts_a_blocked_futex_and_enters_the_handler(tier);
+    a_blocked_signal_leaves_a_futex_wait_alone(tier);
   }
+  nested_delivery_restores_the_outer_handler_first();
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;
 }

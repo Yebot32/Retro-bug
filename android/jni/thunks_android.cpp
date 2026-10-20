@@ -282,6 +282,23 @@ void RegisterAndroidThunks(HostSlots& slots, abi::ForwardingJni& fwd, JavaVM* vm
     });
   }
 
+  // ---- ALooper polling. Unity's native input loop calls `ALooper_pollAll(0, &fd, &events, &data)` every
+  // frame. This engine keeps no input event queue on a guest ALooper (touch reaches Unity through Java's
+  // UnityPlayer), so the honest answer is ALOOPER_POLL_TIMEOUT (-3): no source fired. Polling the *host*
+  // looper here would consume the host app's own events and, with a blocking timeout, could park the guest
+  // forever. Measured: MadTruck's nativeRender stopped on this unanswered import (2026-10-20).
+  for (const char* name : {"ALooper_pollAll", "ALooper_pollOnce"}) {
+    slots.AddSpecial(name, [](exec::MachineState& s, std::string*) {
+      s.r[0] = static_cast<std::uint32_t>(-3);
+      return true;
+    });
+  }
+  // A wake with no blocking poll to wake is a no-op; answered so it stays out of the trap list.
+  slots.AddSpecial("ALooper_wake", [](exec::MachineState& s, std::string*) {
+    s.r[0] = 0;
+    return true;
+  });
+
   // ---- jnigraphics: the pixels are host memory; the guest works on a shadow copied in at lock, out at unlock.
   slots.AddSpecial("AndroidBitmap_getInfo", [st](exec::MachineState& s, std::string* why) {
     JNIEnv* env = st->Env(why);

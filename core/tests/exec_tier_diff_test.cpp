@@ -1121,8 +1121,9 @@ void the_virtual_counter_reads_the_host_count_on_both_tiers() {
 
 /// PMCCNTR (`mrc p15, #0, rT, c9, c13, #0`), the PMU cycle counter, read as a running count on both tiers — what a
 /// kernel with user PMU access enabled gives. Older OpenSSL's `_armv7_tick` reads it under a SIGILL guard (Looney
-/// Tunes Dash's libToonRunner, in a static initialiser); this build delivers no signals, so a refusal stopped the
-/// constructor for good. It is answered from the same host count as CNTVCT, low word. Encoding (ARM state):
+/// Tunes Dash's libToonRunner, in a static initialiser); synthesising a trap for a read the engine can answer
+/// would enter the guest's SIGILL handler, so the count is answered from the same host source as CNTVCT. Encoding
+/// (ARM state):
 ///   mrc p15,#0,r0,c9,c13,#0 ; mrc p15,#0,r1,c9,c13,#0 ; bx lr  → ee190f1d ee191f1d e12fff1e
 void the_cycle_counter_reads_a_running_count_on_both_tiers() {
   Rig rig = build();

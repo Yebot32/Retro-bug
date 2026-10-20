@@ -60,6 +60,7 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -70,6 +71,7 @@
 #include <vector>
 
 #include <atomic>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -129,6 +131,11 @@ constexpr std::uint32_t kNanosleep = 162;   ///< blocking: answered with the GGL
 constexpr std::uint32_t kMremap = 163;
 constexpr std::uint32_t kWritev = 146;
 constexpr std::uint32_t kPrctl = 172;
+/// `rt_sigreturn` (173): the call a signal handler returns through. AArch32 requires `SA_RESTORER`, so a
+/// guest handler never issues this itself — the restorer it registered does
+/// (`mov r7, #__NR_rt_sigreturn; svc 0`), which is why delivery may rely on one existing. The number is
+/// from the NDK's own `arm-linux-androideabi/asm/unistd.h:143`, the header the guest is compiled against.
+constexpr std::uint32_t kRtSigreturn = 173;
 constexpr std::uint32_t kRtSigaction = 174;
 constexpr std::uint32_t kRtSigprocmask = 175;
 constexpr std::uint32_t kMmap2 = 192;
@@ -384,6 +391,108 @@ class Monitor {
   [[nodiscard]] bool host_io() const { return host_io_; }
   /// Receives the answer line of every host-I/O call as it completes (diagnostics; unset = nothing is formatted twice).
   void set_host_io_trace(std::function<void(const std::string&)> trace) { host_io_trace_ = std::move(trace); }
+  /// Receives every `rt_sigaction` as it is recorded, on its own channel so the notes' dedup and cap cannot
+  /// hide it. The signal-disposition set is what C26's delivery has to be built against, and it is a fact
+  /// about the guest that has to be readable from a live log rather than inferred from a capped report.
+  void set_signal_trace(std::function<void(const std::string&)> trace) { signal_trace_ = std::move(trace); }
+
+  /// The signal dispositions the guest has installed, by signal number: the handler address (0 = SIG_DFL,
+  /// 1 = SIG_IGN), the flags it asked for, the restorer, and its blocked mask. `rt_sigaction` is the only
+  /// writer.
+  ///
+  /// The layout was read off the guest rather than taken from a header (SM-X710 2026-10-19, Cars 3):
+  /// `rt_sigaction(sig=30)` passed `+0=0x5fab59 +4=0x14000000 +8=0x1a7240`, so bionic's struct is
+  /// `{handler, flags, restorer, mask}` — flags at +4, not mask, and `SA_RESTORER` (0x04000000) is set in
+  /// practice on AArch32 exactly as docs/research/02 §5.4 says it must be.
+  struct Disposition {
+    std::uint32_t handler = 0;
+    std::uint32_t flags = 0;
+    std::uint32_t restorer = 0;  ///< `sa_restorer`; required on AArch32, and the return path a delivery uses
+    std::uint64_t mask = 0;
+    [[nodiscard]] bool catches() const { return handler > 1; }  ///< a real handler, not SIG_DFL/SIG_IGN
+  };
+  [[nodiscard]] Disposition disposition(int sig) const {
+    const auto it = sig_dispositions_.find(sig);
+    return it == sig_dispositions_.end() ? Disposition{} : it->second;
+  }
+  /// Every disposition the guest has installed, for a report or a test.
+  [[nodiscard]] const std::map<int, Disposition>& dispositions() const { return sig_dispositions_; }
+  /// How many signals the guest has installed a real handler for (neither SIG_DFL nor SIG_IGN). The number a
+  /// signal-delivery report should quote, because it is what delivery can actually enter.
+  [[nodiscard]] std::size_t installed_handler_count() const {
+    std::size_t n = 0;
+    for (const auto& [sig, d] : sig_dispositions_) {
+      if (d.catches()) ++n;
+    }
+    return n;
+  }
+
+  /// ---- C26: pending signals, per target tid.
+  ///
+  /// A signal a guest sends (`tkill`/`tgkill`/`rt_tgsigqueueinfo`) is queued here instead of being refused.
+  /// The target thread picks it up at the ABI's next slice boundary and enters the handler the guest
+  /// installed — which is what Mono's GC suspend/restart protocol needs, and what its absence turned into
+  /// `exit(127)` on two games. Only the signal number is remembered: nothing in the eight Unity boots read
+  /// back a `siginfo_t`, and a fabricated one would be a wrong answer where a missing one is an honest gap.
+  void QueueSignal(std::int32_t tid, int sig) {
+    if (sig < 1 || sig > 64) return;  // the caller turns an invalid number into EINVAL; never store it
+    {
+      std::lock_guard<std::mutex> lk(sig_mu_);
+      auto& q = pending_[tid];
+      // Standard signals coalesce: a second SIGPWR while one is already pending is the same signal, and a
+      // tkill loop must not grow this vector without bound (measured: MadTruck retries billing every frame).
+      if (std::find(q.begin(), q.end(), sig) != q.end()) return;
+      if (q.size() >= 64) return;  // the whole standard-signal space is 64; a queue longer than that is a bug
+      q.push_back(sig);
+      ++signals_queued_;
+    }
+    // A signal wakes a blocked thread as EINTR, exactly as the kernel does — but only when the thread
+    // has not blocked that signal. Interrupting for a blocked one made Unity log "Failed to wait on a
+    // semaphore (Interrupted system call)" in a loop (MadTruck, 2026-10-20) where a device would not
+    // have woken the wait at all. The lookup is installed by GuestProcess; a bare monitor has none and
+    // keeps the old behaviour (nothing in a unit test blocks a signal it then expects to interrupt).
+    bool deliverable = true;
+    if (thread_lookup_ != nullptr) {
+      if (runtime::GuestThread* target = thread_lookup_(tid)) {
+        if (sig >= 1 && sig <= 64 && (target->signal_mask & (1ull << (sig - 1))) != 0) deliverable = false;
+      }
+    }
+    if (deliverable && futex_ != nullptr) futex_->Interrupt(tid);
+  }
+  /// Takes the next pending signal for `tid`, or 0 when there is none. Removed, not marked: a blocked
+  /// delivery re-queues it through `QueueSignal`, so repeated looks cannot grow the queue.
+  int TakePendingSignal(std::int32_t tid) {
+    std::lock_guard<std::mutex> lk(sig_mu_);
+    const auto it = pending_.find(tid);
+    if (it == pending_.end() || it->second.empty()) return 0;
+    const int sig = it->second.front();
+    it->second.erase(it->second.begin());
+    if (it->second.empty()) pending_.erase(it);
+    return sig;
+  }
+  [[nodiscard]] std::size_t signals_queued() const { return signals_queued_.load(); }
+  [[nodiscard]] std::size_t signals_delivered() const { return signals_delivered_.load(); }
+  void CountDelivered() { signals_delivered_.fetch_add(1); }
+
+  /// ---- C26: the return path of a delivery.
+  ///
+  /// `rt_sigreturn` is issued by the restorer the guest registered, and what it must do — read the
+  /// sigcontext the delivery wrote and put the interrupted register file back — is the *runtime's*
+  /// knowledge, not the monitor's: the monitor sits below `rb::runtime` and may not know the frame
+  /// layout, so it cannot restore a frame itself. The runtime installs this one hook, called with the
+  /// calling guest thread (which carries the per-thread delivery record).
+  ///
+  /// Unset (a bare monitor in a test, or a launch with no runtime), `rt_sigreturn` is a named refusal —
+  /// never a 0, which would resume the restorer's own `svc` forever.
+  using SignalReturnRestore = std::function<Outcome(runtime::GuestThread& thread)>;
+  void set_signal_return(SignalReturnRestore restore) { sig_return_restore_ = std::move(restore); }
+  /// Finds a live guest thread by tid, for the blocked-mask check in `QueueSignal`. Set once by the
+  /// runtime; a bare monitor leaves it unset and interrupts every target.
+  using ThreadLookup = std::function<runtime::GuestThread*(std::int32_t tid)>;
+  void set_thread_lookup(ThreadLookup lookup) { thread_lookup_ = std::move(lookup); }
+  [[nodiscard]] bool SignalReturnHooked() const { return static_cast<bool>(sig_return_restore_); }
+  /// The restore itself. Only called from the `rt_sigreturn` case, with the calling thread.
+  Outcome SignalReturn(runtime::GuestThread& thread) { return sig_return_restore_(thread); }
 
   /// Overrides the host-clock default, for a test that needs a value it can assert and for a launcher
   /// that wants the guest to see its own notion of time.
@@ -531,6 +640,19 @@ class Monitor {
   std::vector<ServedFile> served_;
   bool host_io_ = false;
   std::function<void(const std::string&)> host_io_trace_;
+  std::function<void(const std::string&)> signal_trace_;
+  /// The runtime's restore path (see `set_signal_return`): unset means a bare monitor, and `rt_sigreturn`
+  /// is then refused by name.
+  SignalReturnRestore sig_return_restore_;
+  ThreadLookup thread_lookup_;
+  /// Signal dispositions the guest installed, by number. `rt_sigaction` fills this in; delivery reads it.
+  std::map<int, Disposition> sig_dispositions_;
+  /// Pending signals by target tid (C26). Its own mutex: a sender (`tkill`) and the target's run loop
+  /// (`TakePendingSignal`) are different threads, and neither holds the GGL when it touches this.
+  mutable std::mutex sig_mu_;
+  std::map<std::int32_t, std::vector<int>> pending_;
+  std::atomic<std::size_t> signals_queued_{0};
+  std::atomic<std::size_t> signals_delivered_{0};
   /// Whether this monitor answers `f` itself even with host I/O on: a descriptor it served, console output, or a
   /// path its provider serves.
   bool ServesItself(const Frame& f);
@@ -564,8 +686,8 @@ class Monitor {
   std::int32_t NextTid();
   Outcome Clone(const Frame& f, exec::MachineState& state, runtime::GuestThread& th);
   Outcome ThreadExit(const Frame& f, runtime::GuestThread& th);
-  Outcome Futex(const Frame& f);
-  Outcome Sleep(const std::string& what, std::int64_t nanos);
+  Outcome Futex(const Frame& f, runtime::GuestThread& th);
+  Outcome Sleep(const std::string& what, std::int64_t nanos, runtime::GuestThread& th);
   /// The first page-aligned run of `size` free bytes for an anonymous mapping (`mmap2`, a moving
   /// `mremap`), or 0. A hint is honoured only when aligned and entirely free.
   std::uint32_t FindFreeRun(std::uint32_t hint, std::uint32_t size) const;

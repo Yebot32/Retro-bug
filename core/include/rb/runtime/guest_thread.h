@@ -27,6 +27,7 @@
 #include <functional>
 #include <memory>
 #include <thread>
+#include <vector>
 
 #include "rb/exec/machine_state.h"
 
@@ -38,6 +39,27 @@ namespace rb::runtime {
 
 using exec::GuestAddr;
 struct HostBinding;
+
+/// A signal delivery in progress on a guest thread (C26). Set when the runtime enters a handler the guest
+/// installed, and cleared by the `rt_sigreturn` that ends it — so the restorer's call knows which frame to
+/// put back. Per-thread because the kernel's is: two threads can be in two handlers at once.
+///
+/// `frame` is the `ucontext_t` the delivery wrote and is the authority for the live restore, because a
+/// handler is allowed to edit the ucontext it was handed (and the kernel honours that). The mask to
+/// restore is read back out of the frame for the same reason.
+struct SignalDeliveryState {
+  bool active = false;
+  int sig = 0;
+  GuestAddr frame = 0;   ///< the `ucontext_t` address; 0 = no delivery in progress
+  GuestAddr handler = 0; ///< the address entered
+  GuestAddr restorer = 0;  ///< where the handler returns to
+  std::uint64_t saved_mask = 0;  ///< the blocked mask from before the handler, for a frame that cannot be read back
+  /// The VFP state the handler must not be allowed to destroy. The integer sigcontext is in the frame; the
+  /// kernel's VFP block is not modelled there yet, so the interrupted FP file is kept here and put back on
+  /// `rt_sigreturn` (a handler that edits the kernel's FP sigcontext is a named gap, not a silent one).
+  std::uint64_t d[32] = {};
+  std::uint32_t fpscr = 0;
+};
 
 struct GuestThread {
   GuestThread() = default;
@@ -54,6 +76,19 @@ struct GuestThread {
   GuestAddr robust_head = 0;      ///< set_robust_list
   std::uint32_t robust_len = 0;
   std::uint64_t signal_mask = 0;  ///< rt_sigprocmask (the arm32 kernel's 8-byte sigset)
+  /// C26: the signal deliveries this thread is inside, innermost last. A stack, not one record, because
+  /// Mono's GC suspend is a two-signal protocol: SIGPWR enters the suspend handler, which waits for the
+  /// restart signal (SIGXCPU, also installed by Mono) to run *inside* it before it returns. Delivery
+  /// pushes here; `rt_sigreturn` restores the innermost frame and pops, so the outer handler resumes.
+  std::vector<SignalDeliveryState> deliveries;
+  /// Diagnostics: what the thread is doing while it is not executing guest code. Written by the thread
+  /// itself, read by the launcher's liveness supervisor without the GGL; atomics so that read is defined.
+  /// The first job is naming a stall, not controlling anything.
+  enum class WaitKind : int { kNone = 0, kFutex, kSleep, kHostHeld, kHostReleased };
+  std::atomic<int> wait_kind{static_cast<int>(WaitKind::kNone)};
+  std::atomic<std::uint32_t> wait_arg{0};  ///< futex address, or the low word of a sleep's nanoseconds
+  std::atomic<int> wait_slot{-1};          ///< the ABI host slot, while a host call is running
+  std::atomic<std::uint32_t> last_syscall{0};
   std::array<char, 16> name{};    ///< prctl(PR_SET_NAME), TASK_COMM_LEN bytes
   GuestAddr pthread_struct = 0;   ///< this thread's bionic `pthread_internal_t`, when there is one
   bool adopted = false;           ///< a host thread that entered guest code with no binding (Task 5)
