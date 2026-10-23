@@ -461,3 +461,53 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
   at `+0x20`, its setter, and whether a JNI/Choreographer callback is missing).
 - Gate: 23/23 suites on the SM-X710 — tier-diff 1039, guest thread 692, monitor 233, gl thunk 22; advisory
   guest libc 147, guest APK 1376. Build `build/gate-c44.log`.
+
+## 2026-10-24 — C46 is not a deadlock; the guest keeps rendering. The real wait is il2cpp-side
+- **The stall detector was lying, and it cost this session its first hours.** TT2's full dump said "no
+  guest instruction retired in the last 10 s" for ten minutes while the guest was calling
+  `eglSwapBuffers` ~35 times a second. `AbiContext::slices()` only moves when a thread retires a whole
+  200k-instruction stint; Unity's render loop calls JNI/GL thunks every few thousand instructions, so it
+  never reaches one. **Fixed:** `AbiContext::host_activity()` counts syscalls + host-slot dispatches, and
+  the profiler now prints `alive: no slice in 10 s, N host call(s) so far — sub-slice stints, not a
+  stall` instead of a stall report while that counter moves. The `stall:` path is now true quiescence.
+- **What TT2 actually does after the privacy/terms cache** (engine reproducibility: 3 consecutive runs):
+  the *screen* is black, but the guest is not idle — `eglSwapBuffers` ~35/s, `glClear` 2/frame,
+  `glDrawElements` ~160/s, `glBindTexture` ~270/s. SurfaceFlinger's latency query for the guest's
+  SurfaceView layer shows a frame every ~33 ms, so the frames reach the compositor; the content is black,
+  not lost. The guest's own Unity log stops at `cached new terms` and never advances.
+- **The parked thread is not the one C46 named.** Clone tid 4245 `UnityMain` waits at futex
+  `0xff2f52c0` (word 0x4) that is **never woken** (0 wakes for that address all run). Its stack is
+  libil2cpp: `+0x35e830 <- libc.so+0x81927 (pthread_cond_wait) <- +0x46d17c <- +0x470840 <- +0x46d17c
+  <- +0x46d208` (the last is a polling loop over a byte flag). The earlier C37/C46 note named a
+  libunity `0x60e650`-family wait; for TT2 the live wait is an il2cpp one. The object around the wait:
+  `0xabababab 0xabababab 0x19 0x9 0xff2bf410 0x0 0x3 0x0` (dump from addr-0x20).
+- **Thread creation is over after the first 4 s:** 31 clones, every one from tid 4244 `UnityMain` with
+  lr 0x18f1e9, then no `clone` for the rest of the process (new per-clone trace line in
+  `Monitor::Clone`). The UnityChoreographer thread is **not** a guest clone at all: host tid named
+  `UnityChoreograp` is a Java/ART thread, adopted as guest 4277.
+- **The Java side is healthy.** New `ArtJava::DumpThreads()` (a `Thread.getAllStackTraces()` dump through
+  our own JNI bridge — `kill -3` from a non-debuggable app dumps nothing) shows: `UnityChoreographer` is
+  inside `Choreographer.doFrame -> $Proxy11.doFrame -> bitter.jnibridge.JNIBridge.invoke (native)`, i.e.
+  VSYNC callbacks arrive and enter guest code; `UnityMain` (Java) is inside
+  `UnityPlayer.nativeRender`. A bounded JNI trace (300 lines on the first real stall) shows the pump
+  calling `longValue()J` and `postFrameCallback(...)` ~30 times a second. So the VSYNC pump runs; it just
+  never releases whatever 4245 waits on.
+- **A real emulation defect found on the way:** `Process.setThreadPriority(4246)` throws
+  `IllegalArgumentException: Given thread 4246 does not exist` from `UnityPlayer.nativeRender` — Unity
+  passes a **guest** tid to a Java API that resolves host tids. 135 occurrences in the first second, then
+  none (per-thread `jni_pending` counter). Not proven causal for C46, but every such call fails, and the
+  fix is a tid translation at the bridge (guest tid -> bound host tid) for the thread APIs.
+- **Also verified:** the original 32-bit APK (`com.turner.ttgfigures2`) runs natively on this SM-X710 —
+  built-up gameplay with a PAUSED overlay. Any "TT2 reached its title" screenshot must therefore be
+  attributed carefully: package `.rb` vs original. Today's guest builds consistently render black at the
+  same point; the earlier title-screen claim needs re-checking against the `.rb` package.
+- **Diagnostics added to the launcher build** (all bounded, all in the shipped debuggable build):
+  per-clone trace (parent tid/name/lr), `jni_pending` counter in the stall line, JNI call trace on the
+  first stall, Java thread dump at the second stall, EGL/GL counters in the stall line, wait-object
+  memory window for futex waits, and stacks for parked clones.
+- **Next concrete steps:** (1) symbolise the il2cpp wait at `0xff2f52c0` — resolve `+0x46d208`'s caller
+  through Il2Cpp code registration + `global-metadata.dat` (both in hand: `libil2cpp.so`,
+  `assets/bin/Data/Managed/Metadata/global-metadata.dat`); (2) translate guest tids for
+  `android.os.Process.setThreadPriority` (and neighbours) in `ForwardingJni`; (3) re-check whether the
+  black frame content is the game's own loading screen (spinner) or an empty scene — sample the guest's
+  framebuffer content rather than the composited screen.
