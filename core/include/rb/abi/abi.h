@@ -408,6 +408,12 @@ class AbiContext : public exec::HostDispatch {
   /// Slice boundaries at which another host thread was waiting for the GGL — i.e. the boundary handed guest
   /// execution to a different thread. Evidence of real interleaving, which `slices()` alone is not.
   [[nodiscard]] std::uint64_t contended_slices() const { return contended_slices_.load(std::memory_order_relaxed); }
+  /// Guest work that reached the host: one count per syscall and per host-slot dispatch. `slices()` only moves
+  /// when a thread retires a whole 200k-instruction stint; a render loop that calls JNI or a GL thunk every
+  /// few thousand instructions retires few per stint, so a liveness check watching slices alone calls it dead
+  /// while it renders at 30 fps. This counter is that check's honest signal.
+  [[nodiscard]] std::uint64_t host_activity() const { return host_activity_.load(std::memory_order_relaxed); }
+  void note_host_activity() { host_activity_.fetch_add(1, std::memory_order_relaxed); }
 
  private:
   struct Slot {
@@ -442,6 +448,7 @@ class AbiContext : public exec::HostDispatch {
   FaultDeliver fault_deliver_;
   std::atomic<std::uint64_t> slices_{0};
   std::atomic<std::uint64_t> contended_slices_{0};
+  std::atomic<std::uint64_t> host_activity_{0};
   GuestAddr slot_base_;
   GuestAddr return_address_;
   unsigned stack_bytes_;

@@ -1009,19 +1009,46 @@ std::vector<std::string> GuestProcess::StallReport() {
     static const char* const kWaitNames[] = {"running", "futex", "sleep", "host(held GGL)",
                                              "host(GGL released)"};
     const int wk = t.wait_kind.load();
-    std::string s = std::string{kind} + " tid " + std::to_string(t.tid) + ": pc " + name(t.state.pc) +
-                    ", lr " + name(t.state.r[14]) + ", sp " + Hex(t.state.r[13]) + ", last syscall " +
-                    std::to_string(t.last_syscall.load()) + ", " +
-                    (wk >= 0 && wk <= 4 ? kWaitNames[wk] : "wait?");
+    std::string s = std::string{kind} + " tid " + std::to_string(t.tid);
+    if (t.name[0] != '\0') s += std::string{" '"} + t.name.data() + "'";
+    s += ": pc " + name(t.state.pc) + ", lr " + name(t.state.r[14]) + ", sp " + Hex(t.state.r[13]) +
+         ", last syscall " + std::to_string(t.last_syscall.load()) + ", " +
+         (wk >= 0 && wk <= 4 ? kWaitNames[wk] : "wait?");
     if (wk == static_cast<int>(GuestThread::WaitKind::kFutex)) {
       std::uint32_t word = 0xdead'beefu;
       if (!mem_->Read(t.wait_arg.load(), &word, 4)) word = 0xdead'beefu;
       s += " " + Hex(t.wait_arg.load()) + " (word " + Hex(word) + ")";
+      // The words around the wait, by the wait object's own layout: a 52-byte choreographer object has its
+      // 8-byte {value, refcount} cell at +0x20, its mutex at +0x24 and its condvar at +0x28 — so a dump
+      // taken at the condvar's address shows the cell the waiter tests. A cell that stays zero names a
+      // waiter nobody signals; a non-zero cell names a lost wake.
+      std::uint32_t around[8] = {};
+      if (mem_->Read(t.wait_arg.load() - 0x20u, around, sizeof around)) {
+        s += ", near:";
+        for (std::size_t k = 0; k < 8; ++k) s += " " + Hex(around[k]);
+      }
     }
-    if (wk >= static_cast<int>(GuestThread::WaitKind::kHostHeld)) s += " slot " + std::to_string(t.wait_slot.load());
+    if (wk >= static_cast<int>(GuestThread::WaitKind::kHostHeld)) {
+      s += " slot " + std::to_string(t.wait_slot.load());
+      const int step = t.host_step.load();
+      if (step >= 0) s += " step " + std::to_string(step);
+      const std::uint64_t since = t.host_since_ms.load();
+      if (since != 0) {
+        const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now().time_since_epoch())
+                             .count();
+        s += " for " + std::to_string(now >= static_cast<std::int64_t>(since) ? now - static_cast<std::int64_t>(since) : 0) +
+             " ms";
+      }
+    }
     if (with_stack) {
       const std::string frames = stack(t);
       if (!frames.empty()) s += ", stack: " + frames;
+    }
+    // A thread spinning through the JNI bridge with a pending Java exception says so here: the count only
+    // grows on threads whose ExceptionCheck saw one, and a burst identifies the call that keeps throwing.
+    if (const std::uint32_t pend = t.jni_pending.load(); pend != 0) {
+      s += ", jni-pending " + std::to_string(pend);
     }
     return s;
   };
@@ -1031,19 +1058,31 @@ std::vector<std::string> GuestProcess::StallReport() {
   // diagnostic: reading the list without taking the GGL (which a stalled thread could hold) is deliberate.
   for (const auto& t : adopted_) out.push_back(one(*t, "adopted", true));
   out.push_back(one(abi_->main_thread(), "main", true));
-  std::size_t clones = 0, shown = 0;
+  std::size_t clones = 0;
   {
     std::lock_guard<std::mutex> lk(threads_mu_);
     for (const auto& rec : threads_) {
       if (rec->done.load(std::memory_order_acquire)) continue;
       ++clones;
-      if (shown++ < 24) out.push_back(one(*rec->guest, "clone", false));
+      // A startup stall can hide its culprit past any fixed cap (Unity parks 31 workers), so the report
+      // lists every live clone; it is a diagnostic printed once per stall window, not a steady-state log.
+      // Parked clones carry their stack too: the chain that reached the wait is the one fact a futex
+      // address and word cannot give (C46's UnityMain).
+      out.push_back(one(*rec->guest, "clone", rec->guest->wait_kind.load() ==
+                                             static_cast<int>(GuestThread::WaitKind::kFutex)));
     }
   }
   out.push_back(std::to_string(clones) + " clone'd thread(s), " + std::to_string(adopted_.size()) +
-                " adopted (clone'd beyond 24 not listed); futex waits queued " +
+                " adopted; futex waits queued " +
                 std::to_string(futex_.waiters()) + ", blocked " + std::to_string(futex_.blocked()) +
                 ", woken " + std::to_string(futex_.woken()) + ", timeouts " + std::to_string(futex_.timed_out()));
+  // The busiest futex addresses by wake count: a producer that wakes an address nobody waits on (a
+  // mismatched condvar or a lost wake) shows here as wakes with matched 0, next to the parked workers'
+  // address with its queue depth.
+  for (const auto& [addr, st] : futex_.TopWakeAddrs(6)) {
+    out.push_back("futex 0x" + Hex(addr) + ": wakes " + std::to_string(st.wakes) + ", matched " +
+                  std::to_string(st.matched) + ", queued " + std::to_string(st.queued));
+  }
   return out;
 }
 

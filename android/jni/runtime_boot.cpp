@@ -684,7 +684,7 @@ bool BootScope(Runtime& rt, ApkZip& zip, std::string* out) {
     // says is which thread is waiting on what. `Runtime` is a process-lifetime singleton (see `get_rt`).
     rb::runtime::GuestProcess* proc = rt.proc.get();
     rt.profiler = std::thread([prof, jit, proc, &rt] {
-      std::uint64_t last_t = 0, last_i = 0;
+      std::uint64_t last_t = 0, last_i = 0, last_activity = 0;
       int quiet_windows = 0;
       for (int round = 0; round < 60; ++round) {
         {
@@ -713,10 +713,40 @@ bool BootScope(Runtime& rt, ApkZip& zip, std::string* out) {
         if (slices != 0) {
           quiet_windows = 0;
           Live(line);
+        } else if (proc != nullptr && proc->abi().host_activity() != last_activity) {
+          // Alive, just outside long JIT stints: a render loop that calls JNI or a GL thunk every few thousand
+          // instructions never retires a whole slice. Saying "stalled" here was the C46 investigation's
+          // biggest false trail — the game was swapping frames at 35 fps while this line said it was dead.
+          last_activity = proc->abi().host_activity();
+          quiet_windows = 0;
+          Live("alive: no slice in 10 s, " + std::to_string(last_activity) + " host call(s) so far — "
+               "sub-slice stints, not a stall");
         } else if (proc != nullptr && !proc->monitor().group_exited()) {
           // No guest instruction retired for 10 s: dump every guest thread's pc and what it waits on.
           // Three windows up front, then every sixth, so a long stall does not flood logcat.
           ++quiet_windows;
+          if (quiet_windows == 1) {
+            // Diagnostics (C46): the guest has stopped retiring instructions, and the Java calls it still
+            // makes name the loop that spins. Bounded, so a long stall costs 300 lines, not a flood.
+            rb::abi::ForwardingJni::SetCallTrace([](const std::string& line) { Live(line); }, 300);
+          }
+          if (quiet_windows == 2) {
+            // Diagnostics (C46): one Java thread dump names every Java thread's stack — the only view of the
+            // Java side a guest-side stall report cannot give. Once per process.
+            static std::atomic<bool> dumped{false};
+            if (!dumped.exchange(true)) {
+              for (const std::string& line : rt.java->DumpThreads()) Live("stall:   " + line);
+            }
+          }
+          // Frames: what the guest asked the display to present. Zero swaps over a stall means no frame was
+          // ever handed to the surface; a growing count with a black screen means the frames are lost below.
+          if (rt.slots) {
+            Live("stall: egl: eglSwapBuffers " + std::to_string(rt.slots->CallsOf("eglSwapBuffers")) +
+                 ", glClear " + std::to_string(rt.slots->CallsOf("glClear")) + ", glDrawArrays " +
+                 std::to_string(rt.slots->CallsOf("glDrawArrays")) + ", glDrawElements " +
+                 std::to_string(rt.slots->CallsOf("glDrawElements")) + ", glBindTexture " +
+                 std::to_string(rt.slots->CallsOf("glBindTexture")));
+          }
           if (quiet_windows <= 3 || quiet_windows % 6 == 0) {
             Live("stall: no guest instruction retired in the last 10 s (window " +
                  std::to_string(quiet_windows) + "):");

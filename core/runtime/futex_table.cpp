@@ -62,6 +62,8 @@ int FutexTable::Wake(exec::GuestAddr addr, int n, std::uint32_t bitset) {
   if (n <= 0) return 0;
   int count = 0;
   std::lock_guard<std::mutex> lk(mu_);
+  auto& st = wake_stats_[addr];
+  ++st.first;
   const auto q = queues_.find(addr);
   if (q == queues_.end()) return 0;
   auto& d = q->second;
@@ -76,6 +78,7 @@ int FutexTable::Wake(exec::GuestAddr addr, int n, std::uint32_t bitset) {
     ++count;
   }
   if (d.empty()) queues_.erase(q);
+  st.second += static_cast<std::uint64_t>(count);
   woken_ += static_cast<std::uint64_t>(count);
   return count;
 }
@@ -172,6 +175,19 @@ std::uint64_t FutexTable::woken() const {
 std::uint64_t FutexTable::timed_out() const {
   std::lock_guard<std::mutex> lk(mu_);
   return timed_out_;
+}
+
+std::vector<std::pair<exec::GuestAddr, FutexTable::AddrStats>> FutexTable::TopWakeAddrs(std::size_t max) const {
+  std::lock_guard<std::mutex> lk(mu_);
+  std::vector<std::pair<exec::GuestAddr, AddrStats>> all;
+  all.reserve(wake_stats_.size());
+  for (const auto& [addr, st] : wake_stats_) {
+    const auto q = queues_.find(addr);
+    all.push_back({addr, AddrStats{st.first, st.second, q == queues_.end() ? 0 : q->second.size()}});
+  }
+  std::sort(all.begin(), all.end(), [](const auto& a, const auto& b) { return a.second.wakes > b.second.wakes; });
+  if (all.size() > max) all.resize(max);
+  return all;
 }
 
 }  // namespace rb::runtime

@@ -1990,6 +1990,12 @@ Outcome Monitor::Clone(const Frame& f, exec::MachineState& state, runtime::Guest
   std::uint32_t self = 0;
   if (memory_->Read(f.arg[3] + 4u, &self, 4)) child->pthread_struct = self;  // TP+4: the thread struct
   live_tids_.insert(tid);
+  // Diagnostics (C46): one line per thread creation — the parent's name and link register name the call
+  // site, so a thread that never starts (Unity's choreographer) shows as the missing line, not a mystery.
+  if (host_io_trace_) {
+    host_io_trace_("clone by tid " + std::to_string(th.tid) + " '" + th.name.data() + "' lr 0x" + Hex(state.r[14]) +
+                   " new-stack 0x" + Hex(f.arg[1]));
+  }
   const std::string why = spawner_(std::move(child));
   if (!why.empty()) {
     live_tids_.erase(tid);

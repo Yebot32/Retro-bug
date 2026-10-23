@@ -482,4 +482,97 @@ void ArtJava::DetachCurrentThread() {
 
 #undef ENV_OR
 
+std::vector<std::string> ArtJava::DumpThreads() {
+  std::vector<std::string> out;
+  JNIEnv* env = Env();
+  if (env == nullptr) return out;
+  // A pending exception from the guest's own work must not break the dump: clear it (the guest has already
+  // seen it), take the dump, and leave the thread as it was otherwise.
+  if (env->ExceptionCheck()) env->ExceptionClear();
+  jclass thread_cls = env->FindClass("java/lang/Thread");
+  if (thread_cls == nullptr) {
+    env->ExceptionClear();
+    return out;
+  }
+  const jmethodID all = env->GetStaticMethodID(thread_cls, "getAllStackTraces", "()Ljava/util/Map;");
+  jobject map = all != nullptr ? env->CallStaticObjectMethod(thread_cls, all) : nullptr;
+  if (env->ExceptionCheck() || map == nullptr) {
+    env->ExceptionClear();
+    env->DeleteLocalRef(thread_cls);
+    return out;
+  }
+  jclass map_cls = env->FindClass("java/util/Map");
+  jmethodID entry_set = map_cls != nullptr ? env->GetMethodID(map_cls, "entrySet", "()Ljava/util/Set;") : nullptr;
+  if (map_cls != nullptr) env->DeleteLocalRef(map_cls);
+  jobject set = entry_set != nullptr ? env->CallObjectMethod(map, entry_set) : nullptr;
+  jclass set_cls = env->FindClass("java/util/Set");
+  jmethodID iterator_m = set_cls != nullptr ? env->GetMethodID(set_cls, "iterator", "()Ljava/util/Iterator;") : nullptr;
+  if (set_cls != nullptr) env->DeleteLocalRef(set_cls);
+  jobject it = (iterator_m != nullptr && set != nullptr) ? env->CallObjectMethod(set, iterator_m) : nullptr;
+  jclass it_cls = env->FindClass("java/util/Iterator");
+  jmethodID has_next = it_cls != nullptr ? env->GetMethodID(it_cls, "hasNext", "()Z") : nullptr;
+  jmethodID next_m = it_cls != nullptr ? env->GetMethodID(it_cls, "next", "()Ljava/lang/Object;") : nullptr;
+  if (it_cls != nullptr) env->DeleteLocalRef(it_cls);
+  jclass entry_cls = env->FindClass("java/util/Map$Entry");
+  jmethodID get_key = entry_cls != nullptr ? env->GetMethodID(entry_cls, "getKey", "()Ljava/lang/Object;") : nullptr;
+  jmethodID get_value = entry_cls != nullptr ? env->GetMethodID(entry_cls, "getValue", "()Ljava/lang/Object;") : nullptr;
+  if (entry_cls != nullptr) env->DeleteLocalRef(entry_cls);
+  jclass ste_cls = env->FindClass("java/lang/StackTraceElement");
+  jmethodID to_string = ste_cls != nullptr ? env->GetMethodID(ste_cls, "toString", "()Ljava/lang/String;") : nullptr;
+  if (ste_cls != nullptr) env->DeleteLocalRef(ste_cls);
+  const jmethodID get_name = env->GetMethodID(thread_cls, "getName", "()Ljava/lang/String;");
+  if (env->ExceptionCheck() || it == nullptr || has_next == nullptr || next_m == nullptr || get_key == nullptr ||
+      get_value == nullptr || to_string == nullptr || get_name == nullptr) {
+    env->ExceptionClear();
+    if (it != nullptr) env->DeleteLocalRef(it);
+    if (set != nullptr) env->DeleteLocalRef(set);
+    env->DeleteLocalRef(map);
+    env->DeleteLocalRef(thread_cls);
+    return out;
+  }
+  const auto* arr_mid = static_cast<jobjectArray>(nullptr);
+  (void)arr_mid;
+  while (env->CallBooleanMethod(it, has_next) == JNI_TRUE) {
+    if (env->PushLocalFrame(64) != JNI_OK) break;
+    jobject entry = env->CallObjectMethod(it, next_m);
+    jobject th = entry != nullptr ? env->CallObjectMethod(entry, get_key) : nullptr;
+    jobject arr = entry != nullptr ? env->CallObjectMethod(entry, get_value) : nullptr;
+    jstring name = th != nullptr ? static_cast<jstring>(env->CallObjectMethod(th, get_name)) : nullptr;
+    std::string n = "<unnamed>";
+    if (name != nullptr) {
+      const char* c = env->GetStringUTFChars(name, nullptr);
+      if (c != nullptr) {
+        n = c;
+        env->ReleaseStringUTFChars(name, c);
+      } else {
+        env->ExceptionClear();
+      }
+    }
+    out.push_back("java thread '" + n + "':");
+    const jsize len = arr != nullptr ? env->GetArrayLength(static_cast<jobjectArray>(arr)) : 0;
+    for (jsize k = 0; k < len && k < 12; ++k) {
+      jobject el = env->GetObjectArrayElement(static_cast<jobjectArray>(arr), k);
+      if (el == nullptr) continue;
+      jstring s = static_cast<jstring>(env->CallObjectMethod(el, to_string));
+      if (s != nullptr) {
+        const char* c = env->GetStringUTFChars(s, nullptr);
+        if (c != nullptr) {
+          out.push_back(std::string{"  "} + c);
+          env->ReleaseStringUTFChars(s, c);
+        } else {
+          env->ExceptionClear();
+        }
+      }
+      env->DeleteLocalRef(el);
+    }
+    env->PopLocalFrame(nullptr);
+  }
+  if (env->ExceptionCheck()) env->ExceptionClear();
+  env->DeleteLocalRef(it);
+  env->DeleteLocalRef(set);
+  env->DeleteLocalRef(map);
+  env->DeleteLocalRef(thread_cls);
+  return out;
+}
+
 }  // namespace rb::launcher

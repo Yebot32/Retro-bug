@@ -64,6 +64,11 @@ class ForwardingJni {
   /// The guest `JNIEnv*` (the same value on every thread: per-thread state is keyed by the host thread).
   [[nodiscard]] GuestAddr env() const { return where_; }
 
+  /// Diagnostics: one line per Java method call, until `budget` runs out. Set once at boot, before any guest
+  /// thread runs; null in tests. A loop that keeps calling the same method names itself here.
+  using CallTrace = std::function<void(const std::string& line)>;
+  static void SetCallTrace(CallTrace trace, int budget);
+
   /// A real local reference made into a guest local in the calling thread's current frame (0 stays 0).
   GuestAddr ToGuestLocal(HostRef r, std::string* err = nullptr);
   /// The real reference behind a guest handle (0 for null), or 0 with `err` set when it is not a live handle

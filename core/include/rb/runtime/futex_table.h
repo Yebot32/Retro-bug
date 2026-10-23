@@ -32,6 +32,8 @@
 #include <optional>
 #include <set>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "rb/exec/machine_state.h"
 
@@ -101,10 +103,22 @@ class FutexTable {
   [[nodiscard]] std::uint64_t woken() const;
   [[nodiscard]] std::uint64_t timed_out() const;
 
+  /// Per-address wake accounting for the liveness supervisor: how many wakes each address received, how
+  /// many waiters they matched, and how many waiters are queued there now. A producer that keeps waking an
+  /// address nobody waits on (a mismatched condvar) shows up here without any per-call logging.
+  struct AddrStats {
+    std::uint64_t wakes = 0;    ///< FUTEX_WAKE calls on the address
+    std::uint64_t matched = 0;  ///< waiters they actually woke
+    std::size_t queued = 0;     ///< waiters parked there right now
+  };
+  /// The busiest addresses by wake count, for a stall report.
+  [[nodiscard]] std::vector<std::pair<exec::GuestAddr, AddrStats>> TopWakeAddrs(std::size_t max) const;
+
  private:
   mutable std::mutex mu_;
   std::condition_variable sleep_cv_;
   std::unordered_map<exec::GuestAddr, std::deque<std::shared_ptr<Waiter>>> queues_;
+  std::unordered_map<exec::GuestAddr, std::pair<std::uint64_t, std::uint64_t>> wake_stats_;  ///< addr -> {wakes, matched}
   /// Sleeper tids present in `SleepUntil`, and the subset a signal has interrupted. A tid is only put in
   /// the interrupt set while it is actually sleeping, so a stale interrupt cannot make a later sleep return
   /// EINTR for a signal that was already delivered.

@@ -74,6 +74,11 @@ class ArtJava : public abi::HostJava {
   bool AttachCurrentThread(bool daemon) override;
   void DetachCurrentThread() override;
 
+  /// Diagnostics: every Java thread's name and up to 12 stack frames, as `java.lang.Thread.getAllStackTraces`
+  /// reports them. Empty when the dump cannot be taken. A guest-side stall report cannot see the Java side;
+  /// this is what names a Java loop that spins (C46).
+  std::vector<std::string> DumpThreads();
+
  private:
   /// The calling thread's JNIEnv, attaching it first if ART does not know it (logged once per thread).
   JNIEnv* Env();

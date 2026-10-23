@@ -2,16 +2,28 @@
 #include "rb/abi/jni_forward.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 
 #include "rb/abi/jni_args.h"
 #include "rb/runtime/ggl.h"
+#include "rb/runtime/guest_thread.h"
 
 namespace rb::abi {
 namespace {
 
 std::atomic<std::uint64_t> g_serial{1};
+
+/// The optional call trace (see ForwardingJni::SetCallTrace): set once at boot before guest threads run.
+std::function<void(const std::string&)>& TraceHook() {
+  static std::function<void(const std::string&)> hook;
+  return hook;
+}
+std::atomic<int>& TraceBudget() {
+  static std::atomic<int> budget{0};
+  return budget;
+}
 
 std::string Hex(std::uint32_t v) {
   char buf[16];
@@ -211,9 +223,17 @@ ForwardingJni::ForwardingJni(mem::GuestMemory& memory, AbiContext& abi, GuestAdd
         kEnvSlotBase + i,
         [this, i](exec::MachineState& s, std::string* e) {
           // Host-memory direct buffers cross with every call into Java and back (SyncShadows).
-          if (small_shadows_.load(std::memory_order_relaxed) != 0) SyncShadows();
+          runtime::GuestThread* self = runtime::CurrentGuestThread();
+          if (small_shadows_.load(std::memory_order_relaxed) != 0) {
+            if (self != nullptr) self->host_step.store(0);
+            SyncShadows();
+          }
+          if (self != nullptr) self->host_step.store(1);
           const bool ok = Slot(i, s, e);
-          if (small_shadows_.load(std::memory_order_relaxed) != 0) SyncShadows();
+          if (small_shadows_.load(std::memory_order_relaxed) != 0) {
+            if (self != nullptr) self->host_step.store(0);
+            SyncShadows();
+          }
           return ok;
         },
         AbiContext::SlotLock::kReleasesGgl);
@@ -578,6 +598,14 @@ bool ForwardingJni::CallFamily(std::uint32_t i, exec::MachineState& s, std::stri
     if (r == nullptr) return false;
     rec = *r;
   }
+  if (TraceBudget().load(std::memory_order_acquire) > 0) {
+    if (const auto& hook = TraceHook(); hook) {
+      if (TraceBudget().fetch_sub(1) > 0) {
+        runtime::GuestThread* self = runtime::CurrentGuestThread();
+        hook("jni: tid " + std::to_string(self != nullptr ? self->tid : 0) + " " + rec.name);
+      }
+    }
+  }
   if (rec.is_field) {
     *err = rec.name + " is a field ID, not a method ID";
     return false;
@@ -853,9 +881,22 @@ bool ForwardingJni::Slot(std::uint32_t i, exec::MachineState& s, std::string* er
       s.r[0] = kWeakBase + 4u * static_cast<std::uint32_t>(n);
       return true;
     }
-    case 228:  // ExceptionCheck
-      s.r[0] = java_.ExceptionCheck() ? 1u : 0u;
+    case 228: {  // ExceptionCheck
+      // A stall dump distinguishes "in the bridge" (step 1) from "inside the host JVM entry point"
+      // (step 2): ExceptionCheck cannot block on its own, so a wait here names the JVM, not the bridge.
+      runtime::GuestThread* self = runtime::CurrentGuestThread();
+      if (self != nullptr) self->host_step.store(2);
+      const bool pending = java_.ExceptionCheck();
+      s.r[0] = pending ? 1u : 0u;
+      if (pending) {
+        if (self != nullptr) self->jni_pending.fetch_add(1, std::memory_order_relaxed);
+        // Diagnostics (C46): a thread that spins through ExceptionCheck is spinning on a pending Java
+        // exception. Print the first few with their Java stacks — the stack names the call that threw.
+        static std::atomic<int> shown{0};
+        if (shown.fetch_add(1) < 3) java_.ExceptionDescribe();
+      }
       return true;
+    }
     case 232: {  // GetObjectRefType: JNIInvalidRefType 0, Local 1, Global 2, WeakGlobal 3
       // ART answers from the reference's kind bits alone and does not check that it is still live; so does this.
       // A class handle is what FindClass/GetObjectClass hand out — locals, on a device.
@@ -966,6 +1007,12 @@ bool ForwardingJni::MaskIdentifierRefusal(const std::string& called) {
   Note(called + ": " + where + " refused a device identifier (SecurityException, targetSdk 29+); the guest is answered "
        "null, as a phone without the permission answered the game");
   return true;
+}
+
+void ForwardingJni::SetCallTrace(CallTrace trace, int budget) {
+  TraceHook() = std::move(trace);
+  // Release: the hook is written first, so a thread that sees a non-zero budget also sees the hook.
+  TraceBudget().store(budget, std::memory_order_release);
 }
 
 void ForwardingJni::Note(const std::string& note) {

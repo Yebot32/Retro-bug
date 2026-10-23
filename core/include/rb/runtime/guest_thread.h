@@ -92,6 +92,14 @@ struct GuestThread {
   std::atomic<int> wait_kind{static_cast<int>(WaitKind::kNone)};
   std::atomic<std::uint32_t> wait_arg{0};  ///< futex address, or the low word of a sleep's nanoseconds
   std::atomic<int> wait_slot{-1};          ///< the ABI host slot, while a host call is running
+  /// Diagnostics: which step of the host call `wait_slot` is in (set by the JNI bridge: 0 = the inbound
+  /// shadow merge, 1 = the forwarded call itself, 2 = inside the host JVM entry point), and when the host
+  /// call began (ms, steady clock). A stall dump reads them to name the host-side wait, not to control it.
+  std::atomic<int> host_step{-1};
+  std::atomic<std::uint64_t> host_since_ms{0};
+  /// Diagnostics: how many ExceptionCheck calls saw a pending Java exception on this thread. A thread that
+  /// spins through the bridge (Unity's render loop) is spinning on one; the counter shows the rate.
+  std::atomic<std::uint32_t> jni_pending{0};
   std::atomic<std::uint32_t> last_syscall{0};
   std::array<char, 16> name{};    ///< prctl(PR_SET_NAME), TASK_COMM_LEN bytes
   GuestAddr pthread_struct = 0;   ///< this thread's bionic `pthread_internal_t`, when there is one

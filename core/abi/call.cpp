@@ -10,6 +10,7 @@
 #include "rb/abi/abi.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <string>
 #include <thread>
@@ -596,6 +597,7 @@ exec::RunResult AbiContext::RunThread(runtime::GuestThread& thread, unsigned bud
       // The budget and the syscall cap are checked only *after* this syscall is answered: the tier already
       // stepped past the SVC, so a Budget stop here would have a re-entered turn (ThreadMain,
       // CallGuestToCompletion) resume after it with r0 still holding arg0 — a silently skipped syscall.
+      note_host_activity();
       syscall::Outcome o = monitor_->Begin(state, run.svc_number, &thread);
       if (o.verdict == syscall::Verdict::kBlocking) {
         // The wait runs with the GGL released, so other guest threads run meanwhile; the answer is recorded
@@ -658,27 +660,38 @@ exec::RunResult AbiContext::RunThread(runtime::GuestThread& thread, unsigned bud
       continue;
     }
     SlotRef slot;  // our own reference: a `Bind` while this slot runs (GGL released) replaces, never frees, it
+    note_host_activity();
     if (const auto it = bound_.find(run.host_slot); it != bound_.end()) slot = it->second;
     // Diagnostics: if a stall dump runs while this host function blocks, name the slot and whether the
     // GGL was released. Restored afterwards (a nested guest call re-enters this path).
     const int prior_kind = thread.wait_kind.load();
     const std::uint32_t prior_arg = thread.wait_arg.load();
     const int prior_slot = thread.wait_slot.load();
+    const int prior_step = thread.host_step.load();
+    const std::uint64_t prior_since = thread.host_since_ms.load();
     thread.wait_kind.store(static_cast<int>(slot && slot->lock == SlotLock::kHoldsGgl
                                                ? runtime::GuestThread::WaitKind::kHostHeld
                                                : runtime::GuestThread::WaitKind::kHostReleased));
     thread.wait_slot.store(static_cast<int>(run.host_slot));
+    thread.host_step.store(0);
+    thread.host_since_ms.store(static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count()));
     struct RestoreWait {
       runtime::GuestThread& t;
       int kind;
       std::uint32_t arg;
       int slot;
+      int step;
+      std::uint64_t since;
       ~RestoreWait() {
         t.wait_kind.store(kind);
         t.wait_arg.store(arg);
         t.wait_slot.store(slot);
+        t.host_step.store(step);
+        t.host_since_ms.store(since);
       }
-    } restore_wait{thread, prior_kind, prior_arg, prior_slot};
+    } restore_wait{thread, prior_kind, prior_arg, prior_slot, prior_step, prior_since};
     bool ok = false;
     if (slot) {
       if (slot->lock == SlotLock::kHoldsGgl) {
