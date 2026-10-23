@@ -413,3 +413,51 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
   empty (only libmain's three `__cxa_*` remain), and Crash Drive 2's is clean too.
 - It did **not** stop TT2's early SIGABRT (C40) or Crash Drive 2's null platform-table call (C41); both
   remain open, now with the data-range explanation ruled out. Gate: 23/23; guest libc 147 checks.
+
+## 2026-10-21 — C40–C44: the tgkill decode, and three more engine gaps
+
+- **`tgkill` was decoded as `tkill`.** The monitor read `tid = arg0, sig = arg1` for both, but the ABI is
+  `tkill(tid, sig)` and `tgkill(tgid, tid, sig)` / `rt_tgsigqueueinfo(tgid, tid, sig, info)`. So
+  `tgkill(4242, 4246, 30)` was logged as `tgkill(4242, 4242, 4246)` and refused EINVAL — the tid was read
+  as the signal. Boehm's `GC_suspend_all` aborts on any `pthread_kill` error outside {0, ESRCH}, which is
+  exactly what happened in TT2 and CD2 (the guest-stderr capture added first printed
+  "pthread_kill failed at suspend"). Statically confirmed in both libil2cpp copies: `GC_sig_suspend` is
+  `.data 0x1e` (SIGPWR=30), statically initialised, and the abort arm is `mov lr,pc; b abort`. Fix:
+  `tkill` keeps `(arg0,arg1)`, the other two use `(arg1,arg2)`; new monitor lane
+  `the_three_argument_signal_calls_read_the_signal_from_r2` (233 checks, +10).
+- **Device effect:** TT2 boots to its Robin title (`tt2-after-tgkill.png`) instead of SIGABRTing;
+  CD2 boots through Unity 2017.4.32f1, the SPIL GDPR dialog, IAP and Swrve, and reaches its loading screen.
+- **C41: the null GL entry point.** The pc-0x4 fault was `blx` through a slot Unity filled from
+  `eglGetProcAddress`: the name was `glTexImage3DOES` (CD2 `libunity+0x268`, loaded by the sequence at
+  `+0x709160`; ABE stores its own OES entries at `+0x25c/+0x264`). The host thunk table listed only the
+  core `glTexImage3D`, so `HostSlots::Resolve` answered NULL and `strne` left the slot zero. Added
+  `glTexImage3DOES`/`glTexSubImage3DOES` with the core signatures to `kGl3`; the device lane
+  (`gl_thunk_test`) checks the table, `HostSymbol` and a real 3D upload through the alias (22 checks).
+  Device: CD2 reaches the consent dialog (`cd2-after-tgkill.png`, `cd2-menu.png`), ABE reaches the
+  publisher splash (`abe-after-c41.png`), Rolling Sky reaches the Cheetah Mobile splash
+  (`rs-after-c41b.png`) after its DEX patch. None reaches gameplay; all wait in C46.
+- **C43: synchronous guest faults become SIGSEGV.** `RunResult` now carries `fault_addr/has_addr/write`
+  from both tiers (`SetFault`, `FaultAt`); `AbiContext::set_fault_deliver` offers a named-address fault to
+  the runtime, which builds the frame with `si_code` (SEGV_MAPERR read/fetch, SEGV_ACCERR write), `si_addr`
+  and `sigcontext.fault_address`, and resumes at the handler. A fault with SIG_DFL, a blocked SIGSEGV, one
+  inside the handler, or a full delivery stack stays fatal — the kernel's default action. Device: Cars 3's
+  Mono JIT null now becomes a handled `NullReferenceException` ("Object reference not set to an instance of
+  an object") and the game keeps running. Lane:
+  `a_synchronous_fault_reaches_the_guest_sigsegv_handler` for both tiers (guest thread 692 checks).
+- **C44: VADDHN/VRADDHN/VSUBHN/VRSUBHN were not decoded.** Dynarmic's A32 ASIMD table had them commented
+  out; Cars 3's libunity image path executes `vaddhn.i16` (`f2c234a4` at `libunity+0x64f2e4`) and the front
+  end stopped it as "unpredictable instruction", ending the process. Added the four entries (patterns
+  `1111001U1Dss...0100/0110...`), `HighNarrowingInstruction` in the A32 translator, and Tier I
+  `VectorLogicalShiftRight8/16/32/64` + `VectorNarrow16/32/64`. Tier-diff lane
+  `the_high_narrowing_vector_ops_narrow_like_hardware` uses d2 (the low half of source q1) as the
+  destination, so a write-before-read implementation fails; 1039 checks.
+- **Cars 3, patched build:** with the NOP'd libunity it runs at ~64 M guest instr/s, handles the Swrve 403s
+  and the managed null, and stays on a black screen — the NOP removes a real startup barrier, so this is
+  not the fix. The unpatched original still waits in it.
+- **What remains:** **C46**, the shared Unity startup condvar. CD2 (loading), TT2 (title), ABE (splash),
+  Rolling Sky (splash) and Cars 3 (unpatched) all show an adopted UnityMain thread in
+  `libunity+0x60e650`-family `pthread_cond_wait`/futex with every worker idle. It is the same family as
+  C37, now with four independent witnesses and a named next probe (identify the `{flag, refcount}` object
+  at `+0x20`, its setter, and whether a JNI/Choreographer callback is missing).
+- Gate: 23/23 suites on the SM-X710 — tier-diff 1039, guest thread 692, monitor 233, gl thunk 22; advisory
+  guest libc 147, guest APK 1376. Build `build/gate-c44.log`.

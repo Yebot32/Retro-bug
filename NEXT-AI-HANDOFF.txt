@@ -6,6 +6,30 @@ says where we are and what is next. Read this, then the tail of docs/session/wor
 then docs/session/backlog.md (statuses are current as of now).
 
 
+1a. 2026-10-21 — the tgkill decode and four more engine gaps (C40–C45)
+-----------------------------------------------------------------------
+- **`tgkill(tgid, tid, sig)` was decoded as `tkill(tid, sig)`** in core/syscall/monitor.cpp. The
+  target tid landed in the signal field, so `tgkill(4242, 4246, 30)` became `tgkill(4242, 4242, 4246)`
+  and answered EINVAL; Boehm's `GC_suspend_all` aborts on any pthread_kill error outside {0, ESRCH}.
+  Fixed + new monitor lane (233 checks). **TT2 now boots to its title, CD2 to its GDPR dialog.**
+- **C41 was `glTexImage3DOES`.** Unity stores the result of `eglGetProcAddress("glTexImage3DOES")` and
+  calls it unguarded; the host table had only core `glTexImage3D`, so the slot was NULL. OES aliases
+  added + device lane. **CD2 → GDPR/loading, ABE → publisher splash, Rolling Sky → publisher splash.**
+- **C43: synchronous SIGSEGV delivery.** A guest data/fetch fault now becomes a SIGSEGV frame
+  (si_code/si_addr/fault_address) and resumes at the guest handler when one is installed; SIG_DFL, a
+  blocked signal, a fault inside the handler, or a full delivery stack stays fatal. **Cars 3's Mono JIT
+  null is now a handled NullReferenceException** instead of killing the process. 692 thread checks.
+- **C44: VADDHN family + Tier I VectorLogicalShiftRight/VectorNarrow.** Dynarmic's A32 decoder had
+  VADDHN/VRADDHN/VSUBHN/VRSUBHN commented out; libunity's `vaddhn.i16` stopped Cars 3 as
+  "unpredictable". Tier-diff lane now 1039 checks.
+- **C46 is the next shared wall:** CD2 (loading), TT2 (title), ABE (splash), Rolling Sky (splash) and
+  Cars 3 (unpatched) all sit in an adopted UnityMain thread's libunity `pthread_cond_wait` while every
+  worker is idle. The Cars 3 NOP at `libunity+0x55c8a8` is proof the barrier is real, not the fix.
+- Gate: 23/23 on the SM-X710, 0 failures (build/gate-c44.log); advisory libc 147, APK 1376.
+- The engine is baked into each repack: rebuild the launcher, reinstall, re-stage/re-repack a game
+  before testing an engine change. Re-run the gate after any engine edit.
+
+
 0. The human, and the standing rules
 ------------------------------------
 - yebot is not a developer. He wants old 32-bit Android games running on 64-bit-only phones.
