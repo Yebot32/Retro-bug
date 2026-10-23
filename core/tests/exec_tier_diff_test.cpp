@@ -3068,6 +3068,61 @@ void the_wide_vector_adds_widen_like_hardware() {
                Hex(si.d[0]).c_str(), Hex(sj.d[0]).c_str());
 }
 
+/// The ASIMD high-narrowing family (VADDHN/VRADDHN/VSUBHN/VRSUBHN), which Dynarmic's A32 decoder had
+/// commented out: libunity's NEON image path executes `vaddhn.i16` and the front end stopped the process
+/// with "unpredictable instruction" (Cars 3, 2026-10-20). Each row adds/subtracts 16-bit lanes, shifts by
+/// 8, narrows to 8 bits, and writes d2 -- which is the LOW HALF OF SOURCE q1, so a translator that writes
+/// the destination before reading both sources gets lanes 4..7 wrong.
+void the_high_narrowing_vector_ops_narrow_like_hardware() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  constexpr exec::GuestAddr kPage = 0x0071'0000u;
+  constexpr exec::GuestAddr kAdd = kPage + 0x00u;
+  constexpr exec::GuestAddr kRadd = kPage + 0x10u;
+  constexpr exec::GuestAddr kSub = kPage + 0x20u;
+  constexpr exec::GuestAddr kRsub = kPage + 0x30u;
+  std::string err;
+  if (!rig.mem->Map(kPage, mem::kGuestPage, kRead | kWrite | kExec, &err)) {
+    fail("could not map the narrowing page", __LINE__, err);
+    return;
+  }
+  // Thumb-2: vaddhn.i16 d2,q0,q1; vraddhn; vsubhn; vrsubhn; bx lr (assembled with clang).
+  constexpr std::uint16_t kA[] = {0xef80, 0x2402, 0x4770};
+  constexpr std::uint16_t kR[] = {0xff80, 0x2402, 0x4770};
+  constexpr std::uint16_t kS[] = {0xef80, 0x2602, 0x4770};
+  constexpr std::uint16_t kRS[] = {0xff80, 0x2602, 0x4770};
+  CHECK_CTX(rig.mem->Write(kAdd, kA, sizeof(kA)), "could not plant vaddhn");
+  CHECK_CTX(rig.mem->Write(kRadd, kR, sizeof(kR)), "could not plant vraddhn");
+  CHECK_CTX(rig.mem->Write(kSub, kS, sizeof(kS)), "could not plant vsubhn");
+  CHECK_CTX(rig.mem->Write(kRsub, kRS, sizeof(kRS)), "could not plant vrsubhn");
+
+  const auto run_pair = [&](exec::GuestAddr where, std::uint64_t expected, const char* what) {
+    exec::MachineState si = EntryState(where, 0, 0, true);
+    si.d[0] = 0x0004'0003'0002'0000ull;  // q0 lanes 0..3 (16-bit, low first)
+    si.d[1] = 0x8000'0007'0006'0005ull;  // q0 lanes 4..7
+    si.d[2] = 0x0001'FFFF'0101'00FFull;  // q1 lanes 0..3; d2 is also Vd (read before write)
+    si.d[3] = 0x8000'0000'8000'7FFFull;  // q1 lanes 4..7
+    exec::MachineState sj = si;
+    const std::uint64_t d3_before = si.d[3];
+    const exec::RunResult ri = rig.interp->Run(si, 1000);
+    const exec::RunResult rj = rig.jit->Run(sj, 1000);
+    CHECK_CTX(ri.reason == exec::StopReason::Returned,
+              std::string{what} + " Tier I: " + std::to_string(static_cast<int>(ri.reason)) + " " + ri.detail);
+    CHECK_CTX(rj.reason == exec::StopReason::Returned,
+              std::string{what} + " Tier J: " + std::to_string(static_cast<int>(rj.reason)) + " " + rj.detail);
+    CHECK_CTX(si.d[2] == expected, std::string{what} + " Tier I: " + Hex(si.d[2]) + " want " + Hex(expected));
+    CHECK_CTX(sj.d[2] == expected, std::string{what} + " Tier J: " + Hex(sj.d[2]) + " want " + Hex(expected));
+    // d3 is q1's high half and is not the destination: it must be untouched.
+    CHECK_CTX(si.d[3] == d3_before, std::string{what} + " clobbered d3 in Tier I");
+    CHECK_CTX(sj.d[3] == d3_before, std::string{what} + " clobbered d3 in Tier J");
+  };
+
+  run_pair(kAdd, 0x0000'8080'0000'0100ull, "vaddhn.i16");
+  run_pair(kRadd, 0x0000'8080'0000'0101ull, "vraddhn.i16");
+  run_pair(kSub, 0x0000'8080'0000'FFFFull, "vsubhn.i16");
+  run_pair(kRsub, 0x0000'8080'0000'FFFFull, "vrsubhn.i16");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -3100,6 +3155,7 @@ int main(int argc, char** argv) {
   the_thumb_acquire_byte_and_half_rows_execute_on_both_tiers();
   the_dsp_multiplies_publish_q_on_both_tiers();
   the_wide_vector_adds_widen_like_hardware();
+  the_high_narrowing_vector_ops_narrow_like_hardware();
 
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;

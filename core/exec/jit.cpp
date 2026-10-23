@@ -601,6 +601,9 @@ RunResult JitExecutor::Run(MachineState& state, unsigned max_instructions) {
   pending_slot_ = 0;
   pending_svc_ = 0;
   pending_pc_ = 0;
+  pending_fault_addr_ = 0;
+  pending_fault_has_addr_ = false;
+  pending_fault_write_ = false;
 
   SyncIn(state);
   const Dynarmic::HaltReason hr = jit_->Run();
@@ -653,6 +656,9 @@ RunResult JitExecutor::MapHalt(Dynarmic::HaltReason hr, unsigned executed) {
     case Pending::Fault:
       out.reason = StopReason::Fault;
       out.detail = std::move(pending_detail_);
+      out.fault_addr = pending_fault_addr_;
+      out.fault_has_addr = pending_fault_has_addr_;
+      out.fault_write = pending_fault_write_;
       break;
     case Pending::Unimplemented:
       out.reason = StopReason::Unimplemented;
@@ -705,8 +711,7 @@ std::optional<std::uint32_t> JitExecutor::MemoryReadCode(GuestAddr vaddr) {
 std::uint8_t JitExecutor::MemoryRead8(GuestAddr vaddr) {
   std::uint8_t v = 0;
   if (!memory_.Read(vaddr, &v, 1)) {
-    SetPending(Pending::Fault,
-               "guest memory read at 0x" + Hex(vaddr) + " is unmapped or not readable");
+    SetFault("guest memory read at 0x" + Hex(vaddr) + " is unmapped or not readable", vaddr, false);
     jit_->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
   }
   return v;
@@ -715,8 +720,7 @@ std::uint8_t JitExecutor::MemoryRead8(GuestAddr vaddr) {
 std::uint16_t JitExecutor::MemoryRead16(GuestAddr vaddr) {
   std::uint16_t v = 0;
   if (!memory_.Read(vaddr, &v, 2)) {
-    SetPending(Pending::Fault,
-               "guest memory read at 0x" + Hex(vaddr) + " is unmapped or not readable");
+    SetFault("guest memory read at 0x" + Hex(vaddr) + " is unmapped or not readable", vaddr, false);
     jit_->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
   }
   return v;
@@ -725,8 +729,7 @@ std::uint16_t JitExecutor::MemoryRead16(GuestAddr vaddr) {
 std::uint32_t JitExecutor::MemoryRead32(GuestAddr vaddr) {
   std::uint32_t v = 0;
   if (!memory_.Read(vaddr, &v, 4)) {
-    SetPending(Pending::Fault,
-               "guest memory read at 0x" + Hex(vaddr) + " is unmapped or not readable");
+    SetFault("guest memory read at 0x" + Hex(vaddr) + " is unmapped or not readable", vaddr, false);
     jit_->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
   }
   return v;
@@ -735,8 +738,7 @@ std::uint32_t JitExecutor::MemoryRead32(GuestAddr vaddr) {
 std::uint64_t JitExecutor::MemoryRead64(GuestAddr vaddr) {
   std::uint64_t v = 0;
   if (!memory_.Read(vaddr, &v, 8)) {
-    SetPending(Pending::Fault,
-               "guest memory read at 0x" + Hex(vaddr) + " is unmapped or not readable");
+    SetFault("guest memory read at 0x" + Hex(vaddr) + " is unmapped or not readable", vaddr, false);
     jit_->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
   }
   return v;
@@ -744,36 +746,32 @@ std::uint64_t JitExecutor::MemoryRead64(GuestAddr vaddr) {
 
 void JitExecutor::MemoryWrite8(GuestAddr vaddr, std::uint8_t value) {
   if (!memory_.Write(vaddr, &value, 1)) {
-    SetPending(Pending::Fault,
-               "guest memory write at 0x" + Hex(vaddr) +
-                   " is unmapped, read-only, or an executing page");
+    SetFault("guest memory write at 0x" + Hex(vaddr) +
+                 " is unmapped, read-only, or an executing page", vaddr, true);
     jit_->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
   }
 }
 
 void JitExecutor::MemoryWrite16(GuestAddr vaddr, std::uint16_t value) {
   if (!memory_.Write(vaddr, &value, 2)) {
-    SetPending(Pending::Fault,
-               "guest memory write at 0x" + Hex(vaddr) +
-                   " is unmapped, read-only, or an executing page");
+    SetFault("guest memory write at 0x" + Hex(vaddr) +
+                 " is unmapped, read-only, or an executing page", vaddr, true);
     jit_->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
   }
 }
 
 void JitExecutor::MemoryWrite32(GuestAddr vaddr, std::uint32_t value) {
   if (!memory_.Write(vaddr, &value, 4)) {
-    SetPending(Pending::Fault,
-               "guest memory write at 0x" + Hex(vaddr) +
-                   " is unmapped, read-only, or an executing page");
+    SetFault("guest memory write at 0x" + Hex(vaddr) +
+                 " is unmapped, read-only, or an executing page", vaddr, true);
     jit_->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
   }
 }
 
 void JitExecutor::MemoryWrite64(GuestAddr vaddr, std::uint64_t value) {
   if (!memory_.Write(vaddr, &value, 8)) {
-    SetPending(Pending::Fault,
-               "guest memory write at 0x" + Hex(vaddr) +
-                   " is unmapped, read-only, or an executing page");
+    SetFault("guest memory write at 0x" + Hex(vaddr) +
+                 " is unmapped, read-only, or an executing page", vaddr, true);
     jit_->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
   }
 }
@@ -785,8 +783,7 @@ bool JitExecutor::ExclusiveCompareAndStore(GuestAddr vaddr, std::uint64_t value,
   // endianness instead of over the memory model.
   unsigned char raw[8] = {};
   if (!memory_.Read(vaddr, raw, bytes)) {
-    SetPending(Pending::Fault,
-               "guest exclusive access at 0x" + Hex(vaddr) + " is unmapped or not readable");
+    SetFault("guest exclusive access at 0x" + Hex(vaddr) + " is unmapped or not readable", vaddr, false);
     jit_->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
     return false;
   }
@@ -803,9 +800,8 @@ bool JitExecutor::ExclusiveCompareAndStore(GuestAddr vaddr, std::uint64_t value,
     raw[i] = static_cast<unsigned char>(value >> (i * 8));
   }
   if (!memory_.Write(vaddr, raw, bytes)) {
-    SetPending(Pending::Fault,
-               "guest exclusive write at 0x" + Hex(vaddr) +
-                   " is unmapped, read-only, or an executing page");
+    SetFault("guest exclusive write at 0x" + Hex(vaddr) +
+                 " is unmapped, read-only, or an executing page", vaddr, true);
     jit_->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
     return false;
   }
@@ -830,8 +826,7 @@ void JitExecutor::ExceptionRaised(GuestAddr pc, Dynarmic::A32::Exception excepti
   if (exception == Dynarmic::A32::Exception::NoExecuteFault) {
     // The other half of the sentinel/slot check — see MemoryReadCode for why both are needed.
     if (SurfaceNonCodeDestination(pc)) return;
-    SetPending(Pending::Fault, "instruction fetch failed at 0x" + Hex(pc) +
-                                   " (no code could be read there)");
+    SetFault("instruction fetch failed at 0x" + Hex(pc) + " (no code could be read there)", pc, false);
   } else if (exception == Dynarmic::A32::Exception::Breakpoint) {
     SetPending(Pending::Suspended, "guest breakpoint");
   } else {
@@ -936,7 +931,11 @@ void JitExecutor::InterpreterFallback(GuestAddr pc, std::size_t num_instructions
         break;
       }
       if (r.reason == StopReason::Fault) {
-        SetPending(Pending::Fault, r.detail);
+        if (r.fault_has_addr) {
+          SetFault(r.detail, r.fault_addr, r.fault_write);
+        } else {
+          SetPending(Pending::Fault, r.detail);
+        }
         break;
       }
       if (r.reason == StopReason::Unimplemented) {

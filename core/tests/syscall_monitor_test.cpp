@@ -957,6 +957,51 @@ void sigsuspend_waits_for_a_signal_and_returns_eintr() {
   t.sigsuspend_restore = false;  // no handler ran in this lane; a real delivery restores it at rt_sigreturn
 }
 
+/// `tgkill(tgid, tid, sig)` and `rt_tgsigqueueinfo(tgid, tid, sig, info)` carry the signal in r2, not r1.
+/// Reading them like `tkill(tid, sig)` put the target thread id where the signal belongs: a live tid is far
+/// outside 1..64, so the call was answered EINVAL. Boehm GC's thread suspend treats that as fatal and aborts
+/// the process — measured as `tgkill(4242, 4242, 4246) -> -EINVAL` immediately before SIGABRT in Crash Drive 2
+/// and Teeny Titans 2 (2026-10-20). The C26 lanes only exercised `tkill`, so the shifted decode was green.
+void the_three_argument_signal_calls_read_the_signal_from_r2() {
+  sc::Monitor m;
+  auto window = Window();
+  if (!window) return;
+  m.set_memory(window.get());
+  std::string werr;
+  CHECK_CTX(window->Map(0, 0x8000, mem::kRead | mem::kWrite, &werr), werr);
+  m.set_ids(GuestProcessIds::kPid, GuestProcessIds::kMainTid);
+  const std::int32_t other = m.AllocateThreadId();
+
+  const std::uint32_t act[5] = {0x005f'ab59u, 0x1400'0000u, 0x001a'7240u, 0, 0};
+  CHECK(window->Write(0x300, act, sizeof act));
+  exec::MachineState sa = State(sc::nr::kRtSigaction);
+  sa.r[0] = 30;
+  sa.r[1] = 0x300;
+  CHECK(m.Handle(sa, 0).r0 == 0);
+
+  for (const std::uint32_t number : {sc::nr::kTgkill, sc::nr::kRtTgsigqueueinfo}) {
+    const std::string name = number == sc::nr::kTgkill ? "tgkill" : "rt_tgsigqueueinfo";
+    exec::MachineState k = State(number);
+    k.r[0] = GuestProcessIds::kPid;  // tgid
+    k.r[1] = static_cast<std::uint32_t>(other);  // tid
+    k.r[2] = 30;                                 // sig
+    k.r[3] = 0;                                  // info (rt_tgsigqueueinfo)
+    const sc::Outcome o = m.Handle(k, 0);
+    CHECK_CTX(o.r0 == 0, name + "(tgid, tid, 30) must queue, not read the tid as the signal: " + o.detail);
+    CHECK_CTX(m.TakePendingSignal(other) == 30, name + " did not queue the signal for the named thread");
+    CHECK_CTX(m.TakePendingSignal(GuestProcessIds::kMainTid) == 0,
+              name + " queued the signal for the caller instead of the named thread");
+  }
+
+  // The group id still has to be this process's: a signal aimed at another group is ESRCH, not a delivery.
+  exec::MachineState wrong_group = State(sc::nr::kTgkill);
+  wrong_group.r[0] = 9999;
+  wrong_group.r[1] = static_cast<std::uint32_t>(other);
+  wrong_group.r[2] = 30;
+  CHECK_CTX(m.Handle(wrong_group, 0).r0 == -static_cast<std::int32_t>(sc::err::kEsrch),
+            "a tgid that is not this process is ESRCH");
+}
+
 int main() {
   frame_takes_the_number_from_r7_not_the_encoding();
   r7_is_the_number_not_a_masked_remainder();
@@ -984,6 +1029,7 @@ int main() {
   sigaction_and_faccessat_answer_their_facts();
   signal_dispositions_are_what_the_guest_installed();
   a_signal_to_a_live_thread_is_queued_and_taken_once();
+  the_three_argument_signal_calls_read_the_signal_from_r2();
   sigsuspend_waits_for_a_signal_and_returns_eintr();
   sigreturn_outside_a_delivery_is_refused_by_name();
 

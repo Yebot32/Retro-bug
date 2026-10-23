@@ -702,6 +702,10 @@ unsigned LaneBits(Dynarmic::IR::Opcode op) {
       return 64;
     case Opcode::VectorBroadcast8: return 8;
     case Opcode::VectorBroadcast16: return 16;
+    case Opcode::VectorLogicalShiftRight8: return 8;
+    case Opcode::VectorLogicalShiftRight16: return 16;
+    case Opcode::VectorLogicalShiftRight32: return 32;
+    case Opcode::VectorLogicalShiftRight64: return 64;
     default: return 0;
   }
 }
@@ -862,6 +866,17 @@ class BlockRunner {
     return false;
   }
 
+  /// A fault that names the guest address it could not access. `write` distinguishes a store from a
+  /// load; a fetch names its pc and is not a write. The runtime turns these into a SIGSEGV with si_addr.
+  bool FaultAt(const std::string& why, std::uint32_t addr, bool write) {
+    stop.reason = StopReason::Fault;
+    stop.detail = why;
+    stop.fault_addr = addr;
+    stop.fault_has_addr = true;
+    stop.fault_write = write;
+    return false;
+  }
+
   [[nodiscard]] bool Read(const Value& v, V& out) {
     if (v.IsImmediate()) {
       std::uint64_t bits = 0;
@@ -993,12 +1008,14 @@ class BlockRunner {
 
   [[nodiscard]] bool ReadMem(std::uint64_t addr, void* dst, std::size_t bytes, const Inst* inst) {
     if (addr > memory_.window_bytes() || bytes > memory_.window_bytes() - addr) {
-      return Fault("guest memory read past the window: 0x" + Hex(addr) + " (" + std::to_string(bytes) +
-                   " bytes, window 0x" + Hex(memory_.window_bytes()) + ") at " + Describe(inst));
+      return FaultAt("guest memory read past the window: 0x" + Hex(addr) + " (" + std::to_string(bytes) +
+                     " bytes, window 0x" + Hex(memory_.window_bytes()) + ") at " + Describe(inst),
+                     static_cast<std::uint32_t>(addr), false);
     }
     if (!memory_.Read(static_cast<GuestAddr>(addr), dst, bytes)) {
-      return Fault("guest memory read at 0x" + Hex(addr) +
-                   " refused (unmapped or not readable) at " + Describe(inst));
+      return FaultAt("guest memory read at 0x" + Hex(addr) +
+                     " refused (unmapped or not readable) at " + Describe(inst),
+                     static_cast<std::uint32_t>(addr), false);
     }
     return true;
   }
@@ -1006,13 +1023,15 @@ class BlockRunner {
   [[nodiscard]] bool WriteMem(std::uint64_t addr, const void* src, std::size_t bytes,
                                const Inst* inst) {
     if (addr > memory_.window_bytes() || bytes > memory_.window_bytes() - addr) {
-      return Fault("guest memory write past the window: 0x" + Hex(addr) + " (" +
-                   std::to_string(bytes) + " bytes, window 0x" + Hex(memory_.window_bytes()) +
-                   ") at " + Describe(inst));
+      return FaultAt("guest memory write past the window: 0x" + Hex(addr) + " (" +
+                     std::to_string(bytes) + " bytes, window 0x" + Hex(memory_.window_bytes()) +
+                     ") at " + Describe(inst),
+                     static_cast<std::uint32_t>(addr), true);
     }
     if (!memory_.Write(static_cast<GuestAddr>(addr), src, bytes)) {
-      return Fault("guest memory write at 0x" + Hex(addr) +
-                   " refused (unmapped, not writable, or an executing page) at " + Describe(inst));
+      return FaultAt("guest memory write at 0x" + Hex(addr) +
+                     " refused (unmapped, not writable, or an executing page) at " + Describe(inst),
+                     static_cast<std::uint32_t>(addr), true);
     }
     return true;
   }
@@ -1183,7 +1202,9 @@ bool BlockRunner::Step(const Inst* inst) {
       const Exception raised = static_cast<Exception>(kind);
       const std::string where_text = "the A32 front end raised exception " + std::to_string(kind) +
                                      " at 0x" + Hex(static_cast<std::uint32_t>(where));
-      if (raised == Exception::NoExecuteFault) return Fault(where_text);
+      if (raised == Exception::NoExecuteFault) {
+        return FaultAt(where_text, static_cast<std::uint32_t>(where), false);
+      }
       if (raised == Exception::Breakpoint) {
         stop.reason = StopReason::Suspended;
         stop.detail = where_text;
@@ -2681,6 +2702,51 @@ bool BlockRunner::Step(const Inst* inst) {
         default: widen(64); break;
       }
       Put(inst, out);
+      return true;
+    }
+
+    case Opcode::VectorLogicalShiftRight8: case Opcode::VectorLogicalShiftRight16:
+    case Opcode::VectorLogicalShiftRight32: case Opcode::VectorLogicalShiftRight64: {
+      // Per-lane unsigned shift by a constant (USHR): what the high-narrowing ops (VADDHN and family)
+      // emit before VectorNarrow, and Tier I had none of the four when VADDHN was added.
+      const unsigned bits = LaneBits(inst->GetOpcode());
+      V a{};
+      std::uint8_t shift = 0;
+      if (!W128(inst, 0, a) || !ByteArg(inst, 1, shift)) return false;
+      if (bits == 0 || bits > 64) return Fail(inst, "unrecognised lane width in VectorLogicalShiftRight");
+      const std::uint64_t mask = bits == 64 ? ~0ull : ((1ull << bits) - 1ull);
+      const unsigned s = shift >= bits ? bits : shift;
+      const auto shr = [&](std::uint64_t w) {
+        std::uint64_t r = 0;
+        for (unsigned off = 0; off < 64; off += bits) {
+          r |= ((((w >> off) & mask) >> s) & mask) << off;
+        }
+        return r;
+      };
+      Put(inst, V{shr(a.lo), shr(a.hi)});
+      return true;
+    }
+
+    case Opcode::VectorNarrow16: case Opcode::VectorNarrow32: case Opcode::VectorNarrow64: {
+      // XTN: the low half of each lane of the operand's low 64 bits, packed into the result's low
+      // lanes; the high half of the result is zero. A64's ADDHN does the shift first, then this.
+      const unsigned orig = inst->GetOpcode() == Opcode::VectorNarrow16 ? 16
+                            : inst->GetOpcode() == Opcode::VectorNarrow32 ? 32
+                                                                          : 64;
+      if (orig != 16 && orig != 32 && orig != 64) return Fail(inst, "unrecognised width in VectorNarrow");
+      V a{};
+      if (!W128(inst, 0, a)) return false;
+      const unsigned half = orig / 2;
+      const unsigned per_word = 64 / orig;
+      const std::uint64_t orig_mask = orig == 64 ? ~0ull : ((1ull << orig) - 1ull);
+      const std::uint64_t half_mask = (1ull << half) - 1ull;
+      std::uint64_t out = 0;
+      for (unsigned i = 0; i < 2 * per_word; ++i) {
+        const std::uint64_t word = i < per_word ? a.lo : a.hi;
+        const unsigned off = (i % per_word) * orig;
+        out |= ((word >> off) & orig_mask & half_mask) << (half * i);
+      }
+      Put(inst, V{out, 0});
       return true;
     }
 

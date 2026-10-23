@@ -1348,6 +1348,134 @@ void guest_pthreads(int tier) {
 /// The assertions are the guest's own register file and the memory the handler wrote — not a log line. The
 /// handler is real Thumb code both tiers execute, so a delivery that built the frame wrong fails here
 /// rather than in a game.
+/// A synchronous guest fault becomes a SIGSEGV the guest's handler can act on: the frame carries the
+/// faulting address in siginfo's si_addr and the sigcontext's fault_address, and the handler's sigreturn
+/// decides where to resume (Mono's NullReferenceException is exactly this handler). Before this lane the
+/// engine stopped every data fault, so any null in JIT-compiled managed code killed the process — measured
+/// on Cars 3, whose fault pc was Mono JIT code and whose installed SIGSEGV handler never ran (2026-10-20).
+void a_synchronous_fault_reaches_the_guest_sigsegv_handler(int tier) {
+  Rig r = Build(tier);
+  if (!r.ok) return;
+  mem::GuestMemory& m = *r.mem;
+  const exec::GuestAddr kPage = kCode + 0x1000;
+  std::string perr;
+  CHECK_CTX(m.Map(kPage, mem::kGuestPage, mem::kRead | mem::kWrite, &perr), "map the fault page: " + perr);
+  // Thumb encodings, raw because this lane runs on the device. The handler uses r4, which the interrupted
+  // state carries (kData+0x40), rather than a PC-relative literal: it must not depend on the faulting
+  // thread's pc for its own data.
+  //   0x00 str r0,[r4]; 0x02 str r1,[r4,#4]; 0x04 str r2,[r4,#8]
+  //   0x06 ldr r3,[r2,#92]   ; ucontext.mcontext.pc (uc + 20 + 72)
+  //   0x08 str r3,[r4,#12]   ; record the interrupted pc
+  //   0x0a adds r3,#2        ; skip the 16-bit faulting load
+  //   0x0c str r3,[r2,#92]   ; resume there
+  //   0x0e bx lr             ; into the restorer
+  //   0x10 movs r7,#173; svc #0; b .   (the restorer the guest registered)
+  //   0x16 ldr r0,[r0]; bx lr          (the victim: a load through the address in r0)
+  const std::uint16_t code[] = {
+      0x6020, 0x6061, 0x60a2, 0x6dd3, 0x60e3, 0x3302, 0x65d3, 0x4770,
+      0x27ad, 0xdf00, 0xe7fe,  // 0x10 restorer
+      0x6800, 0x4770,          // 0x16 the victim
+  };
+  CHECK_CTX(m.Write(kPage, code, sizeof code), "write the handler bytes while the page is writable");
+  CHECK_CTX(m.Protect(kPage, mem::kGuestPage, mem::kRead | mem::kExec, &perr), "make it executable: " + perr);
+  const exec::GuestAddr kHandler = kPage;
+  const exec::GuestAddr kRestorer = kPage + 0x10 + 1;
+  const exec::GuestAddr kFaultInsn = kPage + 0x16;
+
+  GuestThread& t = r.abi->main_thread();
+  r.mon->set_signal_return([&m](GuestThread& th) -> syscall::Outcome {
+    std::string why;
+    if (!ReturnFromSignal(th, m, &why)) return syscall::Outcome::Refused(syscall::err::kEnosys, why);
+    return syscall::Outcome::Emulated(0, why);
+  });
+  const std::uint32_t act[5] = {kHandler | 1u, 0x0400'0000u /* SA_RESTORER */, kRestorer, 0, 0};
+  CHECK(m.Write(kData + 0x20, act, sizeof act));
+  exec::MachineState sa{};
+  sa.mode = isa::Mode::Thumb;
+  sa.pc = kReturn;
+  sa.r[7] = syscall::nr::kRtSigaction;
+  sa.r[0] = 11;  // SIGSEGV
+  sa.r[1] = kData + 0x20;
+  r.mon->Handle(sa, 0, &t);
+  CHECK_CTX(r.mon->disposition(11).catches(), "the SIGSEGV handler is installed");
+  CHECK_CTX(r.mon->disposition(11).handler == (kPage | 1u),
+            "the recorded handler is the one written: 0x" +
+                std::to_string(r.mon->disposition(11).handler) + " vs 0x" + std::to_string(kPage | 1u));
+
+  int deliveries = 0;
+  r.abi->set_fault_deliver([&](GuestThread& th, const exec::RunResult& run) -> bool {
+    if (!th.deliveries.empty() && th.deliveries.back().sig == 11) {
+      fail(("a fault inside the SIGSEGV handler: " + run.detail + " at pc 0x" +
+            std::to_string(th.state.pc)).c_str(), __LINE__);
+      return false;
+    }
+    const syscall::Monitor::Disposition disp = r.mon->disposition(11);
+    if (!disp.catches()) return false;
+    const int code = run.fault_write ? runtime::sigframe::kSegvAccerr : runtime::sigframe::kSegvMaperr;
+    std::string why;
+    if (!DeliverSignal(th, m, disp, 11, nullptr, &why, code, run.fault_addr)) {
+      fail(("SIGSEGV delivery: " + why).c_str(), __LINE__);
+      return false;
+    }
+    ++deliveries;
+    return true;
+  });
+
+  // The victim loads through 0x1000, a guest page the rig never mapped; r0 is that address, and the
+  // interrupted state is the rig's usual Thumb state at a known pc.
+  t.state.mode = isa::Mode::Thumb;
+  t.state.cpsr = exec::CpsrWithMode(t.state.cpsr, isa::Mode::Thumb);
+  t.state.pc = kFaultInsn;
+  t.state.r[15] = kFaultInsn;
+  t.state.r[0] = 0x1000;
+  t.state.r[4] = kData + 0x40;  // the handler's record area
+  t.state.r[13] = kStacks + kStackBytes - 0x100;
+  t.state.r[14] = kReturn | 1u;
+
+  const exec::RunResult rr = r.abi->RunThread(t, 200000);
+  CHECK_CTX(deliveries == 1, "exactly one SIGSEGV delivery, got " + std::to_string(deliveries));
+  CHECK_CTX(rr.reason == exec::StopReason::Returned,
+            "the handler's sigreturn resumed at the pc it set: " + rr.detail);
+  CHECK_CTX(t.deliveries.empty(), "rt_sigreturn popped the fault's delivery");
+
+  std::uint32_t rec[4] = {};
+  CHECK(m.Read(kData + 0x40, rec, sizeof rec));
+  CHECK_CTX(rec[0] == 11, "the handler's first argument is SIGSEGV");
+  const std::uint32_t info = rec[1], uc = rec[2];
+  std::uint32_t got_code = 0, got_addr = 0, got_fault_address = 0;
+  CHECK(m.Read(info + runtime::sigframe::kSiCode, &got_code, 4));
+  CHECK(m.Read(info + runtime::sigframe::kSiAddr, &got_addr, 4));
+  CHECK(m.Read(uc + runtime::sigframe::kUcMcontext + runtime::sigframe::kScFaultAddress, &got_fault_address, 4));
+  CHECK_CTX(got_code == runtime::sigframe::kSegvMaperr, "a read of an unmapped page is SEGV_MAPERR");
+  CHECK_CTX(got_addr == 0x1000, "si_addr is the faulting address, got 0x" + std::to_string(got_addr));
+  CHECK_CTX(got_fault_address == 0x1000, "the sigcontext's fault_address agrees with si_addr");
+  CHECK_CTX(rec[3] == kFaultInsn,
+            "the interrupted pc is the faulting instruction, not the one after it: 0x" +
+                std::to_string(rec[3]));
+
+  // No handler (SIG_DFL) means no delivery; the fault stays fatal, as the kernel's default action would.
+  Rig plain = Build(tier);
+  if (!plain.ok) return;
+  plain.abi->set_fault_deliver([&plain](GuestThread&, const exec::RunResult&) -> bool {
+    return plain.mon->disposition(11).catches();
+  });
+  GuestThread& p = plain.abi->main_thread();
+  p.state.mode = isa::Mode::Thumb;
+  p.state.cpsr = exec::CpsrWithMode(p.state.cpsr, isa::Mode::Thumb);
+  p.state.pc = kPage + 0x16;
+  p.state.r[15] = kPage + 0x16;
+  p.state.r[0] = 0x1000;
+  p.state.r[13] = kStacks + kStackBytes - 0x100;
+  p.state.r[14] = kReturn | 1u;
+  // The page is mapped executable in the other rig, not this one; map the same bytes here.
+  CHECK_CTX(plain.mem->Map(kPage, mem::kGuestPage, mem::kRead | mem::kWrite, &perr), perr);
+  CHECK(plain.mem->Write(kPage, code, sizeof code));
+  CHECK(plain.mem->Protect(kPage, mem::kGuestPage, mem::kRead | mem::kExec, &perr));
+  const exec::RunResult fatal = plain.abi->RunThread(p, 200000);
+  CHECK_CTX(fatal.reason == exec::StopReason::Fault, "a fault with no handler stays fatal");
+  CHECK_CTX(fatal.fault_addr == 0x1000 && fatal.fault_has_addr, "the fatal result still names the address");
+}
+
 void signal_delivery_enters_the_guest_handler_and_resumes(int tier) {
   Rig r = Build(tier);
   if (!r.ok) return;
@@ -1750,6 +1878,7 @@ int main() {
     each_thread_has_its_own_tid(tier);
     guest_pthreads(tier);
     signal_delivery_enters_the_guest_handler_and_resumes(tier);
+    a_synchronous_fault_reaches_the_guest_sigsegv_handler(tier);
     a_signal_interrupts_a_blocked_futex_and_enters_the_handler(tier);
     a_blocked_signal_leaves_a_futex_wait_alone(tier);
   }

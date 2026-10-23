@@ -362,12 +362,58 @@ std::unique_ptr<GuestProcess> GuestProcess::Create(const GuestProcessOptions& op
     // "blocked" (both are ordinary at every slice); loud about a handler that cannot be entered.
     p->abi_->set_signal_deliver([owner](GuestThread& thread) {
       std::string why;
+      const std::uint32_t sp_before = thread.state.r[13];
+      const std::size_t deliveries_before = thread.deliveries.size();
       if (DeliverPendingSignal(thread, *owner->mem_, *owner->monitor_, &why)) {
         owner->Log("signals: " + why);
+        // An abort() is the game's own last word; its caller is what explains it. The crash handler's
+        // dump showed the abort frame only (and a 0xff stack), so scan the interrupted stack for
+        // module-shaped return addresses at delivery time (SIGABRT = 6).
+        if (thread.deliveries.size() > deliveries_before && thread.deliveries.back().sig == 6) {
+          owner->Log("signals: SIGABRT interrupted sp " + Hex(sp_before) + " stack: " +
+                     owner->StackWords(sp_before, 1024, 12));
+          // The abort's own words were written to guest fd 2 a few instructions earlier (Boehm GC's
+          // "pthread_kill failed at suspend: errcode= %d" is the one that matters here); a console no one
+          // reads leaves the SIGABRT without a cause.
+          const std::string& err = owner->monitor_->captured_stderr();
+          if (!err.empty()) {
+            std::string tail = err.size() > 400 ? err.substr(err.size() - 400) : err;
+            for (char& c : tail) {
+              if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+            }
+            owner->Log("signals: last guest stderr: \"" + tail + "\"");
+          }
+        }
       } else if (why.find("no signal is pending") == std::string::npos &&
                  why.find("is blocked in this thread's mask") == std::string::npos) {
         owner->Log("signals: not delivered — " + why);
       }
+    });
+    // A synchronous memory fault the guest has a SIGSEGV handler for is a signal, not a dead process. The
+    // kernel builds the frame on the faulting thread's stack with si_addr and resumes there; Mono's JIT
+    // relies on that delivery for every null check (a managed NullReferenceException IS this handler).
+    // A fault with no handler, a blocked SIGSEGV, one inside the handler, or a full delivery stack stays
+    // fatal, which is also what the kernel's default action does.
+    p->abi_->set_fault_deliver([owner](GuestThread& thread, const exec::RunResult& run) -> bool {
+      constexpr int kSigsegv = 11;
+      constexpr std::size_t kMaxNestedSignals = 8;
+      if (thread.deliveries.size() >= kMaxNestedSignals) return false;
+      if (!thread.deliveries.empty() && thread.deliveries.back().sig == kSigsegv) return false;  // a fault in the handler
+      if ((thread.signal_mask & (1ull << (kSigsegv - 1))) != 0) return false;
+      const syscall::Monitor::Disposition disp = owner->monitor_->disposition(kSigsegv);
+      if (!disp.catches()) return false;
+      const std::uint32_t interrupted_pc = thread.state.pc;
+      const int code = run.fault_write ? sigframe::kSegvAccerr : sigframe::kSegvMaperr;
+      std::string why;
+      if (!DeliverSignal(thread, *owner->mem_, disp, kSigsegv, nullptr, &why, code, run.fault_addr)) {
+        owner->Log("signals: SIGSEGV at " + Hex(run.fault_addr) + " not delivered — " + why);
+        return false;
+      }
+      owner->Log("signals: SIGSEGV at " + Hex(run.fault_addr) + " (" +
+                 (run.fault_write ? "write" : "read") + ", si_code " + std::to_string(code) +
+                 ") delivered to handler " + Hex(disp.handler) + "; interrupted pc " +
+                 Hex(interrupted_pc));
+      return true;
     });
   }
 
@@ -925,6 +971,28 @@ std::vector<std::string> GuestProcess::thread_faults() const {
   return thread_faults_;
 }
 
+std::string GuestProcess::StackWords(GuestAddr sp, std::size_t bytes, std::size_t max_frames) const {
+  std::string out;
+  std::size_t frames = 0;
+  for (std::size_t i = 0; i < bytes / 4 && frames < max_frames; ++i) {
+    std::uint32_t word = 0;
+    if (!mem_->Read(sp + static_cast<std::uint32_t>(i) * 4u, &word, 4)) break;
+    for (const auto& m : modules_) {
+      // `data_start` is the first writable PT_LOAD. A word at or above it is a data pointer (a vtable,
+      // a literal), not a return address; the scan names code only, so an abort's caller chain is not
+      // buried under pointers into the image's data segment.
+      if (m != nullptr && word >= m->base && word - m->base < m->extent &&
+          (m->data_start == 0 || word < m->data_start)) {
+        out += (out.empty() ? "" : " <- ") +
+               (m->soname.empty() ? m->path : m->soname) + "+" + Hex(word - m->base);
+        ++frames;
+        break;
+      }
+    }
+  }
+  return out;
+}
+
 std::vector<std::string> GuestProcess::StallReport() {
   const auto name = [this](GuestAddr a) {
     for (const auto& m : modules_) {
@@ -936,23 +1004,7 @@ std::vector<std::string> GuestProcess::StallReport() {
   };
   // Return addresses still on the thread's stack, named against the modules — a scan, not an unwind, the
   // same technique the fatal-stop report uses. It names the call chain that reached the wait.
-  const auto stack = [this, &name](const GuestThread& t) {
-    constexpr std::size_t kWindow = 512, kMaxFrames = 6;
-    std::string out;
-    std::size_t frames = 0;
-    for (std::size_t i = 0; i < kWindow / 4 && frames < kMaxFrames; ++i) {
-      std::uint32_t word = 0;
-      if (!mem_->Read(t.state.r[13] + static_cast<std::uint32_t>(i) * 4u, &word, 4)) break;
-      for (const auto& m : modules_) {
-        if (m != nullptr && word >= m->base && word - m->base < m->extent) {
-          out += (out.empty() ? "" : " <- ") + name(word);
-          ++frames;
-          break;
-        }
-      }
-    }
-    return out;
-  };
+  const auto stack = [this](const GuestThread& t) { return StackWords(t.state.r[13], 512, 6); };
   const auto one = [this, &name, &stack](const GuestThread& t, const char* kind, bool with_stack) {
     static const char* const kWaitNames[] = {"running", "futex", "sleep", "host(held GGL)",
                                              "host(GGL released)"};

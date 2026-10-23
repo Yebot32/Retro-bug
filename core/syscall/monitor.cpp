@@ -538,15 +538,20 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
       // the identical pair. The return value stays the kernel's 0, which is now also the truth: the signal is
       // pending.
       const bool queued = f.number == nr::kRtTgsigqueueinfo;
+      const bool tkill_form = f.number == nr::kTkill;  // tkill(tid, sig); the other two are (tgid, tid, sig[, info])
       const auto tgid = static_cast<std::int32_t>(f.arg[0]);
-      const auto tid = static_cast<std::int32_t>(queued ? f.arg[1] : f.arg[0]);
-      const auto sig = static_cast<std::int32_t>(queued ? f.arg[2] : f.arg[1]);
-      const char* what = queued ? "rt_tgsigqueueinfo" : (f.number == nr::kTkill ? "tkill" : "tgkill");
+      const auto tid = static_cast<std::int32_t>(tkill_form ? f.arg[0] : f.arg[1]);
+      const auto sig = static_cast<std::int32_t>(tkill_form ? f.arg[1] : f.arg[2]);
+      const char* what = queued ? "rt_tgsigqueueinfo" : (tkill_form ? "tkill" : "tgkill");
       const std::string call = std::string{what} + "(" +
-                               (f.number == nr::kTkill ? "" : std::to_string(tgid) + ", ") +
+                               (tkill_form ? "" : std::to_string(tgid) + ", ") +
                                std::to_string(tid) + ", " + std::to_string(sig) +
                                (queued ? ", &info" : "") + ")";
       if (sig < 0 || sig > 64) {
+        if (signal_trace_) {
+          signal_trace_("sig: " + call + " -> -EINVAL (-22): " + std::to_string(sig) +
+                        " is not a signal number on this ABI (0..64)");
+        }
         return Outcome::Answered(err::kEinval, call + " = -EINVAL (-22): " + std::to_string(sig) +
                                                    " is not a signal number on this ABI (0..64)");
       }

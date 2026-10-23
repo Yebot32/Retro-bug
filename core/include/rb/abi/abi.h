@@ -265,6 +265,10 @@ class AbiContext : public exec::HostDispatch {
   /// forever inside one JNI method, and the failure that produces is a hung UI, not an error message.
   /// Real apps make thousands of syscalls per *launch*; per call, this is generous.
   static constexpr unsigned kMaxSyscallsPerCall = 100'000u;
+  /// How many guest faults one call may turn into a SIGSEGV delivery before the loop is treated as
+  /// stuck. A handler that sigreturns to the faulting instruction without fixing it would otherwise
+  /// fault forever; real code faults a handful of times (a null check is one), so this is generous.
+  static constexpr unsigned kMaxFaultDeliveriesPerCall = 256u;
   /// The preemption slice: after this many units of executor progress under one hold of the GGL — guest
   /// instructions on Tier J, but IR steps on Tier I (its `Run` counts IR steps, not guest instructions, so a
   /// Tier I slice is a different number of guest instructions than a Tier J one) —
@@ -320,6 +324,13 @@ class AbiContext : public exec::HostDispatch {
   /// the GGL. Set once, at setup.
   using SignalDeliver = std::function<void(runtime::GuestThread& thread)>;
   void set_signal_deliver(SignalDeliver deliver) { signal_deliver_ = std::move(deliver); }
+  /// A guest fault that names an address: the runtime enters the guest's SIGSEGV handler with the fault
+  /// address (Mono's null-reference exception is built on that delivery) and returns true, so `RunThread`
+  /// resumes the thread at the handler instead of stopping it. False leaves the fault fatal, which is what
+  /// a process with SIG_DFL for SIGSEGV, a blocked signal, or a fault inside the handler itself gets.
+  /// Called under the GGL, on the faulting thread, with `run.detail` still describing the access.
+  using FaultDeliver = std::function<bool(runtime::GuestThread& thread, const exec::RunResult& run)>;
+  void set_fault_deliver(FaultDeliver deliver) { fault_deliver_ = std::move(deliver); }
   [[nodiscard]] syscall::Monitor* monitor() const { return monitor_; }
 
   /// Set when a call ended in `StopReason::Exited`; the status the guest passed to `exit_group`.
@@ -428,6 +439,7 @@ class AbiContext : public exec::HostDispatch {
   /// Diagnostics (M4 profiling): told the guest pc at every slice boundary, with the GGL held. Unset: nothing runs.
   std::function<void(std::uint32_t pc)> slice_probe_;
   SignalDeliver signal_deliver_;
+  FaultDeliver fault_deliver_;
   std::atomic<std::uint64_t> slices_{0};
   std::atomic<std::uint64_t> contended_slices_{0};
   GuestAddr slot_base_;

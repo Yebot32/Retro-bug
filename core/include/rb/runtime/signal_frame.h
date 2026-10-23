@@ -62,9 +62,18 @@ constexpr std::uint32_t kScPc = 72;
 constexpr std::uint32_t kScCpsr = 76;
 constexpr std::uint32_t kScFaultAddress = 80;
 
-/// siginfo_t: the two fields delivery fills (the rest is left as the zeroed gap it is).
+/// siginfo_t: the fields delivery fills (the rest is left as the zeroed gap it is). `si_code` and
+/// `si_addr` are filled only for a synchronous fault (SIGSEGV/SIGBUS), where the kernel supplies
+/// SEGV_MAPERR/SEGV_ACCERR and the faulting address; a handler that distinguishes a real fault from a
+/// sent signal reads them (Mono's null-reference handler does).
 constexpr std::uint32_t kSiSigno = 0;
 constexpr std::uint32_t kSiErrno = 4;
+constexpr std::uint32_t kSiCode = 8;
+constexpr std::uint32_t kSiAddr = 12;
+
+/// si_code values a synchronous memory fault carries (asm-generic/siginfo.h).
+constexpr int kSegvMaperr = 1;
+constexpr int kSegvAccerr = 2;
 
 /// `SA_SIGINFO` (asm-generic/signal-defs.h): the handler takes three arguments, not one.
 constexpr std::uint32_t kSaSiginfo = 0x00000004;
@@ -96,11 +105,17 @@ struct SignalDelivery {
 
 /// Builds the frame for `sig` on `t`'s guest stack and points the thread at `handler`.
 ///
+/// `fault_code` is a synchronous fault's si_code (SEGV_MAPERR/SEGV_ACCERR) and `fault_addr` its
+/// address, or 0 for a queued signal from tkill/tgkill, which carries no fault. A fault fills both
+/// siginfo's si_code/si_addr and the sigcontext's fault_address, as the kernel does, because a handler
+/// that decides whether a fault is its own reads them (Mono's does).
+///
 /// On success `t.state` is ready to run the handler and `*out` describes what must be restored when it
 /// returns through `rt_sigreturn`. Returns false with a named `why` when the frame cannot be placed (no
 /// stack room, an unmapped frame page, a handler of 0) — a refusal that names itself, never a silent skip.
 [[nodiscard]] bool DeliverSignal(GuestThread& t, mem::GuestMemory& mem, const syscall::Monitor::Disposition& disp,
-                                 int sig, SignalDelivery* out, std::string* why);
+                                 int sig, SignalDelivery* out, std::string* why, int fault_code = 0,
+                                 std::uint32_t fault_addr = 0);
 
 /// Undoes the innermost delivery: restores the register file that handler interrupted, as the kernel's
 /// `rt_sigreturn` does, and pops the thread's delivery stack (so an outer handler resumes if one is

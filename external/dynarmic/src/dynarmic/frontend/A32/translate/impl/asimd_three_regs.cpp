@@ -27,6 +27,45 @@ enum class WidenBehaviour {
     Both,
 };
 
+enum class NarrowingOperation {
+    Add,
+    Sub,
+};
+
+/// VADDHN/VRADDHN/VSUBHN/VRSUBHN: add or subtract the source lanes at twice the destination's
+/// element width, optionally add the rounding constant, shift right by the result width, and narrow.
+/// The destination is a D register and the sources are Q registers, so the narrowing happens after
+/// both sources are read (Vd may alias their high halves; the architecture calls that UNPREDICTABLE,
+/// and every implementation, including the devices this engine targets, reads first and writes after).
+template<bool Round>
+bool HighNarrowingInstruction(TranslatorVisitor& v, bool D, size_t sz, size_t Vn, size_t Vd, bool N, bool M,
+                              size_t Vm, NarrowingOperation op) {
+    if (sz == 0b11) {
+        return v.UndefinedInstruction();
+    }
+
+    const size_t esize = 8U << sz;
+    const size_t doubled_esize = 2 * esize;
+
+    const auto d = ToVector(false, Vd, D);
+    const auto n = ToVector(true, Vn, N);
+    const auto m = ToVector(true, Vm, M);
+
+    const IR::U128 reg_n = v.ir.GetVector(n);
+    const IR::U128 reg_m = v.ir.GetVector(m);
+    IR::U128 wide = op == NarrowingOperation::Add ? v.ir.VectorAdd(doubled_esize, reg_n, reg_m)
+                                                  : v.ir.VectorSub(doubled_esize, reg_n, reg_m);
+    if constexpr (Round) {
+        wide = v.ir.VectorAdd(doubled_esize, wide,
+                              v.ir.VectorBroadcast(doubled_esize, v.I(doubled_esize, 1ULL << (esize - 1))));
+    }
+
+    const IR::U128 result = v.ir.VectorNarrow(
+        doubled_esize, v.ir.VectorLogicalShiftRight(doubled_esize, wide, static_cast<u8>(esize)));
+    v.ir.SetVector(d, result);
+    return true;
+}
+
 template<bool WithDst, typename Callable>
 bool BitwiseInstruction(TranslatorVisitor& v, bool D, size_t Vn, size_t Vd, bool N, bool Q, bool M, size_t Vm, Callable fn) {
     if (Q && (mcl::bit::get_bit<0>(Vd) || mcl::bit::get_bit<0>(Vn) || mcl::bit::get_bit<0>(Vm))) {
@@ -909,6 +948,22 @@ bool TranslatorVisitor::asimd_VSUBL(bool U, bool D, size_t sz, size_t Vn, size_t
     return WideInstruction(*this, U, D, sz, Vn, Vd, N, M, Vm, op ? WidenBehaviour::Second : WidenBehaviour::Both, [this](size_t esize, const auto&, const auto& reg_n, const auto& reg_m) {
         return ir.VectorSub(esize, reg_n, reg_m);
     });
+}
+
+bool TranslatorVisitor::asimd_VADDHN(bool D, size_t sz, size_t Vn, size_t Vd, bool N, bool M, size_t Vm) {
+    return HighNarrowingInstruction<false>(*this, D, sz, Vn, Vd, N, M, Vm, NarrowingOperation::Add);
+}
+
+bool TranslatorVisitor::asimd_VRADDHN(bool D, size_t sz, size_t Vn, size_t Vd, bool N, bool M, size_t Vm) {
+    return HighNarrowingInstruction<true>(*this, D, sz, Vn, Vd, N, M, Vm, NarrowingOperation::Add);
+}
+
+bool TranslatorVisitor::asimd_VSUBHN(bool D, size_t sz, size_t Vn, size_t Vd, bool N, bool M, size_t Vm) {
+    return HighNarrowingInstruction<false>(*this, D, sz, Vn, Vd, N, M, Vm, NarrowingOperation::Sub);
+}
+
+bool TranslatorVisitor::asimd_VRSUBHN(bool D, size_t sz, size_t Vn, size_t Vd, bool N, bool M, size_t Vm) {
+    return HighNarrowingInstruction<true>(*this, D, sz, Vn, Vd, N, M, Vm, NarrowingOperation::Sub);
 }
 
 bool TranslatorVisitor::asimd_VABAL(bool U, bool D, size_t sz, size_t Vn, size_t Vd, bool N, bool M, size_t Vm) {

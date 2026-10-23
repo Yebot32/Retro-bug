@@ -171,6 +171,14 @@ struct RunResult {
   StopReason reason = StopReason::Budget;
   /// Op name or address involved, for `Unimplemented`/`Fault`. Empty otherwise.
   std::string detail;
+  /// Meaningful only for `Fault`: the guest address whose access failed, whether that fault has a named
+  /// address at all, and whether it was a write. A monitored process delivers such a fault to the guest's
+  /// SIGSEGV handler with `fault_addr` as `si_addr` (Mono's null-reference handling is built on that
+  /// delivery). Zero is a real address (a null dereference), so `fault_has_addr` — not the address —
+  /// says whether these are set. A fetch fault names its pc; `fault_write` is false for it.
+  std::uint32_t fault_addr = 0;
+  bool fault_has_addr = false;
+  bool fault_write = false;
   /// Work done against `max_instructions`, and **the tiers count different things**: Tier I advances
   /// per Dynarmic IR operation, Tier J per guest instruction (Dynarmic's cycle counting, one tick per
   /// fetched encoding). Two tiers that agree on state are not two tiers that agree on a unit, and an

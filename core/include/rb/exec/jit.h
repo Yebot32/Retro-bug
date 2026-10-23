@@ -209,6 +209,18 @@ class JitExecutor : public Executor, public Dynarmic::A32::UserCallbacks {
     if (!detail.empty()) pending_detail_ = std::move(detail);
   }
 
+  /// A guest access that could not be completed, with the address a SIGSEGV handler is entitled to as
+  /// `si_addr`. First stop wins, like SetPending: a later callback from Dynarmic's cleanup must not
+  /// replace the access that actually faulted.
+  void SetFault(std::string detail, GuestAddr addr, bool write) {
+    if (pending_ != Pending::None) return;
+    pending_ = Pending::Fault;
+    pending_detail_ = std::move(detail);
+    pending_fault_addr_ = addr;
+    pending_fault_has_addr_ = true;
+    pending_fault_write_ = write;
+  }
+
   /**
    * True when `pc` is a non-code destination this tier must surface rather than execute: the call
    * sentinel, or a host entry point. Called from *both* the code-read path and the fetch-fault path,
@@ -282,6 +294,9 @@ class JitExecutor : public Executor, public Dynarmic::A32::UserCallbacks {
   std::uint32_t pending_slot_ = 0;
   std::uint32_t pending_svc_ = 0;  ///< the SVC immediate, when `pending_` is `Syscall`
   GuestAddr pending_pc_ = 0;  ///< the address that caused the stop, before Dynarmic advanced past it
+  GuestAddr pending_fault_addr_ = 0;
+  bool pending_fault_has_addr_ = false;
+  bool pending_fault_write_ = false;
 };
 
 }  // namespace rb::exec

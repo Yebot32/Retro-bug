@@ -40,7 +40,7 @@ bool Put(mem::GuestMemory& mem, std::uint32_t at, const void* src, std::size_t l
 }  // namespace
 
 bool DeliverSignal(GuestThread& t, mem::GuestMemory& mem, const syscall::Monitor::Disposition& disp, int sig,
-                   SignalDelivery* out, std::string* why) {
+                   SignalDelivery* out, std::string* why, int fault_code, std::uint32_t fault_addr) {
   if (disp.handler <= 1) {
     *why = "signal " + std::to_string(sig) + " has no handler installed (the disposition is " +
            (disp.handler == 0 ? "SIG_DFL" : "SIG_IGN") + "), so there is nothing to enter";
@@ -101,11 +101,13 @@ bool DeliverSignal(GuestThread& t, mem::GuestMemory& mem, const syscall::Monitor
     return Put(mem, at, &v, 4, frame, &werr);
   };
 
-  // ---- siginfo_t. Only the two fields a handler is entitled to are filled: the signal it got and a zero
-  // errno. Nothing in the games read si_pid/si_code back, and inventing them would be a plausible wrong
-  // answer where a zero is an honest gap (the project's posture for every unanswered fact).
+  // ---- siginfo_t. The signal it got and a zero errno are always filled. A synchronous fault also fills
+  // si_code and si_addr: a handler that has to tell its own fault from a sent signal reads them, and Mono's
+  // SIGSEGV handler throws NullReferenceException from exactly that decision. Nothing invents si_pid.
   if (!Put32(info + sf::kSiSigno, static_cast<std::uint32_t>(sig)) ||
-      !Put32(info + sf::kSiErrno, 0)) {
+      !Put32(info + sf::kSiErrno, 0) ||
+      (fault_code != 0 && (!Put32(info + sf::kSiCode, static_cast<std::uint32_t>(fault_code)) ||
+                           !Put32(info + sf::kSiAddr, fault_addr)))) {
     *why = "signal " + std::to_string(sig) + ": " + werr;
     return false;
   }
@@ -129,7 +131,7 @@ bool DeliverSignal(GuestThread& t, mem::GuestMemory& mem, const syscall::Monitor
   }
   ok = ok && PutSc(sf::kScSp, t.state.r[13]) && PutSc(sf::kScLr, t.state.r[14]) &&
        PutSc(sf::kScPc, t.state.pc) && PutSc(sf::kScCpsr, t.state.cpsr) &&
-       PutSc(sf::kScFaultAddress, 0);
+       PutSc(sf::kScFaultAddress, fault_code != 0 ? fault_addr : 0);
   if (!ok) {
     *why = "signal " + std::to_string(sig) + ": " + werr;
     return false;

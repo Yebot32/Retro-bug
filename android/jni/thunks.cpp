@@ -86,6 +86,10 @@ const std::map<std::string, ThunkEntry>& Table() {
     add(kGl3, {
         {"glReadBuffer", "v:u"}, {"glDrawRangeElements", "v:uuuiuo"}, {"glTexImage3D", "v:uiiiiiiuuo"},
         {"glTexSubImage3D", "v:uiiiiiiiuuo"}, {"glCopyTexSubImage3D", "v:uiiiiiiii"},
+        // Unity probes the OES_spelled 3D entry points through eglGetProcAddress and stores the answer in its GLES
+        // device, then calls that slot without a null check. The core names above are the same functions: on GLES2
+        // (where OES_texture_3D is the extension) the device exposes them under these names only.
+        {"glTexImage3DOES", "v:uiiiiiiuuo"}, {"glTexSubImage3DOES", "v:uiiiiiiiuuo"},
         {"glCompressedTexImage3D", "v:uiuiiiiio"}, {"glCompressedTexSubImage3D", "v:uiiiiiiiuio"},
         {"glGenQueries", "v:ip"}, {"glDeleteQueries", "v:ip"}, {"glIsQuery", "u:u"}, {"glBeginQuery", "v:uu"},
         {"glEndQuery", "v:u"}, {"glGetQueryiv", "v:uup"}, {"glGetQueryObjectuiv", "v:uup"},

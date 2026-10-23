@@ -195,6 +195,9 @@ class GuestProcess {
   /// first (a Java thread calling native is where a stuck game is usually stuck). Reads guest state without
   /// the GGL: it is only taken when the process is stalled, and it is a report, not control flow.
   [[nodiscard]] std::vector<std::string> StallReport();
+  /// Names the module-shaped words in the first `bytes` above `sp` (a scan, not an unwind), at most
+  /// `max_frames`. The stall report uses it, and a SIGABRT delivery logs it to name an abort's caller.
+  [[nodiscard]] std::string StackWords(GuestAddr sp, std::size_t bytes, std::size_t max_frames = 12) const;
   /// The budget one `RunThread` turn of a `clone`d thread gets (it is re-entered until the thread exits).
   static constexpr unsigned kThreadTurnBudget = 1u << 30;
 

@@ -531,6 +531,7 @@ exec::RunResult AbiContext::RunThread(runtime::GuestThread& thread, unsigned bud
     return true;
   };
   unsigned syscalls = 0;
+  unsigned fault_deliveries = 0;
   for (;;) {
     // `exit_group` on another thread (or a fatal fault in one, or the process's teardown) ends this one too: it
     // stops here, at its next slice boundary, syscall or host call, instead of running guest code in a process
@@ -565,6 +566,21 @@ exec::RunResult AbiContext::RunThread(runtime::GuestThread& thread, unsigned bud
       // A slice ran out (go round: the top of the loop releases the lock) or the whole call's budget did.
       if (remaining == 0 || done == 0) break;
       continue;
+    }
+    if (run.reason == exec::StopReason::Fault && run.fault_has_addr && fault_deliver_ &&
+        ++fault_deliveries <= kMaxFaultDeliveriesPerCall) {
+      // A synchronous fault the guest has a handler for is a signal, not a dead thread: build the
+      // SIGSEGV frame on the guest stack (si_addr = the faulting access) and resume at the handler.
+      // Mono throws NullReferenceException from inside this handler; without the delivery any null in
+      // JIT-compiled managed code killed the whole process (Cars 3, 2026-10-20).
+      if (fault_deliver_(thread, run)) {
+        if (remaining == 0) {
+          run.reason = exec::StopReason::Budget;
+          run.detail = "a fault was delivered as SIGSEGV at the call budget boundary";
+          break;
+        }
+        continue;
+      }
     }
     if (run.reason == exec::StopReason::Syscall) {
       // The tier stops with PC already past the instruction and the number in `svc_number`, which is the
