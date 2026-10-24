@@ -218,10 +218,6 @@ class GuestProcess {
   /// Adopted threads whose host thread has not exited yet, and adoptions ever made.
   [[nodiscard]] std::size_t adopted_threads() const;
   [[nodiscard]] std::size_t threads_adopted() const { return threads_adopted_.load(std::memory_order_relaxed); }
-  /// The Linux tid of the host thread bound to guest thread `guest_tid`, or 0 when nothing is bound to it. For
-  /// the Java APIs that take a tid: the guest's tids are the engine's, and ART only knows the host's. Reads the
-  /// `clone`d thread list under its leaf mutex and never takes the GGL, so a host slot can call it.
-  [[nodiscard]] std::int32_t HostTidOf(std::int32_t guest_tid) const;
   /// One named line per adopted thread whose exit did not go cleanly: a TLS-key destructor that faulted or was
   /// refused part-way, an unlink that did not happen. The process carries on (copied under the GGL).
   [[nodiscard]] std::vector<std::string> adoption_faults() const;

@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -37,6 +38,22 @@ struct HostState {
 
 thread_local HostState* tls_state = nullptr;
 
+/// Guest tid -> the bound host thread's Linux tid, for the Java APIs that take one. Written at bind, erased
+/// when the binding ends (or the GuestThread dies), so a dead tid never maps onto a recycled host tid. A leaf
+/// mutex: held only for the map operation, never across guest code and never while waiting for the GGL.
+std::mutex g_tid_mu;
+std::unordered_map<std::int32_t, std::int32_t> g_tids;
+
+void PublishHostTid(std::int32_t guest_tid, std::int32_t host_tid) {
+  std::lock_guard<std::mutex> lk(g_tid_mu);
+  g_tids[guest_tid] = host_tid;
+}
+
+void RetractHostTid(std::int32_t guest_tid) {
+  std::lock_guard<std::mutex> lk(g_tid_mu);
+  g_tids.erase(guest_tid);
+}
+
 void ReleaseBinding(HostState& s, std::thread::id me) {
   if (!s.binding) return;
   {
@@ -44,6 +61,8 @@ void ReleaseBinding(HostState& s, std::thread::id me) {
     if (GuestThread* t = s.binding->thread.load(std::memory_order_acquire)) {
       std::thread::id expected = me;
       t->host.compare_exchange_strong(expected, std::thread::id{}, std::memory_order_acq_rel);
+      // Retracted while this host still owns the binding: a thread that binds `t` after us publishes its own.
+      RetractHostTid(t->tid);
       s.binding->thread.store(nullptr, std::memory_order_release);
     }
   }
@@ -87,6 +106,7 @@ HostState& State() {
 }  // namespace
 
 GuestThread::~GuestThread() {
+  RetractHostTid(tid);
   if (binding_) {
     std::lock_guard<std::mutex> lk(binding_->mu);
     GuestThread* self = this;
@@ -108,7 +128,9 @@ bool BindCurrentHostThread(GuestThread& t) {
   }
   // The host's Linux tid, for the Java APIs that take one: a guest tid is ours, and ART answers
   // "Given thread N does not exist" when the guest hands it one (Unity's Process.setThreadPriority does).
-  t.host_tid.store(static_cast<std::int32_t>(::gettid()), std::memory_order_release);
+  const std::int32_t host_tid = static_cast<std::int32_t>(::gettid());
+  t.host_tid.store(host_tid, std::memory_order_release);
+  PublishHostTid(t.tid, host_tid);
   HostState& s = State();
   if (s.binding && s.binding->thread.load(std::memory_order_acquire) == &t) return true;
   ReleaseBinding(s, me);  // this host thread's previous GuestThread, if any, is now free
@@ -128,5 +150,12 @@ bool BoundHere(const GuestThread& t) {
 }
 
 void AddHostThreadExitHook(std::function<void()> hook) { State().exit_hooks.push_back(std::move(hook)); }
+
+std::int32_t HostTidOfGuest(std::int32_t guest_tid) {
+  if (guest_tid == 0) return 0;
+  std::lock_guard<std::mutex> lk(g_tid_mu);
+  const auto it = g_tids.find(guest_tid);
+  return it != g_tids.end() ? it->second : 0;
+}
 
 }  // namespace rb::runtime

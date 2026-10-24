@@ -130,6 +130,11 @@ struct GuestThread {
 /// The guest thread the calling host thread is bound to, or null.
 GuestThread* CurrentGuestThread();
 
+/// The Linux tid of the host thread bound to guest thread `guest_tid`, or 0 when none is bound. For the Java
+/// APIs that take a tid (ART only knows the host's). Covers clone'd and adopted threads; a binding that ended
+/// leaves no mapping, so a dead guest tid cannot name a recycled host tid.
+std::int32_t HostTidOfGuest(std::int32_t guest_tid);
+
 /// Binds the calling host thread to `t` (and `t` to it): guest calls made from this host thread run on `t`'s
 /// registers and per-thread kernel state. The host thread's previous binding (to another GuestThread) is
 /// released. False, changing nothing, when `t` is bound to another live host thread.

@@ -458,11 +458,9 @@ bool BootBridge(Runtime& rt, std::string* out) {
     return p.MapFree(bytes, rb::mem::kRead | rb::mem::kWrite, e);
   });
   // Java's thread APIs take a Linux tid; the guest's tids are the engine's, so `Process.setThreadPriority` on
-  // a guest thread throws "Given thread N does not exist". Resolve through the process's thread table instead.
-  rb::abi::ForwardingJni::SetGuestTidResolver([](std::int32_t guest_tid) {
-    rb::runtime::GuestProcess* proc = R().proc.get();
-    return proc != nullptr ? proc->HostTidOf(guest_tid) : 0;
-  });
+  // a guest thread throws "Given thread N does not exist". Resolve through the thread-bound tid map instead.
+  rb::abi::ForwardingJni::SetGuestTidResolver(
+      [](std::int32_t guest_tid) { return rb::runtime::HostTidOfGuest(guest_tid); });
   rt.inbound = std::make_unique<rb::runtime::Inbound>(p, *rt.fwd, *rt.java, Tier());
   rt.fwd->set_native_binder([](rb::exec::GuestAddr fn, const std::string& name, const std::string& sig, std::string* e) -> void* {
     const std::string shorty = rb::runtime::ShortyOf(sig);

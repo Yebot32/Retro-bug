@@ -1422,17 +1422,4 @@ std::size_t GuestProcess::adopted_threads() const {
   return adopted_.size();
 }
 
-std::int32_t GuestProcess::HostTidOf(std::int32_t guest_tid) const {
-  if (guest_tid == 0) return 0;
-  const GuestThread& main = abi_->main_thread();
-  if (main.tid == guest_tid) return main.host_tid.load(std::memory_order_acquire);
-  std::lock_guard<std::mutex> lk(threads_mu_);
-  for (const auto& rec : threads_) {
-    if (rec->guest != nullptr && rec->guest->tid == guest_tid) {
-      return rec->guest->host_tid.load(std::memory_order_acquire);
-    }
-  }
-  return 0;
-}
-
 }  // namespace rb::runtime
