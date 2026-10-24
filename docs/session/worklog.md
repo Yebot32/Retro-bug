@@ -511,3 +511,27 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
   `android.os.Process.setThreadPriority` (and neighbours) in `ForwardingJni`; (3) re-check whether the
   black frame content is the game's own loading screen (spinner) or an empty scene — sample the guest's
   framebuffer content rather than the composited screen.
+
+### 2026-10-24 (later) — C46's root cause found: the Java thread APIs were given guest tids
+- **The fix:** `android.os.Process.setThreadPriority(<tid>)` is called by `UnityPlayer.nativeRender` with a
+  **guest** tid; ART resolves host tids and threw `IllegalArgumentException: Given thread 4246 does not
+  exist` on every call (135 in the first second). The pending exception left `nativeRender` half-run and the
+  engine's main thread parked in an il2cpp condvar nobody could wake. `ForwardingJni` now resolves the two
+  `setThreadPriority` overloads once and rewrites the tid argument through a new
+  `GuestProcess::HostTidOf()` (guest tid -> the bound host thread's Linux tid, set in
+  `BindCurrentHostThread`). Unknown ids are passed through unchanged, so ART's own answer stays honest.
+- **Result on the tablet (engine baked into each repack):**
+  - **TT2**: past the freeze — consent screen, then the city intro scene at ~53 M guest instr/s
+    (`build/m5/com.turner.ttgfigures2/tt2-tid.png`, `tt2-tid2..6.png`).
+  - **CD2**: past the GDPR dialog to the Google Play Games profile picker (cancelled — no account action),
+    its own rating dialog, then **the main menu and the "Welcome Back / enter your name" onboarding**
+    (`build/m5/com.spilgames.a10.google.crashdrive2/c46-cd2e.png`, `c46-cd2-menu.png`).
+  - **ABE**: publisher/title screen with its 3D background and its own data-consent dialog
+    (`build/m5/com.rovio.gold/c46-abe.png`). Taps did not dismiss that dialog in this run (input path for
+    this title still to check).
+  - **Rolling Sky**: no longer stalls — it now **crashes in `AppActivity.onCreate`** with
+    `SecurityException: opening provider com.turbochilli.rollingsky.ipc.IpcProvider ... not exported from
+    UID 10576`: the `.rb` copy calls the *original* install's provider by its hard-coded authority. That is
+    a packaging/provider issue (new backlog item C47), not C46.
+- `IllegalArgumentException` count on TT2 after the fix: **3** (down from 135) — the remainder are tids the
+  clone table does not hold when the call is made (adopted threads), left for a follow-up.

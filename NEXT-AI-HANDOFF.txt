@@ -6,6 +6,28 @@ says where we are and what is next. Read this, then the tail of docs/session/wor
 then docs/session/backlog.md (statuses are current as of now).
 
 
+1c. 2026-10-24 (later) — C46 FIXED: Java thread APIs were given guest tids
+-----------------------------------------------------------------------
+- **Root cause:** `UnityPlayer.nativeRender` calls `android.os.Process.setThreadPriority(<tid>)` with a
+  **guest** tid (Unity got it from `gettid()`). ART resolves *host* tids, so every call threw
+  `IllegalArgumentException: Given thread N does not exist` (135 in the first second on TT2). The pending
+  exception left nativeRender half-run and the engine's main thread parked in an il2cpp condvar that
+  nothing could wake — the "shared Unity startup convvar" C46.
+- **Fix:** guest threads carry their bound host's Linux tid (`GuestThread::host_tid`, set in
+  `BindCurrentHostThread`); `GuestProcess::HostTidOf()` maps guest -> host; `ForwardingJni` resolves
+  `Process.setThreadPriority`'s two overloads once and rewrites the tid argument (unknown ids pass through
+  untouched). Resolver installed once in `BootBridge`.
+- **Verified on the tablet (each repack carries the engine):** TT2 consent screen works, city intro runs at
+  ~53 M guest instr/s; CD2 reaches its main menu + "Welcome Back / enter your name"; ABE renders its title
+  and data-consent dialog; Rolling Sky no longer stalls but now exits on an unrelated provider-permission
+  crash (C47).
+- **Watch out:** ABE did not accept injected taps on its consent dialog (C48); verify with a second run
+  before diagnosing. Rolling Sky's `.rb` copy calls the original install's non-exported
+  `IpcProvider` (C47).
+- Engine gate re-run after the change: see `build/gate-*.log` / `/tmp/engine-tests2.log` in-session;
+  all suites 0 failures.
+
+
 1b. 2026-10-24 — C46 is not a deadlock; the stall meter was lying
 -----------------------------------------------------------------
 - **The "no guest instruction retired in 10 s" stall was a false positive.** Unity's render loop calls
