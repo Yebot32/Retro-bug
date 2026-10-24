@@ -25,6 +25,12 @@ std::atomic<int>& TraceBudget() {
   return budget;
 }
 
+/// The guest-tid resolver (see ForwardingJni::SetGuestTidResolver): set once at boot before guest threads run.
+std::function<std::int32_t(std::int32_t)>& GuestTidResolver() {
+  static std::function<std::int32_t(std::int32_t)> resolver;
+  return resolver;
+}
+
 std::string Hex(std::uint32_t v) {
   char buf[16];
   std::snprintf(buf, sizeof buf, "0x%x", v);
@@ -620,6 +626,21 @@ bool ForwardingJni::CallFamily(std::uint32_t i, exec::MachineState& s, std::stri
            "' family";
     return false;
   }
+  // android.os.Process.setThreadPriority takes the Linux tid of the thread to change. The guest's tids are the
+  // engine's (a clone's tid is not its host thread's), so ART answers IllegalArgumentException ("Given thread
+  // N does not exist") for every call Unity makes for its render thread. Translate the tid to the bound host
+  // thread's; an id nothing is bound to is left alone, so ART's own answer stays the honest one.
+  if (is_static && rec.id != 0 && rec.name.rfind("setThreadPriority(", 0) == 0) {
+    EnsureProcessPriorityIds();
+    if (rec.id == process_priority_1_ || rec.id == process_priority_2_) {
+      std::uint32_t guest_tid = 0;
+      if (fixed < 4 && jni::ArgWord(s, memory_, fixed, &guest_tid)) {
+        const auto& resolve = GuestTidResolver();
+        const std::int32_t host = resolve ? resolve(static_cast<std::int32_t>(guest_tid)) : 0;
+        if (host != 0) s.r[fixed] = static_cast<std::uint32_t>(host);
+      }
+    }
+  }
   std::vector<std::uint64_t> args;
   if (!jni::DecodeArgs(s, memory_, form, rec.params, fixed, &args, err)) {
     *err = rec.name + ": " + *err;
@@ -1013,6 +1034,30 @@ void ForwardingJni::SetCallTrace(CallTrace trace, int budget) {
   TraceHook() = std::move(trace);
   // Release: the hook is written first, so a thread that sees a non-zero budget also sees the hook.
   TraceBudget().store(budget, std::memory_order_release);
+}
+
+void ForwardingJni::SetGuestTidResolver(GuestTidResolver resolver) {
+  GuestTidResolver() = std::move(resolver);
+}
+
+void ForwardingJni::EnsureProcessPriorityIds() {
+  // android.os.Process is a boot class, so this resolves from any attached thread; the ids are stable for the
+  // VM's lifetime. The lookup is only ever made for a call already named `setThreadPriority` (so a stranger's
+  // bridge state is untouched), and it never clears a pending exception it did not raise: if the guest has one,
+  // the lookup waits for a later call.
+  std::lock_guard<std::mutex> lk(process_ids_mu_);
+  if (process_ids_ready_) return;
+  if (java_.ExceptionCheck()) return;
+  const HostRef cls = java_.FindClass("android/os/Process");
+  if (cls == 0) {
+    if (java_.ExceptionCheck()) java_.ExceptionClear();  // our own lookup raised it
+    return;
+  }
+  process_priority_1_ = java_.GetMethodID(cls, "setThreadPriority", "(I)V", true);
+  process_priority_2_ = java_.GetMethodID(cls, "setThreadPriority", "(II)V", true);
+  if (java_.ExceptionCheck()) java_.ExceptionClear();
+  java_.DeleteLocalRef(cls);
+  process_ids_ready_ = process_priority_1_ != 0 || process_priority_2_ != 0;
 }
 
 void ForwardingJni::Note(const std::string& note) {

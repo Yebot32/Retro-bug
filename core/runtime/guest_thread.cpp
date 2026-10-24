@@ -13,6 +13,7 @@
 #include "rb/runtime/guest_thread.h"
 
 #include <pthread.h>
+#include <unistd.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -105,6 +106,9 @@ bool BindCurrentHostThread(GuestThread& t) {
   if (!t.host.compare_exchange_strong(expected, me, std::memory_order_acq_rel) && expected != me) {
     return false;  // bound to another live host thread: never stolen (ruling b)
   }
+  // The host's Linux tid, for the Java APIs that take one: a guest tid is ours, and ART answers
+  // "Given thread N does not exist" when the guest hands it one (Unity's Process.setThreadPriority does).
+  t.host_tid.store(static_cast<std::int32_t>(::gettid()), std::memory_order_release);
   HostState& s = State();
   if (s.binding && s.binding->thread.load(std::memory_order_acquire) == &t) return true;
   ReleaseBinding(s, me);  // this host thread's previous GuestThread, if any, is now free

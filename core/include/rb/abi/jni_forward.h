@@ -69,6 +69,11 @@ class ForwardingJni {
   using CallTrace = std::function<void(const std::string& line)>;
   static void SetCallTrace(CallTrace trace, int budget);
 
+  /// Guest tid -> the Linux tid of the host thread bound to it (0 when nothing is bound). Set once at boot:
+  /// `android.os.Process.setThreadPriority` is given a Linux tid, and the guest's tids are the engine's.
+  using GuestTidResolver = std::function<std::int32_t(std::int32_t guest_tid)>;
+  static void SetGuestTidResolver(GuestTidResolver resolver);
+
   /// A real local reference made into a guest local in the calling thread's current frame (0 stays 0).
   GuestAddr ToGuestLocal(HostRef r, std::string* err = nullptr);
   /// The real reference behind a guest handle (0 for null), or 0 with `err` set when it is not a live handle
@@ -140,6 +145,8 @@ class ForwardingJni {
   };
 
   bool Slot(std::uint32_t index, exec::MachineState& s, std::string* err);
+  /// Resolves `android.os.Process.setThreadPriority`'s two ids once (guest-tid translation, see SetGuestTidResolver).
+  void EnsureProcessPriorityIds();
   LocalTable* Locals(std::string* err);
   GuestAddr ClassHandle(HostRef cls_local, bool delete_local, std::string* err);
   GuestAddr IdHandle(HostId id, bool is_field, bool is_static, const std::string& name, const std::string& sig,
@@ -177,6 +184,12 @@ class ForwardingJni {
   static constexpr std::uint32_t kVmOffset = 0x400;  ///< the JavaVM word; its table follows at +0x10
   static constexpr std::uint32_t kVmEntries = 8;
   static constexpr std::size_t kMaxNotes = 64;
+
+  /// `android.os.Process.setThreadPriority`'s ids, resolved once: the calls whose tid is translated.
+  HostId process_priority_1_ = 0;
+  HostId process_priority_2_ = 0;
+  std::mutex process_ids_mu_;
+  bool process_ids_ready_ = false;
 
   mem::GuestMemory& memory_;
   AbiContext& abi_;

@@ -118,6 +118,9 @@ struct GuestThread {
   const void* owner = nullptr;
   /// The host thread this guest thread is bound to (default id = none).
   std::atomic<std::thread::id> host{};
+  /// The bound host thread's Linux tid, set at binding. Java thread APIs take a Linux tid and the guest's is
+  /// ours, so the bridge translates guest tids through this when the guest hands one to ART.
+  std::atomic<std::int32_t> host_tid{0};
 
  private:
   friend bool BindCurrentHostThread(GuestThread&);
