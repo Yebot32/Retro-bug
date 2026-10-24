@@ -102,4 +102,125 @@ final class DexScanner {
         }
         return sb.toString();
     }
+
+    /** True when some string in the pool contains {@code part} (an authority a game names by literal). */
+    static boolean containsStringPart(byte[] dex, String part) throws IOException {
+        if (dex.length < 0x70 || dex[0] != 'd' || dex[1] != 'e' || dex[2] != 'x' || dex[3] != '\n')
+            throw new IOException("not a DEX file (no \"dex\\n\" magic)");
+        try {
+            int nStr = s32(dex, 0x38), strOff = s32(dex, 0x3c);
+            for (int i = 0; i < nStr; i++) {
+                int data = s32(dex, strOff + 4 * i);
+                if (data < 0 || data >= dex.length) throw new IOException("string_id " + i + " points outside the file");
+                if (string(dex, data).contains(part)) return true;
+            }
+            return false;
+        } catch (IndexOutOfBoundsException ex) {
+            throw new IOException("DEX malformed: " + ex, ex);
+        }
+    }
+
+    /**
+     * Rewrites every string in the pool that contains {@code find}, substituting {@code replace}, and returns how
+     * many were rewritten. The string table is length-prefixed, so this works in place only: a rewritten string
+     * that would not fit the record it lives in is left alone (the count then does not include it). ASCII text
+     * throughout — an authority is a URI host, never anything else.
+     */
+    static int replaceStringPart(byte[] dex, String find, String replace) throws IOException {
+        if (!canReplaceInPlace(dex, find, replace)) return 0;
+        int replaced = 0;
+        int nStr = s32(dex, 0x38), strOff = s32(dex, 0x3c);
+        for (int i = 0; i < nStr; i++) {
+            int data = s32(dex, strOff + 4 * i);
+            String s = string(dex, data);
+            if (!s.contains(find)) continue;
+            int lenBytes = ulebSize(dex, data);
+            byte[] text = mutf8(s.replace(find, replace));
+            System.arraycopy(text, 0, dex, data + lenBytes, text.length);   // same length: the record is reused
+            replaced++;
+        }
+        return replaced;
+    }
+
+    /**
+     * True when every string containing {@code find} can take {@code replace} in place: the result must be the same
+     * byte length (the string table is length-prefixed and its records are packed; a shorter one would leave bytes
+     * the verifier rejects, a longer one would run into the next record) and must not disturb the table's ordering —
+     * {@code string_ids} are sorted by content and ART verifies that.
+     */
+    static boolean canReplaceInPlace(byte[] dex, String find, String replace) throws IOException {
+        if (dex.length < 0x70 || dex[0] != 'd' || dex[1] != 'e' || dex[2] != 'x' || dex[3] != '\n')
+            throw new IOException("not a DEX file (no \"dex\\n\" magic)");
+        if (find.isEmpty()) return false;
+        try {
+            int nStr = s32(dex, 0x38), strOff = s32(dex, 0x3c);
+            boolean any = false;
+            for (int i = 0; i < nStr; i++) {
+                int data = s32(dex, strOff + 4 * i);
+                if (data < 0 || data >= dex.length) throw new IOException("string_id " + i + " points outside the file");
+                String s = string(dex, data);
+                if (!s.contains(find)) continue;
+                String neu = s.replace(find, replace);
+                byte[] text = mutf8(neu);
+                if (text == null || text.length != s.length()) return false;
+                if (i > 0 && string(dex, s32(dex, strOff + 4 * (i - 1))).compareTo(neu) >= 0) return false;
+                if (i + 1 < nStr && string(dex, s32(dex, strOff + 4 * (i + 1))).compareTo(neu) <= 0) return false;
+                any = true;
+            }
+            return any;
+        } catch (IndexOutOfBoundsException ex) {
+            throw new IOException("DEX malformed: " + ex, ex);
+        }
+    }
+
+    /** How many bytes the uleb128 prefix at {@code p} takes. */
+    private static int ulebSize(byte[] b, int p) {
+        int n = 0;
+        do { n++; } while ((b[p + n - 1] & 0x80) != 0);
+        return n;
+    }
+
+    private static int ulebSizeFor(int units) {
+        int n = 1;
+        while ((units >>>= 7) != 0) n++;
+        return n;
+    }
+
+    /** MUTF-8 (the DEX encoding); null for a string this writer does not handle (a lone surrogate). */
+    private static byte[] mutf8(String s) {
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream(s.length() + 8);
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c != 0 && c < 0x80) out.write(c);
+            else if (c < 0x800) { out.write(0xc0 | (c >> 6)); out.write(0x80 | (c & 0x3f)); }
+            else if (Character.isSurrogate(c)) return null;
+            else { out.write(0xe0 | (c >> 12)); out.write(0x80 | ((c >> 6) & 0x3f)); out.write(0x80 | (c & 0x3f)); }
+        }
+        return out.toByteArray();
+    }
+
+    /**
+     * Recomputes the header's SHA-1 signature (bytes 12..31, over the rest of the file from 32) and Adler-32
+     * checksum (bytes 8..11, over everything from the signature on) after an in-place edit. ART refuses a DEX
+     * whose checksum no longer matches ("Bad checksum"), so every {@link #replaceStringPart} caller needs this.
+     */
+    static void refreshDigests(byte[] dex) throws IOException {
+        if (dex.length < 32 || dex[0] != 'd' || dex[1] != 'e' || dex[2] != 'x' || dex[3] != '\n')
+            throw new IOException("not a DEX file (no \"dex\\n\" magic)");
+        try {
+            java.security.MessageDigest sha = java.security.MessageDigest.getInstance("SHA-1");
+            sha.update(dex, 32, dex.length - 32);
+            byte[] digest = sha.digest();
+            System.arraycopy(digest, 0, dex, 12, 20);
+        } catch (java.security.NoSuchAlgorithmException ex) {
+            throw new IOException("SHA-1 is unavailable: " + ex, ex);
+        }
+        java.util.zip.Adler32 adler = new java.util.zip.Adler32();
+        adler.update(dex, 12, dex.length - 12);
+        int sum = (int) adler.getValue();
+        dex[8] = (byte) sum;
+        dex[9] = (byte) (sum >> 8);
+        dex[10] = (byte) (sum >> 16);
+        dex[11] = (byte) (sum >> 24);
+    }
 }

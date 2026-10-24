@@ -122,6 +122,64 @@ final class ApkRepackager {
         }
     }
 
+    /**
+     * Authorities the app names by string can only be renamed to something the string table already has room for:
+     * the DEX holds the name in place, its records packed and sorted. For those the rename keeps the length and the
+     * position (the last label's first two characters become "rb"), and the DEX literals are rewritten to match; a
+     * name that cannot be rewritten that way is left with the generic rename and reported.
+     */
+    private static Map<String, String> authorityOverrides(ZipFile zip, AxmlEditor ed, String old, String neu, Result r)
+            throws IOException {
+        List<String> auths = ed.providerAuthorities();
+        if (auths.isEmpty()) return Collections.emptyMap();
+        List<byte[]> dexes = new ArrayList<>();
+        for (Enumeration<? extends ZipEntry> en = zip.entries(); en.hasMoreElements(); ) {
+            ZipEntry e = en.nextElement();
+            if (e.isDirectory() || !e.getName().matches("classes\\d*\\.dex")) continue;
+            try {
+                dexes.add(readFully(zip, e));
+            } catch (IOException ignored) {
+                // The copy loop reports an unreadable DEX itself; a scan that cannot read it decides nothing.
+            }
+        }
+        Map<String, String> out = new HashMap<>();
+        for (String a : auths) {
+            if (AxmlEditor.renamedName(old, neu, a).length() <= a.length()) continue;  // the generic name fits
+            String alias = sameLengthAlias(a);
+            if (alias == null) continue;
+            boolean named = false, rewritable = true;
+            for (byte[] d : dexes) {
+                try {
+                    if (!DexScanner.containsStringPart(d, a)) continue;
+                    named = true;
+                    if (!DexScanner.canReplaceInPlace(d, a, alias)) {
+                        rewritable = false;
+                        break;
+                    }
+                } catch (IOException ignored) {
+                }
+            }
+            if (!named) continue;
+            if (!rewritable) {
+                r.report.add("provider authority " + a + " is named in a DEX that cannot take " + alias + " in place; "
+                        + "left as " + AxmlEditor.renamedName(old, neu, a));
+                continue;
+            }
+            out.put(a, alias);
+            r.report.add("provider authority " + a + " is named in a DEX; renamed in place to " + alias);
+        }
+        return out;
+    }
+
+    /** The same length as {@code a}, with "rb" in place of the last label's first two characters, or null. */
+    private static String sameLengthAlias(String a) {
+        int dot = a.lastIndexOf('.');
+        if (dot < 0) return null;
+        String label = a.substring(dot + 1);
+        if (label.length() < 3) return null;
+        return a.substring(0, dot + 1) + "rb" + label.substring(2);
+    }
+
     private static Result run(File inApk, byte[] stub, Map<String, byte[]> runtimeFiles, File out, String renameTo)
             throws IOException {
         Result r = new Result();
@@ -157,6 +215,9 @@ final class ApkRepackager {
             if (renameTo != null) {
                 if (r.packageName == null) throw refused("manifest names no package to rename");
                 String neu = renameTo.startsWith(".") ? r.packageName + renameTo : renameTo;
+                // An authority a DEX names by string has to be renamed to something that fits the bytes the string
+                // table already holds (see authorityOverrides), so that is decided before the manifest is written.
+                ed.setAuthorityOverrides(authorityOverrides(zip, ed, r.packageName, neu, r));
                 List<String> changes = ed.renamePackage(neu);
                 r.renamedFrom = r.packageName;
                 r.packageName = neu;
@@ -356,6 +417,31 @@ final class ApkRepackager {
                         } catch (IOException ex) {
                             r.report.add("natives: " + n + " unreadable (its natives get no generated stub export) — "
                                     + ex.getMessage());
+                        }
+                        // An authority the app names by literal (a game opening its own provider) has to follow the
+                        // rename the manifest just got, or the lookup resolves to the original install.
+                        boolean dexEdited = false;
+                        for (Map.Entry<String, String> auth : ed.authorityRenames().entrySet()) {
+                            if (auth.getKey().equals(auth.getValue())) continue;
+                            int k;
+                            try {
+                                k = DexScanner.replaceStringPart(dex, auth.getKey(), auth.getValue());
+                            } catch (IOException ex) {
+                                r.report.add(n + ": authority literal: " + ex.getMessage() + " — left as it is");
+                                break;
+                            }
+                            if (k > 0) {
+                                dexEdited = true;
+                                r.report.add(n + ": " + k + " string(s) follow the authority rename " + auth.getKey() +
+                                        " -> " + auth.getValue());
+                            }
+                        }
+                        if (dexEdited) {
+                            try {
+                                DexScanner.refreshDigests(dex);  // ART refuses a DEX whose checksum no longer matches
+                            } catch (IOException ex) {
+                                r.report.add(n + ": digests: " + ex.getMessage());
+                            }
                         }
                         putBytes(zo, n, dex, e.getMethod() == ZipEntry.STORED ? ZipEntry.STORED : ZipEntry.DEFLATED);
                         continue;

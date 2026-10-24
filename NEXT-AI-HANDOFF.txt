@@ -6,6 +6,27 @@ says where we are and what is next. Read this, then the tail of docs/session/wor
 then docs/session/backlog.md (statuses are current as of now).
 
 
+1d. 2026-10-24 (latest) — C47 fixed (Rolling Sky runs); Cars 3/ABE re-measured
+-----------------------------------------------------------------------
+- **Rolling Sky runs to its level-select screen.** Its `IpcProvider` opened a provider by a literal
+  `content://com.turbochilli.rollingsky.ipc_provider` in `classes2.dex`; the repack renamed only the
+  manifest, so the copy talked to the original install (other uid) and died with `SecurityException`.
+  The repack now decides authority renames with the DEX in view: an authority the app names by string is
+  renamed **in place** (same length, same string-table position: `...ipc_provider` -> `...rbc_provider`,
+  `...provider` -> `...rbovider`) and the DEX records are rewritten with recomputed SHA-1 + Adler-32.
+  The patcher refuses any edit that changes length or breaks `string_ids` order (both were tried and both
+  make ART reject the file: "String longer than indicated size 0"). Host lane `DexStringsTest` pins it.
+- **Cars 3 (unpatched)** boots fully now (Crittercism/Kochava/IAP/AES/bundle check, ~64 M guest instr/s)
+  but stays black while Swrve 403s and its IAP list fails; its frames reach SurfaceFlinger, so the
+  remaining wall is its online bootstrap (C37 family).
+- **ABE**: the consent dialog is gated on "Checking internet connection...", which never resolves; taps
+  reach the window (so C48 is not an input defect).
+- **Tids**: the guest->host map covers clone'd and adopted threads; TT2 still logs three
+  `Given thread 4246 does not exist` at startup (a late priority call for a tid with no bound thread).
+- Commits: engine (adopted-thread tid map) + repack authority patch + docs; engine gate 25/25 suites,
+  Java host suite green (DexStringsTest 11 checks).
+
+
 1c. 2026-10-24 (later) — C46 FIXED: Java thread APIs were given guest tids
 -----------------------------------------------------------------------
 - **Root cause:** `UnityPlayer.nativeRender` calls `android.os.Process.setThreadPriority(<tid>)` with a

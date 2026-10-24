@@ -724,6 +724,36 @@ final class AxmlEditor {
         return v + (neu.startsWith(old + ".") ? neu.substring(old.length()) : "." + neu);
     }
 
+    /**
+     * The provider authorities the manifest declares. A DEX that names one of them as a string (a game opening its
+     * own provider, e.g. Rolling Sky's ServicePreferencesHelper) can only follow a rename that fits the bytes the
+     * string table already holds, so the repack must know them before it renames.
+     */
+    List<String> providerAuthorities() {
+        List<String> out = new ArrayList<>();
+        for (byte[] c : nodes) {
+            if (u16(c, 0) != XML_START_ELEMENT || !"provider".equals(str(s32(c, NODE_HEADER + 4)))) continue;
+            String v = stringValue(c, findAttr(c, "authorities"));
+            if (v == null) continue;
+            for (String a : v.split(";", -1)) if (!a.isEmpty()) out.add(a);
+        }
+        return out;
+    }
+
+    /** Authority renames to use instead of the generic rule (a name that fits a DEX string, see providerAuthorities). */
+    void setAuthorityOverrides(java.util.Map<String, String> overrides) {
+        authorityOverrides.clear();
+        if (overrides != null) authorityOverrides.putAll(overrides);
+    }
+
+    /** Every authority the last {@link #renamePackage} renamed, as old -> new. */
+    java.util.Map<String, String> authorityRenames() {
+        return new java.util.LinkedHashMap<>(authorityRenames);
+    }
+
+    private final java.util.Map<String, String> authorityOverrides = new java.util.LinkedHashMap<>();
+    private final java.util.Map<String, String> authorityRenames = new java.util.LinkedHashMap<>();
+
     private static final java.util.regex.Pattern PACKAGE_NAME =
             java.util.regex.Pattern.compile("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+");
 
@@ -768,7 +798,13 @@ final class AxmlEditor {
                     StringBuilder sb = new StringBuilder();
                     for (String auth : v.split(";", -1)) {
                         if (sb.length() > 0) sb.append(';');
-                        sb.append(auth.isEmpty() ? auth : renamedName(old, neu, auth));
+                        if (auth.isEmpty()) {
+                            sb.append(auth);
+                            continue;
+                        }
+                        String authNeu = authorityOverrides.getOrDefault(auth, renamedName(old, neu, auth));
+                        authorityRenames.put(auth, authNeu);
+                        sb.append(authNeu);
                     }
                     nv = sb.toString();
                 } else if (perms.containsKey(v) && in(attr, PERMISSION_REFS)) {

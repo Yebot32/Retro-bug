@@ -52,7 +52,7 @@ javac -encoding UTF-8 -nowarn -Xlint:-options -d "$(to_host "$OUT/classes")" "${
 
 # DEX fixtures for the risk scan: real javac + d8 output, as in a game's classes.dex. Compiled against
 # android.jar so the references are the platform's own descriptors; never loaded or run.
-for f in RiskyFixture CleanFixture NativeFixture JniFixture ReceiverFixture ActivityFixture; do
+for f in RiskyFixture CleanFixture NativeFixture JniFixture ReceiverFixture ActivityFixture AuthorityFixture; do
   mkdir -p "$OUT/dexsrc/$f" "$OUT/dexout/$f"
   javac -encoding UTF-8 -nowarn -Xlint:-options --release 8 -classpath "$(to_host "$AJ")" \
     -d "$(to_host "$OUT/dexsrc/$f")" "$(to_host "$ROOT/tools/java-tests/dexfixtures/$f.java")"
@@ -107,5 +107,6 @@ java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ObbRulesTest
 java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ElfRepairTest
 java -cp "$(to_host "$OUT/classes")" com.retrobug.shim.SaveArchiveTest
 java -cp "$(to_host "$OUT/classes")" com.retrobug.shim.PermissionPolicyTest
+java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.DexStringsTest "$(to_host "$OUT/fixtures")"
 java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.PatchTest
 java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ModTest

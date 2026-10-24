@@ -535,3 +535,32 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
     a packaging/provider issue (new backlog item C47), not C46.
 - `IllegalArgumentException` count on TT2 after the fix: **3** (down from 135) — the remainder are tids the
   clone table does not hold when the call is made (adopted threads), left for a follow-up.
+
+### 2026-10-24 (later still) — C47 fixed: the repack now moves authority literals with the manifest
+- **Root cause (sub-agent-verified):** Rolling Sky's `IpcProvider.<clinit>` parses
+  `content://com.turbochilli.rollingsky.ipc_provider` (a literal in `classes2.dex`, string_data at
+  0x1c494d). The repack renames the manifest's authority but copies the DEX byte-for-byte, so the copy
+  opened the **original** install's provider and got `SecurityException` (not exported, other uid).
+- **Fix:** `ApkRepackager` now decides the authority rename *with the DEX in view* before writing the
+  manifest. An authority the app names by string is renamed **in place**: same length, same string-table
+  position (the last label's first two characters become "rb"), e.g.
+  `com.turbochilli.rollingsky.ipc_provider` -> `...rollingsky.rbc_provider`; `...rollingsky.provider` ->
+  `...rollingsky.rbovider`. `DexScanner.replaceStringPart` rewrites those strings and
+  `refreshDigests` recomputes the DEX's SHA-1 signature and Adler-32 checksum (ART rejects a stale one).
+  The patcher refuses any edit that changes a record's length or breaks `string_ids` ordering — both
+  were learned the hard way: a shorter name failed verification with "String longer than indicated
+  size 0", and reordering failed as well. Host lane `DexStringsTest` (11 checks) pins the contract,
+  including both refusals; the full Java suite stays green.
+- **Device:** `rollingsky-patched` repacks, installs and reaches its **level-select screen** (Cloud,
+  0%, 0/10) — `build/m5/com.turbochilli.rollingsky/c47-rs3.png`. C47 done.
+- **Cars 3 (unpatched, this run):** no longer stalls — it boots through Crittercism/Kochava/IAP/AES and
+  the bundle check at ~64 M guest instr/s, but stays on black frames while Swrve answers 403 and its
+  IAP list fails; frames reach SurfaceFlinger (`--latency` shows them), so the remaining wall is the
+  game's online bootstrap (C37 family), not C46.
+- **C48 reclassified:** ABE's consent dialog is gated on "Checking internet connection...", which never
+  resolves; taps *do* reach the window (the VRI frame-rate hint fires on touch), so this is not an input
+  defect. The earlier "taps don't land" note was wrong and is replaced here.
+- **Adopted-thread tids:** the guest->host tid map now covers clone'd and adopted threads (bind
+  publishes, unbind/exit retracts). TT2 still shows **3** `Given thread 4246 does not exist` at startup:
+  tid 4246 has no bound thread when Unity asks (a late priority call for a dead worker), which ART answers
+  honestly; harmless and not blocking.
