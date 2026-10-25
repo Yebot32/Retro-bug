@@ -194,6 +194,8 @@ int RenameAt2(std::int32_t old_dirfd, const char* old_path, std::int32_t new_dir
       ::syscall(SYS_renameat2, old_dirfd, old_path, new_dirfd, new_path, guest_flags));
 }
 
+int FdatasyncFd(int fd) { return ::fdatasync(fd); }
+
 int Accept4(int fd, void* addr, void* addrlen, std::uint32_t guest_flags) {
   // Through syscall() because bionic declares accept4() only with _GNU_SOURCE visible, and this file
   // does not restate the libc's feature-test macros.

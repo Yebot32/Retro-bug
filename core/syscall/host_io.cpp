@@ -378,11 +378,11 @@ Outcome HostIo::Serve(const Frame& f, mem::GuestMemory& mem) {
         r = R(::ftruncate(fd, static_cast<off_t>((static_cast<std::uint64_t>(a[3]) << 32) | a[2])));
         break;
       case a32::kFsync: r = R(::fsync(fd)); break;
-      case a32::kFdatasync: r = R(::fdatasync(fd)); break;
+      case a32::kFdatasync: r = R(platform::FdatasyncFd(fd)); break;
       case a32::kFlock: r = R(::flock(fd, static_cast<int>(a[1]))); break;
       case a32::kDup: r = R(::dup(fd)); break;
       case a32::kDup2: r = static_cast<int>(a[1]) == fd ? R(::fcntl(fd, F_GETFD)) >= 0 ? fd : -EBADF
-                                                        : R(::dup3(fd, static_cast<int>(a[1]), 0));
+                                                        : R(platform::Dup3(fd, static_cast<int>(a[1]), 0));
         break;
       case a32::kDup3: r = R(platform::Dup3(fd, static_cast<int>(a[1]), a[2])); break;
       case a32::kPipe: case a32::kPipe2: {

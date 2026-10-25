@@ -114,6 +114,9 @@ int RenameAt2(std::int32_t old_dirfd, const char* old_path, std::int32_t new_dir
 /// accept4(fd, addr, addrlen, guest_flags). Darwin has no accept4; it accepts and applies the flags.
 int Accept4(int fd, void* addr, void* addrlen, std::uint32_t guest_flags);
 
+/// fdatasync (data-only durability). Darwin has no fdatasync; fsync is the honest superset.
+int FdatasyncFd(int fd);
+
 /// Fill `dst` with `len` bytes from the host's entropy pool.
 bool RandomBytes(void* dst, std::size_t len);
 

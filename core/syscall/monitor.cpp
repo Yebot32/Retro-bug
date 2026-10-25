@@ -895,20 +895,17 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
       if (memory_ == nullptr) {
         return Outcome::Refused(err::kEnosys, call + ": no guest memory is attached to this monitor");
       }
-      cpu_set_t host;
-      CPU_ZERO(&host);
       // Guest pids name guest threads, not host ones, so the only mask that means anything is this
       // process's. Darwin has no sched_getaffinity at all; the platform answers with the online CPUs.
       const std::uint32_t mask = platform::CpuMask();
       if (mask == 0 && platform::CpuCount() == 0) {
         return Outcome::Answered(err::kEsrch, call + " = -ESRCH (-3): the host has no such thread");
       }
-      std::memcpy(&host, &mask, sizeof mask);
-      // The arm32 cpu_set_t is 1024 bits (128 bytes) with the same bit-per-CPU layout, so the leading words map
+      // The arm32 cpu_set_t is 1024 bits (128 bytes) with the same bit-per-CPU layout, so the leading word maps
       // straight across; anything the guest asked for beyond that is zero-filled, as a kernel does.
       std::vector<std::uint8_t> guest(size, 0);
-      const std::size_t from_host = std::min<std::size_t>(size, sizeof host);
-      std::memcpy(guest.data(), &host, from_host);
+      const std::size_t from_host = std::min<std::size_t>(size, sizeof mask);
+      std::memcpy(guest.data(), &mask, from_host);
       if (size != 0 && !memory_->Write(f.arg[2], guest.data(), size)) {
         return Outcome::Answered(err::kEfault, call + ": the cpu_set at 0x" + Hex(f.arg[2]) +
                                                    " is not writable guest memory");

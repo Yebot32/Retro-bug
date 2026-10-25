@@ -9,7 +9,6 @@
 // first-run compile error here as unverified code, not as a design problem.
 #include "rb/platform/host.h"
 
-#include <dirent.h>
 #include <fcntl.h>
 #include <mach/host_info.h>
 #include <mach/mach.h>
@@ -219,36 +218,14 @@ bool StatFsAt(std::int32_t dirfd, const char* path, StatFsInfo* out) {
 }
 
 long GetDents(int fd, void* buf, std::size_t bytes) {
-  // Darwin has no getdents64: read one `dirent` at a time and pack the guest's linux_dirent64 record
-  // (d_ino 8, d_off 8, d_reclen 2, d_type 1, name, NUL) into the caller's buffer. The directory cursor is
-  // the fd's own position, which `getdirentries` advances, so repeated calls continue where they left off.
-  auto* out = static_cast<std::uint8_t*>(buf);
-  std::size_t used = 0;
-  char rec[sizeof(struct dirent) + 1];
-  while (used + 19 + 256 <= bytes) {
-    long got = ::getdirentries(fd, rec, sizeof rec, nullptr);
-    if (got < 0) return -1;
-    if (got == 0) break;  // end of directory
-    const auto* d = reinterpret_cast<const struct dirent*>(rec);
-    const std::size_t name_len = std::strlen(d->d_name);
-    if (name_len == 0) continue;
-    const std::size_t reclen = (19 + name_len + 1 + 7) & ~std::size_t{7};  // 8-byte aligned, as Linux packs it
-    if (used + reclen > bytes) {
-      // Not enough room for this record: rewind the directory cursor so the next call returns it again.
-      if (::lseek(fd, -got, SEEK_CUR) < 0) return -1;
-      break;
-    }
-    std::uint64_t ino = d->d_fileno;
-    std::int64_t off = 0;  // the guest uses d_off as a cookie; its own lseek state is authoritative here
-    std::uint16_t rl = static_cast<std::uint16_t>(reclen);
-    std::memcpy(out + used, &ino, 8);
-    std::memcpy(out + used + 8, &off, 8);
-    std::memcpy(out + used + 16, &rl, 2);
-    out[used + 18] = d->d_type;
-    std::memcpy(out + used + 19, d->d_name, name_len + 1);
-    used += reclen;
-  }
-  return static_cast<long>(used);
+  // Darwin has no getdents: getdirentries is a stub when 64-bit inodes are in effect (link error, not a
+  // runtime one), and readdir buffers a whole block, so a per-call DIR would silently skip entries whose
+  // bytes the kernel already consumed. A correct implementation needs one persistent DIR per guest fd and
+  // a close/dup hook from the syscall layer; until that exists this refuses by name instead of losing
+  // directory entries.
+  (void)fd; (void)buf; (void)bytes;
+  errno = ENOSYS;
+  return -1;
 }
 
 int Pipe(int fds[2], std::uint32_t guest_flags) {
@@ -303,6 +280,8 @@ int RenameAt2(std::int32_t old_dirfd, const char* old_path, std::int32_t new_dir
   }
   return ::renameat(DirFd(old_dirfd), old_path, DirFd(new_dirfd), new_path);
 }
+
+int FdatasyncFd(int fd) { return ::fsync(fd); }  // no fdatasync; fsync is a superset of what the guest asked
 
 int Accept4(int fd, void* addr, void* addrlen, std::uint32_t guest_flags) {
   const int accepted = ::accept(fd, static_cast<struct sockaddr*>(addr), static_cast<socklen_t*>(addrlen));
