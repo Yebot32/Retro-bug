@@ -134,6 +134,6 @@ add_subdirectory(runtime)
 # rb::host (S1): the in-process boot with every platform decision behind callbacks. It owns an `Inbound`,
 # which is the AArch64 trampoline pool, so it exists on the architectures that can host a guest (Android
 # arm64 and iOS arm64) and not on hosts that cannot execute Tier J or reach the trampolines at all.
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+if(RB_AARCH64_HOST)
   add_subdirectory(host)
 endif()

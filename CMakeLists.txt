@@ -20,6 +20,16 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(RB_USE_REAL_BOOST "Use a real Boost installation instead of compat/" OFF)
 
+# The host architectures that can run a guest and reach the AArch64 inbound trampolines: Android arm64 and
+# Apple arm64 (macOS, iOS). `CMAKE_SYSTEM_PROCESSOR` is empty for an iOS cross-build, where the architecture
+# lives in `CMAKE_OSX_ARCHITECTURES` instead — so both are consulted in one place and the component
+# CMakeLists ask `RB_AARCH64_HOST` rather than repeating a check that one of them would miss.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64" OR CMAKE_OSX_ARCHITECTURES MATCHES "arm64")
+  set(RB_AARCH64_HOST ON)
+else()
+  set(RB_AARCH64_HOST OFF)
+endif()
+
 # The host-side launcher's JNI library. OFF by default, and that is the whole of the guard:
 # `tools/run_engine_tests.sh` configures with `-DRB_BUILD_TESTS=ON` and never mentions this, so the option
 # stays OFF there, the block below is never reached, and no test target gains a dependency on it.

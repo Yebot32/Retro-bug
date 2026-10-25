@@ -9,7 +9,7 @@ target_link_libraries(rb_runtime PUBLIC rb_linker rb_loader rb_exec rb_abi rb_sy
 
 # M3: Java calling guest natives — the inbound trampoline pool (AArch64 assembly) and its dispatcher. arm64 hosts
 # only, which is every device RetroBug targets.
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+if(RB_AARCH64_HOST)
   add_library(rb_inbound STATIC inbound.cpp inbound_aarch64.S)
   target_compile_features(rb_inbound PUBLIC cxx_std_20)
   target_link_libraries(rb_inbound PUBLIC rb_runtime rb_abi)
