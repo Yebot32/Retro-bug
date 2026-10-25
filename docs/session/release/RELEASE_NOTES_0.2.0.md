@@ -15,10 +15,10 @@ app is never modified or removed.
 | | |
 |---|---|
 | APK | `build/launcher-apk/rbguest-launcher.apk` (2,659,673 bytes) |
-| versionCode / versionName | `262` / `0.2.0` |
+| versionCode / versionName | `264` / `0.2.0` |
 | minSdk / targetSdk | 26 / 34 |
 | ABI | arm64-v8a launcher, 32-bit guest bytes carried as assets |
-| SHA-256 | `8ba88a91b0e919993993b4a91ab17e5559cc5b7cadd1c311eb142fddfc403239` |
+| SHA-256 | `7e268510a307aff82f1220f614f9dc42cd8969f0933bfd68b7bfc580262f6ae8` |
 
 Built with `RB_RELEASE=1 RB_VERSION_NAME=0.2.0 bash tools/build_launcher_apk.sh`. Release means: not
 debuggable, and the `-e` diagnostic intents are refused. A dev build (`bash tools/build_launcher_apk.sh`)

@@ -639,3 +639,13 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
   key, D4), and what changed since 0.1.
 - **Backlog:** A7 and D1/D2/D3/D5 closed with what was verified; A6 now lists only post-release polish
   (C17/C20/C21/C23 and the packaging/engine nits); C13/C14/C22 confirmed already fixed in the code.
+
+### 2026-10-25 — the launcher icon stays the Android robot (owner's call)
+- The RetroBug beetle icon was replaced at the owner's request; the launcher ships the Android robot again.
+  The commit that introduced the beetle is kept in history, but the packaged densities are regenerated from
+  `file_0000000033448211bbdb620eed523634.png` and NOTICE.md carries the CC BY 3.0 attribution that applies.
+- `tools/make_launcher_icon.ps1` keeps its `-Source` argument (default back to the robot), so another icon
+  needs no script change. The generated beetle source was removed from the tree.
+- Release build rebuilt from the restored resources: versionCode 264 / versionName 0.2.0, 2,659,673 bytes,
+  SHA-256 `7e268510…6ae8`, installed and opened on the Tab S9; Recents shows the robot icon. Release notes
+  updated to the new code and hash.
