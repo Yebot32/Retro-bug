@@ -57,7 +57,7 @@ jobs:
           -DRB_BUILD_TESTS=OFF
 
       # The platform layer plus the two components that now go through it. The interpreter and the rest
-      # of the engine join this list when the syscall backend lands (S0b); until then this target set is
+      # of the engine join this list once the interpreter builds for iOS; until then this target set is
       # the honest statement of what is known to compile for iOS.
       - name: Build for iOS
-        run: cmake --build build/ios --target rb_platform rb_mem rb_loader -j 4
+        run: cmake --build build/ios --target rb_platform rb_mem rb_loader rb_syscall -j 4

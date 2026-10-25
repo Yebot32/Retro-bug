@@ -37,6 +37,86 @@ void* ReserveWindowAt(void* hint, std::size_t bytes);
 /// closes it.
 int ImageFile(const void* data, std::size_t bytes);
 
+/// Guest (arm32 Linux) `O_*` bits to this host's. Linux's are the guest's, so it is an identity there;
+/// Darwin numbers them differently and has no `O_LARGEFILE`/`O_NOATIME`/`O_DIRECT`, which are dropped
+/// because the guest's intent (a 64-bit offset, no atime update) is already the only behaviour it has.
+int OpenFlags(std::uint32_t guest_flags);
+
+/// A guest `*at` directory argument in this host's numbering: the guest's `AT_FDCWD` is -100, Darwin's
+/// is -2. Any real fd passes through.
+int DirFd(std::int32_t guest_fd);
+
+/// Guest `AT_*` bits (symlink handling, `AT_REMOVEDIR`, `AT_EACCESS`) to this host's.
+int AtFlags(std::uint32_t guest_flags);
+
+/// A stat result independent of the host's `struct stat`, so the guest's 104-byte `stat64` is packed from
+/// one shape on every platform (Darwin names the timestamps `st_atimespec`, and its `struct statfs` has
+/// no `f_frsize`/`f_namelen`).
+struct StatInfo {
+  std::uint64_t dev = 0;
+  std::uint64_t ino = 0;
+  std::uint64_t rdev = 0;
+  std::uint64_t size = 0;
+  std::uint64_t blocks = 0;
+  std::uint32_t mode = 0;
+  std::uint32_t nlink = 0;
+  std::uint32_t uid = 0;
+  std::uint32_t gid = 0;
+  std::uint32_t blksize = 0;
+  std::int64_t atime_s = 0, mtime_s = 0, ctime_s = 0;
+  std::uint32_t atime_ns = 0, mtime_ns = 0, ctime_ns = 0;
+};
+bool StatFd(int fd, StatInfo* out);
+/// `dirfd` is a *guest* directory argument (translated here); `follow` false is `lstat` semantics.
+bool StatAt(std::int32_t dirfd, const char* path, bool follow, StatInfo* out);
+
+struct StatFsInfo {
+  std::uint64_t type = 0;
+  std::uint64_t bsize = 0;
+  std::uint64_t blocks = 0;
+  std::uint64_t bfree = 0;
+  std::uint64_t bavail = 0;
+  std::uint64_t files = 0;
+  std::uint64_t ffree = 0;
+  std::uint64_t fsid = 0;
+  std::uint32_t namelen = 0;
+  std::uint32_t frsize = 0;
+  std::uint32_t flags = 0;
+};
+bool StatFsFd(int fd, StatFsInfo* out);
+bool StatFsAt(std::int32_t dirfd, const char* path, StatFsInfo* out);
+
+/// Directory entries in the guest's `linux_dirent64` layout, written straight into `buf` (host memory over
+/// the guest window). Returns the byte count, or -1 with errno set. Darwin has no `getdents64`: it packs
+/// the same records from `getdirentries`.
+long GetDents(int fd, void* buf, std::size_t bytes);
+
+/// `pipe2` and `dup3`. Darwin has neither; it has `pipe` + `fcntl` and `dup2` + `fcntl`.
+int Pipe(int fds[2], std::uint32_t guest_flags);
+int Dup3(int old_fd, int new_fd, std::uint32_t guest_flags);
+
+/// An eventfd as the guest means it (a counter with poll readiness). Linux's kernel one; Darwin has no
+/// equivalent and refuses with ENOSYS — named, not stubbed, because a stub that returns a pipe would give
+/// the guest different semantics under the same fd.
+int EventFd(std::uint32_t init, std::uint32_t guest_flags);
+
+/// epoll. Linux's kernel implementation; Darwin refuses with ENOSYS (kqueue is not a drop-in: it has no
+/// per-fd "modify" and needs a registration table to emulate EPOLL_CTL_DEL) until a title needs it.
+int EpollCreate(std::uint32_t guest_flags);
+int EpollCtl(int epfd, std::uint32_t op, int fd, void* guest_event);
+int EpollWait(int epfd, void* guest_events, int max_events, int timeout_ms);
+
+/// `renameat2`: Darwin's `renameat` has no flags; a non-zero flag set is refused (EINVAL), as a kernel
+/// without the feature does.
+int RenameAt2(std::int32_t old_dirfd, const char* old_path, std::int32_t new_dirfd, const char* new_path,
+              std::uint32_t guest_flags);
+
+/// accept4(fd, addr, addrlen, guest_flags). Darwin has no accept4; it accepts and applies the flags.
+int Accept4(int fd, void* addr, void* addrlen, std::uint32_t guest_flags);
+
+/// Fill `dst` with `len` bytes from the host's entropy pool.
+bool RandomBytes(void* dst, std::size_t len);
+
 // ---------------------------------------------------------------- process facts
 
 /// The calling thread's kernel id (Linux `gettid`, Darwin `pthread_threadid_np`). Used to describe a

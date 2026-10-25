@@ -3,17 +3,15 @@
 // See host_io.h. Each handler reads the guest's arguments, makes the host call, and writes any translated result
 // back; all of it inside `block`, which the bridge runs with the GGL released.
 #include "rb/syscall/host_io.h"
+#include "rb/platform/host.h"
 
 #include <fcntl.h>
 #include <poll.h>
-#include <sys/epoll.h>
 #include <sys/file.h>
 #include <sys/ioctl.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/statfs.h>
-#include <sys/syscall.h>
 #include <sys/time.h>
 #include <sys/uio.h>
 #include <unistd.h>
@@ -72,47 +70,50 @@ bool Path(mem::GuestMemory& m, std::uint32_t at, std::string* out, long* err) {
 }
 
 // ---- struct translation
-/// arm32 `struct stat64` (104 bytes; offsets measured, see monitor.cpp's kStat*), from the host's `struct stat`.
-bool PutStat64(mem::GuestMemory& m, std::uint32_t at, const struct stat& st) {
+/// arm32 `struct stat64` (104 bytes; offsets measured, see monitor.cpp's kStat*), from the host-neutral
+/// shape the platform fills — so the same guest bytes are produced on Darwin, whose `struct stat` names
+/// the timestamps differently.
+bool PutStat64(mem::GuestMemory& m, std::uint32_t at, const platform::StatInfo& st) {
   std::uint8_t b[104] = {};
   const auto p32 = [&](unsigned o, std::uint32_t v) { std::memcpy(b + o, &v, 4); };
   const auto p64 = [&](unsigned o, std::uint64_t v) { std::memcpy(b + o, &v, 8); };
-  p64(0, st.st_dev);
-  p32(12, static_cast<std::uint32_t>(st.st_ino));
-  p32(16, st.st_mode);
-  p32(20, static_cast<std::uint32_t>(st.st_nlink));
-  p32(24, st.st_uid);
-  p32(28, st.st_gid);
-  p64(32, st.st_rdev);
-  p64(48, static_cast<std::uint64_t>(st.st_size));
-  p32(56, static_cast<std::uint32_t>(st.st_blksize));
-  p64(64, static_cast<std::uint64_t>(st.st_blocks));
-  p32(72, static_cast<std::uint32_t>(st.st_atim.tv_sec));
-  p32(76, static_cast<std::uint32_t>(st.st_atim.tv_nsec));
-  p32(80, static_cast<std::uint32_t>(st.st_mtim.tv_sec));
-  p32(84, static_cast<std::uint32_t>(st.st_mtim.tv_nsec));
-  p32(88, static_cast<std::uint32_t>(st.st_ctim.tv_sec));
-  p32(92, static_cast<std::uint32_t>(st.st_ctim.tv_nsec));
-  p64(96, st.st_ino);
+  p64(0, st.dev);
+  p32(12, static_cast<std::uint32_t>(st.ino));
+  p32(16, st.mode);
+  p32(20, st.nlink);
+  p32(24, st.uid);
+  p32(28, st.gid);
+  p64(32, st.rdev);
+  p64(48, st.size);
+  p32(56, st.blksize);
+  p64(64, st.blocks);
+  p32(72, static_cast<std::uint32_t>(st.atime_s));
+  p32(76, st.atime_ns);
+  p32(80, static_cast<std::uint32_t>(st.mtime_s));
+  p32(84, st.mtime_ns);
+  p32(88, static_cast<std::uint32_t>(st.ctime_s));
+  p32(92, st.ctime_ns);
+  p64(96, st.ino);
   return m.Write(at, b, sizeof b);
 }
 
-/// arm32 `struct statfs64` (EABI: packed to 4, 84 bytes), from the host's `struct statfs`.
-bool PutStatfs64(mem::GuestMemory& m, std::uint32_t at, std::uint32_t size, const struct statfs& sf) {
+/// arm32 `struct statfs64` (EABI: packed to 4, 84 bytes), from the host-neutral shape the platform fills
+/// (Darwin's `struct statfs` has no f_frsize/f_namelen and keeps its fsid in a two-int array).
+bool PutStatfs64(mem::GuestMemory& m, std::uint32_t at, std::uint32_t size, const platform::StatFsInfo& sf) {
   std::uint8_t b[84] = {};
   const auto p32 = [&](unsigned o, std::uint32_t v) { std::memcpy(b + o, &v, 4); };
   const auto p64 = [&](unsigned o, std::uint64_t v) { std::memcpy(b + o, &v, 8); };
-  p32(0, static_cast<std::uint32_t>(sf.f_type));
-  p32(4, static_cast<std::uint32_t>(sf.f_bsize));
-  p64(8, sf.f_blocks);
-  p64(16, sf.f_bfree);
-  p64(24, sf.f_bavail);
-  p64(32, sf.f_files);
-  p64(40, sf.f_ffree);
-  std::memcpy(b + 48, &sf.f_fsid, 8);
-  p32(56, static_cast<std::uint32_t>(sf.f_namelen));
-  p32(60, static_cast<std::uint32_t>(sf.f_frsize));
-  p32(64, static_cast<std::uint32_t>(sf.f_flags));
+  p32(0, static_cast<std::uint32_t>(sf.type));
+  p32(4, static_cast<std::uint32_t>(sf.bsize));
+  p64(8, sf.blocks);
+  p64(16, sf.bfree);
+  p64(24, sf.bavail);
+  p64(32, sf.files);
+  p64(40, sf.ffree);
+  p64(48, sf.fsid);
+  p32(56, sf.namelen);
+  p32(60, sf.frsize);
+  p32(64, sf.flags);
   return m.Write(at, b, size < sizeof b ? size : sizeof b);
 }
 
@@ -282,55 +283,56 @@ Outcome HostIo::Serve(const Frame& f, mem::GuestMemory& mem) {
     std::string p1, p2;
     long perr = 0;
     const auto path = [&](unsigned i, std::string* out) { return Path(m, a[i], out, &perr); };
-    const auto dirfd = [&](unsigned i) { return static_cast<int>(a[i]); };
+    // A guest dirfd argument: AT_FDCWD is -100 to Linux and -2 to Darwin, and a real fd passes through.
+    const auto dirfd = [&](unsigned i) { return platform::DirFd(static_cast<std::int32_t>(a[i])); };
     switch (fr.number) {
       case a32::kRead: r = R(::read(fd, H(m, a[1]), a[2])); break;
       case a32::kWrite: r = R(::write(fd, H(m, a[1]), a[2])); break;
       case a32::kClose: r = R(::close(fd)); break;
       case a32::kOpen:
-        r = path(0, &p1) ? R(::openat(kAtFdcwd, p1.c_str(), static_cast<int>(a[1]), a[2])) : perr;
+        r = path(0, &p1) ? R(::openat(platform::DirFd(kAtFdcwd), p1.c_str(), platform::OpenFlags(a[1]), a[2])) : perr;
         break;
       case a32::kCreat:
-        r = path(0, &p1) ? R(::openat(kAtFdcwd, p1.c_str(), O_CREAT | O_WRONLY | O_TRUNC, a[1])) : perr;
+        r = path(0, &p1) ? R(::openat(platform::DirFd(kAtFdcwd), p1.c_str(), platform::OpenFlags(0x40u | 1u | 0x200u), a[1])) : perr;
         break;
       case a32::kOpenat:
-        r = path(1, &p1) ? R(::openat(dirfd(0), p1.c_str(), static_cast<int>(a[2]), a[3])) : perr;
+        r = path(1, &p1) ? R(::openat(dirfd(0), p1.c_str(), platform::OpenFlags(a[2]), a[3])) : perr;
         break;
       case a32::kLink:
-        r = path(0, &p1) && path(1, &p2) ? R(::linkat(kAtFdcwd, p1.c_str(), kAtFdcwd, p2.c_str(), 0)) : perr;
+        r = path(0, &p1) && path(1, &p2) ? R(::linkat(platform::DirFd(kAtFdcwd), p1.c_str(), platform::DirFd(kAtFdcwd), p2.c_str(), 0)) : perr;
         break;
-      case a32::kUnlink: r = path(0, &p1) ? R(::unlinkat(kAtFdcwd, p1.c_str(), 0)) : perr; break;
-      case a32::kRmdir: r = path(0, &p1) ? R(::unlinkat(kAtFdcwd, p1.c_str(), AT_REMOVEDIR)) : perr; break;
-      case a32::kUnlinkat: r = path(1, &p1) ? R(::unlinkat(dirfd(0), p1.c_str(), static_cast<int>(a[2]))) : perr; break;
+      case a32::kUnlink: r = path(0, &p1) ? R(::unlinkat(platform::DirFd(kAtFdcwd), p1.c_str(), 0)) : perr; break;
+      case a32::kRmdir: r = path(0, &p1) ? R(::unlinkat(platform::DirFd(kAtFdcwd), p1.c_str(), platform::AtFlags(0x200u))) : perr; break;
+      case a32::kUnlinkat: r = path(1, &p1) ? R(::unlinkat(dirfd(0), p1.c_str(), platform::AtFlags(a[2]))) : perr; break;
       case a32::kChdir: r = path(0, &p1) ? R(::chdir(p1.c_str())) : perr; break;
-      case a32::kChmod: r = path(0, &p1) ? R(::fchmodat(kAtFdcwd, p1.c_str(), a[1], 0)) : perr; break;
-      case a32::kFchmodat: r = path(1, &p1) ? R(::fchmodat(dirfd(0), p1.c_str(), a[2], 0)) : perr; break;
+      case a32::kChmod: r = path(0, &p1) ? R(::fchmodat(platform::DirFd(kAtFdcwd), p1.c_str(), a[1], 0)) : perr; break;
+      case a32::kFchmodat: r = path(1, &p1) ? R(::fchmodat(dirfd(0), p1.c_str(), a[2], platform::AtFlags(a[3]))) : perr; break;
       case a32::kFchmod: r = R(::fchmod(fd, a[1])); break;
-      case a32::kAccess: r = path(0, &p1) ? R(::faccessat(kAtFdcwd, p1.c_str(), static_cast<int>(a[1]), 0)) : perr; break;
+      case a32::kAccess: r = path(0, &p1) ? R(::faccessat(platform::DirFd(kAtFdcwd), p1.c_str(), static_cast<int>(a[1]), 0)) : perr; break;
       case a32::kFaccessat:
-        r = path(1, &p1) ? R(::faccessat(dirfd(0), p1.c_str(), static_cast<int>(a[2]), 0)) : perr;
+        r = path(1, &p1) ? R(::faccessat(dirfd(0), p1.c_str(), static_cast<int>(a[2]), platform::AtFlags(a[3]))) : perr;
         break;
       case a32::kRename:
-        r = path(0, &p1) && path(1, &p2) ? R(::renameat(kAtFdcwd, p1.c_str(), kAtFdcwd, p2.c_str())) : perr;
+        r = path(0, &p1) && path(1, &p2) ? R(::renameat(platform::DirFd(kAtFdcwd), p1.c_str(), platform::DirFd(kAtFdcwd), p2.c_str())) : perr;
         break;
       case a32::kRenameat:
         r = path(1, &p1) && path(3, &p2) ? R(::renameat(dirfd(0), p1.c_str(), dirfd(2), p2.c_str())) : perr;
         break;
       case a32::kLinkat:
         r = path(1, &p1) && path(3, &p2)
-                ? R(::linkat(dirfd(0), p1.c_str(), dirfd(2), p2.c_str(), static_cast<int>(a[4])))
+                ? R(::linkat(dirfd(0), p1.c_str(), dirfd(2), p2.c_str(), platform::AtFlags(a[4])))
                 : perr;
         break;
       case a32::kSymlink:
-        r = path(0, &p1) && path(1, &p2) ? R(::symlinkat(p1.c_str(), kAtFdcwd, p2.c_str())) : perr;
+        r = path(0, &p1) && path(1, &p2) ? R(::symlinkat(p1.c_str(), platform::DirFd(kAtFdcwd), p2.c_str())) : perr;
         break;
       case a32::kSymlinkat:
         r = path(0, &p1) && path(2, &p2) ? R(::symlinkat(p1.c_str(), dirfd(1), p2.c_str())) : perr;
         break;
-      case a32::kMkdir: r = path(0, &p1) ? R(::mkdirat(kAtFdcwd, p1.c_str(), a[1])) : perr; break;
+      case a32::kMkdir: r = path(0, &p1) ? R(::mkdirat(platform::DirFd(kAtFdcwd), p1.c_str(), a[1])) : perr; break;
       case a32::kMkdirat: r = path(1, &p1) ? R(::mkdirat(dirfd(0), p1.c_str(), a[2])) : perr; break;
       case a32::kReadlink:
-        r = path(0, &p1) ? R(::readlinkat(kAtFdcwd, p1.c_str(), static_cast<char*>(H(m, a[1])), a[2])) : perr;
+        r = path(0, &p1) ? R(::readlinkat(platform::DirFd(kAtFdcwd), p1.c_str(), static_cast<char*>(H(m, a[1])), a[2])) : perr;
         break;
       case a32::kReadlinkat:
         r = path(1, &p1) ? R(::readlinkat(dirfd(0), p1.c_str(), static_cast<char*>(H(m, a[2])), a[3])) : perr;
@@ -346,7 +348,7 @@ Outcome HostIo::Serve(const Frame& f, mem::GuestMemory& mem) {
         if (a[1] == 0) {
           r = R(::futimens(dirfd(0), have ? ts : nullptr));
         } else {
-          r = path(1, &p1) ? R(::utimensat(dirfd(0), p1.c_str(), have ? ts : nullptr, static_cast<int>(a[3]))) : perr;
+          r = path(1, &p1) ? R(::utimensat(dirfd(0), p1.c_str(), have ? ts : nullptr, platform::AtFlags(a[3]))) : perr;
         }
         break;
       }
@@ -382,14 +384,14 @@ Outcome HostIo::Serve(const Frame& f, mem::GuestMemory& mem) {
       case a32::kDup2: r = static_cast<int>(a[1]) == fd ? R(::fcntl(fd, F_GETFD)) >= 0 ? fd : -EBADF
                                                         : R(::dup3(fd, static_cast<int>(a[1]), 0));
         break;
-      case a32::kDup3: r = R(::dup3(fd, static_cast<int>(a[1]), static_cast<int>(a[2]))); break;
+      case a32::kDup3: r = R(platform::Dup3(fd, static_cast<int>(a[1]), a[2])); break;
       case a32::kPipe: case a32::kPipe2: {
         int p[2];
-        r = R(::pipe2(p, fr.number == a32::kPipe2 ? static_cast<int>(a[1]) : 0));
+        r = R(platform::Pipe(p, fr.number == a32::kPipe2 ? a[1] : 0));
         if (r == 0 && !m.Write(a[0], p, 8)) r = -EFAULT;
         break;
       }
-      case a32::kEventfd2: r = R(::syscall(SYS_eventfd2, a[0], a[1])); break;
+      case a32::kEventfd2: r = R(platform::EventFd(a[0], a[1])); break;
       case a32::kIoctl: {
         // Only the integer-pointer requests a game uses on sockets and pipes; the rest would need per-request structs.
         const std::uint32_t req = a[1];
@@ -428,35 +430,91 @@ Outcome HostIo::Serve(const Frame& f, mem::GuestMemory& mem) {
         break;
       }
       case a32::kStat64: case a32::kLstat64: case a32::kFstat64: case a32::kFstatat64: {
-        struct stat st {};
+        platform::StatInfo st {};
+        bool ok = false;
         if (fr.number == a32::kFstat64) {
-          r = R(::fstat(fd, &st));
+          ok = platform::StatFd(fd, &st);
         } else if (fr.number == a32::kFstatat64) {
-          r = path(1, &p1) ? R(::fstatat(dirfd(0), p1.c_str(), &st, static_cast<int>(a[3]))) : perr;
+          if (!path(1, &p1)) { r = perr; break; }
+          ok = platform::StatAt(static_cast<std::int32_t>(a[0]), p1.c_str(),
+                                (platform::AtFlags(a[3]) & AT_SYMLINK_NOFOLLOW) == 0, &st);
         } else {
-          r = path(0, &p1) ? R(::fstatat(kAtFdcwd, p1.c_str(), &st, fr.number == a32::kLstat64 ? AT_SYMLINK_NOFOLLOW : 0))
-                           : perr;
+          if (!path(0, &p1)) { r = perr; break; }
+          ok = platform::StatAt(kAtFdcwd, p1.c_str(), fr.number != a32::kLstat64, &st);
         }
+        r = ok ? 0 : -errno;
         const std::uint32_t buf = fr.number == a32::kFstatat64 ? a[2] : a[1];
         if (r == 0 && !PutStat64(m, buf, st)) r = -EFAULT;
         break;
       }
-      case a32::kStatx: r = path(1, &p1) ? R(::syscall(SYS_statx, dirfd(0), p1.c_str(), a[2], a[3], H(m, a[4]))) : perr; break;
+      case a32::kStatx: {  // (dirfd, path, flags, mask, struct statx*)
+        if (!path(1, &p1)) { r = perr; break; }
+        platform::StatInfo st {};
+        if (!platform::StatAt(static_cast<std::int32_t>(a[0]), p1.c_str(),
+                              (platform::AtFlags(a[2]) & AT_SYMLINK_NOFOLLOW) == 0, &st)) {
+          r = -errno;
+          break;
+        }
+        // The guest's 256-byte `struct statx`, packed from the neutral shape: Darwin has no statx at all,
+        // and only the fields a game reads (mode, size, times, device) carry values.
+        std::uint8_t b[256] = {};
+        const auto p32 = [&](unsigned o, std::uint32_t v) { std::memcpy(b + o, &v, 4); };
+        const auto p64 = [&](unsigned o, std::uint64_t v) { std::memcpy(b + o, &v, 8); };
+        const auto ts_at = [&](unsigned o, std::int64_t s, std::uint32_t ns) {
+          std::memcpy(b + o, &s, 8);
+          std::memcpy(b + o + 8, &ns, 4);
+        };
+        p32(0, 0x7ffu);  // stx_mask: everything this engine can report
+        p32(4, st.blksize);
+        p32(16, st.nlink);
+        p32(20, st.uid);
+        p32(24, st.gid);
+        const std::uint16_t mode = static_cast<std::uint16_t>(st.mode);
+        std::memcpy(b + 28, &mode, 2);
+        p64(32, st.ino);
+        p64(40, st.size);
+        p64(48, st.blocks);
+        ts_at(64, st.atime_s, st.atime_ns);
+        // 80: btime — no host-neutral field; a zeroed timestamp says "not reported", which is what a
+        // file system without birth times reports too.
+        ts_at(96, st.ctime_s, st.ctime_ns);
+        ts_at(112, st.mtime_s, st.mtime_ns);
+        // Linux encodes dev_t as (major << 20) | minor on this ABI; split both device numbers the same way.
+        p32(128, static_cast<std::uint32_t>((st.rdev >> 20) & 0xfffu));
+        p32(132, static_cast<std::uint32_t>(st.rdev & 0xfffffu));
+        p32(136, static_cast<std::uint32_t>((st.dev >> 20) & 0xfffu));
+        p32(140, static_cast<std::uint32_t>(st.dev & 0xfffffu));
+        r = m.Write(a[4], b, sizeof b) ? 0 : -EFAULT;
+        break;
+      }
       case a32::kStatfs64: case a32::kFstatfs64: {  // (path|fd, size, buf)
-        struct statfs sf {};
-        r = fr.number == a32::kFstatfs64 ? R(::fstatfs(fd, &sf)) : (path(0, &p1) ? R(::statfs(p1.c_str(), &sf)) : perr);
+        platform::StatFsInfo sf {};
+        bool ok = false;
+        if (fr.number == a32::kFstatfs64) {
+          ok = platform::StatFsFd(fd, &sf);
+        } else {
+          if (!path(0, &p1)) { r = perr; break; }
+          ok = platform::StatFsAt(kAtFdcwd, p1.c_str(), &sf);
+        }
+        r = ok ? 0 : -errno;
         if (r == 0 && !PutStatfs64(m, a[2], a[1], sf)) r = -EFAULT;
         break;
       }
-      case a32::kGetdents64: r = R(::syscall(SYS_getdents64, fd, H(m, a[1]), a[2])); break;
+      case a32::kGetdents64: r = R(platform::GetDents(fd, H(m, a[1]), a[2])); break;
       case a32::kPoll: r = R(::poll(static_cast<struct pollfd*>(H(m, a[0])), a[1], static_cast<int>(a[2]))); break;
       case a32::kPpoll: {  // (fds, n, timespec*, sigmask*, sigsetsize)
-        struct timespec ts {};
-        if (a[2] != 0 && !GetTimespec(m, a[2], &ts)) {
-          r = -EFAULT;
-          break;
+        std::int64_t ms = -1;
+        if (a[2] != 0) {
+          struct timespec ts {};
+          if (!GetTimespec(m, a[2], &ts)) {
+            r = -EFAULT;
+            break;
+          }
+          ms = static_cast<std::int64_t>(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000;
         }
-        r = R(::syscall(SYS_ppoll, H(m, a[0]), a[1], a[2] != 0 ? &ts : nullptr, H(m, a[3]), a[4]));
+        // A guest signal mask would have to bracket the wait atomically; the loaders pass NULL for it,
+        // so the mask is not applied rather than applied in a way that could lose a signal.
+        r = R(::poll(static_cast<struct pollfd*>(H(m, a[0])), a[1], static_cast<int>(ms)));
         break;
       }
       case a32::kNewselect: case a32::kPselect6: {  // fd_set is byte-identical; the timeout is not
@@ -474,17 +532,18 @@ Outcome HostIo::Serve(const Frame& f, mem::GuestMemory& mem) {
           r = R(::select(static_cast<int>(a[0]), rd, wr, ex, timed ? &tv : nullptr));
           if (timed) PutTimeval(m, a[4], tv);
         } else {
-          r = R(::syscall(SYS_pselect6, a[0], rd, wr, ex, timed ? &ts : nullptr, nullptr));
+          // pselect exists on Darwin; the guest's sigmask pointer is ignored for the same reason ppoll's is.
+          r = R(::pselect(static_cast<int>(a[0]), rd, wr, ex, timed ? &ts : nullptr, nullptr));
         }
         break;
       }
-      case a32::kEpollCreate: r = R(::epoll_create1(0)); break;
-      case a32::kEpollCreate1: r = R(::epoll_create1(static_cast<int>(a[0]))); break;
+      case a32::kEpollCreate: r = R(platform::EpollCreate(0)); break;
+      case a32::kEpollCreate1: r = R(platform::EpollCreate(a[0])); break;
       case a32::kEpollCtl:  // struct epoll_event is 16 bytes on both (no packing on ARM)
-        r = R(::epoll_ctl(fd, static_cast<int>(a[1]), static_cast<int>(a[2]), static_cast<struct epoll_event*>(H(m, a[3]))));
+        r = R(platform::EpollCtl(fd, a[1], static_cast<int>(a[2]), H(m, a[3])));
         break;
       case a32::kEpollWait:
-        r = R(::epoll_wait(fd, static_cast<struct epoll_event*>(H(m, a[1])), static_cast<int>(a[2]), static_cast<int>(a[3])));
+        r = R(platform::EpollWait(fd, H(m, a[1]), static_cast<int>(a[2]), static_cast<int>(a[3])));
         break;
       // ---- sockets (sockaddr is byte-identical)
       case a32::kSocket: r = R(::socket(static_cast<int>(a[0]), static_cast<int>(a[1]), static_cast<int>(a[2]))); break;
@@ -498,8 +557,8 @@ Outcome HostIo::Serve(const Frame& f, mem::GuestMemory& mem) {
       case a32::kConnect: r = R(::connect(fd, static_cast<const struct sockaddr*>(H(m, a[1])), a[2])); break;
       case a32::kListen: r = R(::listen(fd, static_cast<int>(a[1]))); break;
       case a32::kAccept: case a32::kAccept4:
-        r = R(::accept4(fd, static_cast<struct sockaddr*>(H(m, a[1])), static_cast<socklen_t*>(H(m, a[2])),
-                        fr.number == a32::kAccept4 ? static_cast<int>(a[3]) : 0));
+        r = R(platform::Accept4(fd, H(m, a[1]), H(m, a[2]),
+                                fr.number == a32::kAccept4 ? a[3] : 0u));
         break;
       case a32::kGetsockname:
         r = R(::getsockname(fd, static_cast<struct sockaddr*>(H(m, a[1])), static_cast<socklen_t*>(H(m, a[2]))));
@@ -554,7 +613,8 @@ Outcome HostIo::Serve(const Frame& f, mem::GuestMemory& mem) {
       }
       case a32::kRenameat2:  // bionic's rename() on recent releases
         r = path(1, &p1) && path(3, &p2)
-                ? R(::syscall(SYS_renameat2, dirfd(0), p1.c_str(), dirfd(2), p2.c_str(), a[4]))
+                ? R(platform::RenameAt2(static_cast<std::int32_t>(a[0]), p1.c_str(),
+                                          static_cast<std::int32_t>(a[2]), p2.c_str(), a[4]))
                 : perr;
         break;
       case a32::kGettimeofday: {

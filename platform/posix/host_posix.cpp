@@ -6,8 +6,14 @@
 #include "rb/platform/host.h"
 
 #include <sched.h>
+#include <sys/epoll.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sys/statfs.h>
+#include <fcntl.h>
 #include <sys/syscall.h>
 #include <sys/sysinfo.h>
 #include <sys/types.h>
@@ -18,6 +24,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <random>
 
 namespace rb::platform {
 namespace {
@@ -73,6 +80,135 @@ int ImageFile(const void* data, std::size_t bytes) {
 }
 
 std::int32_t CurrentTid() { return static_cast<std::int32_t>(::gettid()); }
+
+// The guest is Linux, so every argument translation is the identity: these exist so the call sites read
+// the same on both platforms, and so a future divergence has one place to land.
+int OpenFlags(std::uint32_t guest_flags) { return static_cast<int>(guest_flags); }
+
+int DirFd(std::int32_t guest_fd) { return guest_fd; }
+
+int AtFlags(std::uint32_t guest_flags) { return static_cast<int>(guest_flags); }
+
+namespace {
+
+void FillStat(const struct stat& st, StatInfo* out) {
+  out->dev = static_cast<std::uint64_t>(st.st_dev);
+  out->ino = static_cast<std::uint64_t>(st.st_ino);
+  out->rdev = static_cast<std::uint64_t>(st.st_rdev);
+  out->size = static_cast<std::uint64_t>(st.st_size);
+  out->blocks = static_cast<std::uint64_t>(st.st_blocks);
+  out->mode = static_cast<std::uint32_t>(st.st_mode);
+  out->nlink = static_cast<std::uint32_t>(st.st_nlink);
+  out->uid = static_cast<std::uint32_t>(st.st_uid);
+  out->gid = static_cast<std::uint32_t>(st.st_gid);
+  out->blksize = static_cast<std::uint32_t>(st.st_blksize);
+  out->atime_s = static_cast<std::int64_t>(st.st_atim.tv_sec);
+  out->atime_ns = static_cast<std::uint32_t>(st.st_atim.tv_nsec);
+  out->mtime_s = static_cast<std::int64_t>(st.st_mtim.tv_sec);
+  out->mtime_ns = static_cast<std::uint32_t>(st.st_mtim.tv_nsec);
+  out->ctime_s = static_cast<std::int64_t>(st.st_ctim.tv_sec);
+  out->ctime_ns = static_cast<std::uint32_t>(st.st_ctim.tv_nsec);
+}
+
+}  // namespace
+
+bool StatFd(int fd, StatInfo* out) {
+  struct stat st {};
+  if (::fstat(fd, &st) != 0) return false;
+  FillStat(st, out);
+  return true;
+}
+
+bool StatAt(std::int32_t dirfd, const char* path, bool follow, StatInfo* out) {
+  struct stat st {};
+  const int flags = follow ? 0 : AT_SYMLINK_NOFOLLOW;
+  if (::fstatat(dirfd, path, &st, flags) != 0) return false;
+  FillStat(st, out);
+  return true;
+}
+
+namespace {
+
+void FillStatFs(const struct statfs& sf, StatFsInfo* out) {
+  out->type = static_cast<std::uint64_t>(sf.f_type);
+  out->bsize = static_cast<std::uint64_t>(sf.f_bsize);
+  out->blocks = static_cast<std::uint64_t>(sf.f_blocks);
+  out->bfree = static_cast<std::uint64_t>(sf.f_bfree);
+  out->bavail = static_cast<std::uint64_t>(sf.f_bavail);
+  out->files = static_cast<std::uint64_t>(sf.f_files);
+  out->ffree = static_cast<std::uint64_t>(sf.f_ffree);
+  // Android spells fsid as __fsid_t { int __val[2] }; Darwin spells it fsid_t { int val[2] }.
+  out->fsid = (static_cast<std::uint64_t>(static_cast<std::uint32_t>(sf.f_fsid.__val[0])) << 32) |
+              static_cast<std::uint32_t>(sf.f_fsid.__val[1]);
+  out->namelen = static_cast<std::uint32_t>(sf.f_namelen);
+  out->frsize = static_cast<std::uint32_t>(sf.f_frsize);
+  out->flags = static_cast<std::uint32_t>(sf.f_flags);
+}
+
+}  // namespace
+
+bool StatFsFd(int fd, StatFsInfo* out) {
+  struct statfs sf {};
+  if (::fstatfs(fd, &sf) != 0) return false;
+  FillStatFs(sf, out);
+  return true;
+}
+
+bool StatFsAt(std::int32_t dirfd, const char* path, StatFsInfo* out) {
+  struct statfs sf {};
+  if (::statfs(path, &sf) != 0) return false;
+  FillStatFs(sf, out);
+  return true;
+}
+
+long GetDents(int fd, void* buf, std::size_t bytes) {
+  return ::syscall(SYS_getdents64, fd, buf, bytes);
+}
+
+int Pipe(int fds[2], std::uint32_t guest_flags) {
+  // Linux's pipe2 takes the same O_* bits, and this is Linux.
+  return ::pipe2(fds, static_cast<int>(guest_flags)) == 0 ? 0 : -1;
+}
+
+int Dup3(int old_fd, int new_fd, std::uint32_t guest_flags) {
+  return ::dup3(old_fd, new_fd, static_cast<int>(guest_flags));
+}
+
+int EventFd(std::uint32_t init, std::uint32_t guest_flags) {
+  return static_cast<int>(::syscall(SYS_eventfd2, init, guest_flags));
+}
+
+int EpollCreate(std::uint32_t guest_flags) { return ::epoll_create1(static_cast<int>(guest_flags)); }
+
+int EpollCtl(int epfd, std::uint32_t op, int fd, void* guest_event) {
+  return ::epoll_ctl(epfd, static_cast<int>(op), fd, static_cast<struct epoll_event*>(guest_event));
+}
+
+int EpollWait(int epfd, void* guest_events, int max_events, int timeout_ms) {
+  return ::epoll_wait(epfd, static_cast<struct epoll_event*>(guest_events), max_events, timeout_ms);
+}
+
+int RenameAt2(std::int32_t old_dirfd, const char* old_path, std::int32_t new_dirfd, const char* new_path,
+              std::uint32_t guest_flags) {
+  return static_cast<int>(
+      ::syscall(SYS_renameat2, old_dirfd, old_path, new_dirfd, new_path, guest_flags));
+}
+
+int Accept4(int fd, void* addr, void* addrlen, std::uint32_t guest_flags) {
+  // Through syscall() because bionic declares accept4() only with _GNU_SOURCE visible, and this file
+  // does not restate the libc's feature-test macros.
+  return static_cast<int>(::syscall(SYS_accept4, fd, addr, addrlen, guest_flags));
+}
+
+bool RandomBytes(void* dst, std::size_t len) {
+  std::random_device device;  // bionic: /dev/urandom; no getentropy below API 28
+  auto* p = static_cast<std::uint8_t*>(dst);
+  for (std::size_t i = 0; i < len;) {
+    const std::uint32_t word = device();
+    for (unsigned b = 0; b < 4 && i < len; ++b, ++i) p[i] = static_cast<std::uint8_t>((word >> (8 * b)) & 0xffu);
+  }
+  return true;
+}
 
 Uts LinuxUts() {
   Uts out{};
