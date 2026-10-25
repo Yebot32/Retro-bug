@@ -5,10 +5,9 @@
 # may not include an Android/JNI/GL/Mach header, and it may not call a host interface that exists on one
 # platform and not another. Everything of that kind belongs in `platform/` behind rb/platform/host.h.
 #
-# Usage: tools/check_layering.sh [--strict]
-#   default   FAIL on the header rule, REPORT the syscall rule (host_io.cpp still calls Linux-only
-#             interfaces; S0b moves them and then --strict becomes the default)
-#   --strict  FAIL on both
+# Usage: tools/check_layering.sh [--report]
+#   default   FAIL on both rules (S0b is done: core/ has no platform-specific host calls left)
+#   --report  fail on headers only, report the syscall rule
 #
 # Comments and string literals are stripped before the syscall scan: a message that *names*
 # `sched_getaffinity` is documentation, not a call, and a gate that flags its own explanations gets
@@ -17,8 +16,8 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-STRICT=0
-[ "${1:-}" = "--strict" ] && STRICT=1
+STRICT=1
+[ "${1:-}" = "--report" ] && STRICT=0
 
 fail=0
 reported=0
