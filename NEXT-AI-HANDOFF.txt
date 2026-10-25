@@ -6,6 +6,22 @@ says where we are and what is next. Read this, then the tail of docs/session/wor
 then docs/session/backlog.md (statuses are current as of now).
 
 
+1g. 2026-10-25 (release) — 0.2.0 is built and verified; original icon; notes written
+---------------------------------------------------------------------------
+- **Release build:** `RB_RELEASE=1 RB_VERSION_NAME=0.2.0 bash tools/build_launcher_apk.sh` →
+  `build/launcher-apk/rbguest-launcher.apk`, 2,659,673 bytes, versionCode 262, minSdk 26 / targetSdk 34,
+  apksigner clean, not debuggable (no `application-debuggable` in badging; `-e` paths refused). Installed
+  and run on the Tab S9 from that file. SHA-256 `001a710686b1d34029c65a86a2c79f300470c371e1debefeb3788310e5d21c39`.
+- **Icon:** `tools/icon/retrobug-icon.png` (original teal beetle) is now the launcher icon;
+  `tools/make_launcher_icon.ps1 [-Source path]` regenerates the densities. The Android-robot source is
+  still in the tree and still credited in NOTICE.md, but is no longer packaged.
+- **Notes:** `docs/session/release/RELEASE_NOTES_0.2.0.md` (install, what works, named limits, signing).
+- **Do not push a `v*` tag without the owner's key:** CI falls back to a throwaway key when
+  `RB_KEYSTORE_B64` is missing (D4) and that APK cannot update an installed copy.
+- Open engine work is unchanged: C31 (native activities), C37 (Cars 3 online bootstrap), C50 (Gumball DRM),
+  C51 (Among Us after Unity), plus post-release polish in the backlog's A6 row.
+
+
 1f. 2026-10-25 (latest) — undefined encodings now reach the guest's SIGILL handler
 ---------------------------------------------------------------------------
 - **Engine change:** `UndefinedInstruction` and `UnpredictableInstruction` are classified as a `Fault` with

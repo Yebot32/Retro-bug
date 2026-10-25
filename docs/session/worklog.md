@@ -620,3 +620,22 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
   separate wall (a libunity-side pointer near the 32-bit stack top; ~3 GB), not the crypto probes.
 - Engine lanes were re-gated after the classification change: 25/25 suites, 0 failures (guest-thread lane
   726 checks, including the new SIGILL row on both tiers).
+
+### 2026-10-25 — release prep: 0.2.0, an original icon, and notes
+- **Release build:** `RB_RELEASE=1 RB_VERSION_NAME=0.2.0 bash tools/build_launcher_apk.sh` produces
+  `rbguest-launcher.apk` 2,659,673 bytes, versionCode 262 / versionName 0.2.0, minSdk 26 / targetSdk 34,
+  apksigner-clean, no `application-debuggable` in `aapt2 dump badging`. Installed on the Tab S9 from that
+  exact file: the library loads and an `-e repack` start is ignored (diagnostics are refused in a release
+  build). SHA-256 `001a7106…c39`.
+- **Icon (D5):** the launcher shipped with Google's Android robot. It now carries an original RetroBug
+  icon — a flat teal beetle on a transparent background — generated for the project and checked at all five
+  densities (the 48 px one is legible). `tools/make_launcher_icon.ps1` takes the source as an argument and
+  regenerated the mipmaps; the robot source stays in the tree, but NOTICE.md now credits it as a previous
+  asset that is no longer packaged, and the manifest comment says the same.
+- **Build script:** the closing "build is …" line printed "a release build1" (both shell expansions ran);
+  it is an if/else now.
+- **Notes:** `docs/session/release/RELEASE_NOTES_0.2.0.md` — what it is, install steps, what works on the
+  Tab S9, the named limits (C31/C37/C50/C51 and Play-services checks), the signing warning (CI's throwaway
+  key, D4), and what changed since 0.1.
+- **Backlog:** A7 and D1/D2/D3/D5 closed with what was verified; A6 now lists only post-release polish
+  (C17/C20/C21/C23 and the packaging/engine nits); C13/C14/C22 confirmed already fixed in the code.
