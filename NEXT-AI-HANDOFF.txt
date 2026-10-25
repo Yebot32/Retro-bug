@@ -6,6 +6,25 @@ says where we are and what is next. Read this, then the tail of docs/session/wor
 then docs/session/backlog.md (statuses are current as of now).
 
 
+1f. 2026-10-25 (latest) — undefined encodings now reach the guest's SIGILL handler
+---------------------------------------------------------------------------
+- **Engine change:** `UndefinedInstruction` and `UnpredictableInstruction` are classified as a `Fault` with
+  `illegal_instruction`/`illegal_pc` in *both* tiers (other raises stay `Unimplemented` — this engine's own
+  gaps). The monitored process delivers SIGILL (si_code `ILL_ILLOPC`, si_addr = the instruction, pc set to
+  it) to the guest's handler. The "inside its own handler" guard is the **signal mask**, not a delivery
+  stack: EOS's probe handler `siglongjmp`s back and never issues `rt_sigreturn`.
+- **Among Us progress:** EOS finishes every constructor and `libgamedva.com.so` (renamed Unity player)
+  boots. It then dies reading `0xbfffffe4` in the render thread with SIGSEGV blocked — new item **C51**.
+- New lane row `an_undefined_encoding_reaches_the_guest_sigill_handler` (both tiers; `udf #0` victim,
+  ILL_ILLOPC/si_addr/interrupted-pc assertions, rt_sigreturn pops the delivery). Guest-thread lane: 726
+  checks; full gate 25/25 suites, 0 failures.
+- Diagnostics left in place on purpose: each refused delivery logs *why* (mask, no handler, depth), and
+  every `rt_sigreturn` logs the delivery depth before/after — cheap and bounded.
+- Still open: **C31** native activities (mapped: `ANativeActivity` glue is absent end to end), **C37/C51**
+  Cars 3 and Among Us online/render bootstrap, **C50** Gumball's DRM stack jump, Cars 3 unpatched still
+  black, launcher polish (C1/C13/C14/C20-C23), release prep (A6/A7).
+
+
 1e. 2026-10-25 — Among Us names a new engine gap; C31 mapped
 -----------------------------------------------------------------
 - **Among Us dies before Unity**: `libEOSSDK.so`'s constructor reaches ARMv8-A A32 crypto

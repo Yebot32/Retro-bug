@@ -587,3 +587,36 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
   answers −3. Smallest plan: export the symbol from the stub, add a `kStubOnCreate` branch that builds an
   `ANativeActivity` and calls the guest entry, then implement `ANativeActivity_*`/`AInputQueue_*`/
   `ALooper_*` semantics in `thunks_android.cpp`, and a Java `NativeActivity`-compatible host activity.
+
+### 2026-10-25 (later) — an undefined encoding now reaches the guest's SIGILL handler
+- **What changed:** an *architecturally undefined* encoding (`UndefinedInstruction`) and an UNPREDICTABLE one
+  (ARM permits the undefined-instruction exception for those) are classified as a `Fault` carrying
+  `illegal_instruction` + `illegal_pc`, in both tiers, instead of `Unimplemented` (which stays the label for a
+  gap in *this* engine). The monitored process delivers SIGILL (si_code `ILL_ILLOPC`, si_addr = the
+  instruction) to the guest's handler with the pc set to the instruction, so a probe that skips it resumes
+  after it — the kernel's answer. Refusals (no handler, blocked, nested) are logged by name.
+- **Evidence (Among Us, ARMv8-A crypto probes in `libEOSSDK.so`):** the first probe, `vmull.p64` at
+  `libEOSSDK+0xFD4548`, is trapped and **delivered to the guest's handler 0x1c64844**; the constructor then
+  moves on to the next probe, `sha1c` at `+0xFD4538`. That second trap is refused — `inside its own handler
+  (deliveries 1)` — because the first delivery is never closed: the handler runs and control resumes at the
+  probe it chose, yet **no `rt_sigreturn` reaches the monitor**. Until that is understood (how that handler
+  returns, e.g. bionic's restorer path), Among Us still stops in the constructor and the boot refuses the
+  process; C49 keeps the details.
+- New engine lane: `an_undefined_encoding_reaches_the_guest_sigill_handler` runs on both tiers (handler
+  installed with `SA_RESTORER`, `udf #0` victim, asserts ILL_ILLOPC/si_addr/interrupted pc and that
+  `rt_sigreturn` pops the delivery). Guest-thread lane: 726 checks, 0 failures.
+
+### 2026-10-25 (final) — SIGILL delivery takes Among Us past EOS; the next wall is libunity
+- **The handler was abandoning its frame, not returning through it.** EOS's probe handler runs, chooses the
+  next probe, and `siglongjmp`s back — it never issues `rt_sigreturn`, so the first delivery stayed open and
+  the old "inside its own handler" guard refused the second probe. The kernel's only bookkeeping for that
+  state is the **signal mask** (entering a handler blocks the signal unless `SA_NODEFER`, and `siglongjmp`
+  restores the mask), so the delivery guard now reads the mask, not the delivery stack.
+- **Result on Among Us:** the first probe (`vmull.p64`) and the second (`sha1c`) are both delivered,
+  `libEOSSDK.so` finishes every constructor, and **`libgamedva.com.so` (the renamed Unity player) boots and
+  its `JNI_OnLoad` returns**. The game then dies in its render thread:
+  `fatal: guest memory read at 0xbfffffe4 (pc libc.so+0x940f0, lr libunity.so+0x724189)`, with the log's
+  prior line showing `SIGSEGV at 0xbfffffe4 not delivered — blocked in the thread's mask`. That is a new,
+  separate wall (a libunity-side pointer near the 32-bit stack top; ~3 GB), not the crypto probes.
+- Engine lanes were re-gated after the classification change: 25/25 suites, 0 failures (guest-thread lane
+  726 checks, including the new SIGILL row on both tiers).

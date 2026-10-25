@@ -62,7 +62,7 @@ Gate: 23/23 suites on the SM-X710 (tier-diff 1039, guest thread 692, monitor 233
 | 27 | Turbo FAST | com.pikpok.turbo | native | not installed | Play Protect verification failure | install log |
 | 28 | Nutty Fluffies | com.UBI.A90.WW | Unity | died | re-run 2026-10-18 21:46: `JNI_OnLoad` runs 147,666,044 steps (was stopped at 4,000,000) and faults on an unmapped guest read at 0xc0d900b3, pc 0x2410bc — a real memory fault, no longer the budget | logcat |
 | 29 | Where's My Mickey | com.disney.wheresmymickey_goo | native | **runs** | — age gate on screen | screenshot |
-| 30 | Among Us | com.innersloth.spacemafia | Unity (il2cpp) | died (engine) | re-run 2026-10-25: converts (497 MB) and installs, then dies before Unity on `UnsatisfiedLinkError: NativeLoader.load` — because `libEOSSDK.so`'s constructor executes ARMv8-A A32 crypto (`sha1c.32`/`sha256h.32`/`vmull.p64`), which dynarmic cannot decode, so the boot refuses the process (C49) | `build/m5/com.innersloth.spacemafia/au1.png`; C49 open |
+| 30 | Among Us | com.innersloth.spacemafia | Unity (il2cpp) | died (engine, further) | re-run 2026-10-25: the EOS crypto probes are now delivered as SIGILL (undefined/UNPREDICTABLE encodings reach the guest handler), so `libEOSSDK.so` finishes every constructor and the renamed Unity player boots. It then dies in the render thread reading `0xbfffffe4` with SIGSEGV blocked (C51) | `build/m5/com.innersloth.spacemafia/au1.png`; C49 done, C51 open |
 
 ## Causes, grouped by frequency
 
