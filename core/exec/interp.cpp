@@ -1196,14 +1196,23 @@ bool BlockRunner::Step(const Inst* inst) {
       // The reason code is chosen to match Tier J's `ExceptionRaised` for the same event, because the
       // differential compares reasons and two tiers naming one raise differently is the thing it exists to
       // catch. That mapping is: a failed instruction fetch is a `Fault` the guest would have seen, a
-      // breakpoint suspends, and anything else -- an undefined or unmodelled encoding, an unimplemented
-      // hint -- is `Unimplemented`, not a fault. Making every raise a `Fault` was my error two revisions
-      // ago and the two lanes that caught it are `docs/30` §Step 37's record of it.
+      // breakpoint suspends, an *architecturally undefined* encoding is SIGILL (a `Fault` with
+      // `illegal_instruction`, delivered to the guest's handler when it has one), and anything else -- an
+      // unmodelled encoding, an unimplemented hint -- is `Unimplemented`, this engine's own gap, not a fault.
       const Exception raised = static_cast<Exception>(kind);
       const std::string where_text = "the A32 front end raised exception " + std::to_string(kind) +
                                      " at 0x" + Hex(static_cast<std::uint32_t>(where));
       if (raised == Exception::NoExecuteFault) {
         return FaultAt(where_text, static_cast<std::uint32_t>(where), false);
+      }
+      if (raised == Exception::UndefinedInstruction || raised == Exception::UnpredictableInstruction) {
+        // Same answer as Tier J: an encoding this CPU does not define is the guest's SIGILL, not this
+        // engine's gap. Every other raise stays `Unimplemented`, which is what the differential compares.
+        stop.reason = StopReason::Fault;
+        stop.detail = where_text;
+        stop.illegal_instruction = true;
+        stop.illegal_pc = static_cast<std::uint32_t>(where);
+        return false;
       }
       if (raised == Exception::Breakpoint) {
         stop.reason = StopReason::Suspended;

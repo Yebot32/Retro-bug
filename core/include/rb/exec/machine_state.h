@@ -179,6 +179,12 @@ struct RunResult {
   std::uint32_t fault_addr = 0;
   bool fault_has_addr = false;
   bool fault_write = false;
+  /// Meaningful only for `Fault`: the tier stopped on an encoding this CPU does not define (the kernel's
+  /// SIGILL, si_code ILL_ILLOPC), and `illegal_pc` is that instruction's own address — the state's pc is
+  /// already the encoding after it. A monitored process delivers this to the guest's SIGILL handler; code
+  /// that probes an instruction that way (EOS's crypto stubs, OpenSSL's counter read) depends on the trap.
+  bool illegal_instruction = false;
+  std::uint32_t illegal_pc = 0;
   /// Work done against `max_instructions`, and **the tiers count different things**: Tier I advances
   /// per Dynarmic IR operation, Tier J per guest instruction (Dynarmic's cycle counting, one tick per
   /// fetched encoding). Two tiers that agree on state are not two tiers that agree on a unit, and an

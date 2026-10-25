@@ -351,9 +351,13 @@ std::unique_ptr<GuestProcess> GuestProcess::Create(const GuestProcessOptions& op
     });
     p->monitor_->set_signal_return([owner](GuestThread& thread) -> syscall::Outcome {
       std::string why;
+      const std::size_t before = thread.deliveries.size();
       if (!ReturnFromSignal(thread, *owner->mem_, &why)) {
+        owner->Log("sigreturn: refused with " + std::to_string(before) + " delivery(ies) open — " + why);
         return syscall::Outcome::Refused(syscall::err::kEnosys, "rt_sigreturn: " + why);
       }
+      owner->Log("sigreturn: frame restored, deliveries " + std::to_string(before) + " -> " +
+                 std::to_string(thread.deliveries.size()));
       return syscall::Outcome::Emulated(0, why);
     });
     // C26: entry into a queued signal's handler, at the ABI's slice boundaries. Every thread runs there —
@@ -396,23 +400,50 @@ std::unique_ptr<GuestProcess> GuestProcess::Create(const GuestProcessOptions& op
     // fatal, which is also what the kernel's default action does.
     p->abi_->set_fault_deliver([owner](GuestThread& thread, const exec::RunResult& run) -> bool {
       constexpr int kSigsegv = 11;
+      constexpr int kSigill = 4;
       constexpr std::size_t kMaxNestedSignals = 8;
+      // An encoding this CPU does not define is the kernel's SIGILL (ILL_ILLOPC) at the instruction itself;
+      // it arrives through the same delivery as a data fault, with the pc as si_addr.
+      const bool illegal = run.illegal_instruction;
+      const int sig = illegal ? kSigill : kSigsegv;
+      const std::uint32_t stop_addr = illegal ? run.illegal_pc : run.fault_addr;
+      const char* const sig_name = illegal ? "SIGILL" : "SIGSEGV";
       if (thread.deliveries.size() >= kMaxNestedSignals) return false;
-      if (!thread.deliveries.empty() && thread.deliveries.back().sig == kSigsegv) return false;  // a fault in the handler
-      if ((thread.signal_mask & (1ull << (kSigsegv - 1))) != 0) return false;
-      const syscall::Monitor::Disposition disp = owner->monitor_->disposition(kSigsegv);
-      if (!disp.catches()) return false;
-      const std::uint32_t interrupted_pc = thread.state.pc;
-      const int code = run.fault_write ? sigframe::kSegvAccerr : sigframe::kSegvMaperr;
-      std::string why;
-      if (!DeliverSignal(thread, *owner->mem_, disp, kSigsegv, nullptr, &why, code, run.fault_addr)) {
-        owner->Log("signals: SIGSEGV at " + Hex(run.fault_addr) + " not delivered — " + why);
+      // The kernel's only bookkeeping for "inside its own handler" is the mask: entering a handler blocks the
+      // signal (unless SA_NODEFER), and a handler that abandons its frame with siglongjmp restores the mask,
+      // which ends that state without an rt_sigreturn. So the mask decides, not the delivery stack — EOS's
+      // probes install a handler, try an instruction, and longjmp back, then try the next one (Among Us).
+      if ((thread.signal_mask & (1ull << (sig - 1))) != 0) {
+        owner->Log("signals: " + std::string(sig_name) + " at " + Hex(stop_addr) +
+                   " not delivered — blocked in the thread's mask");
         return false;
       }
-      owner->Log("signals: SIGSEGV at " + Hex(run.fault_addr) + " (" +
-                 (run.fault_write ? "write" : "read") + ", si_code " + std::to_string(code) +
-                 ") delivered to handler " + Hex(disp.handler) + "; interrupted pc " +
-                 Hex(interrupted_pc));
+      const syscall::Monitor::Disposition disp = owner->monitor_->disposition(sig);
+      if (!disp.catches()) {
+        owner->Log("signals: " + std::string(sig_name) + " at " + Hex(stop_addr) + " not delivered — no handler");
+        return false;
+      }
+      std::uint32_t interrupted_pc = thread.state.pc;
+      std::uint32_t addr = run.fault_addr;
+      if (illegal) {
+        // The tier's pc is already past the encoding; the frame must say where the undefined one is, so a
+        // handler that skips it (the probe pattern) resumes after it.
+        thread.state.pc = run.illegal_pc;
+        thread.state.r[15] = run.illegal_pc;
+        interrupted_pc = run.illegal_pc;
+        addr = run.illegal_pc;
+      }
+      const int code = illegal ? sigframe::kIllIllopc : (run.fault_write ? sigframe::kSegvAccerr : sigframe::kSegvMaperr);
+      std::string why;
+      if (!DeliverSignal(thread, *owner->mem_, disp, sig, nullptr, &why, code, addr)) {
+        owner->Log("signals: " + std::string(illegal ? "SIGILL" : "SIGSEGV") + " at " + Hex(addr) +
+                   " not delivered — " + why);
+        return false;
+      }
+      owner->Log("signals: " + std::string(illegal ? "SIGILL" : "SIGSEGV") + " at " + Hex(addr) + " (" +
+                 (illegal ? "ILL_ILLOPC" : run.fault_write ? "write" : "read") + ", si_code " +
+                 std::to_string(code) + ") delivered to handler " + Hex(disp.handler) +
+                 "; interrupted pc " + Hex(interrupted_pc));
       return true;
     });
   }

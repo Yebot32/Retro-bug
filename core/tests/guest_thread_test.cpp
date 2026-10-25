@@ -1724,6 +1724,91 @@ void a_signal_interrupts_a_blocked_futex_and_enters_the_handler(int tier) {
             "the wait marker is cleared after the wait");
 }
 
+/// An architecturally undefined encoding is the guest's SIGILL (ILL_ILLOPC), at the instruction's own address:
+/// a probe that tests an instruction for support (EOS's sha1c/sha256h/vmull.p64 stubs, OpenSSL's counter read)
+/// installs a handler, tries it, and falls back when the trap arrives. Both tiers agree on the classification —
+/// an *undefined* encoding is a fault the guest can catch, while an encoding this engine has not modelled stays
+/// `Unimplemented` and is reported as the gap it is.
+void an_undefined_encoding_reaches_the_guest_sigill_handler(int tier) {
+  Rig r = Build(tier);
+  if (!r.ok) return;
+  mem::GuestMemory& m = *r.mem;
+  const exec::GuestAddr kPage = kCode + 0x1000;
+  std::string perr;
+  CHECK_CTX(m.Map(kPage, mem::kGuestPage, mem::kRead | mem::kWrite, &perr), "map the handler page: " + perr);
+  // Same handler as the SIGSEGV lane: record sig/pc, skip the 16-bit faulting instruction, resume, return
+  // through the restorer. The victim here is `udf #0` (Thumb 0xDE00) followed by `bx lr`.
+  const std::uint16_t code[] = {
+      0x6020, 0x6061, 0x60a2, 0x6dd3, 0x60e3, 0x3302, 0x65d3, 0x4770,
+      0x27ad, 0xdf00, 0xe7fe,  // 0x10 restorer
+      0xde00, 0x4770,          // 0x16 victim: udf #0; bx lr
+  };
+  CHECK_CTX(m.Write(kPage, code, sizeof code), "write the handler bytes while the page is writable");
+  CHECK_CTX(m.Protect(kPage, mem::kGuestPage, mem::kRead | mem::kExec, &perr), "make it executable: " + perr);
+  const exec::GuestAddr kHandler = kPage;
+  const exec::GuestAddr kRestorer = kPage + 0x10 + 1;
+  const exec::GuestAddr kUndefined = kPage + 0x16;
+
+  GuestThread& t = r.abi->main_thread();
+  r.mon->set_signal_return([&m](GuestThread& th) -> syscall::Outcome {
+    std::string why;
+    if (!ReturnFromSignal(th, m, &why)) return syscall::Outcome::Refused(syscall::err::kEnosys, why);
+    return syscall::Outcome::Emulated(0, why);
+  });
+  const std::uint32_t act[5] = {kHandler | 1u, 0x0400'0000u /* SA_RESTORER */, kRestorer, 0, 0};
+  CHECK(m.Write(kData + 0x20, act, sizeof act));
+  exec::MachineState sa{};
+  sa.mode = isa::Mode::Thumb;
+  sa.pc = kReturn;
+  sa.r[7] = syscall::nr::kRtSigaction;
+  sa.r[0] = 4;  // SIGILL
+  sa.r[1] = kData + 0x20;
+  r.mon->Handle(sa, 0, &t);
+  CHECK_CTX(r.mon->disposition(4).catches(), "the SIGILL handler is installed");
+
+  int deliveries = 0;
+  r.abi->set_fault_deliver([&](GuestThread& th, const exec::RunResult& run) -> bool {
+    std::string why;
+    CHECK_CTX(run.illegal_instruction, "the stop is classified as an illegal instruction: " + run.detail);
+    CHECK_CTX(run.illegal_pc == kUndefined, "illegal_pc is the undefined instruction's address");
+    const syscall::Monitor::Disposition disp = r.mon->disposition(4);
+    if (!disp.catches()) return false;
+    th.state.pc = run.illegal_pc;  // the frame must say where the undefined encoding is (the real wiring does this)
+    th.state.r[15] = run.illegal_pc;
+    if (!DeliverSignal(th, m, disp, 4, nullptr, &why, runtime::sigframe::kIllIllopc, run.illegal_pc)) {
+      fail(("SIGILL delivery: " + why).c_str(), __LINE__);
+      return false;
+    }
+    ++deliveries;
+    return true;
+  });
+
+  t.state.mode = isa::Mode::Thumb;
+  t.state.cpsr = exec::CpsrWithMode(t.state.cpsr, isa::Mode::Thumb);
+  t.state.pc = kUndefined;
+  t.state.r[15] = kUndefined;
+  t.state.r[4] = kData + 0x40;
+  t.state.r[13] = kStacks + kStackBytes - 0x100;
+  t.state.r[14] = kReturn | 1u;
+
+  const exec::RunResult rr = r.abi->RunThread(t, 200000);
+  CHECK_CTX(deliveries == 1, "exactly one SIGILL delivery, got " + std::to_string(deliveries));
+  CHECK_CTX(rr.reason == exec::StopReason::Returned,
+            "the handler skipped the undefined encoding and returned: " + rr.detail);
+  CHECK_CTX(t.deliveries.empty(), "rt_sigreturn popped the SIGILL delivery");
+
+  std::uint32_t rec[4] = {};
+  CHECK(m.Read(kData + 0x40, rec, sizeof rec));
+  CHECK_CTX(rec[0] == 4, "the handler's first argument is SIGILL");
+  const std::uint32_t info = rec[1];
+  std::uint32_t got_code = 0, got_addr = 0;
+  CHECK(m.Read(info + runtime::sigframe::kSiCode, &got_code, 4));
+  CHECK(m.Read(info + runtime::sigframe::kSiAddr, &got_addr, 4));
+  CHECK_CTX(got_code == runtime::sigframe::kIllIllopc, "si_code is ILL_ILLOPC");
+  CHECK_CTX(got_addr == kUndefined, "si_addr is the undefined instruction's address");
+  CHECK_CTX(rec[3] == kUndefined, "the interrupted pc is the undefined instruction itself");
+}
+
 /// ---- C26: a second signal nests inside the first, and each `rt_sigreturn` peels one layer.
 ///
 /// Mono's suspend handler (SIGPWR) waits for the restart signal (SIGXCPU) to run inside it, so delivery
@@ -1879,6 +1964,7 @@ int main() {
     guest_pthreads(tier);
     signal_delivery_enters_the_guest_handler_and_resumes(tier);
     a_synchronous_fault_reaches_the_guest_sigsegv_handler(tier);
+    an_undefined_encoding_reaches_the_guest_sigill_handler(tier);
     a_signal_interrupts_a_blocked_futex_and_enters_the_handler(tier);
     a_blocked_signal_leaves_a_futex_wait_alone(tier);
   }

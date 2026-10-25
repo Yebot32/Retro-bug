@@ -568,7 +568,7 @@ exec::RunResult AbiContext::RunThread(runtime::GuestThread& thread, unsigned bud
       if (remaining == 0 || done == 0) break;
       continue;
     }
-    if (run.reason == exec::StopReason::Fault && run.fault_has_addr && fault_deliver_ &&
+    if (run.reason == exec::StopReason::Fault && (run.fault_has_addr || run.illegal_instruction) && fault_deliver_ &&
         ++fault_deliveries <= kMaxFaultDeliveriesPerCall) {
       // A synchronous fault the guest has a handler for is a signal, not a dead thread: build the
       // SIGSEGV frame on the guest stack (si_addr = the faulting access) and resume at the handler.

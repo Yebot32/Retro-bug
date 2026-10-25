@@ -297,6 +297,11 @@ class JitExecutor : public Executor, public Dynarmic::A32::UserCallbacks {
   GuestAddr pending_fault_addr_ = 0;
   bool pending_fault_has_addr_ = false;
   bool pending_fault_write_ = false;
+  /// Set when the raise was an architecturally undefined encoding (SIGILL), with that instruction's address:
+  /// the stop becomes a `Fault` carrying `illegal_instruction`, which a monitored process delivers to the
+  /// guest's SIGILL handler. Any other raise stays `Unimplemented` (a gap in this engine, not a guest-visible trap).
+  bool pending_illegal_ = false;
+  GuestAddr pending_illegal_pc_ = 0;
 };
 
 }  // namespace rb::exec

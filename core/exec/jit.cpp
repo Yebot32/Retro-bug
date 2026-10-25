@@ -604,6 +604,8 @@ RunResult JitExecutor::Run(MachineState& state, unsigned max_instructions) {
   pending_fault_addr_ = 0;
   pending_fault_has_addr_ = false;
   pending_fault_write_ = false;
+  pending_illegal_ = false;
+  pending_illegal_pc_ = 0;
 
   SyncIn(state);
   const Dynarmic::HaltReason hr = jit_->Run();
@@ -661,8 +663,16 @@ RunResult JitExecutor::MapHalt(Dynarmic::HaltReason hr, unsigned executed) {
       out.fault_write = pending_fault_write_;
       break;
     case Pending::Unimplemented:
-      out.reason = StopReason::Unimplemented;
-      out.detail = std::move(pending_detail_);
+      if (pending_illegal_) {
+        // An encoding this CPU does not define: a fault the guest can catch, not this engine's own gap.
+        out.reason = StopReason::Fault;
+        out.detail = std::move(pending_detail_);
+        out.illegal_instruction = true;
+        out.illegal_pc = pending_illegal_pc_;
+      } else {
+        out.reason = StopReason::Unimplemented;
+        out.detail = std::move(pending_detail_);
+      }
       break;
     case Pending::Suspended:
       out.reason = StopReason::Suspended;
@@ -830,6 +840,18 @@ void JitExecutor::ExceptionRaised(GuestAddr pc, Dynarmic::A32::Exception excepti
   } else if (exception == Dynarmic::A32::Exception::Breakpoint) {
     SetPending(Pending::Suspended, "guest breakpoint");
   } else {
+    if (exception == Dynarmic::A32::Exception::UndefinedInstruction ||
+        exception == Dynarmic::A32::Exception::UnpredictableInstruction) {
+      // The kernel's answer to an encoding this CPU does not define is SIGILL (ILL_ILLOPC), delivered to the
+      // guest's handler if it has one; code that probes instructions relies on that trap to fall back. ARM
+      // permits an UNPREDICTABLE encoding to take the undefined-instruction exception, which is what a probe
+      // for a newer encoding sees on an older CPU. First stop wins: only the raise that becomes this Run's
+      // reason may classify it (an earlier pending stop is not reclassified).
+      if (pending_ == Pending::None) {
+        pending_illegal_ = true;
+        pending_illegal_pc_ = static_cast<std::uint32_t>(pc);
+      }
+    }
     SetPending(Pending::Unimplemented, std::string{name} + " at 0x" + Hex(pc));
   }
   // Deliberately *not* recorded in `pending_pc_`: the translator emits the raising instruction's

@@ -74,6 +74,8 @@ constexpr std::uint32_t kSiAddr = 12;
 /// si_code values a synchronous memory fault carries (asm-generic/siginfo.h).
 constexpr int kSegvMaperr = 1;
 constexpr int kSegvAccerr = 2;
+/// si_code for SIGILL raised by an encoding this CPU does not define (ILL_ILLOPC): si_addr is the instruction.
+constexpr int kIllIllopc = 1;
 
 /// `SA_SIGINFO` (asm-generic/signal-defs.h): the handler takes three arguments, not one.
 constexpr std::uint32_t kSaSiginfo = 0x00000004;
