@@ -693,3 +693,32 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
   entries. It needs one persistent `DIR` per guest fd plus a close/dup hook from the syscall layer.
 - **Also**: Darwin's `fdatasync` is `fsync`; `accept4`/`dup3` are accept/dup2 + `fcntl`; the monitor no
   longer uses `cpu_set_t` at all (the platform answers a 32-bit mask).
+
+### 2026-10-25 — iOS S1a: Tier I decodes each block once (and a real title renders on it)
+- **The cache.** Tier I called `isa::TranslateOne` inside its run loop and allocated an `IR::Block` on every
+  entry. Blocks are now cached by **(pc, mode, IT, FPSCR)**. FPSCR belongs in the key: Dynarmic bakes the
+  rounding mode and flush-to-zero into the FP instructions it emits, and the tier-diff `fp_rmode` rows
+  failed immediately without it (two of five rows disagreed with hardware by one ulp).
+- **Correctness rule.** Only blocks on **non-writable pages** are cached. Guest text is read+exec,
+  `GuestMemory::Write` refuses a read-only page, and a writable page (a JIT arena, or this repo's own patch
+  test) is decoded afresh — so self-modifying code stays correct without a write observer. That is also why
+  the tier-diff SMC row kept its meaning: a code page the guest can write is never cached.
+- **Invalidation.** `arm_cacheflush` evicts by **page overlap**, not start address: the fixture patches one
+  byte at +8 and flushes from there, and an address-only comparison left the stale block in place (measured:
+  `I=1008` after the flush).
+- **Contract change, deliberate and recorded in the test**: Tier I no longer promises fresh code *before* a
+  flush. It used to match hardware only because it owned no cache; ARM requires the flush, and Tier J — the
+  Android default — has always behaved this way. The lane now asserts both tiers are stale pre-flush and
+  fresh post-flush.
+- **Measured:** `rb_exec_interp_tests` 578 ms → 164 ms on the Tab S9 (same binary shape, 1096 checks);
+  tier-diff 1039 checks, 0 failures; whole gate 26/26 suites.
+- **Device evidence for the tier itself:** Angry Birds Epic launched with **CPU mode = Safe (Tier I)** and
+  rendered its title scene (3D, il2cpp) with its consent dialog. Its boot is host-call bound (1.1 M host
+  calls in 10 s) rather than instruction bound, so a throughput number needs a title that actually spins —
+  Rolling Sky is the next measurement, not this one. The game's CPU mode and overlay were restored to the
+  owner's settings afterwards.
+- **Install-flow note for the release backlog:** converting/updating a copy now raises two system dialogs on
+  this device — "Update this app?" (PackageInstaller) and Google Play Protect's "App scan recommended" →
+  "This app looks safe" — so a conversion is not silent on Android 14+. The launcher reports
+  `PENDING_USER_ACTION` while the first is up, and `INSTALL_FAILED_ABORTED: User rejected permissions` if it
+  is dismissed. Worth surfacing in the UI ("confirm the system install prompt").
