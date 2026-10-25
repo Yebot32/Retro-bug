@@ -44,7 +44,7 @@ Gate: 23/23 suites on the SM-X710 (tier-diff 1039, guest thread 692, monitor 233
 | 9 | FC All-Stars | com.turner.fcallstars | Unity + NativeActivity | died | `ANativeActivity_onCreate` undefined — tile now says so (C31, 0.1.236) | logcat; tile |
 | 10 | Fruit Ninja vs Skittles | com.halfbrick.fruitninjavsskittles | native | **runs** | — playable | screenshot + played |
 | 11 | Gumball Lite | com.twentysixdigital.gumballlite | native | **runs** | — playable | screenshot + played |
-| 12 | Gumball's Amazing Party | com.turner.gumballsamazingparty | Unity | died | undefined instruction in `libgvradio.so` ctor (obfuscated/DRM lib) | logcat |
+| 12 | Gumball's Amazing Party | com.turner.gumballsamazingparty | Unity | died | 2026-10-25: the `libgvradio.so` constructor (guest 0x24c900) jumps to a stack address and faults — a bad function pointer in its obfuscated DRM lib, not the missing-opcode class (C50) | `build/m5/com.turner.gumballsamazingparty/logcat.txt` |
 | 13 | Gameloft Cars | com.gameloft.android.ANMP.GloftCAHM | native | died | `ASensorManager_createEventQueue` refuses a guest looper callback | logcat |
 | 14 | KitKat Challenge | com.doubleleft.androidkitkat | native | **runs** | — playable | screenshot + played |
 | 15 | LEGO Mighty Micros | com.lego.superheroes.dccomicsmightymicros | Unity + NativeActivity | died | `ANativeActivity_onCreate` undefined — tile now says so (C31, 0.1.236) | logcat; tile |
@@ -62,7 +62,7 @@ Gate: 23/23 suites on the SM-X710 (tier-diff 1039, guest thread 692, monitor 233
 | 27 | Turbo FAST | com.pikpok.turbo | native | not installed | Play Protect verification failure | install log |
 | 28 | Nutty Fluffies | com.UBI.A90.WW | Unity | died | re-run 2026-10-18 21:46: `JNI_OnLoad` runs 147,666,044 steps (was stopped at 4,000,000) and faults on an unmapped guest read at 0xc0d900b3, pc 0x2410bc — a real memory fault, no longer the budget | logcat |
 | 29 | Where's My Mickey | com.disney.wheresmymickey_goo | native | **runs** | — age gate on screen | screenshot |
-| 30 | Among Us | com.innersloth.spacemafia | Unity (il2cpp) | converted, untested | conversion used to OOM; now converts (497 MB) | repack log 20:13 |
+| 30 | Among Us | com.innersloth.spacemafia | Unity (il2cpp) | died (engine) | re-run 2026-10-25: converts (497 MB) and installs, then dies before Unity on `UnsatisfiedLinkError: NativeLoader.load` — because `libEOSSDK.so`'s constructor executes ARMv8-A A32 crypto (`sha1c.32`/`sha256h.32`/`vmull.p64`), which dynarmic cannot decode, so the boot refuses the process (C49) | `build/m5/com.innersloth.spacemafia/au1.png`; C49 open |
 
 ## Causes, grouped by frequency
 

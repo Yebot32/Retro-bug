@@ -6,6 +6,27 @@ says where we are and what is next. Read this, then the tail of docs/session/wor
 then docs/session/backlog.md (statuses are current as of now).
 
 
+1e. 2026-10-25 — Among Us names a new engine gap; C31 mapped
+-----------------------------------------------------------------
+- **Among Us dies before Unity**: `libEOSSDK.so`'s constructor reaches ARMv8-A A32 crypto
+  (`sha1c.32`, `sha256h.32`, `vmull.p64` at `libEOSSDK+0xFD4538..0xFD4548`). Dynarmic's A32 table has AES
+  but no SHA1/SHA256, and refuses `vmull.p64`; the mirror reports it as an undefined instruction and the
+  boot refuses the process, so the renamed Unity player (`libgamedva.com.so`) never loads and Java reports
+  `UnsatisfiedLinkError: NativeLoader.load`. **C49**: implement the v8 A32 crypto family in both tiers.
+  Verify with `llvm-objdump --mcpu=cortex-a53` (plain objdump calls these words `<unknown>`).
+- **Gumball's Amazing Party** is a different failure (C50): `libgvradio.so`'s ctor jumps to a *stack*
+  address (0xff59e476) before faulting — control-flow/relocation damage in an obfuscated DRM lib, not an
+  opcode gap.
+- **C31 is fully mapped** (no code exists for `ANativeActivity`/app glue/`AInputQueue`; the tile is marked
+  unplayable before any repack). Smallest plan is in the backlog row: export the stub symbol, add a
+  `kStubOnCreate` boot branch that builds the activity + callbacks, implement `ANativeActivity_*`/
+  `AInputQueue_*`/`ALooper_*` in `thunks_android.cpp`, and give the copy a Java `NativeActivity` host.
+- Regression: MadTruck reaches its menu on this engine; TT2/CD2/RS unchanged. Sonic was tested without its
+  851 MB OBB, so its video error is expected, not a regression.
+- Device note: adb briefly lost authorisation after a server restart (`adb kill-server` + `start-server`
+  cleared it), and the tablet has a Secure Folder user (150) — use `--user 0` for package queries.
+
+
 1d. 2026-10-24 (latest) — C47 fixed (Rolling Sky runs); Cars 3/ABE re-measured
 -----------------------------------------------------------------------
 - **Rolling Sky runs to its level-select screen.** Its `IpcProvider` opened a provider by a literal

@@ -564,3 +564,26 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
   publishes, unbind/exit retracts). TT2 still shows **3** `Given thread 4246 does not exist` at startup:
   tid 4246 has no bound thread when Unity asks (a late priority call for a dead worker), which ART answers
   honestly; harmless and not blocking.
+
+### 2026-10-25 — Among Us and the native-activity map
+- **Among Us (first run)**: repacks, installs, and dies before Unity with
+  `UnsatisfiedLinkError: NativeLoader.load` — a *symptom*. The real stop is earlier: `libEOSSDK.so`'s
+  constructor (DT_INIT_ARRAY[59] at `+0xFD4654`) reaches `+0xFD4548`, an **ARMv8-A A32 crypto**
+  instruction: llvm-objdump with `--mcpu=cortex-a53` decodes the three stubs at `+0xFD4538/+0xFD4540/
+  +0xFD4548` as `sha1c.32`, `sha256h.32` and `vmull.p64`. Dynarmic's A32 table has the v8 AES entries but
+  not SHA1/SHA256, and its VMULL pattern swallows `vmull.p64` only to refuse it (`P & sz==0b10` is
+  architecturally undefined in ARMv7). The boot then refuses the process, so `libgamedva.com.so` (the
+  renamed Unity player) never loads. **New backlog item C49**: implement ARMv8-A A32 crypto
+  (SHA1C/SHA256H/SHA1H/SHA1SU1/SHA256H2/…, VMULL.P64, and the AES family dynarmic already lists) in both
+  tiers, with a tier-diff lane. Until then Among Us stays unplayable.
+- **Gumball's Amazing Party is a different fault**: its `libgvradio.so` constructor (guest 0x24c900) jumps
+  to `0xff59e476` — a stack address — and only then hits "undefined instruction". That is a bad
+  function-pointer/relocation control flow in an obfuscated DRM library, not a missing opcode; note it as
+  such rather than folding it into C49.
+- **C31 map (sub-agent, verified)**: no `ANativeActivity`/`android_native_app_glue`/`AInputQueue` code
+  exists anywhere (only detection in `ApkScan.isNativeActivity`, which marks the tile unplayable before a
+  repack). The repack path never emits `ANativeActivity_onCreate` (`StubElfWriter.jniExportsOf` keeps only
+  `Java_*` + `JNI_OnLoad`); `runtime_boot.cpp`'s stub dispatch only knows `JNI_OnLoad`; `ALooper_pollAll`
+  answers −3. Smallest plan: export the symbol from the stub, add a `kStubOnCreate` branch that builds an
+  `ANativeActivity` and calls the guest entry, then implement `ANativeActivity_*`/`AInputQueue_*`/
+  `ALooper_*` semantics in `thunks_android.cpp`, and a Java `NativeActivity`-compatible host activity.
