@@ -618,11 +618,11 @@ void invalidation_reaches_the_compiled_code() {
               "test would be measuring something other than a patched function");
   }
 
-  // Before invalidation: Tier I owns no cache, so it must already answer the new 42 — and Tier J must
-  // still answer the *old* 1008, which is the premise of everything below. Measured on the Tab S9:
-  // `patched, not yet invalidated: I=42 J=1008`. If a future back end re-reads code and comes back 42
-  // here, this test has nothing left to demonstrate and should be deleted rather than left to pass
-  // vacuously, so it fails loudly instead.
+  // Before invalidation: both tiers now cache decoded blocks, so both must still answer the *old* 1008 —
+  // the premise of everything below. This row used to assert that Tier I came back 42 because it owned no
+  // cache; with the decode-once cache (iOS S1) that property is gone, and what remains is the contract
+  // every real JIT relies on: written code is not visible until the guest flushes. ARM never promised
+  // otherwise, and Tier J (the default on Android) has always behaved this way.
   {
     exec::MachineState si{}, sj{};
     const exec::RunResult ri = run(rig.interp.get(), a->addr, 3, 7, si);
@@ -632,15 +632,17 @@ void invalidation_reaches_the_compiled_code() {
                  static_cast<std::int32_t>(si.r[0]), kPatchB_want, static_cast<std::int32_t>(sj.r[0]));
     CHECK_CTX(ri.reason == exec::StopReason::Returned && rj.reason == exec::StopReason::Returned,
               "a patched probe must still run to a return: I " + ri.detail + " / J " + rj.detail);
-    CHECK_CTX(static_cast<std::int32_t>(si.r[0]) == kPatchB_want,
-              "Tier I, which owns no cache, reads " + std::to_string(static_cast<std::int32_t>(si.r[0])) +
-                  " of patched code; want " + std::to_string(kPatchB_want));
+    CHECK_CTX(static_cast<std::int32_t>(si.r[0]) == kPatchA_want,
+              "Tier I ran the cached block of patched code: " +
+                  std::to_string(static_cast<std::int32_t>(si.r[0])) + ", want the stale " +
+                  std::to_string(kPatchA_want));
     CHECK_CTX(static_cast<std::int32_t>(sj.r[0]) == kPatchA_want,
               "Tier J answered " + std::to_string(static_cast<std::int32_t>(sj.r[0])) +
                   " before anything invalidated its cache; it has no cache to invalidate, so this "
                   "test is measuring nothing");
   }
 
+  rig.interp->Invalidate(a->addr, a->addr + kPatchWindow);
   rig.jit->Invalidate(a->addr, a->addr + kPatchWindow);
 
   exec::MachineState si{}, sj{};
@@ -672,6 +674,7 @@ void invalidation_reaches_the_compiled_code() {
   rig.mem->Protect(page, mem::kGuestPage, kRead | kWrite, &rerr);
   rig.mem->Write(a->addr + diff_at, &ba[diff_at], 1);
   rig.mem->Protect(page, mem::kGuestPage, kRead | kExec, &rerr);
+  rig.interp->Invalidate(a->addr, a->addr + kPatchWindow);
   rig.jit->Invalidate(a->addr, a->addr + kPatchWindow);
   exec::MachineState back{};
   run(rig.jit.get(), a->addr, 3, 7, back);

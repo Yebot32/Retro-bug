@@ -3112,12 +3112,31 @@ RunResult InterpExecutor::Run(MachineState& state, unsigned max_instructions) {
         break;
       }
     }
-    std::string err;
-    auto block = isa::TranslateOne(memory_, location, &err);
+    // A decoded block is reusable only while its page cannot be written by the guest. That condition is
+    // the whole self-modifying-code contract here: guest text is read+exec, `Write` refuses a read-only
+    // page, and a page the guest may write (a JIT's arena, or this project's own patch tests) is decoded
+    // afresh every entry — so Tier I keeps its "no stale code without a cache flush" property even with a
+    // cache. See the class comment in interp.h.
+    const BlockKey key = MakeKey(location);
+    const bool cacheable = (memory_.ProtAt(location.PC()) & mem::kWrite) == 0;
+    std::shared_ptr<isa::TranslatedBlock> block;
+    if (cacheable) {
+      const auto it = blocks_.find(key);
+      if (it != blocks_.end()) block = it->second.block;
+    }
     if (!block) {
-      result.reason = StopReason::Fault;
-      result.detail = std::move(err);
-      break;
+      std::string err;
+      auto translated = isa::TranslateOne(memory_, location, &err);
+      if (!translated) {
+        result.reason = StopReason::Fault;
+        result.detail = std::move(err);
+        break;
+      }
+      block = std::make_shared<isa::TranslatedBlock>(std::move(*translated));
+      if (cacheable) {
+        if (blocks_.size() >= kBlockCacheLimit) blocks_.clear();
+        blocks_.emplace(key, CachedBlock{block});
+      }
     }
 
     // A predicated *block*, not merely a predicated terminal. Dynarmic's A32 translator splits an IT
@@ -3208,9 +3227,33 @@ RunResult InterpExecutor::Run(MachineState& state, unsigned max_instructions) {
   return result;
 }
 
+InterpExecutor::BlockKey InterpExecutor::MakeKey(const Dynarmic::A32::LocationDescriptor& location) {
+  BlockKey k;
+  k.pc = location.PC();
+  k.fpscr = location.FPSCR().Value();
+  k.it = static_cast<std::uint8_t>(location.IT().Value());
+  k.thumb = location.TFlag();
+  return k;
+}
+
 void InterpExecutor::Invalidate(GuestAddr from, GuestAddr to) {
-  (void)from;
-  (void)to;
+  // The guest's own statement (arm_cacheflush) that executable bytes changed. Eviction is by *page
+  // overlap*, not by start address: a flush names the bytes that were rewritten, and a block whose start
+  // lies just before the range can still contain one of them (the fixture patches a single byte at +8 and
+  // flushes from there — an address-only comparison left the stale block in place). Flushes are page-
+  // granular in practice, so evicting every block that starts on a touched page is both correct and cheap.
+  if (from >= to) return;
+  const GuestAddr from_page = from & ~static_cast<GuestAddr>(mem::kGuestPage - 1);
+  const GuestAddr to_page = (to + mem::kGuestPage - 1) & ~static_cast<GuestAddr>(mem::kGuestPage - 1);
+  for (auto it = blocks_.begin(); it != blocks_.end();) {
+    const GuestAddr bpage =
+        static_cast<GuestAddr>(it->first.pc) & ~static_cast<GuestAddr>(mem::kGuestPage - 1);
+    if (bpage >= from_page && bpage < to_page) {
+      it = blocks_.erase(it);
+    } else {
+      ++it;
+    }
+  }
 }
 
 }  // namespace rb::exec

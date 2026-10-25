@@ -33,7 +33,9 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
+#include <unordered_map>
 
 #include "rb/exec/machine_state.h"
 #include "rb/isa/front_end.h"
@@ -108,6 +110,13 @@ class InterpExecutor : public Executor {
 
   RunResult Run(MachineState& state, unsigned max_instructions) override;
 
+  /// Decoded blocks, reused across entries. A block is trusted only while the page it starts on is not
+  /// writable: code the guest can change without a protection change is re-decoded every time, which is
+  /// what keeps self-modifying code correct without a write observer (the loader maps text read+exec, and
+  /// `GuestMemory::Write` refuses a read-only page outright). Invalidation from `arm_cacheflush` evicts
+  /// every block whose start address falls in the flushed range.
+  static constexpr std::size_t kBlockCacheLimit = 8192;
+
   /// Nothing is cached, so nothing can be stale — and that is a property of this tier, not a stub:
   /// running the same block after an invalidation call has to give the same answer, which the test
   /// asserts rather than assumes.
@@ -116,7 +125,34 @@ class InterpExecutor : public Executor {
   CodeTier tier() const override { return CodeTier::Interp; }
 
  private:
+  struct CachedBlock {
+    std::shared_ptr<isa::TranslatedBlock> block;
+  };
+  /// What a decoded block depends on besides memory: where it starts, the mode, the IT window it was
+  /// decoded inside, and FPSCR — Dynarmic bakes the rounding mode and flush-to-zero into the FP
+  /// instructions it emits, so a block decoded under one FPSCR must not be reused under another (the
+  /// tier-diff fp_rmode rows are what found this). PSR's other bits do not change a decoding.
+  struct BlockKey {
+    std::uint32_t pc = 0;
+    std::uint32_t fpscr = 0;
+    std::uint8_t it = 0;
+    bool thumb = false;
+    bool operator==(const BlockKey& o) const {
+      return pc == o.pc && fpscr == o.fpscr && it == o.it && thumb == o.thumb;
+    }
+  };
+  struct BlockKeyHash {
+    std::size_t operator()(const BlockKey& k) const noexcept {
+      std::uint64_t h = (static_cast<std::uint64_t>(k.pc) << 32) ^ k.fpscr;
+      h ^= static_cast<std::uint64_t>(k.it) << 8;
+      h ^= static_cast<std::uint64_t>(k.thumb) << 7;
+      h ^= h >> 33;
+      return static_cast<std::size_t>(h);
+    }
+  };
+  static BlockKey MakeKey(const Dynarmic::A32::LocationDescriptor& location);
   mem::GuestMemory& memory_;
+  std::unordered_map<BlockKey, CachedBlock, BlockKeyHash> blocks_;
   GuestAddr return_address_;
   const HostDispatch* dispatch_;
   /// Runs so far, for `RB_T1_TRACE=<n>` (trace the n-th Run). Per executor rather than a static.
