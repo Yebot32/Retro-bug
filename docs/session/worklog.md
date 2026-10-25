@@ -649,3 +649,47 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
 - Release build rebuilt from the restored resources: versionCode 264 / versionName 0.2.0, 2,659,673 bytes,
   SHA-256 `7e268510…6ae8`, installed and opened on the Tab S9; Recents shows the robot icon. Release notes
   updated to the new code and hash.
+
+### 2026-10-25 — iOS S0a: the platform seam (memory, image files, tid, guest-visible host facts)
+- **What landed:** `core/include/rb/platform/host.h` — the small set of host facts the engine cannot get
+  from the C++ standard library: window reservation (incl. "exactly here or fail"), an anonymous image file
+  for the loader, the calling thread's tid, the guest's `utsname`, memory info, rlimits in the *guest's*
+  numbering, CPU affinity, scheduler facts, and the guest-clock mapping. Implementations:
+  `platform/posix/host_posix.cpp` (the code these operations always had, moved) and
+  `platform/darwin/host_darwin.cpp` (mkstemp image file, `pthread_threadid_np`, `host_statistics64`,
+  guest→Darwin rlimit table, and the clock translation the research flagged: Darwin's MONOTONIC counts
+  through sleep, so guest MONOTONIC → `CLOCK_UPTIME_RAW` and guest BOOTTIME → `CLOCK_MONOTONIC`).
+- **Call sites moved:** `guest_memory.cpp` (flat-window reservation), `guest_elf.cpp` (memfd → ImageFile),
+  `guest_thread.cpp` (gettid), `monitor.cpp` (clock, uname, sched_get{,param,scheduler,priority_*},
+  prlimit, sysinfo). Android behaviour is intended to be unchanged; the only deliberate differences are
+  that `prlimit` now answers for the calling process (guest pids are virtual) and `sysinfo` applies
+  `mem_unit` (always 1 on Android).
+- **New gate:** `tools/check_layering.sh` — fails on Android/JNI/GL/Mach headers in `core/`, reports (and
+  will fail, under `--strict`, once S0b lands) the platform-specific syscalls still in `core/`.
+  It strips comments and string literals first, so its own explanations don't trip it.
+- **New CI:** `.github/workflows/host-and-ios.yml` — macOS builds and runs `rb_platform_tests` (the only
+  suite that needs no guest/device), and an iOS-arm64 configure builds `rb_platform rb_mem rb_loader`,
+  which is the honest "compiles for iOS" statement until the syscall backend lands.
+- **Verified here:** arm64 test build + launcher build compile; `rb_platform_tests` builds. The device
+  gate could not complete because the tablet dropped off USB mid-run ("device not found"); the Darwin code
+  cannot be compiled on the Windows host at all, so both are pending their runners.
+- **Next (S0b):** eventfd/statx/getdents64/epoll/ppoll/pselect6/renameat2 and the guest `O_*` flag
+  translation behind `rb::platform`, then `check_layering.sh --strict` in CI.
+
+### 2026-10-25 — iOS S0 complete: the syscall backend, and a strict layering gate
+- **S0b landed.** `host_io` no longer names or calls a Linux-only interface: guest `O_*`/`AT_*` flags,
+  the dirfd (guest `AT_FDCWD` -100 vs Darwin -2), `stat`/`statfs` through a host-neutral shape, `statx`
+  marshalling (Darwin has no statx), `poll`/`ppoll`/`pselect`, `pipe2`/`dup3`/`accept4`, `renameat2`,
+  entropy, and `eventfd`/`epoll` (kernel on Linux; Darwin refuses by name instead of aliasing a pipe, which
+  would give the guest different semantics under the same fd).
+- **`check_layering.sh` is strict by default** — `core/` has no Android/JNI/GL/Mach headers and no
+  platform-specific host call. `--report` keeps the old advisory mode.
+- **Verified:** Android gate 26/26 suites, 0 failures (twice: before and after the syscall move);
+  `rb_host_io_tests` 52, `rb_syscall_monitor_tests` 233, `rb_platform_tests` 29 on device. CI: macOS
+  platform test 26 checks/0 failures + layering clean; iOS arm64 compiles `rb_platform rb_mem rb_loader
+  rb_syscall`.
+- **Known gap, stated rather than hidden:** Darwin directory listing returns `ENOSYS`. `getdirentries` is a
+  link-error stub with 64-bit inodes, and `readdir` buffers a whole block, so a per-call `DIR` would skip
+  entries. It needs one persistent `DIR` per guest fd plus a close/dup hook from the syscall layer.
+- **Also**: Darwin's `fdatasync` is `fsync`; `accept4`/`dup3` are accept/dup2 + `fcntl`; the monitor no
+  longer uses `cpu_set_t` at all (the platform answers a 32-bit mask).
