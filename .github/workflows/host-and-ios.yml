@@ -32,8 +32,13 @@ jobs:
       - name: Build and run the platform seam test
         run: |
           set -euo pipefail
-          cmake --build build/host --target rb_platform_tests -j 4
+          cmake --build build/host --target rb_platform_tests rb_zip_tests rb_host_boot_tests -j 4
           ./build/host/core/tests/rb_platform_tests
+          ./build/host/core/tests/rb_zip_tests
+          # The boot lane needs the tablet's libc and the gate's fixtures, which a CI runner does not have:
+          # it reports "skipped" and exits 0. Building it here is the point — the shared boot compiles for
+          # Darwin and links the same core the Android app does.
+          ./build/host/core/tests/rb_host_boot_tests
 
       - name: Layering gate
         run: bash tools/check_layering.sh
@@ -56,8 +61,9 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release
           -DRB_BUILD_TESTS=OFF
 
-      # The platform layer plus the two components that now go through it. The interpreter and the rest
-      # of the engine join this list once the interpreter builds for iOS; until then this target set is
-      # the honest statement of what is known to compile for iOS.
+      # The platform layer plus the two components that now go through it, then `rb_host` — which pulls the
+      # rest of the engine (Tier I, the bridge, the guest process, the inbound trampolines) into an iOS arm64
+      # build. No executable guest memory is involved in compiling it; running Tier I writes guest code as
+      # data, as iOS requires.
       - name: Build for iOS
-        run: cmake --build build/ios --target rb_platform rb_mem rb_loader rb_syscall -j 4
+        run: cmake --build build/ios --target rb_platform rb_mem rb_loader rb_syscall rb_host -j 4

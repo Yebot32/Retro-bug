@@ -14,8 +14,16 @@ target_link_libraries(rb_mem PUBLIC rb_platform)
 # the self-audit checks, and the auditor is dependency-free by design so the arrow can only ever point
 # this way.
 target_link_libraries(rb_mem PUBLIC rb_diag)
-add_library(rb_loader STATIC loader/guest_elf.cpp)
+add_library(rb_loader STATIC loader/guest_elf.cpp loader/zip.cpp)
 target_link_libraries(rb_loader PUBLIC rb_platform)
+# The zip reader inflates the APK's deflated entries. The NDK's and Apple's SDKs both ship zlib; Android
+# exposes it as a plain system library, so the fallback is the target name rather than a vendored copy.
+find_package(ZLIB QUIET)
+if(ZLIB_FOUND)
+  target_link_libraries(rb_loader PUBLIC ZLIB::ZLIB)
+else()
+  target_link_libraries(rb_loader PUBLIC z)
+endif()
 
 foreach(t rb_mem rb_loader)
   target_include_directories(${t} PUBLIC
@@ -122,3 +130,10 @@ endif()
 # rb::runtime (M2) composes the components above; it lives in its own directory because it is the one
 # layer allowed to depend on all of them.
 add_subdirectory(runtime)
+
+# rb::host (S1): the in-process boot with every platform decision behind callbacks. It owns an `Inbound`,
+# which is the AArch64 trampoline pool, so it exists on the architectures that can host a guest (Android
+# arm64 and iOS arm64) and not on hosts that cannot execute Tier J or reach the trampolines at all.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+  add_subdirectory(host)
+endif()

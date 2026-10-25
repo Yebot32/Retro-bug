@@ -25,10 +25,6 @@ namespace rb::launcher {
 /// unreadable or absurd address yields the empty string.
 std::string GuestStringOrEmpty(const mem::GuestMemory& mem, std::uint32_t at);
 
-/// The `DT_NEEDED` sonames of an ELF32 image, read from its bytes (before it is loaded). Bounds-checked;
-/// anything malformed yields what could be read (the loader names the damage later).
-std::vector<std::string> NeededSonames(const std::vector<std::uint8_t>& image);
-
 class HostSlots {
  public:
   /// Above bionic's JNI table and the launcher's GL window (256..319), below `AbiContext::kMaxSlots`.

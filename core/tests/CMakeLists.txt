@@ -181,3 +181,22 @@ target_link_libraries(rb_gl_thunk_tests PRIVATE rb_abi rb_mem EGL GLESv2 dl)
 # compile and behave on Linux and Darwin.
 add_executable(rb_platform_tests platform_host_test.cpp)
 target_link_libraries(rb_platform_tests PRIVATE rb_platform)
+
+# S1: the APK zip reader. No guest and no device — the archive is written by the test, stored and
+# deflated, then damaged in each way the reader defines a refusal for.
+add_executable(rb_zip_tests zip_test.cpp)
+target_link_libraries(rb_zip_tests PRIVATE rb_loader)
+
+# S1: the platform-free boot, on the gate's own fixtures (the tablet's libc and the C06 chain). It is a
+# guest lane like rb_guest_process_tests, so it exists only where the inbound trampoline pool does.
+if(TARGET rb_inbound)
+  add_executable(rb_host_boot_tests host_boot_test.cpp fake_java.cpp)
+  target_link_libraries(rb_host_boot_tests PRIVATE rb_host)
+  target_compile_definitions(rb_host_boot_tests PRIVATE
+    RB_DEVICE_LIBC_PATH="/data/local/tmp/rb_device_libc.so"
+    RB_GUEST_LIBM_PATH="/data/local/tmp/libm.so"
+    RB_GUEST_LIBZ_PATH="/data/local/tmp/libz.so"
+    RB_LINK_LEAF_PATH="/data/local/tmp/librbleaf.so"
+    RB_LINK_MID_PATH="/data/local/tmp/librbmid.so"
+    RB_CTOR_FAULT_PATH="/data/local/tmp/librbctorfault.so")
+endif()

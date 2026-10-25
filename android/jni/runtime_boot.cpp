@@ -1,41 +1,30 @@
 // RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
 //
-// `rb_runtime_boot`: the in-process boot. A repackaged game's `System.loadLibrary("X")` loads a 64-bit
-// stub named libX.so (`stub.cpp`), whose `JNI_OnLoad` lands here with the game's own APK path. The 32-bit
-// libraries and the guest system libraries travel inside that APK as assets (the repackager's layout:
-// `assets/rb32/<libX.so>`, `assets/rb32sys/{libc,libm,libz,libstdc++}.so`).
+// `rb_runtime_boot`: the Android half of the in-process boot. A repackaged game's `System.loadLibrary("X")`
+// loads a 64-bit stub named libX.so (`stub.cpp`), whose `JNI_OnLoad` lands here with the game's own APK path.
+// The 32-bit libraries and the guest system libraries travel inside that APK as assets (the repackager's
+// layout: `assets/rb32/<libX.so>`, `assets/rb32sys/{libc,libm,libz,libstdc++}.so`).
 //
-// Boot-only (M2): one process-lifetime `GuestProcess` (4 GiB biased window, unresolved imports bound to the
-// trap 0xfffe0000) whose scope — libc, libm, libz — is booted on the first call and reused by every later
-// one; each call loads its library and any `assets/rb32/` sibling its DT_NEEDED names (libstdc++ from
-// `assets/rb32sys/` on demand), runs the constructors and the guest `JNI_OnLoad`, on Tier J, synchronously.
-// No per-game profile runs here: driving a game's entry points is the game's own Java's job (M3).
-// The host answers the dynamic-linker and liblog imports (`host_slots.h`); GL imports stay trapped by name
-// until M4.
+// The boot itself is `rb::host::Boot` (core/host/boot.cpp), shared with iOS. This file is the Android
+// platform behind it: ART as the Java, HostSlots/OpenSL ES as the host services, logcat as the log sink, and
+// the app's files directory as the report destination. The stub dispatch and the overlay stay here because
+// both are Android-only (ARM64 inbound trampolines and the shim's Java, respectively).
 
 #include "runtime_boot.h"
 
-#include <chrono>
-#include <condition_variable>
-#include <thread>
-#include <atomic>
 #include <android/log.h>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <zlib.h>
 
-#include <algorithm>
-#include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <exception>
 #include <map>
 #include <memory>
 #include <mutex>
-#include <optional>
-#include <set>
 #include <string>
 #include <vector>
 
@@ -44,9 +33,9 @@
 #include "thunks_android.h"
 #include "thunks_sles.h"
 #include "rb/abi/jni_forward.h"
+#include "rb/host/boot.h"
 #include "rb/runtime/ggl.h"
 #include "rb/runtime/inbound.h"
-#include "rb/exec/jit.h"
 #include "rb/runtime/guest_process.h"
 
 namespace {
@@ -54,8 +43,7 @@ namespace {
 using rb::runtime::GuestProcess;
 
 constexpr const char* kTag = "RBRUNTIME";
-constexpr std::size_t kWindowBytes = std::size_t{4} << 30;
-constexpr rb::exec::GuestAddr kTrap = 0xfffe'0000u;
+
 std::string PackageName();
 
 /// The player's per-game settings (the launcher's GameSettings), as the repack's shim saved them at start:
@@ -100,161 +88,12 @@ int Tier() {
   return tier;
 }
 
-std::string Hex(std::uint32_t v) {
-  char buf[16];
-  std::snprintf(buf, sizeof buf, "0x%x", v);
-  return buf;
+/// What a device's linker would answer for this app: the host's own answer, since the stub runs in it.
+int TargetSdk() {
+  using Fn = int (*)();
+  if (auto fn = reinterpret_cast<Fn>(dlsym(RTLD_DEFAULT, "android_get_application_target_sdk_version"))) return fn();
+  return 24;  // the repackager's floor (HANDOFF M1 deviation 3)
 }
-
-/// Guards the report being collected and `Runtime::report`: guest threads log into it from their own host
-/// threads (holding the GGL, not g_mu) while the boot thread appends and finally detaches it. A leaf lock: held
-/// only for an append or a pointer swap, never while taking anything else.
-std::mutex g_report_mu;
-
-/// A line of the report: logged under RBRUNTIME and, when a boot is collecting one, kept for the file.
-void Line(std::string* out, const std::string& s) {
-  __android_log_print(ANDROID_LOG_INFO, kTag, "%s", s.c_str());
-  if (out != nullptr) {
-    std::lock_guard<std::mutex> lk(g_report_mu);
-    *out += s;
-    *out += '\n';
-  }
-}
-
-/**
- * The APK as a zip read through its fd: the central directory once (only the `assets/rb32*` entries are
- * kept), then one entry at a time — a stored one by `pread`, a deflated one inflated in 64 KiB chunks —
- * so no whole-APK buffer exists (M1's read of the whole file was a `bad_alloc` waiting for a 1 GB APK).
- * ZIP64, an unknown method, a damaged header and a CRC mismatch are each refused by name.
- */
-class ApkZip {
- public:
-  ~ApkZip() {
-    if (fd_ >= 0) ::close(fd_);
-  }
-
-  bool Open(const std::string& path, std::string* why) {
-    fd_ = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
-    if (fd_ < 0) return Fail(why, "open(" + path + "): " + std::strerror(errno));
-    struct stat st {};
-    if (::fstat(fd_, &st) != 0) return Fail(why, "fstat(" + path + "): " + std::strerror(errno));
-    const std::uint64_t size = static_cast<std::uint64_t>(st.st_size);
-    if (size < 22) return Fail(why, path + " is shorter than an end-of-central-directory record");
-    const std::uint64_t tail_len = std::min<std::uint64_t>(size, 22 + 0xffff);
-    std::vector<std::uint8_t> tail(tail_len);
-    if (!ReadAt(size - tail_len, tail.data(), tail.size())) return Fail(why, "reading the zip's tail: " + err_);
-    std::size_t eocd = tail.size() - 22;
-    while (U32(tail, eocd) != 0x06054b50u) {
-      if (eocd == 0) return Fail(why, path + " has no end-of-central-directory record");
-      --eocd;
-    }
-    const std::uint32_t entries = U16(tail, eocd + 10), cd_size = U32(tail, eocd + 12), cd_at = U32(tail, eocd + 16);
-    if (entries == 0xffffu || cd_at == 0xffff'ffffu || cd_size == 0xffff'ffffu) {
-      return Fail(why, path + " is a ZIP64 archive, which this reader does not read");
-    }
-    std::vector<std::uint8_t> cd(cd_size);
-    if (!ReadAt(cd_at, cd.data(), cd.size())) return Fail(why, "reading the central directory: " + err_);
-    std::size_t at = 0;
-    for (std::uint32_t i = 0; i < entries; ++i) {
-      if (at + 46 > cd.size() || U32(cd, at) != 0x02014b50u) {
-        return Fail(why, "central directory entry " + std::to_string(i) + " is damaged");
-      }
-      const std::uint32_t nlen = U16(cd, at + 28), xlen = U16(cd, at + 30), clen = U16(cd, at + 32);
-      if (at + 46 + nlen > cd.size()) return Fail(why, "a central directory name runs off the directory");
-      std::string name(reinterpret_cast<const char*>(cd.data() + at + 46), nlen);
-      if (name.compare(0, 11, "assets/rb32") == 0) {
-        entries_[name] = Entry{U16(cd, at + 10), U32(cd, at + 16), U32(cd, at + 20), U32(cd, at + 24), U32(cd, at + 42)};
-      }
-      at += 46 + nlen + xlen + clen;
-    }
-    return true;
-  }
-
-  bool Has(const std::string& name) const { return entries_.count(name) != 0; }
-
-  std::optional<std::vector<std::uint8_t>> Read(const std::string& name, std::string* why) {
-    const auto none = [&](const std::string& w) -> std::optional<std::vector<std::uint8_t>> {
-      if (why != nullptr) *why = w;
-      return std::nullopt;
-    };
-    const auto it = entries_.find(name);
-    if (it == entries_.end()) return none("no entry named " + name);
-    const Entry& e = it->second;
-    std::vector<std::uint8_t> lh(30);
-    if (!ReadAt(e.local, lh.data(), lh.size()) || U32(lh, 0) != 0x04034b50u) {
-      return none(name + ": local header is damaged");
-    }
-    const std::uint64_t data = std::uint64_t{e.local} + 30 + U16(lh, 26) + U16(lh, 28);
-    std::vector<std::uint8_t> out(e.usize);
-    if (e.method == 0) {
-      if (e.csize != e.usize) return none(name + ": stored, but the sizes disagree");
-      if (!ReadAt(data, out.data(), out.size())) return none(name + ": " + err_);
-    } else if (e.method == 8) {
-      z_stream z{};
-      if (inflateInit2(&z, -MAX_WBITS) != Z_OK) return none(name + ": inflateInit2 failed");
-      std::vector<std::uint8_t> chunk(1 << 16);
-      std::uint64_t left = e.csize, pos = data;
-      int rc = Z_OK;
-      z.next_out = out.data();
-      z.avail_out = static_cast<uInt>(out.size());
-      while (rc == Z_OK && left > 0) {
-        const std::size_t n = static_cast<std::size_t>(std::min<std::uint64_t>(left, chunk.size()));
-        if (!ReadAt(pos, chunk.data(), n)) {
-          inflateEnd(&z);
-          return none(name + ": " + err_);
-        }
-        pos += n;
-        left -= n;
-        z.next_in = chunk.data();
-        z.avail_in = static_cast<uInt>(n);
-        rc = inflate(&z, left == 0 ? Z_FINISH : Z_NO_FLUSH);
-        if (rc == Z_BUF_ERROR && z.avail_out == 0) break;  // more input than the directory's size says
-      }
-      const std::uint64_t produced = z.total_out;
-      inflateEnd(&z);
-      if (rc != Z_STREAM_END || produced != e.usize) {
-        return none(name + ": inflate ended with " + std::to_string(rc) + " after " + std::to_string(produced) +
-                    " of " + std::to_string(e.usize) + " bytes");
-      }
-    } else {
-      return none(name + ": compression method " + std::to_string(e.method) + " is not stored or deflate");
-    }
-    const std::uint32_t crc = static_cast<std::uint32_t>(crc32(0L, out.data(), static_cast<uInt>(out.size())));
-    if (crc != e.crc) return none(name + ": CRC " + Hex(crc) + " is not the directory's " + Hex(e.crc));
-    return out;
-  }
-
- private:
-  struct Entry {
-    std::uint32_t method = 0, crc = 0, csize = 0, usize = 0, local = 0;
-  };
-  static std::uint32_t U16(const std::vector<std::uint8_t>& b, std::size_t at) { return b[at] | (b[at + 1] << 8); }
-  static std::uint32_t U32(const std::vector<std::uint8_t>& b, std::size_t at) {
-    return b[at] | (b[at + 1] << 8) | (b[at + 2] << 16) | (static_cast<std::uint32_t>(b[at + 3]) << 24);
-  }
-  bool Fail(std::string* why, const std::string& w) {
-    if (why != nullptr) *why = w;
-    return false;
-  }
-  bool ReadAt(std::uint64_t off, std::uint8_t* into, std::size_t n) {
-    while (n > 0) {
-      const ssize_t got = ::pread(fd_, into, n, static_cast<off_t>(off));
-      if (got < 0 && errno == EINTR) continue;
-      if (got <= 0) {
-        err_ = got == 0 ? "unexpected end of file at offset " + std::to_string(off) : std::strerror(errno);
-        return false;
-      }
-      into += got;
-      off += static_cast<std::uint64_t>(got);
-      n -= static_cast<std::size_t>(got);
-    }
-    return true;
-  }
-
-  int fd_ = -1;
-  std::string err_;
-  std::map<std::string, Entry> entries_;
-};
 
 /// This process's package, from `/proc/self/cmdline` (the first NUL-terminated string; a `:service`
 /// process suffix is dropped). Empty when it cannot be read.
@@ -270,214 +109,151 @@ std::string PackageName() {
   return name;
 }
 
-/// What a device's linker would answer for this app: the host's own answer, since the stub runs in it.
-int TargetSdk() {
-  using Fn = int (*)();
-  if (auto fn = reinterpret_cast<Fn>(dlsym(RTLD_DEFAULT, "android_get_application_target_sdk_version"))) return fn();
-  return 24;  // the repackager's floor (HANDOFF M1 deviation 3)
+std::string Hex(std::uint32_t v) {
+  char buf[16];
+  std::snprintf(buf, sizeof buf, "0x%x", v);
+  return buf;
 }
 
-/// The process-lifetime runtime. Never destroyed: the guest process lives as long as the app does, and
-/// tearing it down from a static destructor while an ART thread might still call in would be worse.
-struct Runtime {
-  std::unique_ptr<GuestProcess> proc;
-  std::unique_ptr<rb::launcher::HostSlots> slots;
-  std::unique_ptr<rb::launcher::Sles> sles;  ///< OpenSL ES (M4 Task 4); uses slots' handles and proc's memory
-  // M3: the JNI bridge — real Java (the VM the first stub handed in), the guest JNIEnv/JavaVM over it, and the
-  // dispatcher Java calls guest natives through.
+void LogLine(const std::string& s) { __android_log_print(ANDROID_LOG_INFO, kTag, "%s", s.c_str()); }
+
+/// This process's Android platform: the VM the first stub handed in, the boot, and the host services the
+/// boot installs. Process-lifetime and never destroyed (the guest process lives as long as the app does).
+struct Platform {
   JavaVM* vm = nullptr;
-  std::unique_ptr<rb::launcher::ArtJava> java;
-  std::unique_ptr<rb::abi::ForwardingJni> fwd;
-  std::unique_ptr<rb::runtime::Inbound> inbound;
-  std::map<std::string, const rb::loader::GuestModule*> loaded;  ///< soname -> module (apps, libstdc++)
-  std::set<std::string> booted;                                  ///< libraries whose boot succeeded
-  std::string* report = nullptr;                                 ///< the boot in progress's report
-  /// Set when a boot failed after guest state changed (a module placed, guest code run): the process is
-  /// then half-initialized, so every later call refuses by name instead of running into its leftovers
-  /// (a faulted module's constructors, a sibling whose constructors never ran) under another report.
-  std::string poisoned;
-  bool touched = false;  ///< this boot changed guest state
-  std::string failure;   ///< this boot's failure, for `poisoned`
-  std::string apk;       ///< the game's APK (the first boot's), where a guest dlopen finds assets/rb32/<lib>
-  /// Libraries a guest dlopen handed out a handle for, by handle index (handle = kDlModuleBase | index).
-  std::vector<const rb::loader::GuestModule*> dl_handles;
-  /// The liveness supervisor. Owned and joined (never detached) because `DropScope` frees `proc` on a failed
-  /// boot: a detached sampler would hold a dangling GuestProcess for up to its next 10 s window.
-  std::thread profiler;
-  std::mutex profiler_mu;
-  std::condition_variable profiler_cv;
-  bool profiler_stop = false;
+  std::unique_ptr<rb::host::Boot> boot;
+  std::unique_ptr<rb::launcher::HostSlots> slots;
+  std::unique_ptr<rb::launcher::Sles> sles;  ///< OpenSL ES; uses slots' handles and the process's memory
+  rb::launcher::ArtJava* art = nullptr;     ///< the Java behind the bridge (owned by the boot)
+  std::mutex mu;                            ///< guards the first construction of `boot`
 };
 
-/// The thread running rb_runtime_boot (holding g_mu), or none. A guest dlopen (which runs in a host slot, holding the
-/// GGL, and so may not take g_mu) may load libraries when no boot runs or when the boot is its own thread's.
-std::atomic<std::thread::id> g_boot_owner{};
-
-const rb::loader::GuestModule* LoadWithNeeded(Runtime& rt, ApkZip& zip, const std::string& lib,
-                                              std::set<std::string>& in_progress, std::string* out);
-
-void Live(const std::string& s);
-
-constexpr std::uint32_t kDlModuleBase = 0xC0D00000u;  ///< | index: a library a guest dlopen loaded
-constexpr std::uint32_t kDlGlobal = 0xC0D8FFFFu;      ///< dlopen(NULL) / a system library: search everything
-constexpr std::uint32_t kRtldDefault = 0xFFFFFFFFu;   ///< bionic LP32 RTLD_DEFAULT
-constexpr std::uint32_t kRtldNext = 0xFFFFFFFEu;      ///< bionic LP32 RTLD_NEXT
-
-std::uint32_t DlHandle(Runtime& rt, const rb::loader::GuestModule* m) {
-  for (std::size_t i = 0; i < rt.dl_handles.size(); ++i) {
-    if (rt.dl_handles[i] == m) return kDlModuleBase | static_cast<std::uint32_t>(i);
-  }
-  rt.dl_handles.push_back(m);
-  return kDlModuleBase | static_cast<std::uint32_t>(rt.dl_handles.size() - 1);
+Platform& P() {
+  static Platform* p = new Platform;
+  return *p;
 }
 
-/// A guest dlopen/android_dlopen_ext of `path`, answered with the game's own libraries (Unity's libmain dlopens
-/// libunity.so and libmono.so by their full /data/app path): the file name is looked up in assets/rb32/, loaded with
-/// its DT_NEEDED siblings, and constructed, as a device's linker would. System libraries answer with a handle whose
-/// dlsym goes to the host thunks. Runs in a host slot: the GGL is held (constructors nest under it).
-std::uint32_t GuestDlopen(Runtime& rt, const std::string& path, std::string* why) {
-  const std::thread::id owner = g_boot_owner.load();
-  if (owner != std::thread::id{} && owner != std::this_thread::get_id()) {
-    *why = "another library is starting on another thread";
-    return 0;
-  }
-  if (path.empty()) return kDlGlobal;  // dlopen(NULL): the "main program" — dlsym on it searches everything
-  const std::string base = path.substr(path.find_last_of('/') == std::string::npos ? 0 : path.find_last_of('/') + 1);
-  for (const auto& m : rt.proc->modules()) {
-    if (m->soname == base) return DlHandle(rt, m.get());  // already placed (the scope's libc/libm/libz, or an app)
-  }
-  if (const auto hit = rt.loaded.find(base); hit != rt.loaded.end()) return DlHandle(rt, hit->second);
-  static const char* const kHost[] = {"libGLESv1_CM.so", "libGLESv2.so", "libGLESv3.so", "libEGL.so", "libOpenSLES.so",
-                                      "libandroid.so", "liblog.so", "libjnigraphics.so", "libdl.so"};
-  for (const char* h : kHost) {
-    if (base == h) return kDlGlobal;  // answered by name through the host thunks (dlsym -> HostSlots::Resolve)
-  }
-  ApkZip zip;
-  std::string err;
-  if (rt.apk.empty() || !zip.Open(rt.apk, &err)) {
-    *why = "the game's APK cannot be read (" + err + ")";
-    return 0;
-  }
-  if (!zip.Has("assets/rb32/" + base)) {
-    *why = base + " is not one of the game's 32-bit libraries";
-    return 0;
-  }
-  std::set<std::string> in_progress;
-  const rb::loader::GuestModule* m = LoadWithNeeded(rt, zip, base, in_progress, rt.report);
-  if (m == nullptr) {
-    *why = base + " did not load (the runtime log says why)";
-    return 0;
-  }
-  std::string failed;
-  if (!rt.proc->RunConstructors(&failed)) {
-    *why = base + ": constructor " + failed;
-    return 0;
-  }
-  Live("dl: dlopen(\"" + path + "\") loaded " + base + " from assets/rb32/");
-  return DlHandle(rt, m);
-}
-
-/// A guest dlsym: in the library the handle names, then in every placed module, then the host thunks (GLES/EGL/...).
-std::optional<std::uint32_t> GuestDlsym(Runtime& rt, std::uint32_t handle, const std::string& name) {
-  if ((handle & 0xFFFF0000u) == kDlModuleBase && (handle & 0xFFFFu) < rt.dl_handles.size()) {
-    if (auto e = rt.dl_handles[handle & 0xFFFFu]->FindExport(name)) return e->tagged();
-  } else if (handle != kDlGlobal && handle != kRtldDefault && handle != kRtldNext) {
-    return std::nullopt;  // not a handle this runtime gave out
-  }
-  for (const auto& m : rt.proc->modules()) {
-    if (auto e = m->FindExport(name)) return e->tagged();
-  }
-  auto at = rt.slots->Resolve(name);
-  if (!at) {  // named once each: a NULL the game may call later (an engine probing for optional entry points)
-    static std::set<std::string> said;
-    if (said.insert(name).second) Live("dl: dlsym(\"" + name + "\") = NULL (no guest export, no host thunk)");
-  }
-  return at;
-}
-
-Runtime& R() {
-  static Runtime* rt = new Runtime;
-  return *rt;
-}
-
-/// A line from a guest thread (the process's log, a host slot's liblog): the report is read under its lock, so a
-/// line that races the boot's end either lands in the report or only in logcat, never in a detached string.
-void Live(const std::string& s) {
-  __android_log_print(ANDROID_LOG_INFO, kTag, "%s", s.c_str());
-  std::lock_guard<std::mutex> lk(g_report_mu);
-  if (std::string* out = R().report) {
-    *out += s;
-    *out += '\n';
-  }
-}
-
-/// Attaches (or, with nullptr, detaches) the report guest-thread lines go to.
-void SetReport(Runtime& rt, std::string* report) {
-  std::lock_guard<std::mutex> lk(g_report_mu);
-  rt.report = report;
-}
-
-/// One boot at a time per process. Lock order: g_mu, then the process's GGL (taken inside each guest call);
-/// nothing that holds the GGL — no host slot, no guest call — takes g_mu.
-std::mutex g_mu;
-
-/// What natives and rb_runtime_process reach without g_mu (which a boot holds for its whole length — and a guest
-/// JNI_OnLoad that makes Java call one of an earlier library's natives would otherwise deadlock on it). A leaf lock:
-/// held only to read or publish, never across a guest call.
-std::mutex g_published_mu;
-GuestProcess* g_published_proc = nullptr;
-std::map<std::string, const rb::loader::GuestModule*> g_published_libs;  ///< booted libraries by file name
-
-/// The JNI bridge over the scope just booted: ArtJava on the VM the stub handed in, the forwarding JNIEnv/JavaVM
-/// in one guest page, its copy arena, and the inbound dispatcher (natives on Tier J). Guest RegisterNatives binds
-/// through the dispatcher's trampoline pool; a guest exit inside a native exits the process, as on a device.
-bool BootBridge(Runtime& rt, std::string* out) {
-  if (rt.vm == nullptr) {
-    Line(out, "FATAL: rb_runtime_boot: no JavaVM was handed in, so the JNI bridge cannot reach Java");
-    return false;
-  }
-  GuestProcess& p = *rt.proc;
-  std::string err;
-  rb::exec::GuestAddr page = 0;
+/// The host services that need the bridge: the import answers (GLES/EGL/dl/log, then OpenSL ES), the
+/// Android natives, the guest dlopen/dlsym hooks, file I/O and the diagnostic traces.
+void InstallPlatform(rb::host::Boot& b, GuestProcess& p) {
+  Platform& plat = P();
+  plat.slots = std::make_unique<rb::launcher::HostSlots>(p, TargetSdk(), [](const std::string& s) { P().boot->Live(s); });
+  // The game's own GLSurfaceView makes its GLES1 context current on its GL thread, where its natives call gl*.
+  plat.slots->enable_thunks();
+  // libandroid and jnigraphics calls that take a Java object need the bridge (M4 Task 3).
+  rb::launcher::RegisterAndroidThunks(*plat.slots, *b.jni(), plat.vm);
+  // Guest dlopen/dlsym of the game's own libraries (Unity) and of system ones (dlsym'd GLES/EGL entry points).
+  plat.slots->SetDlHooks([&b](const std::string& path, std::string* why) { return b.DlOpen(path, why); },
+                         [&b](std::uint32_t h, const std::string& name) { return b.DlSym(h, name); });
+  // OpenSL ES (M4 Task 4): engines, output mixes, players and their buffer queues, as guest objects whose
+  // vtables are host slots. Callbacks come back on the host's audio threads, adopted to call the guest there.
   {
-    rb::runtime::Ggl::Held hold(p.ggl());
-    page = p.MapFree(rb::mem::kGuestPage, rb::mem::kRead | rb::mem::kWrite, &err);
+    rb::launcher::HostSlots* slots = plat.slots.get();
+    rb::launcher::SlesHost h;
+    h.mem = &p.memory();
+    h.handles = &slots->handles();
+    h.alloc = [&p](std::size_t bytes) -> std::uint32_t {
+      std::string e;
+      return p.MapFree(bytes, rb::mem::kRead | rb::mem::kWrite, &e);
+    };
+    h.bind = [slots](const std::string& name, rb::launcher::SlesHost::Method fn) -> std::uint32_t {
+      slots->AddSpecial(name, std::move(fn));
+      const auto at = slots->Resolve(name);
+      return at ? *at : 0u;
+    };
+    h.call_guest = [&p](std::uint32_t fn, const std::vector<std::uint32_t>& args) {
+      std::vector<rb::abi::Value32> v;
+      for (std::uint32_t a : args) v.push_back(rb::abi::Value32::U32(a));
+      rb::exec::RunResult rr{};
+      p.abi().CallGuestToCompletion(fn, rb::abi::Args32{v}, rb::abi::Shorty::For("V"), GuestProcess::kThreadTurnBudget,
+                                    &rr);
+      if (rr.reason != rb::exec::StopReason::Returned) {
+        char buf[32];
+        std::snprintf(buf, sizeof buf, "0x%x", static_cast<unsigned>(fn));
+        P().boot->Live(std::string{"sles: guest callback "} + buf + " did not return: " + rr.detail);
+      }
+    };
+    h.unlocked = [&p](const std::function<void()>& f) {
+      rb::runtime::Ggl::Released off(p.abi().ggl());
+      f();
+    };
+    h.say = [](const std::string& s) { P().boot->Live(s); };
+    plat.sles = std::make_unique<rb::launcher::Sles>(std::move(h));
+    rb::launcher::Sles* sles = plat.sles.get();
+    slots->AddResolver([sles](const std::string& n) { return sles->Resolve(n); });
   }
-  if (page == 0) {
-    Line(out, "FATAL: rb_runtime_boot: no guest page for the JNI bridge: " + err);
-    return false;
-  }
-  rt.java = std::make_unique<rb::launcher::ArtJava>(rt.vm);
-  rt.fwd = std::make_unique<rb::abi::ForwardingJni>(p.memory(), p.abi(), page, *rt.java, &err);
-  if (!rt.fwd->ok()) {
-    Line(out, "FATAL: rb_runtime_boot: " + err);
-    return false;
-  }
-  rt.fwd->set_allocator([&p](std::uint32_t bytes, std::string* e) {
-    rb::runtime::Ggl::Held hold(p.ggl());
-    return p.MapFree(bytes, rb::mem::kRead | rb::mem::kWrite, e);
+  // Files and sockets are the host's (M4 Task 3b): the game reads and writes its own sandbox and talks to the
+  // network with the app's permissions, as its native code does on a device. No path is virtualized yet.
+  p.monitor().set_file_provider([](const std::string&) -> std::optional<std::vector<std::uint8_t>> {
+    return std::nullopt;
   });
-  // Java's thread APIs take a Linux tid; the guest's tids are the engine's, so `Process.setThreadPriority` on
-  // a guest thread throws "Given thread N does not exist". Resolve through the thread-bound tid map instead.
-  rb::abi::ForwardingJni::SetGuestTidResolver(
-      [](std::int32_t guest_tid) { return rb::runtime::HostTidOfGuest(guest_tid); });
-  rt.inbound = std::make_unique<rb::runtime::Inbound>(p, *rt.fwd, *rt.java, Tier());
-  rt.fwd->set_native_binder([](rb::exec::GuestAddr fn, const std::string& name, const std::string& sig, std::string* e) -> void* {
-    const std::string shorty = rb::runtime::ShortyOf(sig);
-    if (shorty.empty()) {
-      if (e != nullptr) *e = "'" + sig + "' is not a JNI method signature";
+  p.monitor().set_host_io(true);
+  {
+    // The first host-I/O answers go to logcat as they happen: what a game's file and network code did is
+    // otherwise invisible after boot. Capped so a long run does not flood the log.
+    auto left = std::make_shared<std::atomic<int>>(6000);
+    p.monitor().set_host_io_trace([left](const std::string& line) {
+      // Errors and everything but the routine file walk (stat, getdents, read, close) of a successful call.
+      const bool error = line.find(" = -") != std::string::npos;
+      const bool routine = line.find("fstatat64") != std::string::npos || line.find("nr:0x18d") != std::string::npos ||
+                           line.find("getdents64") != std::string::npos ||
+                           line.find("host close ") != std::string::npos || line.find("host fstat64 ") != std::string::npos ||
+                           line.find("host nr:0x148") != std::string::npos ||
+                           line.find("host read(") != std::string::npos || line.find("host nr:0x8c(") != std::string::npos;
+      // A search-path probe that misses (a game looking for a file in each of its directories) is routine too: one
+      // asset can cost a dozen of them, and they spent the whole budget in a minute of Fruit Ninja's loading.
+      const bool probe_miss = line.find(" = -2") != std::string::npos &&
+                              (line.find("fstatat64(") != std::string::npos || line.find("openat(") != std::string::npos ||
+                               line.find("faccessat(") != std::string::npos);
+      if (((error && !probe_miss) || !routine) && left->fetch_sub(1) > 0) P().boot->Live("io: " + line);
+    });
+    // Signal dispositions on their own channel, uncapped relative to the I/O trace and never deduplicated:
+    // the set of handlers a guest installs is the fact C26's delivery is built from, and a report that could
+    // show only the first three was the reason a wrong conclusion about signals survived a session.
+    p.monitor().set_signal_trace([](const std::string& line) { P().boot->Live("sig: " + line); });
+  }
+}
+
+rb::host::BootConfig MakeConfig(Platform& p) {
+  rb::host::BootConfig c;
+  c.ctor_tier = Tier();
+  c.target_sdk = TargetSdk();
+  c.log = LogLine;
+  c.make_java = [&p](std::string* err) -> std::unique_ptr<rb::abi::HostJava> {
+    if (p.vm == nullptr) {
+      if (err != nullptr) *err = "no JavaVM was handed in";
       return nullptr;
     }
-    return R().inbound->BindPool(rb::runtime::InboundTarget{fn, shorty, name + sig}, e);
-  });
-  rt.inbound->set_on_exit([](int status) {
-    __android_log_print(ANDROID_LOG_INFO, kTag, "jni: a guest native called exit(%d); the app exits, as on a device",
-                        status);
-    ::_exit(status);
-  });
-  Line(out, "jni: forwarding JNI bridge up — JNIEnv at " + Hex(rt.fwd->env()) + ", JavaVM at " + Hex(rt.fwd->vm()) +
-                ", natives on Tier " + (Tier() == 2 ? "J" : "I"));
-  return true;
+    auto java = std::make_unique<rb::launcher::ArtJava>(p.vm);
+    p.art = java.get();
+    return java;
+  };
+  c.resolve_host = [&p](const std::string& name) -> std::optional<rb::exec::GuestAddr> {
+    return p.slots ? p.slots->Resolve(name) : std::nullopt;
+  };
+  c.on_bridge = [](rb::host::Boot& b, GuestProcess& proc) { InstallPlatform(b, proc); };
+  c.report_suffix = [](std::string*, GuestProcess& proc) {
+    // Guest threads the boot started may be making syscalls and dl calls right now: the monitor's tallies and
+    // notes and the slots' dl records are GGL-protected, so they are read holding it.
+    rb::runtime::Ggl::Held hold(proc.ggl());
+    const auto say = [](const std::string& s) { P().boot->Live(s); };
+    P().slots->ReportDl(say, 0xfffe'0000u);
+    const std::string tally = proc.monitor().TallyText();
+    say("syscalls (this process so far): " + (tally.empty() ? std::string{"none"} : tally));
+    for (const std::string& note : proc.monitor().notes()) say("syscall note: " + note);
+  };
+  c.java_thread_dump = [&p]() -> std::vector<std::string> {
+    return p.art != nullptr ? p.art->DumpThreads() : std::vector<std::string>{};
+  };
+  c.frame_stats = [&p]() -> std::string {
+    if (!p.slots) return {};
+    return "eglSwapBuffers " + std::to_string(p.slots->CallsOf("eglSwapBuffers")) + ", glClear " +
+           std::to_string(p.slots->CallsOf("glClear")) + ", glDrawArrays " +
+           std::to_string(p.slots->CallsOf("glDrawArrays")) + ", glDrawElements " +
+           std::to_string(p.slots->CallsOf("glDrawElements")) + ", glBindTexture " +
+           std::to_string(p.slots->CallsOf("glBindTexture"));
+  };
+  return c;
 }
 
 /// A generated stub's descriptor table (written by StubElfWriter at repackage time), in the stub's own memory.
@@ -545,14 +321,10 @@ extern "C" __attribute__((visibility("default"))) std::uint64_t rb_stub_dispatch
     }
   }
   if (!have) {
-    const rb::loader::GuestModule* m = nullptr;
-    {
-      std::lock_guard<std::mutex> lk(g_published_mu);
-      const auto it = g_published_libs.find(lib);
-      if (it != g_published_libs.end()) m = it->second;
-    }
+    rb::host::Boot* boot = P().boot.get();
+    const rb::loader::GuestModule* m = boot != nullptr ? boot->module(lib) : nullptr;
     const auto at = m != nullptr ? m->FindExport(name) : std::nullopt;
-    if (!at || !R().inbound) {
+    if (!at || boot == nullptr || boot->inbound() == nullptr) {
       // ART only calls a native after its library loaded; a library whose boot failed is not published, so this is
       // the native that would have run in it — said by name, in the Java caller's stack trace.
       const std::string why = m == nullptr ? lib + " did not boot (its rb-report.txt says why)"
@@ -567,468 +339,32 @@ extern "C" __attribute__((visibility("default"))) std::uint64_t rb_stub_dispatch
     std::lock_guard<std::mutex> lk(cache_mu);
     cache[{tag, index}] = target;
   }
-  return R().inbound->Dispatch(target, *args);
+  rb::host::Boot* boot = P().boot.get();
+  if (boot == nullptr || boot->inbound() == nullptr) return 0;
+  return boot->inbound()->Dispatch(target, *args);
 }
-
-namespace {
-
-/// A scope that did not boot leaves nothing worth keeping; the next call starts over. Torn down users first: the
-/// dispatcher and the bridge bind and unbind slots on the process's AbiContext, so they go before it does.
-void DropScope(Runtime& rt) {
-  // Stop and join the sampler before the GuestProcess it reads goes away (see Runtime::profiler).
-  {
-    std::lock_guard<std::mutex> lk(rt.profiler_mu);
-    rt.profiler_stop = true;
-  }
-  rt.profiler_cv.notify_all();
-  if (rt.profiler.joinable()) rt.profiler.join();
-  rt.profiler_stop = false;
-  rt.sles.reset();
-  rt.inbound.reset();
-  rt.fwd.reset();
-  rt.java.reset();
-  rt.slots.reset();
-  rt.proc.reset();
-}
-
-bool BootScope(Runtime& rt, ApkZip& zip, std::string* out) {
-  rb::runtime::GuestProcessOptions o;
-  o.window_bytes = kWindowBytes;
-  o.biased = true;
-  o.unresolved_trap = kTrap;
-  o.ctor_tier = Tier();
-  o.log = [](const std::string& s) { Live(s); };
-  o.host_resolver = [](const std::string& name) -> std::optional<rb::exec::GuestAddr> {
-    Runtime& r = R();
-    return r.slots ? r.slots->Resolve(name) : std::nullopt;
-  };
-  std::string err;
-  auto proc = GuestProcess::Create(o, &err);
-  if (!proc) {
-    Line(out, "FATAL: " + err);
-    return false;
-  }
-  rt.proc = std::move(proc);
-  rt.slots = std::make_unique<rb::launcher::HostSlots>(*rt.proc, TargetSdk(),
-                                                       [](const std::string& s) { Live(s); });
-  // The game's own GLSurfaceView makes its GLES1 context current on its GL thread, where its natives call gl*.
-  rt.slots->enable_thunks();
-  if (!BootBridge(rt, out)) {
-    DropScope(rt);
-    return false;
-  }
-  // libandroid and jnigraphics calls that take a Java object need the bridge (M4 Task 3).
-  rb::launcher::RegisterAndroidThunks(*rt.slots, *rt.fwd, rt.vm);
-  // Guest dlopen/dlsym of the game's own libraries (Unity) and of system ones (dlsym'd GLES/EGL entry points).
-  {
-    Runtime* r = &rt;
-    rt.slots->SetDlHooks([r](const std::string& path, std::string* why) { return GuestDlopen(*r, path, why); },
-                         [r](std::uint32_t h, const std::string& name) { return GuestDlsym(*r, h, name); });
-  }
-  // OpenSL ES (M4 Task 4): engines, output mixes, players and their buffer queues, as guest objects whose vtables are
-  // host slots. Callbacks come back on the host's audio threads, which are adopted to call the guest there.
-  {
-    GuestProcess& p = *rt.proc;
-    rb::launcher::HostSlots* slots = rt.slots.get();
-    rb::launcher::SlesHost h;
-    h.mem = &p.memory();
-    h.handles = &slots->handles();
-    h.alloc = [&p](std::size_t bytes) -> std::uint32_t {
-      std::string e;
-      return p.MapFree(bytes, rb::mem::kRead | rb::mem::kWrite, &e);
-    };
-    h.bind = [slots](const std::string& name, rb::launcher::SlesHost::Method fn) -> std::uint32_t {
-      slots->AddSpecial(name, std::move(fn));
-      const auto at = slots->Resolve(name);
-      return at ? *at : 0u;
-    };
-    h.call_guest = [&p](std::uint32_t fn, const std::vector<std::uint32_t>& args) {
-      std::vector<rb::abi::Value32> v;
-      for (std::uint32_t a : args) v.push_back(rb::abi::Value32::U32(a));
-      rb::exec::RunResult rr{};
-      p.abi().CallGuestToCompletion(fn, rb::abi::Args32{v}, rb::abi::Shorty::For("V"), GuestProcess::kThreadTurnBudget,
-                                    &rr);
-      if (rr.reason != rb::exec::StopReason::Returned) {
-        char b[32];
-        std::snprintf(b, sizeof b, "0x%x", static_cast<unsigned>(fn));
-        Live(std::string{"sles: guest callback "} + b + " did not return: " + rr.detail);
-      }
-    };
-    h.unlocked = [&p](const std::function<void()>& f) {
-      rb::runtime::Ggl::Released off(p.abi().ggl());
-      f();
-    };
-    h.say = [](const std::string& s) { Live(s); };
-    rt.sles = std::make_unique<rb::launcher::Sles>(std::move(h));
-    rb::launcher::Sles* sles = rt.sles.get();
-    slots->AddResolver([sles](const std::string& n) { return sles->Resolve(n); });
-  }
-  // Files and sockets are the host's (M4 Task 3b): the game reads and writes its own sandbox and talks to the network
-  // with the app's permissions, as its native code does on a device. No path is virtualized yet.
-  rt.proc->monitor().set_file_provider([](const std::string&) -> std::optional<std::vector<std::uint8_t>> {
-    return std::nullopt;
-  });
-  rt.proc->monitor().set_host_io(true);
-  {
-    // A statistical guest profile (M4 performance work): the pc at every slice boundary (each 200k guest
-    // instructions), bucketed by 64 bytes; every 10 s the top buckets and the instruction rate go to logcat.
-    struct Profile {
-      std::mutex mu;
-      std::map<std::uint32_t, std::uint32_t> hits;
-      std::uint64_t slices = 0;
-    };
-    auto prof = std::make_shared<Profile>();
-    rt.proc->abi().set_slice_probe([prof](std::uint32_t pc) {
-      std::lock_guard<std::mutex> lk(prof->mu);
-      ++prof->hits[pc & ~0x3fu];
-      ++prof->slices;
-    });
-    auto* jit = dynamic_cast<rb::exec::JitExecutor*>(&rt.proc->engine(2));
-    // The liveness supervisor: a window with no slice is a stall, and the one thing a black screen never
-    // says is which thread is waiting on what. `Runtime` is a process-lifetime singleton (see `get_rt`).
-    rb::runtime::GuestProcess* proc = rt.proc.get();
-    rt.profiler = std::thread([prof, jit, proc, &rt] {
-      std::uint64_t last_t = 0, last_i = 0, last_activity = 0;
-      int quiet_windows = 0;
-      for (int round = 0; round < 60; ++round) {
-        {
-          std::unique_lock<std::mutex> lk(rt.profiler_mu);
-          if (rt.profiler_cv.wait_for(lk, std::chrono::seconds(10), [&rt] { return rt.profiler_stop; })) return;
-        }
-        std::vector<std::pair<std::uint32_t, std::uint32_t>> top;
-        std::uint64_t slices = 0;
-        {
-          std::lock_guard<std::mutex> lk(prof->mu);
-          top.assign(prof->hits.begin(), prof->hits.end());
-          slices = prof->slices;
-          prof->hits.clear();
-          prof->slices = 0;
-        }
-        std::sort(top.begin(), top.end(), [](const auto& x, const auto& y) { return x.second > y.second; });
-        std::string line = "prof: " + std::to_string(slices) + " slices (" + std::to_string(slices * 200'000 / 10'000'000) +
-                           " M guest instr/s) top:";
-        for (std::size_t i = 0; i < top.size() && i < 15; ++i) line += " " + Hex(top[i].first) + "x" + std::to_string(top[i].second);
-        if (jit != nullptr) {
-          const std::uint64_t t = jit->translated(), inv = jit->invalidations();
-          line += " | translated " + std::to_string(t - last_t) + " instr, " + std::to_string(inv - last_i) + " invalidations";
-          last_t = t;
-          last_i = inv;
-        }
-        if (slices != 0) {
-          quiet_windows = 0;
-          Live(line);
-        } else if (proc != nullptr && proc->abi().host_activity() != last_activity) {
-          // Alive, just outside long JIT stints: a render loop that calls JNI or a GL thunk every few thousand
-          // instructions never retires a whole slice. Saying "stalled" here was the C46 investigation's
-          // biggest false trail — the game was swapping frames at 35 fps while this line said it was dead.
-          last_activity = proc->abi().host_activity();
-          quiet_windows = 0;
-          Live("alive: no slice in 10 s, " + std::to_string(last_activity) + " host call(s) so far — "
-               "sub-slice stints, not a stall");
-        } else if (proc != nullptr && !proc->monitor().group_exited()) {
-          // No guest instruction retired for 10 s: dump every guest thread's pc and what it waits on.
-          // Three windows up front, then every sixth, so a long stall does not flood logcat.
-          ++quiet_windows;
-          if (quiet_windows == 1) {
-            // Diagnostics (C46): the guest has stopped retiring instructions, and the Java calls it still
-            // makes name the loop that spins. Bounded, so a long stall costs 300 lines, not a flood.
-            rb::abi::ForwardingJni::SetCallTrace([](const std::string& line) { Live(line); }, 300);
-          }
-          if (quiet_windows == 2) {
-            // Diagnostics (C46): one Java thread dump names every Java thread's stack — the only view of the
-            // Java side a guest-side stall report cannot give. Once per process.
-            static std::atomic<bool> dumped{false};
-            if (!dumped.exchange(true)) {
-              for (const std::string& line : rt.java->DumpThreads()) Live("stall:   " + line);
-            }
-          }
-          // Frames: what the guest asked the display to present. Zero swaps over a stall means no frame was
-          // ever handed to the surface; a growing count with a black screen means the frames are lost below.
-          if (rt.slots) {
-            Live("stall: egl: eglSwapBuffers " + std::to_string(rt.slots->CallsOf("eglSwapBuffers")) +
-                 ", glClear " + std::to_string(rt.slots->CallsOf("glClear")) + ", glDrawArrays " +
-                 std::to_string(rt.slots->CallsOf("glDrawArrays")) + ", glDrawElements " +
-                 std::to_string(rt.slots->CallsOf("glDrawElements")) + ", glBindTexture " +
-                 std::to_string(rt.slots->CallsOf("glBindTexture")));
-          }
-          if (quiet_windows <= 3 || quiet_windows % 6 == 0) {
-            Live("stall: no guest instruction retired in the last 10 s (window " +
-                 std::to_string(quiet_windows) + "):");
-            for (const std::string& line : proc->StallReport()) Live("stall:   " + line);
-          }
-        }
-      }
-    });
-  }
-  {
-    // The first host-I/O answers go to logcat as they happen: what a game's file and network code did is otherwise
-    // invisible after boot. Capped so a long run does not flood the log.
-    auto left = std::make_shared<std::atomic<int>>(6000);
-    rt.proc->monitor().set_host_io_trace([left](const std::string& line) {
-      // Errors and everything but the routine file walk (stat, getdents, read, close) of a successful call.
-      const bool error = line.find(" = -") != std::string::npos;
-      const bool routine = line.find("fstatat64") != std::string::npos || line.find("nr:0x18d") != std::string::npos ||
-                           line.find("getdents64") != std::string::npos || 
-                           line.find("host close ") != std::string::npos || line.find("host fstat64 ") != std::string::npos ||
-                           line.find("host nr:0x148") != std::string::npos ||
-                           line.find("host read(") != std::string::npos || line.find("host nr:0x8c(") != std::string::npos;
-      // A search-path probe that misses (a game looking for a file in each of its directories) is routine too: one
-      // asset can cost a dozen of them, and they spent the whole budget in a minute of Fruit Ninja's loading.
-      const bool probe_miss = line.find(" = -2") != std::string::npos &&
-                              (line.find("fstatat64(") != std::string::npos || line.find("openat(") != std::string::npos ||
-                               line.find("faccessat(") != std::string::npos);
-      if (((error && !probe_miss) || !routine) && left->fetch_sub(1) > 0) Live("io: " + line);
-    });
-    // Signal dispositions on their own channel, uncapped relative to the I/O trace and never deduplicated:
-    // the set of handlers a guest installs is the fact C26's delivery is built from, and a report that could
-    // show only the first three was the reason a wrong conclusion about signals survived a session.
-    rt.proc->monitor().set_signal_trace([](const std::string& line) { Live("sig: " + line); });
-  }
-  std::vector<std::uint8_t> sys[3];
-  const char* const names[3] = {"libc.so", "libm.so", "libz.so"};
-  for (int i = 0; i < 3; ++i) {
-    const std::string entry = std::string{"assets/rb32sys/"} + names[i];
-    auto bytes = zip.Read(entry, &err);
-    if (!bytes) {
-      Line(out, "FATAL: rb_runtime_boot: " + entry + ": " + err);
-      DropScope(rt);
-      return false;
-    }
-    sys[i] = std::move(*bytes);
-    Line(out, "rb_runtime_boot: " + entry + " = " + std::to_string(sys[i].size()) + " bytes");
-  }
-  if (!rt.proc->LoadScope(sys[0], sys[1], sys[2], {}, &err)) {
-    Line(out, "FATAL: " + err);
-    DropScope(rt);
-    return false;
-  }
-  Line(out, "scope: booted once — libc.so, libm.so, libz.so in a 4 GiB biased window, unresolved imports"
-            " bound to " + Hex(kTrap) + "; process-lifetime, reused by every later rb_runtime_boot");
-  return true;
-}
-
-/// Loads `lib` from `assets/rb32/` after every sibling its DT_NEEDED names (and libstdc++ on demand), as a
-/// device's linker loads a library's dependencies first. nullptr after a FATAL line.
-const rb::loader::GuestModule* LoadWithNeeded(Runtime& rt, ApkZip& zip, const std::string& lib,
-                                              std::set<std::string>& in_progress, std::string* out) {
-  if (const auto hit = rt.loaded.find(lib); hit != rt.loaded.end()) return hit->second;
-  if (!in_progress.insert(lib).second) {
-    Line(out, "FATAL: rb_runtime_boot: a DT_NEEDED cycle reaches " + lib + " again");
-    return nullptr;
-  }
-  std::string err;
-  auto image = zip.Read("assets/rb32/" + lib, &err);
-  if (!image) {
-    Line(out, "FATAL: rb_runtime_boot: assets/rb32/" + lib + ": " + err);
-    return nullptr;
-  }
-  Line(out, "rb_runtime_boot: assets/rb32/" + lib + " = " + std::to_string(image->size()) + " bytes");
-  std::string host_side;
-  for (const std::string& n : rb::launcher::NeededSonames(*image)) {
-    if (n == "libc.so" || n == "libm.so" || n == "libz.so" || rt.loaded.count(n) != 0) continue;
-    // libstdc++ comes in through LoadApp, on demand, where the launcher's Inspect passes it to LoadScope:
-    // this scope is booted once for every library the process will ever load, before anyone knows whether
-    // one of them needs libstdc++, so it joins later the way a device's linker loads a DT_NEEDED — after
-    // the scope, before its user, its constructors run with the user's.
-    if (n == "libstdc++.so" && zip.Has("assets/rb32sys/libstdc++.so")) {
-      auto cxx = zip.Read("assets/rb32sys/libstdc++.so", &err);
-      rt.touched = true;
-      const rb::loader::GuestModule* m = cxx ? rt.proc->LoadApp(*cxx, n, &err) : nullptr;
-      if (m == nullptr) {
-        Line(out, "FATAL: rb_runtime_boot: " + lib + " needs libstdc++.so, which did not load: " + err);
-        return nullptr;
-      }
-      rt.loaded[n] = m;
-      Line(out, "needs: " + lib + " -> libstdc++.so, loaded from assets/rb32sys/ on demand");
-    } else if (zip.Has("assets/rb32/" + n)) {
-      Line(out, "needs: " + lib + " -> " + n + ", a sibling in assets/rb32/, loaded first");
-      if (LoadWithNeeded(rt, zip, n, in_progress, out) == nullptr) return nullptr;
-    } else {
-      host_side += (host_side.empty() ? "" : ", ") + n;
-    }
-  }
-  if (!host_side.empty()) {
-    Line(out, "needs: " + lib + " -> " + host_side + " — no image in the APK; its imports are answered by the"
-              " host (dl*, liblog) or trapped by name at " + Hex(kTrap));
-  }
-  const std::size_t unanswered_before = rt.proc->unanswered().size();
-  rt.touched = true;
-  const rb::loader::GuestModule* m = rt.proc->LoadApp(*image, lib, &err);
-  if (m == nullptr) {
-    Line(out, "FATAL: " + err);
-    return nullptr;
-  }
-  rt.loaded[lib] = m;
-  const auto& un = rt.proc->unanswered();
-  if (un.size() > unanswered_before) {
-    std::string names;
-    for (std::size_t i = unanswered_before; i < un.size(); ++i) names += (names.empty() ? "" : ", ") + un[i];
-    Line(out, "imports: " + lib + ": " + std::to_string(un.size() - unanswered_before) +
-              " nothing answers, each bound to its own trap slot from " + Hex(kTrap) +
-              " (a call faults naming it; weak ones are 0): " + names);
-  }
-  return m;
-}
-
-/// The whole boot of one library. True only when the scope, the loads, every constructor and (when
-/// exported) `JNI_OnLoad` all returned.
-bool BootOne(Runtime& rt, const std::string& apk, const std::string& lib, std::string* out) {
-  if (rt.apk.empty()) rt.apk = apk;  // a guest dlopen reads its libraries from here
-  if (apk.empty()) {
-    Line(out, "FATAL: rb_runtime_boot: no APK path was given — the stub could not find the game's sourceDir");
-    return false;
-  }
-  if (lib.empty() || lib.find('/') != std::string::npos) {
-    Line(out, "FATAL: rb_runtime_boot: '" + lib + "' is not a library file name");
-    return false;
-  }
-  ApkZip zip;
-  std::string err;
-  if (!zip.Open(apk, &err)) {
-    Line(out, "FATAL: rb_runtime_boot: cannot read the APK: " + err);
-    return false;
-  }
-  if (!rt.proc) {
-    if (!BootScope(rt, zip, out)) return false;
-  } else {
-    Line(out, "scope: reused — booted by an earlier rb_runtime_boot in this process (" +
-                  std::to_string(rt.proc->constructors_run()) + " constructors run so far); " + lib +
-                  " loads against it");
-    // A later boot can arrive on a different Java thread (each System.loadLibrary runs on its caller's thread).
-    // The main guest thread stays with the host thread that booted the scope (M2 Task 5 ruling a): this one
-    // is adopted on its first guest call (its own pthread, stack and TLS), as on a device.
-  }
-  GuestProcess& p = *rt.proc;
-  std::set<std::string> in_progress;
-  const rb::loader::GuestModule* app = LoadWithNeeded(rt, zip, lib, in_progress, out);
-  if (app == nullptr) {
-    rt.failure = lib + " did not load";
-    Line(out, "RESULT: stopped during startup — " + lib + " did not load (the FATAL line above says why)");
-    return false;
-  }
-  std::string failed;
-  rt.touched = true;
-  if (!p.RunConstructors(&failed)) {
-    rt.failure = "constructor " + failed;
-    Line(out, "RESULT: stopped during startup — constructor " + failed);
-    return false;
-  }
-  if (app->init.addr == 0 && app->init_array.empty()) {
-    Line(out, "constructors: " + lib + " carries no DT_INIT_ARRAY and no DT_INIT");
-  }
-  std::size_t java_entries = 0;
-  for (const std::string& name : app->ExportNames()) {
-    if (name.compare(0, 5, "Java_") == 0) ++java_entries;
-  }
-  const auto onload = app->FindExport("JNI_OnLoad");
-  if (!onload) {
-    Line(out, "JNI_OnLoad: " + lib + " exports none; its " + std::to_string(java_entries) +
-                  " Java_* entry points are called by its own Java");
-    Line(out, "RESULT: startup finished with no fault — every constructor returned (" + lib +
-                  " has no JNI_OnLoad). Boot-only: nothing drives the game yet");
-    return true;
-  }
-  // The guest JNI_OnLoad gets the bridge's JavaVM, synchronously on this (the loading) thread, inside a local frame
-  // of its own as ART gives one.
-  Line(out, "JNI_OnLoad: guest JavaVM at " + Hex(rt.fwd->vm()) + ", JNIEnv at " + Hex(rt.fwd->env()));
-  p.abi().set_executor(p.engine(Tier()));
-  rb::exec::RunResult rr{};
-  rb::exec::MachineState exit{};
-  rt.fwd->PushFrame();
-  // Initialisation, not a bounded call: a Unity title does its metadata and scripting setup here, and the 4M-step
-  // call budget stopped Nutty Fluffies halfway through it (C27). See GuestProcess::kInitBudget.
-  const rb::abi::Ret32 ret = p.abi().CallGuest(onload->tagged(), {rb::abi::Value32::Ptr(rt.fwd->vm()), rb::abi::Value32::Ptr(0)},
-                                               rb::abi::Shorty::For("II"), GuestProcess::kInitBudget, &rr, &exit);
-  rt.fwd->PopFrame(0);
-  if (rr.reason != rb::exec::StopReason::Returned) {
-    Line(out, "JNI_OnLoad: did not return on Tier J after " + std::to_string(rr.instructions_executed) +
-                  " steps: " + rr.detail + "; pc " + Hex(exit.pc) + " lr " + Hex(exit.r[14]));
-    rt.failure = lib + " JNI_OnLoad did not return: " + rr.detail;
-    Line(out, "RESULT: the constructors finished, then JNI_OnLoad stopped — the line above says where");
-    return false;
-  }
-  Line(out, "JNI_OnLoad: returned " + Hex(ret.w()) + " on Tier J, " + std::to_string(rr.instructions_executed) + " steps");
-  Line(out, "RESULT: startup finished with no fault — every constructor and JNI_OnLoad returned. Boot-only: " +
-                std::to_string(java_entries) + " Java_* entry points wait for the game's own Java");
-  return true;
-}
-
-void Tallies(Runtime& rt, std::string* out) {
-  if (!rt.proc) return;
-  // Guest threads the boot started (a JNI_OnLoad's worker) may be making syscalls and dl calls right now: the
-  // monitor's tallies and notes and the slots' dl records are GGL-protected, so they are read holding it.
-  rb::runtime::Ggl::Held hold(rt.proc->ggl());
-  const auto say = [out](const std::string& s) { Line(out, s); };
-  rt.slots->ReportDl(say, kTrap);
-  const std::string tally = rt.proc->monitor().TallyText();
-  Line(out, "syscalls (this process so far): " + (tally.empty() ? std::string{"none"} : tally));
-  for (const std::string& note : rt.proc->monitor().notes()) Line(out, "syscall note: " + note);
-}
-
-}  // namespace
 
 rb::runtime::GuestProcess* rb_runtime_process() {
   // Defined during a boot too: null until a scope finished booting, never waiting for the boot in progress.
-  std::lock_guard<std::mutex> lk(g_published_mu);
-  return g_published_proc;
+  rb::host::Boot* boot = P().boot.get();
+  return boot != nullptr ? boot->process() : nullptr;
 }
 
 extern "C" int rb_runtime_boot(JavaVM* vm, const char* apk_path, const char* lib_name) {
   const std::string lib = lib_name != nullptr ? lib_name : "";
   const std::string apk = apk_path != nullptr ? apk_path : "";
-  std::lock_guard<std::mutex> lock(g_mu);  // held until return: one boot at a time
-  g_boot_owner.store(std::this_thread::get_id());
-  struct OwnerReset { ~OwnerReset() { g_boot_owner.store(std::thread::id{}); } } owner_reset;
-  Runtime& rt = R();
-  if (rt.vm == nullptr) rt.vm = vm;  // one VM per process: the first stub's
-  if (rt.booted.count(lib) != 0) {
-    __android_log_print(ANDROID_LOG_INFO, kTag, "rb_runtime_boot: %s already booted in this process", lib.c_str());
-    return JNI_VERSION_1_6;
+  Platform& p = P();
+  {
+    std::lock_guard<std::mutex> lk(p.mu);
+    if (p.vm == nullptr) p.vm = vm;  // one VM per process: the first stub's
+    if (!p.boot) p.boot = std::make_unique<rb::host::Boot>(MakeConfig(p));
   }
-  std::string report;
-  SetReport(rt, &report);
-  Line(&report, "rb_runtime_boot: lib=" + (lib.empty() ? std::string{"(none)"} : lib) +
-                    " apk=" + (apk.empty() ? std::string{"(none)"} : apk));
-  bool ok = false;
-  rt.touched = false;
-  rt.failure.clear();
-  if (!rt.poisoned.empty()) {
-    Line(&report, "FATAL: rb_runtime_boot: refused — the guest process faulted in an earlier boot: " + rt.poisoned +
-                      ". It is half-initialized, so no guest work runs in this process again");
-    Line(&report, "RESULT: stopped during startup — the guest process faulted in an earlier boot (above)");
-  } else {
-    try {
-      ok = BootOne(rt, apk, lib, &report);
-      Tallies(rt, &report);
-    } catch (const std::exception& e) {
-      Line(&report, std::string{"FATAL: unhandled exception while booting: "} + e.what());
-      Line(&report, "RESULT: stopped during startup — a host exception (above)");
-      rt.failure = std::string{"a host exception: "} + e.what();
-      rt.touched = rt.touched || rt.proc != nullptr;
-    } catch (...) {
-      Line(&report, "FATAL: unhandled exception of a non-standard type while booting");
-      Line(&report, "RESULT: stopped during startup — a host exception (above)");
-      rt.failure = "a host exception of a non-standard type";
-      rt.touched = rt.touched || rt.proc != nullptr;
-    }
-    if (ok) {
-      rt.booted.insert(lib);
-      std::lock_guard<std::mutex> lk(g_published_mu);
-      g_published_proc = rt.proc.get();
-      g_published_libs[lib] = rt.loaded[lib];
-    } else if (rt.touched && rt.proc) {
-      // Guest state changed before the failure: nothing in this process may run guest code again.
-      rt.poisoned = lib + ": " + (rt.failure.empty() ? std::string{"see its report"} : rt.failure);
-      Line(&report, "rb_runtime_boot: the guest process is now refused for every later boot (" + rt.poisoned + ")");
-    }
-    // A failure before any guest state changed (no APK, a missing entry, a scope that did not boot and was
-    // discarded) leaves nothing behind, so a later call may try again.
-  }
-  SetReport(rt, nullptr);
+  const rb::host::BootResult res = p.boot->BootLibrary(apk, lib);
+  if (res.already) return JNI_VERSION_1_6;
 
   const std::string pkg = PackageName();
   if (pkg.empty()) {
-    Line(nullptr, "rb_runtime_boot: report not written — /proc/self/cmdline names no package");
+    p.boot->Live("rb_runtime_boot: report not written — /proc/self/cmdline names no package");
     return JNI_VERSION_1_6;
   }
   const std::string dir = "/data/user/" + std::to_string(::getuid() / 100000) + "/" + pkg + "/files";
@@ -1037,7 +373,7 @@ extern "C" int rb_runtime_boot(JavaVM* vm, const char* apk_path, const char* lib
   FILE* f = std::fopen(path.c_str(), "wb");
   bool written = false;
   if (f != nullptr) {
-    written = std::fwrite(report.data(), 1, report.size(), f) == report.size();
+    written = std::fwrite(res.report.data(), 1, res.report.size(), f) == res.report.size();
     written = std::fclose(f) == 0 && written;
   }
   if (written) {
@@ -1057,13 +393,13 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_retrobug_shim_Overlay_nativeStats(
   static std::uint64_t last_frames = 0, last_slices = 0;
   static bool last_swapped = false;
   static auto last = std::chrono::steady_clock::now();
-  Runtime& r = R();
+  Platform& p = P();
   // Frames: the guest's eglSwapBuffers when it swaps itself; a game drawn through Java's GLSurfaceView swaps in Java,
   // so its glClear calls stand in (games clear once per frame, nearly always).
   std::uint64_t frames = 0, swaps = 0, clears = 0, slices = 0;
-  if (r.slots) {
-    swaps = r.slots->CallsOf("eglSwapBuffers");
-    clears = r.slots->CallsOf("glClear");
+  if (p.slots) {
+    swaps = p.slots->CallsOf("eglSwapBuffers");
+    clears = p.slots->CallsOf("glClear");
   }
   const bool swapped = swaps != 0;
   frames = swapped ? swaps : clears;
@@ -1071,7 +407,8 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_retrobug_shim_Overlay_nativeStats(
   // or a wild difference between two unrelated counters.
   if (swapped != last_swapped || frames < last_frames) last_frames = frames;
   last_swapped = swapped;
-  if (r.proc) slices = r.proc->abi().slices();
+  GuestProcess* proc = p.boot ? p.boot->process() : nullptr;
+  if (proc) slices = proc->abi().slices();
   const auto now = std::chrono::steady_clock::now();
   const double dt = std::max(0.001, std::chrono::duration<double>(now - last).count());
   const double fps = static_cast<double>(frames - last_frames) / dt;

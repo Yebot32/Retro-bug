@@ -304,4 +304,8 @@ std::optional<GuestModule> LoadFromBytes(mem::GuestMemory& mem, const std::vecto
 /// decide whether an APK's `lib/armeabi-v7a` entry is loadable here at all.
 bool LooksLikeAArch32Elf(const std::uint8_t* data, std::size_t len);
 
+/// The `DT_NEEDED` sonames of an ELF32 image, read from its bytes (before it is loaded). Bounds-checked;
+/// anything malformed yields what could be read (the loader names the damage later).
+std::vector<std::string> NeededSonames(const std::vector<std::uint8_t>& image);
+
 }  // namespace rb::loader

@@ -228,55 +228,6 @@ std::string GuestStringOrEmpty(const mem::GuestMemory& mem, std::uint32_t at) {
   return out;
 }
 
-std::vector<std::string> NeededSonames(const std::vector<std::uint8_t>& img) {
-  std::vector<std::string> out;
-  const auto u16 = [&](std::size_t at) -> std::uint32_t {
-    return at + 2 <= img.size() ? (img[at] | (img[at + 1] << 8)) : 0u;
-  };
-  const auto u32 = [&](std::size_t at) -> std::uint32_t {
-    if (at + 4 > img.size()) return 0u;
-    std::uint32_t v = 0;
-    std::memcpy(&v, img.data() + at, 4);
-    return v;
-  };
-  if (img.size() < 52) return out;
-  const std::uint32_t phoff = u32(28), phentsize = u16(42), phnum = u16(44);
-  std::uint32_t dyn_off = 0, dyn_sz = 0;
-  const auto file_of = [&](std::uint32_t vaddr) -> std::size_t {
-    for (std::uint32_t i = 0; i < phnum; ++i) {
-      const std::size_t ph = phoff + std::size_t{i} * phentsize;
-      if (u32(ph) != 1u) continue;  // PT_LOAD
-      const std::uint32_t off = u32(ph + 4), va = u32(ph + 8), filesz = u32(ph + 16);
-      if (vaddr >= va && vaddr - va < filesz) return off + (vaddr - va);
-    }
-    return 0;
-  };
-  for (std::uint32_t i = 0; i < phnum; ++i) {
-    const std::size_t ph = phoff + std::size_t{i} * phentsize;
-    if (u32(ph) == 2u) {  // PT_DYNAMIC
-      dyn_off = u32(ph + 4);
-      dyn_sz = u32(ph + 16);
-    }
-  }
-  std::uint32_t strtab = 0;
-  std::vector<std::uint32_t> needed;
-  for (std::size_t at = dyn_off; dyn_off != 0 && at + 8 <= std::size_t{dyn_off} + dyn_sz; at += 8) {
-    const std::uint32_t tag = u32(at), val = u32(at + 4);
-    if (tag == 0u) break;
-    if (tag == 1u) needed.push_back(val);  // DT_NEEDED
-    if (tag == 5u) strtab = val;           // DT_STRTAB
-  }
-  const std::size_t str = strtab != 0 ? file_of(strtab) : 0;
-  if (str == 0) return out;
-  for (const std::uint32_t n : needed) {
-    std::size_t at = str + n;
-    std::string name;
-    while (at < img.size() && img[at] != 0 && name.size() < 256) name.push_back(static_cast<char>(img[at++]));
-    if (!name.empty()) out.push_back(name);
-  }
-  return out;
-}
-
 HostSlots::HostSlots(runtime::GuestProcess& p, int target_sdk, std::function<void(const std::string&)> live_log)
     : p_(p), target_sdk_(target_sdk), live_log_(std::move(live_log)) {
   // Both tables are bound `kHoldsGgl`: they are the linker's and liblog's part of the process (they read the

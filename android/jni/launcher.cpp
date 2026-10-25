@@ -1294,7 +1294,7 @@ std::string Inspect(const std::vector<std::uint8_t>& app_image,
    * linker's shared globals and auxv published, bionic's real main thread built. Its report lines (loads,
    * IFUNC slots, the bionic layout, the thread) arrive through the process's log above.
    */
-  const std::vector<std::string> app_needs = NeededSonames(app_image);
+  const std::vector<std::string> app_needs = loader::NeededSonames(app_image);
   const bool wants_libstdcxx =
       std::find(app_needs.begin(), app_needs.end(), "libstdc++.so") != app_needs.end();
   if (wants_libstdcxx && libstdcxx_image.empty()) {
@@ -2569,11 +2569,40 @@ Java_com_retrobug_launcher_LauncherActivity_nativeBootCheck(JNIEnv* env, jclass 
       "/data/user/" + std::to_string(::getuid() / 100000) + "/com.retrobug.launcher/files/rb-report.txt";
   std::remove(report_path.c_str());
   const int rc = rb_runtime_boot(vm, apk.c_str(), lib.c_str());
+  // A boot that reached Java and failed leaves the throwable pending, exactly as a device's native code would.
+  // This function is about to make JNI calls of its own (`NewStringUTF`), and ART aborts on those while an
+  // exception is pending — which is how a Unity title's missing `NativeLoader` class killed the whole run
+  // before its report was written. Clear it, and name it in the report instead.
+  std::string pending_note;
+  if (env->ExceptionCheck()) {
+    jthrowable pending = env->ExceptionOccurred();
+    env->ExceptionClear();
+    std::string described;
+    if (pending != nullptr) {
+      jclass cls = env->GetObjectClass(pending);
+      jmethodID to_string = cls != nullptr ? env->GetMethodID(cls, "toString", "()Ljava/lang/String;") : nullptr;
+      jstring s = to_string != nullptr ? static_cast<jstring>(env->CallObjectMethod(pending, to_string)) : nullptr;
+      if (env->ExceptionCheck()) env->ExceptionClear();
+      if (s != nullptr) {
+        if (const char* chars = env->GetStringUTFChars(s, nullptr)) {
+          described = chars;
+          env->ReleaseStringUTFChars(s, chars);
+        }
+        env->DeleteLocalRef(s);
+      }
+      if (cls != nullptr) env->DeleteLocalRef(cls);
+      env->DeleteLocalRef(pending);
+      if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    pending_note = "bootcheck: the boot left a Java exception pending: " +
+                   (described.empty() ? std::string{"(no description)"} : described) + "\n";
+  }
   char head[160];
   std::snprintf(head, sizeof head, "bootcheck: rb_runtime_boot(%s) returned 0x%x", lib.c_str(),
                 static_cast<unsigned>(rc));
   std::string report = head;
   report += '\n';
+  report += pending_note;
   FILE* f = std::fopen(report_path.c_str(), "rb");
   if (f == nullptr) {
     report += std::string{"bootcheck: no rb-report.txt to read back: "} + std::strerror(errno) + "\n";
