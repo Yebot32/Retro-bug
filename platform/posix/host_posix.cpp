@@ -34,7 +34,17 @@ void* ReserveWindow(std::size_t bytes) {
 }
 
 void* ReserveWindowAt(void* hint, std::size_t bytes) {
-  return ::mmap(hint, bytes, PROT_NONE, kWindowFlags | MAP_FIXED_NOREPLACE, -1, 0);
+  void* got = ::mmap(hint, bytes, PROT_NONE, kWindowFlags | MAP_FIXED_NOREPLACE, -1, 0);
+  if (got == MAP_FAILED) return nullptr;
+  // Kernels older than 4.17 ignore MAP_FIXED_NOREPLACE and treat it as a hint. Relocating a guest window
+  // would put guest addresses somewhere the caller did not ask for — the one thing this call exists to
+  // prevent — so a mapping anywhere but the hint is withdrawn and reported as "taken".
+  if (got != hint) {
+    ::munmap(got, bytes);
+    errno = EEXIST;
+    return nullptr;
+  }
+  return got;
 }
 
 int ImageFile(const void* data, std::size_t bytes) {

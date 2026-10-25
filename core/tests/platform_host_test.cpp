@@ -59,9 +59,15 @@ void Windows() {
   } else {
     errno = 0;
     void* second = rb::platform::ReserveWindowAt(first, kBytes);
-    Check(second == nullptr, "ReserveWindowAt over a live mapping fails");
-    Check(errno == EEXIST, "…and says EEXIST rather than silently relocating (errno " +
-                               std::to_string(errno) + ")");
+    const int second_errno = errno;
+    // Strict on purpose: a relocated mapping here would mean guest addresses were silently moved, which is
+    // the failure mode the whole call exists to prevent (a kernel that ignores MAP_FIXED_NOREPLACE is
+    // handled inside the platform, not by loosening this check).
+    Check(second == nullptr,
+          std::string{"ReserveWindowAt over a live mapping fails (got "} +
+              (second == nullptr ? "nullptr" : second == first ? "the same address" : "another address") +
+              ", errno " + std::to_string(second_errno) + ")");
+    Check(second_errno == EEXIST, "…and says EEXIST (errno " + std::to_string(second_errno) + ")");
     Check(::munmap(first, kBytes) == 0, "the first mapping survived the refused second one");
   }
 }
