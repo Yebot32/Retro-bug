@@ -9,6 +9,7 @@
 // first-run compile error here as unverified code, not as a design problem.
 #include "rb/platform/host.h"
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <mach/host_info.h>
 #include <mach/mach.h>
@@ -19,6 +20,7 @@
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -131,7 +133,9 @@ int AtFlags(std::uint32_t g) {
   int out = 0;
   if (g & 0x100u) out |= AT_SYMLINK_NOFOLLOW;  // guest 0x100 -> Darwin's value
   if (g & 0x200u) out |= AT_REMOVEDIR;
+#ifdef AT_SYMLINK_FOLLOW
   if (g & 0x400u) out |= AT_SYMLINK_FOLLOW;
+#endif
   if (g & 0x2u) out |= AT_EACCESS;
   return out;
 }
