@@ -9,11 +9,13 @@
 # built and run on a target without compiling the DBT at all, which matters now that the AArch64
 # backend needs its own work against compat/ (docs/30 §Step 5).
 add_library(rb_mem STATIC mem/guest_memory.cpp)
+target_link_libraries(rb_mem PUBLIC rb_platform)
 # `GuestMemory::Audit` reports into `rb::diag`'s auditor — the memory manager is one of the components
 # the self-audit checks, and the auditor is dependency-free by design so the arrow can only ever point
 # this way.
 target_link_libraries(rb_mem PUBLIC rb_diag)
 add_library(rb_loader STATIC loader/guest_elf.cpp)
+target_link_libraries(rb_loader PUBLIC rb_platform)
 
 foreach(t rb_mem rb_loader)
   target_include_directories(${t} PUBLIC
@@ -88,6 +90,7 @@ target_include_directories(rb_diag PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 # of its own — which is the shape that keeps "no syscall reaches the host kernel except through the
 # allowlist" reviewable in one file rather than grep'd across the engine.
 add_library(rb_syscall STATIC syscall/monitor.cpp syscall/host_io.cpp)
+target_link_libraries(rb_syscall PUBLIC rb_platform)
 target_compile_features(rb_syscall PUBLIC cxx_std_20)
 target_link_libraries(rb_syscall PUBLIC rb_exec rb_diag rb_guest_thread)
 

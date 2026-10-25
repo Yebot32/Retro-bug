@@ -175,3 +175,9 @@ target_link_libraries(rb_sles_tests PRIVATE rb_abi rb_mem OpenSLES dl)
 add_executable(rb_gl_thunk_tests gl_thunk_test.cpp "${CMAKE_SOURCE_DIR}/android/jni/thunks.cpp")
 target_include_directories(rb_gl_thunk_tests PRIVATE "${CMAKE_SOURCE_DIR}/android/jni")
 target_link_libraries(rb_gl_thunk_tests PRIVATE rb_abi rb_mem EGL GLESv2 dl)
+
+# The platform seam (S0 of the iOS port): pure host tests, no guest, no device, no fixtures — the
+# only suite that can run on the build machine itself. Its contract is what makes the same core
+# compile and behave on Linux and Darwin.
+add_executable(rb_platform_tests platform_host_test.cpp)
+target_link_libraries(rb_platform_tests PRIVATE rb_platform)

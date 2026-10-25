@@ -2,6 +2,7 @@
  * RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
  */
 #include "rb/mem/guest_memory.h"
+#include "rb/platform/host.h"
 
 #include <sys/mman.h>
 #include <unistd.h>
@@ -83,19 +84,19 @@ std::unique_ptr<GuestMemory> GuestMemory::Create(std::size_t window_bytes, const
     // Flat asks for the window low, so guest addresses stay in a range where a 32-bit truncation is
     // unambiguous. Address 0 itself is refused by the kernel (mmap_min_addr); the lowest hint that
     // worked on the x86_64 Android emulator was 0x10000 — the measurement behind docs/10 §17 U-2.
-    raw = mmap(reinterpret_cast<void*>(host_page), window_bytes + slack, PROT_NONE,
-               MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
-    if (raw == MAP_FAILED) {
+    // The platform supplies "fail if anything is already there": MAP_FIXED_NOREPLACE on Linux,
+    // mach_vm_allocate/hint-and-verify on Darwin (which has no such flag).
+    raw = platform::ReserveWindowAt(reinterpret_cast<void*>(host_page), window_bytes + slack);
+    if (raw == nullptr) {
       if (err) *err = SysErr("flat-model low window reservation failed", errno);
       return nullptr;
     }
   }
-  if (raw == nullptr || raw == MAP_FAILED) {
+  if (raw == nullptr) {
     // Biased, or a flat request the kernel refused: take whatever the OS offers and never assume
     // where it landed.
-    raw = mmap(nullptr, window_bytes + slack, PROT_NONE,
-               MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    if (raw == MAP_FAILED) {
+    raw = platform::ReserveWindow(window_bytes + slack);
+    if (raw == nullptr) {
       if (err) *err = SysErr("window reservation failed", errno);
       return nullptr;
     }

@@ -1,0 +1,59 @@
+# RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
+#
+# The Darwin proof for the iOS port (S0): the engine's platform seam compiles and behaves on macOS, the
+# same core compiles for iOS arm64, and `core/` keeps its layering rule. None of this needs a device or an
+# Apple developer account — static libraries are not signed.
+#
+# Why a macOS runner and not the Windows development host: the platform layer has a Darwin implementation
+# (platform/darwin) that no Windows machine can compile, and the point of S0 is exactly that it compiles.
+name: host-and-ios
+
+on:
+  push:
+    branches: [main, 'session/**']
+  workflow_dispatch:
+
+jobs:
+  darwin-host:
+    name: macOS host — platform seam + layering
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure (host build)
+        run: cmake -S . -B build/host -DCMAKE_BUILD_TYPE=Release -DRB_BUILD_TESTS=ON
+
+      - name: Build and run the platform seam test
+        run: |
+          set -euo pipefail
+          cmake --build build/host --target rb_platform_tests -j 4
+          ./build/host/core/tests/rb_platform_tests
+
+      - name: Layering gate
+        run: bash tools/check_layering.sh
+
+  ios-compile:
+    name: iOS — the same core compiles for arm64
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure for iOS (no tests, no signing)
+        run: >
+          cmake -S . -B build/ios
+          -DCMAKE_SYSTEM_NAME=iOS
+          -DCMAKE_OSX_ARCHITECTURES=arm64
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0
+          -DCMAKE_OSX_SYSROOT=iphoneos
+          -DCMAKE_BUILD_TYPE=Release
+          -DRB_BUILD_TESTS=OFF
+
+      # The platform layer plus the two components that now go through it. The interpreter and the rest
+      # of the engine join this list when the syscall backend lands (S0b); until then this target set is
+      # the honest statement of what is known to compile for iOS.
+      - name: Build for iOS
+        run: cmake --build build/ios --target rb_platform rb_mem rb_loader -j 4

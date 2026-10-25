@@ -3,6 +3,7 @@
  */
 #include "rb/loader/guest_elf.h"
 #include "rb/loader/elf_defs.h"
+#include "rb/platform/host.h"
 
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -174,31 +175,16 @@ std::vector<std::string> GuestModule::ExportNames() const {
 std::optional<GuestModule> LoadFromBytes(mem::GuestMemory& mem, const std::vector<std::uint8_t>& image,
                                          const std::string& path, const LoadOptions& opts,
                                          std::string* err) {
-  // Round-trip through a memfd so there is one mapping path. This is not a test-only shortcut:
-  // guest code reached from an APK is handed around as bytes or an asset fd, and the isolated
+  // Round-trip through an anonymous image file so there is one mapping path. This is not a test-only
+  // shortcut: guest code reached from an APK is handed around as bytes or an asset fd, and the isolated
   // environment passes the same kind of descriptor over Binder (docs/10 §C9), so an in-memory image
   // has to be loadable without ever touching a writable file — which it could not be executed from
-  // anyway (docs/10 §7).
-  //
-  // Called via syscall() because the memfd_create() wrapper is only declared from API 30 and the
-  // core builds against android-26.
-  int fd = -1;
-#if defined(SYS_memfd_create)
-  fd = static_cast<int>(syscall(SYS_memfd_create, "rb-guest-elf", MFD_CLOEXEC));
-#endif
+  // anyway (docs/10 §7). The platform decides what "anonymous" means: a memfd on Linux, an unlinked
+  // temp file on Darwin, which has no memfd_create.
+  const int fd = platform::ImageFile(image.data(), image.size());
   if (fd < 0) {
-    if (err) *err = Stage("memfd_create unavailable", std::strerror(errno));
+    if (err) *err = Stage("an anonymous image file could not be created", std::strerror(errno));
     return std::nullopt;
-  }
-  std::size_t off = 0;
-  while (off < image.size()) {
-    const ssize_t w = ::write(fd, image.data() + off, image.size() - off);
-    if (w <= 0) {
-      ::close(fd);
-      if (err) *err = Stage("memfd write failed", std::strerror(errno));
-      return std::nullopt;
-    }
-    off += static_cast<std::size_t>(w);
   }
   auto mod = LoadFromFd(mem, fd, path, opts, err);
   ::close(fd);

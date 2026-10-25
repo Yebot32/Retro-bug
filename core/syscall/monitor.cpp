@@ -6,7 +6,6 @@
 
 #include <fcntl.h>
 #include <sys/resource.h>
-#include <sys/sysinfo.h>
 #include <sys/utsname.h>
 #include <unistd.h>
 #include <sched.h>
@@ -21,6 +20,7 @@
 #include <vector>
 
 #include "rb/mem/guest_memory.h"
+#include "rb/platform/host.h"
 
 namespace rb::syscall {
 namespace {
@@ -50,12 +50,11 @@ std::string ProtText(std::uint32_t prot) {
 bool HostClock(std::int32_t clock_id, std::int64_t* nanos) {
   // The wall and monotonic clocks and their raw/coarse/boot variants (0, 1, 4..7) — the guest kernel's answer — and
   // the process and thread CPU clocks (2, 3). A clock id encoding a pid or tid (negative) is not answered.
-  const clockid_t id = (clock_id >= 0 && clock_id <= 7) ? clock_id : -1;
-  if (id < 0) return false;
-  timespec ts{};
-  if (::clock_gettime(id, &ts) != 0) return false;
-  *nanos = static_cast<std::int64_t>(ts.tv_sec) * 1'000'000'000 + static_cast<std::int64_t>(ts.tv_nsec);
-  return true;
+  //
+  // The mapping to the host's clock names is the platform's: Darwin's MONOTONIC counts through sleep and
+  // Linux's does not, so the two are not the same clock under the same number (see rb/platform/host.h).
+  if (clock_id < 0 || clock_id > 7) return false;
+  return platform::ClockNs(clock_id, nanos);
 }
 
 /// The host's entropy pool, through `<random>` because `getentropy`/`getrandom` are API 28 and this
@@ -869,13 +868,14 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
       // asks what it is running on, so "armv7l" is the true answer to the question it asked, and the host's
       // "aarch64" would be the answer to a question nobody put. Every other field is the host's own.
       // `struct utsname` is six 65-byte fields on both the arm32 and the arm64 kernel ABI, so the copy is the
-      // same shape; only that one field is corrected.
+      // same shape; only `machine` (and, on a Darwin host, every field) is corrected.
       struct utsname u {};
-      if (::uname(&u) != 0) {
-        return Outcome::Answered(err::kEfault, "uname: the host refused to describe itself");
-      }
-      std::memset(u.machine, 0, sizeof u.machine);
-      std::snprintf(u.machine, sizeof u.machine, "armv7l");
+      const platform::Uts uts = platform::LinuxUts();
+      std::snprintf(u.sysname, sizeof u.sysname, "%s", uts.sysname);
+      std::snprintf(u.nodename, sizeof u.nodename, "%s", uts.nodename);
+      std::snprintf(u.release, sizeof u.release, "%s", uts.release);
+      std::snprintf(u.version, sizeof u.version, "%s", uts.version);
+      std::snprintf(u.machine, sizeof u.machine, "%s", uts.machine);
       const std::uint32_t at = f.arg[0];
       if (at != 0 && !memory_->Write(at, &u, sizeof u)) {
         return Outcome::Answered(err::kEfault, "uname: the utsname at 0x" + Hex(at) +
@@ -897,9 +897,13 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
       }
       cpu_set_t host;
       CPU_ZERO(&host);
-      if (::sched_getaffinity(pid == 0 ? 0 : static_cast<pid_t>(pid), sizeof host, &host) != 0) {
+      // Guest pids name guest threads, not host ones, so the only mask that means anything is this
+      // process's. Darwin has no sched_getaffinity at all; the platform answers with the online CPUs.
+      const std::uint32_t mask = platform::CpuMask();
+      if (mask == 0 && platform::CpuCount() == 0) {
         return Outcome::Answered(err::kEsrch, call + " = -ESRCH (-3): the host has no such thread");
       }
+      std::memcpy(&host, &mask, sizeof mask);
       // The arm32 cpu_set_t is 1024 bits (128 bytes) with the same bit-per-CPU layout, so the leading words map
       // straight across; anything the guest asked for beyond that is zero-filled, as a kernel does.
       std::vector<std::uint8_t> guest(size, 0);
@@ -910,7 +914,7 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
                                                    " is not writable guest memory");
       }
       unsigned cpus = 0;
-      for (int i = 0; i < CPU_SETSIZE; ++i) cpus += CPU_ISSET(i, &host) ? 1u : 0u;
+      for (unsigned i = 0; i < 32; ++i) cpus += (mask >> i) & 1u;
       return Outcome::Emulated(0, call + " -> " + std::to_string(cpus) + " CPU(s)");
     }
 
@@ -945,23 +949,23 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
       if (memory_ == nullptr) {
         return Outcome::Refused(err::kEnosys, call + ": no guest memory is attached to this monitor");
       }
-      rlimit host{};
-      if (::prlimit(pid == 0 ? 0 : static_cast<pid_t>(pid), resource, nullptr, &host) != 0) {
+      platform::Limit host{};
+      if (!platform::ResourceLimit(resource, &host)) {
         return Outcome::Answered(err::kEinval, call + " = -EINVAL (-22): no such resource, or no such process");
       }
       // A limit of RLIM_INFINITY does not survive the trip into a 32-bit field, so it is clamped to the widest
       // value the guest's own type can hold rather than wrapped to zero.
-      constexpr std::uint64_t kInf = ~static_cast<std::uint64_t>(0);
-      const auto clamp = [](rlim_t v) -> std::uint64_t {
-        return v == RLIM_INFINITY ? kInf : static_cast<std::uint64_t>(v);
+      constexpr std::uint64_t kInf = platform::kInfinite;
+      const auto clamp = [](std::uint64_t v) -> std::uint64_t {
+        return v == platform::kInfinite ? kInf : v;
       };
-      const std::uint64_t old_pair[2] = {clamp(host.rlim_cur), clamp(host.rlim_max)};
+      const std::uint64_t old_pair[2] = {clamp(host.cur), clamp(host.max)};
       if (f.arg[3] != 0 && !memory_->Write(f.arg[3], old_pair, sizeof old_pair)) {
         return Outcome::Answered(err::kEfault, call + ": the old rlimit at 0x" + Hex(f.arg[3]) +
                                                    " is not writable guest memory");
       }
       if (f.arg[2] != 0) {
-        const std::uint64_t asked[2] = {clamp(host.rlim_cur), clamp(host.rlim_max)};
+        const std::uint64_t asked[2] = {clamp(host.cur), clamp(host.max)};
         return Outcome::Emulated(0, call + " = 0: cur " + std::to_string(asked[0]) + ", max " +
                                         std::to_string(asked[1]) + " (the request was read, not applied: this "
                                         "build does not lower the host's own limits)");
@@ -980,17 +984,16 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
       if (memory_ == nullptr) {
         return Outcome::Refused(err::kEnosys, call + ": no guest memory is attached to this monitor");
       }
-      struct ::sysinfo host {};
-      if (::sysinfo(&host) != 0) {
+      platform::MemInfo host{};
+      if (!platform::MemoryInfo(&host)) {
         return Outcome::Answered(err::kEfault, call + " = -EFAULT (-14): the host refused to describe itself");
       }
       // The arm32 `struct sysinfo` prefix, field for field: uptime, loads[3], totalram, freeram, sharedram,
-      // bufferram, totalswap, freeswap, procs. Written field by field so the widths are the guest's, not the
+      // bufferram, totalswap, freeswap. Written field by field so the widths are the guest's, not the
       // host's — `long` is 4 bytes on one side of this ABI pair and 8 on the other.
       const std::uint32_t words[10] = {
           static_cast<std::uint32_t>(host.uptime),
-          static_cast<std::uint32_t>(host.loads[0]), static_cast<std::uint32_t>(host.loads[1]),
-          static_cast<std::uint32_t>(host.loads[2]),
+          host.loads[0], host.loads[1], host.loads[2],
           static_cast<std::uint32_t>(host.totalram), static_cast<std::uint32_t>(host.freeram),
           static_cast<std::uint32_t>(host.sharedram), static_cast<std::uint32_t>(host.bufferram),
           static_cast<std::uint32_t>(host.totalswap), static_cast<std::uint32_t>(host.freeswap)};
@@ -1014,7 +1017,6 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
       // Measured (SM-X710 2026-10-19): Cars 3 asked 155, 156, 159 and 160 in a tight loop once the signal
       // refusals stopped ending it, so these are the next wall rather than a hypothetical gap.
       const auto pid = static_cast<std::int32_t>(f.arg[0]);
-      const pid_t host_pid = pid == 0 ? 0 : static_cast<pid_t>(pid);
       const std::string call = std::string{Name(f.number)} + "(" + std::to_string(pid) +
                                (f.number == nr::kSchedGetPriorityMin || f.number == nr::kSchedGetPriorityMax
                                     ? ", " + std::to_string(f.arg[1]) + ")"
@@ -1023,12 +1025,11 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
         if (memory_ == nullptr) {
           return Outcome::Refused(err::kEnosys, call + ": no guest memory is attached to this monitor");
         }
-        struct sched_param host {};
-        if (::sched_getparam(host_pid, &host) != 0) {
+        std::int32_t prio = 0;
+        if (!platform::SchedPriority(pid, &prio)) {
           return Outcome::Answered(err::kEsrch, call + " = -ESRCH (-3): the host has no such thread");
         }
         // The arm32 `struct sched_param` is a single `int sched_priority`, so the copy is four bytes.
-        const std::int32_t prio = host.sched_priority;
         if (f.arg[1] != 0 && !memory_->Write(f.arg[1], &prio, 4)) {
           return Outcome::Answered(err::kEfault, call + ": the sched_param at 0x" + Hex(f.arg[1]) +
                                                      " is not writable guest memory");
@@ -1036,20 +1037,19 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
         return Outcome::Emulated(0, call + " -> priority " + std::to_string(prio));
       }
       if (f.number == nr::kSchedGetscheduler) {
-        const int policy = ::sched_getscheduler(host_pid);
-        if (policy < 0) {
+        std::int32_t policy = 0;
+        if (!platform::SchedPolicy(pid, &policy)) {
           return Outcome::Answered(err::kEsrch, call + " = -ESRCH (-3): the host has no such thread");
         }
-        return Outcome::Emulated(static_cast<std::int32_t>(policy),
-                                 call + " -> policy " + std::to_string(policy));
+        return Outcome::Emulated(policy, call + " -> policy " + std::to_string(policy));
       }
       // The priority bounds are per policy, and the host's table is the same one a device uses.
-      const int policy = static_cast<int>(f.arg[1]);
-      const int bound = f.number == nr::kSchedGetPriorityMin ? ::sched_get_priority_min(policy)
-                                                             : ::sched_get_priority_max(policy);
-      if (bound < 0) {
+      const std::int32_t policy = static_cast<std::int32_t>(f.arg[1]);
+      std::int32_t lo = 0, hi = 0;
+      if (!platform::SchedPriorityBounds(policy, &lo, &hi)) {
         return Outcome::Answered(err::kEinval, call + " = -EINVAL (-22): no such scheduling policy");
       }
+      const std::int32_t bound = f.number == nr::kSchedGetPriorityMin ? lo : hi;
       return Outcome::Emulated(bound, call + " -> " + std::to_string(bound));
     }
 

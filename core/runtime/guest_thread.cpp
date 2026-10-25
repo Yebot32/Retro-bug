@@ -13,7 +13,6 @@
 #include "rb/runtime/guest_thread.h"
 
 #include <pthread.h>
-#include <unistd.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -21,6 +20,8 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#include "rb/platform/host.h"
 
 namespace rb::runtime {
 
@@ -128,7 +129,7 @@ bool BindCurrentHostThread(GuestThread& t) {
   }
   // The host's Linux tid, for the Java APIs that take one: a guest tid is ours, and ART answers
   // "Given thread N does not exist" when the guest hands it one (Unity's Process.setThreadPriority does).
-  const std::int32_t host_tid = static_cast<std::int32_t>(::gettid());
+  const std::int32_t host_tid = platform::CurrentTid();
   t.host_tid.store(host_tid, std::memory_order_release);
   PublishHostTid(t.tid, host_tid);
   HostState& s = State();

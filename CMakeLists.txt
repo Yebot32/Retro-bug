@@ -48,6 +48,7 @@ endif()
 add_subdirectory(external/dynarmic EXCLUDE_FROM_ALL)
 
 # ---------------------------------------------------------------- RetroBug core
+add_subdirectory(platform)
 add_subdirectory(core)
 
 if(RB_BUILD_TESTS)
