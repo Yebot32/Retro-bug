@@ -287,4 +287,8 @@ echo "Not installed: this script runs no adb. To run it,"
 echo "  adb install -r -g $(to_host "$OUT/rbguest-launcher.apk")"
 echo "  adb shell am start -n com.retrobug.launcher/.LauncherActivity"
 echo "  adb logcat -s RBLAUNCH"
-echo "build is ${RB_RELEASE:+a release build}${RB_RELEASE:-debuggable (the -e paths work; RB_RELEASE=1 turns that off)}"
+if [ -n "${RB_RELEASE:-}" ]; then
+  echo "build is a release build (not debuggable; the -e diagnostic paths are refused)"
+else
+  echo "build is debuggable (the -e paths work; RB_RELEASE=1 turns that off)"
+fi

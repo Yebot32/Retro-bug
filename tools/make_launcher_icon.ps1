@@ -2,18 +2,21 @@
 #
 # `tools/build_launcher_apk.sh` has no image tooling and this machine has no ImageMagick or Python, so the
 # resizing is done with .NET's System.Drawing, which every Windows image already has. Run from the repo
-# root:  powershell -ExecutionPolicy Bypass -File tools/make_launcher_icon.ps1
+# root:  powershell -ExecutionPolicy Bypass -File tools/make_launcher_icon.ps1 [-Source tools/icon/retrobug-icon.png]
 #
-# Two things about the source that decide the output, both measured by the script and printed:
-#   * it is 24-bit RGB with **no alpha channel**, and its background is opaque near-black (the corner
-#     pixel reads 1,1,1), so shipping the pixels as they are would put a black square on the launcher;
-#   * the figure itself is green with white eyes and a dark outline, so "near-black" is a safe key: no
-#     part of the figure is that dark.
+# The default source is the RetroBug bug (tools/icon/retrobug-icon.png). The previous icon — the Android
+# robot — is still at the repo root and can be regenerated with `-Source file_0000000033448211bbdb620eed523634.png`.
+#
+# Two things about a source that decide the output, both measured by the script and printed:
+#   * a 24-bit RGB source with **no alpha channel** and an opaque near-black background (the RetroBug icon's
+#     corner pixel is 11,15,20) would ship as a black square on the launcher;
+#   * the figure itself keeps clear of "near-black", so the key is safe: no part of it is that dark.
 # The key is therefore written as transparency, and the scaled copies are drawn in premultiplied-alpha
 # format so the downscale does not leave a grey halo where the black met the outline.
+param([string]$Source = 'tools/icon/retrobug-icon.png')
 Add-Type -AssemblyName System.Drawing
 
-$src = Join-Path (Get-Location) 'file_0000000033448211bbdb620eed523634.png'
+$src = Join-Path (Get-Location) $Source
 if (-not (Test-Path $src)) { Write-Error "no source image at $src"; exit 1 }
 $KeyBelow = 16   # every channel below this counts as background
 
