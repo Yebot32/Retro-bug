@@ -404,3 +404,35 @@ DATA HYGIENE:
   Linux/Android-only in practice; iOS/macOS will use the biased model sized from available memory.
 - **Pending:** the Android device gate did not rerun (the tablet dropped off USB mid-run). Replug it and
   run `RB_SERIAL=<serial> bash tools/run_engine_tests.sh arm64-v8a` before trusting "Android unchanged".
+
+1i. 2026-10-25 (iOS S1b) — the boot is shared; the whole engine compiles for iOS
+---------------------------------------------------------------------------
+- `rb::host::Boot` (`core/host/boot.cpp`, header `core/include/rb/host/boot.h`) is the in-process
+  APK boot: scope, DT_NEEDED order, constructors, JNI_OnLoad, guest dlopen/dlsym, the poison rule,
+  the liveness monitor. Every platform decision is a `BootConfig` callback: `make_java`, `resolve_host`,
+  `on_bridge`, `report_suffix`, `java_thread_dump`, `frame_stats`, `log`, `on_guest_exit`.
+- `android/jni/runtime_boot.cpp` is now the Android half only: settings, package/report paths, ART,
+  HostSlots/OpenSL ES, the stub dispatch, the overlay. Nothing in it is duplicated in core.
+- `rb::loader::ZipReader` (`core/loader/zip.cpp`) is ApkZip with file and in-memory constructors;
+  `NeededSonames` moved to `rb::loader` with it. zlib is found via `find_package(ZLIB)` (NDK and Apple
+  SDK both have it; the fallback is `-lz`).
+- **iOS build proof:** the CI's iOS-arm64 job now builds `rb_host`, which pulls `rb_inbound`, `rb_runtime`,
+  `rb_abi`, `rb_exec`, `rb_isa` and dynarmic. The first attempt exposed the real blocker: iOS sets no
+  `CMAKE_SYSTEM_PROCESSOR`, so the arch gates in `core/CMakeLists.txt` and `core/runtime/CMakeLists.txt`
+  never fired. There is now one `RB_AARCH64_HOST` in the top-level CMakeLists (processor OR
+  `CMAKE_OSX_ARCHITECTURES`). `inbound_aarch64.S` also learned Mach-O (`_` symbol prefix,
+  `.private_extern`, no `.type`/`.size`).
+- **Tests:** `rb_zip_tests` (25) and `rb_host_boot_tests` (46; needs the tablet's libc + the C06 chain,
+  skips cleanly without them) join the gate: 28/28 suites, 0 failures on R52Y106BECZ.
+- **Device end-to-end, through the real launcher (`-e bootcheck`):** Blocky Roads `libgame.so` — 58
+  constructors on Tier J, JNI_OnLoad returned `0x10004`, "startup finished with no fault", 21 `Java_*`
+  entry points waiting. Rolling Sky — its Unity `JNI_OnLoad` calls `FindClass(com.unity3d.player.NativeLoader)`,
+  which does not exist in the launcher process; the boot now stops by name at
+  `RegisterNatives(null class)` and writes its report. **That is expected:** the launcher has no DEX;
+  the real repackaged app's Java supplies the class.
+- **Bug fixed on the way:** `nativeBootCheck` (launcher) called `NewStringUTF` while the guest had left a
+  `ClassNotFoundException` pending, and ART aborted the process (Fatal signal 6) before the report was
+  written. It now clears the exception and names it in the report.
+- **Next S1:** `platform/ios` EAGL/EGL adapter, UIKit touch queue, Core Audio sink, `IosJavaHost` (class
+  table driven by a recorded guest→Java call trace), an Xcode shell built unsigned in CI, then the first
+  native title on an iPad; the Tier-I Rolling Sky number (CPU=Safe) is still the open G1b measurement.

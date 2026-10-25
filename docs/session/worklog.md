@@ -722,3 +722,31 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
   "This app looks safe" — so a conversion is not silent on Android 14+. The launcher reports
   `PENDING_USER_ACTION` while the first is up, and `INSTALL_FAILED_ABORTED: User rejected permissions` if it
   is dismissed. Worth surfacing in the UI ("confirm the system install prompt").
+
+### 2026-10-25 — iOS S1b: the boot moves into core, and the engine builds for iOS
+- **`rb::host::Boot` is the shared boot.** The whole Android runtime's mechanics — scope from
+  `assets/rb32sys/`, DT_NEEDED-first loading, constructors, guest `JNI_OnLoad`, guest dlopen/dlsym, the
+  poison-after-a-touched-failure rule, the stall monitor — now live in `core/host/boot.cpp`. ART, host
+  slots, OpenSL ES, logcat and the report path are callbacks (`BootConfig`), so `android/jni/runtime_boot.cpp`
+  is a platform wrapper and iOS can call the same boot.
+- **The APK reader grew a memory constructor** (`rb::loader::ZipReader`), and `NeededSonames` moved to
+  `rb::loader` — the boot no longer needs a launcher to parse an image's dependencies.
+- **iOS compile proof, and the real blocker it exposed.** The iOS CI job now builds `rb_host`, which pulls
+  `rb_inbound`, `rb_runtime`, `rb_abi`, `rb_exec`, `rb_isa` and dynarmic. The first run failed with
+  "No rule to make target rb_host": iOS sets no `CMAKE_SYSTEM_PROCESSOR`, so the arch gates never fired.
+  One `RB_AARCH64_HOST` in the top-level CMakeLists (processor **or** `CMAKE_OSX_ARCHITECTURES`) fixed
+  both places; `inbound_aarch64.S` also needed Mach-O symbols (`_` prefix, `.private_extern`, no
+  `.type`/`.size`). The second run built everything through dynarmic and the trampolines.
+- **New lanes:** `rb_zip_tests` 25 checks (stored/deflated/CRC/ZIP64/file-backed, a zip written by the
+  test), `rb_host_boot_tests` 46 checks (scope, sibling-first constructors in bionic order, boot-once,
+  dlopen/dlsym, missing entry retry, constructor-fault poison). Device gate **28/28 suites, 0 failures**.
+- **Real-launcher evidence.** Bootcheck of Blocky Roads: 58 constructors on Tier J, `JNI_OnLoad` returned
+  `0x10004`, "startup finished with no fault". Rolling Sky: its Unity `JNI_OnLoad` needs
+  `com.unity3d.player.NativeLoader`, which only its own DEX provides; the boot stops by name at
+  `RegisterNatives(null class)` and the report is written — the launcher path cannot validate further, the
+  repackaged app can.
+- **A latent crash found and fixed:** the launcher's `nativeBootCheck` called `NewStringUTF` with the
+  guest's `ClassNotFoundException` still pending; ART aborts on any JNI call then, so the process died
+  (SIGABRT) before reporting. It now clears the exception and puts it in the report.
+- **Not done yet:** EAGL/EGL, touch, audio, `IosJavaHost`, the SwiftUI shell and the unsigned-IPA job; the
+  Tier-I Rolling Sky throughput is still the open G1b measurement.
