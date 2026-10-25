@@ -11,6 +11,10 @@ name: host-and-ios
 on:
   push:
     branches: [main, 'session/**']
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - '*.txt'
   workflow_dispatch:
 
 jobs:

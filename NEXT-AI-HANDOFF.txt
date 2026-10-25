@@ -388,3 +388,19 @@ DATA HYGIENE:
 - G-Presto analysis (3.4.0) stands: any converted copy trips it; the untouched 4.9.0 build has
   none. Do not attempt to defeat it.
 - iOS sideload version: docs/ios-notes.txt.
+
+1h. 2026-10-25 (iOS S0a) — the platform seam, proven on macOS and compiled for iOS
+---------------------------------------------------------------------------
+- `core/include/rb/platform/host.h` + `platform/{posix,darwin}` hold the effects whose existence
+  differs between Linux and Darwin: window reservation (fail-instead-of-replace), an anonymous image
+  file, `CurrentTid`, `LinuxUts`, `MemoryInfo`, `ResourceLimit` (guest numbering), `CpuMask`, sched
+  facts, and `ClockNs` (Darwin MONOTONIC counts through sleep: guest MONOTONIC → CLOCK_UPTIME_RAW,
+  guest BOOTTIME → CLOCK_MONOTONIC).
+- Moved call sites: `guest_memory.cpp`, `guest_elf.cpp`, `guest_thread.cpp`, `monitor.cpp`.
+- CI (`host-and-ios.yml`): macOS runs `rb_platform_tests` (26/26) and an iOS-arm64 build compiles
+  `rb_platform rb_mem rb_loader`. `tools/check_layering.sh` gates headers in `core/` and reports the
+  syscalls S0b still has to move (host_io: eventfd2, statx, getdents64, ppoll, pselect6, epoll*, renameat2).
+- **macOS note:** a fixed low window hint (0x10000000) is refused by Darwin — the flat address model is
+  Linux/Android-only in practice; iOS/macOS will use the biased model sized from available memory.
+- **Pending:** the Android device gate did not rerun (the tablet dropped off USB mid-run). Replug it and
+  run `RB_SERIAL=<serial> bash tools/run_engine_tests.sh arm64-v8a` before trusting "Android unchanged".
