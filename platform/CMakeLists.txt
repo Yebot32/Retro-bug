@@ -21,3 +21,9 @@ endif()
 
 target_include_directories(rb_platform PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../core/include")
 target_compile_features(rb_platform PUBLIC cxx_std_20)
+
+# The iOS adapter (S1): EGL on EAGL and the GL symbol source. The OpenGLES framework exists only in the iOS
+# SDK, so this directory is configured for an iOS build and never for the macOS host.
+if(IOS)
+  add_subdirectory(ios)
+endif()

@@ -66,4 +66,4 @@ jobs:
       # build. No executable guest memory is involved in compiling it; running Tier I writes guest code as
       # data, as iOS requires.
       - name: Build for iOS
-        run: cmake --build build/ios --target rb_platform rb_mem rb_loader rb_syscall rb_host -j 4
+        run: cmake --build build/ios --target rb_platform rb_mem rb_loader rb_syscall rb_gfx rb_host rb_ios -j 4

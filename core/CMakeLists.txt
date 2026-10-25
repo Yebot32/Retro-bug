@@ -118,10 +118,19 @@ add_library(rb_profile STATIC profile/profile.cpp)
 target_compile_features(rb_profile PUBLIC cxx_std_20)
 target_link_libraries(rb_profile PUBLIC rb_diag)
 
+# rb::gfx (S1): the import→signature table for GLES/EGL/libandroid entry points. It is data — which host
+# answers a name (a device driver on Android, the EAGL adapter on iOS) is the platform's — and both platforms'
+# host-slot layers resolve through it, so a title's imports are the same list on both.
+add_library(rb_gfx STATIC gfx/thunk_table.cpp)
+target_compile_features(rb_gfx PUBLIC cxx_std_20)
+target_include_directories(rb_gfx PUBLIC
+  "${CMAKE_CURRENT_SOURCE_DIR}/include"
+  "${CMAKE_CURRENT_SOURCE_DIR}/..")
+
 # rb_core is the aggregate the engine-facing components will hang off.
 add_library(rb_core INTERFACE)
 target_link_libraries(rb_core INTERFACE rb_mem rb_loader rb_linker rb_isa rb_exec rb_abi rb_diag
-                                        rb_syscall rb_guest_thread rb_codecache rb_profile dynarmic)
+                                        rb_syscall rb_guest_thread rb_codecache rb_profile rb_gfx dynarmic)
 
 if(DEFINED RB_COMPAT_INCLUDE_DIR)
   target_include_directories(rb_core INTERFACE "${RB_COMPAT_INCLUDE_DIR}")
