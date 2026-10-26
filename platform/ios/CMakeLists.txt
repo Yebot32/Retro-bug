@@ -4,7 +4,7 @@
 # OpenGLES.framework is not part of the macOS SDK, and an iOS app is the only consumer.
 enable_language(OBJCXX)
 
-add_library(rb_ios STATIC egl_shim.mm gl_symbols.mm ios_host.cpp)
+add_library(rb_ios STATIC egl_shim.mm gl_symbols.mm ios_host.cpp cocos2dx.cpp)
 target_compile_features(rb_ios PUBLIC cxx_std_20)
 target_compile_options(rb_ios PRIVATE -fobjc-arc)
 target_include_directories(rb_ios PUBLIC
