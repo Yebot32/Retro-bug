@@ -456,16 +456,22 @@ DATA HYGIENE:
 - **Verified:** macOS CI runs `rb_table_java_tests` 36 checks, `rb_zip_tests` 25, platform 26; iOS CI builds
   `rb_ios` (the EAGL shim + IosHost) and `rb_java`. The Tab S9 dropped off USB during this step, so the
   Android gate has NOT been rerun since the rb_java move; run it when the tablet is back.
-- **Next, and this is now the critical path:** a title bootstrap. Blocky Roads is Cocos2d-x; its
-  `libgame.so` exports (llvm-nm) include
-  `Java_org_cocos2dx_lib_Cocos2dxHelper_nativeSetApkPath(JNIEnv*, jclass, jstring)`,
-  `Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeInit(JNIEnv*, jobject, jint, jint)`,
-  `..._nativeRender(JNIEnv*, jobject)`, `..._nativeTouchesBegin/Move/End/Cancel(JNIEnv*, jobject, jint, jfloat, jfloat)`,
-  `..._nativeOnPause/Resume/Start/Stop`, `..._Cocos2dxAccelerometer_onSensorChanged`,
-  `..._Cocos2dxBitmap_nativeInitBitmapDC`, `..._Cocos2dxRenderer_nativeKeyDown/Up`.
-  **Do not guess the Java-layer call order**: read it from the APK's classes.dex (dexdump) or record a
-  guest→Java trace with `ForwardingJni::SetCallTrace` on the device. In particular the Surface/ANativeWindow
-  hand-off (how the C++ EGL view gets its window) is the unclear step.
+- **Next, and this is now the critical path:** a title bootstrap. Blocky Roads is Cocos2d-x. Read from the
+  APK (not guessed):
+  * `libgame.so` imports **only `eglGetProcAddress`** from EGL (plus `AAsset*`, `__android_log_*`): the
+    Java GLSurfaceView owns the EGL context and the buffer swap, so on iOS **the shell** creates the EAGL
+    context/framebuffer (EglShim), calls the guest's `nativeInit`, calls `nativeRender` per frame, and
+    presents with `[EAGLContext presentRenderbuffer:]`. The guest never calls eglSwapBuffers.
+  * Java layer order: `Cocos2dxHelper.init` sets package/files/assets; `Cocos2dxRenderer.onSurfaceCreated`
+    calls `nativeInit(mScreenWidth, mScreenHeight)` (static); `onDrawFrame` calls `nativeRender()` (static);
+    touches are scaled by `contentScaleFactor` (1.0 by default) and forwarded to the static
+    `nativeTouchesBegin(IFFI)/nativeTouchesEnd(IFFI)/nativeTouchesMove([I[F[FI)/nativeTouchesCancel([I[F[FI)`
+    with `(id, x, y, source)`, source 0 for touch.
+  * `Cocos2dxHelper_nativeSetApkPath(JNIEnv*, jclass, jstring)` must be called by the shell before
+    `nativeInit`, with a guest string (create it with TableJava, convert with `ForwardingJni::ToGuestLocal`).
+  * The native side asks Java for the AssetManager (`FindClass("org/cocos2dx/lib/Cocos2dxHelper")`,
+    `getAssetManager()`), then `AAssetManager_fromJava(env, manager)`: the base profile needs that method,
+    and IosHost needs the AAsset* family backed by `rb::loader::ZipReader` over the APK. That filesystem
+    view is the next subsystem.
 - Still absent: the SwiftUI/Xcode shell (app target, CADisplayLink render loop, touch → those natives),
-  a C API for it, and the unsigned-IPA CI job. `ANativeWindow_fromSurface` needs an IosHost special (a fake
-  guest handle is enough, because `eglCreateWindowSurface` ignores it and uses the layer).
+  a C API for it, and the unsigned-IPA CI job.
