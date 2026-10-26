@@ -90,7 +90,7 @@ target_link_libraries(rb_abi PUBLIC rb_exec rb_mem rb_syscall rb_guest_thread)
 # rb::java (S1): the table-driven Java the core lanes already exercised as `FakeJava`, promoted so the iOS
 # app can answer a guest's JNI calls with no VM. Classes, methods and fields are registered as data; a profile
 # (android_base, unity_player) is the part that knows which classes a title expects.
-add_library(rb_java STATIC host/java/table_java.cpp host/java/android_base.cpp host/java/cocos2dx.cpp)
+add_library(rb_java STATIC host/java/table_java.cpp host/java/android_base.cpp host/java/cocos2dx.cpp host/java/dlgl.cpp)
 target_compile_features(rb_java PUBLIC cxx_std_20)
 target_include_directories(rb_java PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}/include"

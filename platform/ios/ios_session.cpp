@@ -26,11 +26,14 @@
 #include <sys/stat.h>
 
 #include "cocos2dx_bootstrap.h"
+#include "dlgl_bootstrap.h"
 #include "egl_shim.h"
 #include "ios_host.h"
 #include "rb/host/boot.h"
 #include "rb/java/android_base.h"
 #include "rb/java/cocos2dx.h"
+#include "rb/java/dlgl.h"
+#include "rb/loader/apk_assets.h"
 #include "rb/java/table_java.h"
 #include "rb/loader/guest_elf.h"
 #include "rb/runtime/inbound.h"
@@ -54,6 +57,7 @@ struct RbIosSession {
   rb::java::TableJava* java = nullptr;                               ///< owned by boot, as its HostJava
   std::unique_ptr<rb::platform::ios::IosHost> host;                  ///< the guest's import answers
   std::unique_ptr<rb::platform::ios::Cocos2dxBootstrap> game;
+  std::unique_ptr<rb::platform::ios::DlglBootstrap> dlgl;  ///< KitKat Challenge's DLGE engine, when that is the lib
   bool booted = false;  ///< render thread only
 
   std::thread render;
@@ -202,6 +206,7 @@ bool RbIosSession::Boot(std::string* err) {
     auto java = std::make_unique<rb::java::TableJava>();
     rb::java::InstallAndroidBase(*java, env);
     rb::java::InstallCocos2dx(*java, env);
+    rb::java::InstallDlgl(*java, env);
     self->java = java.get();
     return java;
   };
@@ -231,7 +236,12 @@ bool RbIosSession::Boot(std::string* err) {
     host.reset();
     return false;
   }
-  game = std::make_unique<rb::platform::ios::Cocos2dxBootstrap>(*boot, *java, lib);
+  if (lib == "libdlgl.so") {
+    dlgl = std::make_unique<rb::platform::ios::DlglBootstrap>(*java, lib,
+                                                              [self](const std::string& line) { self->Log(line); });
+  } else {
+    game = std::make_unique<rb::platform::ios::Cocos2dxBootstrap>(*boot, *java, lib);
+  }
   return true;
 }
 
@@ -245,8 +255,34 @@ extern "C" RbIosSession* rb_ios_create(const char* apk_path, const char* lib_nam
   if (log_path != nullptr && log_path[0] != '\0') s->log_file = std::fopen(log_path, "ab");
   s->apk = apk_path;
   s->lib = lib_name;
+  if (s->lib.empty()) {
+    // The largest assets/rb32/*.so is the game's engine (the repack layout keeps every sibling there).
+    std::string why;
+    auto archive = rb::loader::ApkArchive::Open(s->apk, &why);
+    if (archive) {
+      std::uint32_t best = 0;
+      for (const std::string& name : archive->Names()) {
+        if (name.rfind("assets/rb32/", 0) != 0 || name.size() < 4 || name.compare(name.size() - 3, 3, ".so") != 0) {
+          continue;
+        }
+        const auto size = archive->EntrySize(name);
+        if (size && *size > best) {
+          best = *size;
+          s->lib = name.substr(name.rfind('/') + 1);
+        }
+      }
+      if (!s->lib.empty()) s->Log("auto: " + s->lib + " (" + std::to_string(best) + " bytes)");
+    } else {
+      s->Log("auto: cannot read the APK: " + why);
+    }
+    if (s->lib.empty()) {
+      CopyOut("no library name was given and the APK has no assets/rb32/*.so", err, err_len);
+      return nullptr;
+    }
+  }
   s->data_dir = data_dir != nullptr ? data_dir : "";
   s->client_version = client_version == 1 ? 1 : 2;
+  if (s->lib == "libdlgl.so") s->client_version = 1;  // KitKat's DLGE draws with GLES1
   if (!s->data_dir.empty()) {
     ::mkdir((s->data_dir + "/files").c_str(), 0755);
     ::mkdir((s->data_dir + "/cache").c_str(), 0755);
@@ -306,8 +342,10 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
         s->running.store(false);
         return;
       }
-      if (!s->game->Start(s->apk, s->width, s->height, &why)) {
-        s->Fail("nativeInit: " + why);
+      const bool started = s->dlgl ? s->dlgl->Start(s->apk, s->width, s->height, &why)
+                                   : s->game->Start(s->apk, s->width, s->height, &why);
+      if (!started) {
+        s->Fail(std::string{s->dlgl ? "dlxInit" : "nativeInit"} + ": " + why);
         egl.ReleaseThread();
         s->running.store(false);
         return;
@@ -317,13 +355,12 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
       while (s->running.load()) {
         const bool want = s->want_run.load();
         if (want != !app_paused) {
+          std::string e;
           if (want) {
-            std::string e;
-            s->game->Resume(&e);
+            if (s->dlgl) s->dlgl->Resume(&e); else s->game->Resume(&e);
             s->Log("resume");
           } else {
-            std::string e;
-            s->game->Pause(&e);
+            if (s->dlgl) s->dlgl->Pause(&e); else s->game->Pause(&e);
             s->Log("pause");
           }
           app_paused = !want;
@@ -338,6 +375,12 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
           queued.swap(s->touches);
         }
         for (const RbIosSession::Touch& t : queued) {
+          if (s->dlgl) {
+            // Android's MotionEvent action: down 0, up 1, move 2, cancel 3.
+            const int action = t.kind == 0 ? 0 : t.kind == 1 ? 2 : t.kind == 2 ? 1 : 3;
+            s->dlgl->Touch(action, t.x, t.y);
+            continue;
+          }
           switch (t.kind) {
             case 0: s->game->TouchBegin(t.id, t.x, t.y); break;
             case 1: s->game->TouchMove(t.id, t.x, t.y); break;
@@ -345,8 +388,9 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
             default: s->game->TouchCancel(t.id, t.x, t.y); break;
           }
         }
-        if (!s->game->Render(&why)) {
-          s->Fail("nativeRender: " + why);
+        const bool rendered = s->dlgl ? s->dlgl->Render(&why) : s->game->Render(&why);
+        if (!rendered) {
+          s->Fail(std::string{s->dlgl ? "dlxDraw" : "nativeRender"} + ": " + why);
           break;
         }
         if (!egl.Present(&why)) {
@@ -354,8 +398,8 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
           break;
         }
         ++s->frames;
-        // No sleep: Cocos2d-x paces itself (setAnimationInterval/onDrawFrame's interval); adding a second
-        // 16 ms here would halve the frame rate. The swap is the present.
+        // No sleep: the engine paces itself (Cocos's onDrawFrame interval, DLGE's own frame timing); a
+        // second 16 ms here would halve the frame rate. The swap is the present.
         std::this_thread::yield();
       }
     } catch (const std::exception& e) {

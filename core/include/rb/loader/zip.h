@@ -33,6 +33,11 @@ class ZipReader {
   std::optional<std::vector<std::uint8_t>> Read(const std::string& name, std::string* why);
   /// Every entry name, in central-directory order.
   const std::vector<std::string>& Names() const { return order_; }
+  /// The entry's uncompressed size from the central directory, nullopt when absent.
+  std::optional<std::uint32_t> UncompressedSize(const std::string& name) const {
+    const auto it = entries_.find(name);
+    return it == entries_.end() ? std::nullopt : std::optional<std::uint32_t>(it->second.usize);
+  }
 
  private:
   ZipReader() = default;

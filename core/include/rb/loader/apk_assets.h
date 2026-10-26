@@ -41,6 +41,8 @@ class ApkArchive {
 
   bool Has(const std::string& name) const { return zip_->Has(name); }
   const std::vector<std::string>& Names() const { return zip_->Names(); }
+  /// An entry's uncompressed size, nullopt when absent (choosing the largest library, for one).
+  std::optional<std::uint32_t> EntrySize(const std::string& name) const { return zip_->UncompressedSize(name); }
   /// A read-only view that does not keep a cursor of its own.
   std::optional<std::vector<std::uint8_t>> Read(const std::string& name, std::string* why) {
     return zip_->Read(name, why);

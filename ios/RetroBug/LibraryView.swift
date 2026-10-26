@@ -22,7 +22,7 @@ struct LibraryView: View {
     @State private var games: [ImportedGame] = []
     @State private var sheet: ActiveSheet?
     @State private var playing: ImportedGame?
-    @State private var libName = "libgame.so"
+    @State private var libName = ""
     @State private var notice = ""
 
     private var gamesDir: URL {
@@ -56,7 +56,7 @@ struct LibraryView: View {
                     .onDelete(perform: delete)
                 }
                 Section("Library to boot") {
-                    TextField("libgame.so", text: $libName)
+                    TextField("auto (largest library)", text: $libName)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                 }

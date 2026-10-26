@@ -17,6 +17,7 @@
 #include "rb/abi/host_java.h"
 #include "rb/java/android_base.h"
 #include "rb/java/cocos2dx.h"
+#include "rb/java/dlgl.h"
 #include "rb/java/table_java.h"
 
 namespace {
@@ -65,6 +66,7 @@ struct Rig {
     };
     rb::java::InstallAndroidBase(java, env);
     rb::java::InstallCocos2dx(java, env);
+    rb::java::InstallDlgl(java, env);
   }
 
   TableJava::Ref Cls(const char* name) { return java.FindClass(name); }
@@ -196,6 +198,17 @@ void cocos2dx_helper_answers() {
   CHECK_CTX(r.StringArg(got) == "fallback", r.StringArg(got));
 }
 
+void dlgl_profile_answers() {
+  Rig r;
+  const auto key = r.java.NewString(u"best");
+  CHECK(r.CallStatic("com/doubleleft/LocalStorage", "loadFloat", "(Ljava/lang/String;)F", {key}) == 0);
+  const auto text = static_cast<TableJava::Ref>(
+      r.CallStatic("com/doubleleft/LocalStorage", "loadString", "(Ljava/lang/String;)Ljava/lang/String;", {key}));
+  CHECK_CTX(r.StringArg(text).empty(), r.StringArg(text));
+  CHECK(r.CallStatic("android/media/AudioTrack", "getMinBufferSize", "(III)I", {44100, 2, 2}) == 4096);
+  CHECK(r.Cls("com/doubleleft/DLGLRenderer") != 0);
+}
+
 void integers_behave() {
   Rig r;
   const auto parsed = r.CallStatic("java/lang/Integer", "parseInt", "(Ljava/lang/String;)I", {r.java.NewString(u"-123")});
@@ -220,6 +233,7 @@ int main() {
   an_unimplemented_class_is_named();
   integers_behave();
   cocos2dx_helper_answers();
+  dlgl_profile_answers();
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;
 }
