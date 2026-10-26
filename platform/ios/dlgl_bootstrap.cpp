@@ -47,10 +47,10 @@ bool DlglBootstrap::Start(const std::string& apk, int width, int height, std::st
   // DLGLSurface's constructor hands the AssetManager over before the renderer exists; then the renderer's
   // onSurfaceCreated/onSurfaceChanged call dlxInit and dlxSurfaceChanged(w, h, language) + glViewport.
   const auto manager = java_.NewInstance("android/content/res/AssetManager");
-  static_cast<VL>(asset_)(nullptr, nullptr, manager);
-  static_cast<V0>(init_)(nullptr, nullptr);
+  reinterpret_cast<VL>(asset_)(nullptr, nullptr, manager);
+  reinterpret_cast<V0>(init_)(nullptr, nullptr);
   const auto language = java_.NewString(u"en");
-  static_cast<VIIL>(surface_)(nullptr, nullptr, width, height, language);
+  reinterpret_cast<VIIL>(surface_)(nullptr, nullptr, width, height, language);
   using Viewport = void (*)(int, int, int, int);
   const auto viewport = reinterpret_cast<Viewport>(GlSymbol("glViewport"));
   if (viewport != nullptr) viewport(0, 0, width, height);
@@ -65,22 +65,22 @@ bool DlglBootstrap::Render(std::string* err) {
     if (err != nullptr) *err = "dlgl has not started";
     return false;
   }
-  static_cast<V0>(draw_)(nullptr, nullptr);
+  reinterpret_cast<V0>(draw_)(nullptr, nullptr);
   return true;
 }
 
 bool DlglBootstrap::Pause(std::string*) {
-  if (started_ && pause_ != nullptr) static_cast<V0>(pause_)(nullptr, nullptr);
+  if (started_ && pause_ != nullptr) reinterpret_cast<V0>(pause_)(nullptr, nullptr);
   return true;
 }
 
 bool DlglBootstrap::Back(std::string*) {
-  if (started_ && back_ != nullptr) static_cast<V0>(back_)(nullptr, nullptr);
+  if (started_ && back_ != nullptr) reinterpret_cast<V0>(back_)(nullptr, nullptr);
   return true;
 }
 
 void DlglBootstrap::Touch(int action, float x, float y) {
-  if (started_ && touch_ != nullptr) static_cast<VIFF>(touch_)(nullptr, nullptr, action, x, y);
+  if (started_ && touch_ != nullptr) reinterpret_cast<VIFF>(touch_)(nullptr, nullptr, action, x, y);
 }
 
 }  // namespace rb::platform::ios

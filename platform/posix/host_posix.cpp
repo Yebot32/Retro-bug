@@ -254,7 +254,13 @@ bool ResourceLimit(std::int32_t guest_resource, Limit* out) {
   // The guest's numbers are this kernel's numbers (both asm-generic), so the value passes straight
   // through. pid 0 is the calling process, which is the only process the guest has.
   rlimit host{};
-  if (::prlimit(0, static_cast<int>(guest_resource), nullptr, &host) != 0) return false;
+  // glibc takes the resource as an enum (`__rlimit_resource_t`); bionic takes an int.
+#if defined(__GLIBC__)
+  const auto resource = static_cast<__rlimit_resource_t>(guest_resource);
+#else
+  const int resource = static_cast<int>(guest_resource);
+#endif
+  if (::prlimit(0, resource, nullptr, &host) != 0) return false;
   out->cur = host.rlim_cur == RLIM_INFINITY ? kInfinite : static_cast<std::uint64_t>(host.rlim_cur);
   out->max = host.rlim_max == RLIM_INFINITY ? kInfinite : static_cast<std::uint64_t>(host.rlim_max);
   return true;
