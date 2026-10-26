@@ -578,3 +578,25 @@ DATA HYGIENE:
 - **Known next stops:** `libgame.so` imports five OpenSL ES symbols (`slCreateEngine`, `SL_IID_*`) that have
   no iOS answers yet — audio is the next subsystem; then the Java classes Cocos2d-x asks for at runtime.
 - **Artifact:** 1,993,341 bytes, SHA-256 `ba5fbfd319febebe3704d90d2fae30f2b356ba8d76dee4940c63eb9015bfaf98` (18e87ef).
+
+1q. 2026-10-26 (iOS S1j) — the static audit, folded into one build
+---------------------------------------------------------------------------
+- Two agents audited libgame.so instead of another per-symbol device loop. Result: **all 289 imports are
+  answered** — 197 by guest libc/libm, 72 GL (table + glGetString/glShaderSource specials), eglGetProcAddress,
+  7 AAsset*, 2 liblog, 5 dl*, and the 5 OpenSL names (4 are data imports, answered by guest cells).
+- **Text flow confirmed from the binary:** Cocos2d-x calls
+  `Cocos2dxBitmap.createTextBitmapShadowStroke([BLjava/lang/String;IFFFIIIZFFFZFFFF)V`, the Java class
+  rasterises and calls **the guest's `nativeInitBitmapDC(II[B)` back**; there is no jnigraphics import.
+  Our shim now does exactly that: the profile builds a correctly sized (transparent for now) byte[] and
+  the iOS session hands it to the guest through `Inbound::Dispatch` (shorty "VIIL").
+- **Stopper found and fixed:** Horde3D binds framebuffer **0** to return to the screen, and EAGL's default
+  framebuffer is not the shim's FBO. `glBindFramebuffer(0)` now binds the drawable, GL_FRAMEBUFFER_BINDING
+  reports 0 for it, glCheckFramebufferStatus answers COMPLETE, and the drawable has the 16-bit depth
+  renderbuffer the config promises. The game is OpenAL-Soft + Horde3D, not the Cocos renderer.
+- Also: AAssetDir lists real APK children; SLES fails engine creation cleanly (silent); Java classes for
+  Cocos2dBitmap/GLSurfaceView/Renderer/Activity + IME no-ops; ApplicationInfo.sourceDir; files/cache dirs.
+- **Known remaining, expected to be non-fatal:** text pixels are blank (CoreText pass next), audio silent.
+  Extension GL names the game probes and the framework lacks: glGetQueryivEXT/glIsQueryEXT,
+  glBlitFramebufferANGLE, glRenderbufferStorageMultisampleANGLE, glCompressedTexImage3DOES/
+  glCompressedTexSubImage3DOES/glCopyTexSubImage3DOES (all extension-gated).
+- **Artifact:** 2,003,107 bytes, SHA-256 `873174afa16a9a84677e0656cbcc5f6e321ca7b844c24aee825e2a4152930dcd` (7985e58).
