@@ -600,3 +600,19 @@ DATA HYGIENE:
   glBlitFramebufferANGLE, glRenderbufferStorageMultisampleANGLE, glCompressedTexImage3DOES/
   glCompressedTexSubImage3DOES/glCopyTexSubImage3DOES (all extension-gated).
 - **Artifact:** 2,003,107 bytes, SHA-256 `873174afa16a9a84677e0656cbcc5f6e321ca7b844c24aee825e2a4152930dcd` (7985e58).
+
+1r. 2026-10-26 (iOS S1k) — CoreText glyphs, and the game identified as Cocos2d-x 2.2.x
+---------------------------------------------------------------------------
+- The second agent's audit corrected two assumptions: the title is **Cocos2d-x 2.2.x** (not 3.x), and its
+  text path is `createTextBitmapShadowStroke(...)V` → Java rasterises → `nativeInitBitmapDC(II[B)V`, with
+  **no** `AndroidBitmap_*` imports. Two more lookups exist: `getFontSizeAccordingHeight(I)I` and
+  `getStringWithEllipsis(Ljava/lang/String;FF)Ljava/lang/String;`.
+- Implemented: both methods (identity answers), and `platform/ios/text_render.mm` renders one line with
+  CoreText into ARGB_8888 little-endian (B,G,R,A) white-on-transparent, which is what Android's
+  `copyPixelsToBuffer(nativeOrder)` hands the guest before its own `swapAlphaChannel`. The profile passes
+  the buffer through `Inbound::Dispatch` ("VIIL") to the guest's native.
+- Audio confirmed safe: OpenAL-Soft's OpenSL backend checks slCreateEngine, logs and returns
+  ALC_INVALID_VALUE; no abort. The SL_IID data cells match its `ldr [got]; ldr [cell]` expectation.
+- Still open: multi-line wrapping (CoreText path draws one line; Cocos's Java wraps within maxW), real
+  audio output, and the extensions the framework lacks (extension-gated only).
+- Artifact (this run): SHA-256 follows in the message; the build is commit 7a99338.
