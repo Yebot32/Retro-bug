@@ -79,6 +79,8 @@ class IosHost {
   /// host slot — the guest loads the value rather than calling it.
   std::map<std::string, std::uint32_t> data_symbols_;
   std::uint32_t bound_fbo_ = 0;  ///< the guest's current framebuffer; 0 is our EAGL drawable
+  bool manager_logged_ = false;
+  int asset_logs_ = 0;
   struct DirState;
   std::map<std::uint32_t, std::unique_ptr<DirState>> dirs_;
 };

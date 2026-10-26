@@ -29,6 +29,10 @@ class TableJava : public abi::HostJava {
   /// reference as a HostRef the fake made for this call), the result in the same encoding.
   using Body = std::function<std::uint64_t(TableJava&, int self, const std::vector<std::uint64_t>& args)>;
 
+  /// A line for every failed class/method/field lookup. The iOS boot log uses it to name the Java
+  /// surface a title expects but the profile does not yet provide.
+  void set_trace(std::function<void(const std::string&)> trace);
+
   /// Defines a class (`super_name` empty for a root) and returns its class object's id.
   int DefineClass(const std::string& name, const std::string& super_name = {});
   /// Defines (or, for an existing one, replaces the body of) a method.
@@ -154,6 +158,7 @@ class TableJava : public abi::HostJava {
   std::map<Ref, int> refs_;
   Ref next_ref_ = 0x1000;
   std::map<std::string, std::size_t> calls_;
+  std::function<void(const std::string&)> trace_;
   int pending_ = 0;  ///< the pending throwable's object id
   std::map<std::thread::id, std::vector<std::vector<Ref>>> frames_;  ///< per thread: refs made in each frame
   std::map<std::thread::id, bool> detached_;

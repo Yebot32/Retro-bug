@@ -46,7 +46,56 @@ void InstallDlgl(TableJava& j, const AndroidEnv& env) {
   NoOp(j, storage, "saveFloat", "(Ljava/lang/String;F)V");
   NoOp(j, storage, "saveString", "(Ljava/lang/String;Ljava/lang/String;)V");
   j.DefineMethod(storage, "getPreferences", "()Landroid/content/SharedPreferences;", true,
+                 [](TableJava& f, int, const std::vector<std::uint64_t>&) {
+                   return static_cast<std::uint64_t>(f.NewInstance("android/content/SharedPreferences"));
+                 });
+
+  // SharedPreferences: a real object whose getters answer their defaults and whose editor accepts writes.
+  // A null here is the kind of thing an engine stores and dereferences later without a check.
+  const std::string prefs = "android/content/SharedPreferences";
+  const std::string editor = "android/content/SharedPreferences$Editor";
+  j.DefineClass(prefs, "java/lang/Object");
+  j.DefineClass(editor, "java/lang/Object");
+  j.DefineMethod(prefs, "getFloat", "(Ljava/lang/String;F)F", false,
+                 [](TableJava&, int, const std::vector<std::uint64_t>& a) { return a[1]; });
+  j.DefineMethod(prefs, "getInt", "(Ljava/lang/String;I)I", false,
+                 [](TableJava&, int, const std::vector<std::uint64_t>& a) { return a[1]; });
+  j.DefineMethod(prefs, "getLong", "(Ljava/lang/String;J)J", false,
+                 [](TableJava&, int, const std::vector<std::uint64_t>& a) { return a[1]; });
+  j.DefineMethod(prefs, "getBoolean", "(Ljava/lang/String;Z)Z", false,
+                 [](TableJava&, int, const std::vector<std::uint64_t>& a) { return a[1]; });
+  j.DefineMethod(prefs, "getString", "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;", false,
+                 [](TableJava&, int, const std::vector<std::uint64_t>& a) { return a[1]; });
+  j.DefineMethod(prefs, "contains", "(Ljava/lang/String;)Z", false,
                  [](TableJava&, int, const std::vector<std::uint64_t>&) { return static_cast<std::uint64_t>(0); });
+  j.DefineMethod(prefs, "edit", "()Landroid/content/SharedPreferences$Editor;", false,
+                 [](TableJava& f, int, const std::vector<std::uint64_t>&) {
+                   return static_cast<std::uint64_t>(f.NewInstance("android/content/SharedPreferences$Editor"));
+                 });
+  j.DefineMethod(editor, "putFloat", "(Ljava/lang/String;F)Landroid/content/SharedPreferences$Editor;", false,
+                 [](TableJava& f, int self, const std::vector<std::uint64_t>&) {
+                   return static_cast<std::uint64_t>(f.MakeRef(self));
+                 });
+  j.DefineMethod(editor, "putInt", "(Ljava/lang/String;I)Landroid/content/SharedPreferences$Editor;", false,
+                 [](TableJava& f, int self, const std::vector<std::uint64_t>&) {
+                   return static_cast<std::uint64_t>(f.MakeRef(self));
+                 });
+  j.DefineMethod(editor, "putLong", "(Ljava/lang/String;J)Landroid/content/SharedPreferences$Editor;", false,
+                 [](TableJava& f, int self, const std::vector<std::uint64_t>&) {
+                   return static_cast<std::uint64_t>(f.MakeRef(self));
+                 });
+  j.DefineMethod(editor, "putBoolean", "(Ljava/lang/String;Z)Landroid/content/SharedPreferences$Editor;", false,
+                 [](TableJava& f, int self, const std::vector<std::uint64_t>&) {
+                   return static_cast<std::uint64_t>(f.MakeRef(self));
+                 });
+  j.DefineMethod(editor, "putString",
+                 "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/SharedPreferences$Editor;", false,
+                 [](TableJava& f, int self, const std::vector<std::uint64_t>&) {
+                   return static_cast<std::uint64_t>(f.MakeRef(self));
+                 });
+  j.DefineMethod(editor, "commit", "()Z", false,
+                 [](TableJava&, int, const std::vector<std::uint64_t>&) { return static_cast<std::uint64_t>(1); });
+  NoOpVirtual(j, editor, "apply", "()V");
 
   // AudioTrack, the engine's non-OpenSL fallback: create, accept every buffer, report playing.
   const std::string track = "android/media/AudioTrack";

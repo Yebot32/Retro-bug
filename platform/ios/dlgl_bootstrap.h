@@ -32,6 +32,8 @@ class DlglBootstrap {
 
  private:
   void* Native(const char* cls, const char* name, std::string* err) const;
+  /// Logs (and consumes) any GL error our calls left, naming the step. Diagnostics only.
+  void Drain(const char* after);
 
   rb::java::TableJava& java_;
   std::string lib_;

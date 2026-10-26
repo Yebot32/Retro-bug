@@ -6,6 +6,8 @@
 
 #include "gl_symbols.h"
 
+#include <cstdio>
+
 namespace rb::platform::ios {
 
 namespace {
@@ -48,9 +50,13 @@ bool DlglBootstrap::Start(const std::string& apk, int width, int height, std::st
   // onSurfaceCreated/onSurfaceChanged call dlxInit and dlxSurfaceChanged(w, h, language) + glViewport.
   const auto manager = java_.NewInstance("android/content/res/AssetManager");
   reinterpret_cast<VL>(asset_)(nullptr, nullptr, manager);
+  Drain("dlxAssetManager");
   reinterpret_cast<V0>(init_)(nullptr, nullptr);
+  Drain("dlxInit");
   const auto language = java_.NewString(u"en");
   reinterpret_cast<VIIL>(surface_)(nullptr, nullptr, width, height, language);
+  Drain("dlxSurfaceChanged");
+  if (java_.ExceptionCheck() && log_) log_("dlgl: pending " + java_.PendingClass() + " after surfaceChanged");
   using Viewport = void (*)(int, int, int, int);
   const auto viewport = reinterpret_cast<Viewport>(GlSymbol("glViewport"));
   if (viewport != nullptr) viewport(0, 0, width, height);
@@ -81,6 +87,21 @@ bool DlglBootstrap::Back(std::string*) {
 
 void DlglBootstrap::Touch(int action, float x, float y) {
   if (started_ && touch_ != nullptr) reinterpret_cast<VIFF>(touch_)(nullptr, nullptr, action, x, y);
+}
+
+void DlglBootstrap::Drain(const char* after) {
+  using GetError = unsigned (*)();
+  static const auto get_error = reinterpret_cast<GetError>(GlSymbol("glGetError"));
+  if (get_error == nullptr) return;
+  for (int i = 0; i < 8; ++i) {
+    const unsigned e = get_error();
+    if (e == 0) return;
+    if (log_) {
+      char buf[32];
+      std::snprintf(buf, sizeof buf, "0x%x", e);
+      log_(std::string{"dlgl: glGetError after "} + after + " = " + buf);
+    }
+  }
 }
 
 }  // namespace rb::platform::ios

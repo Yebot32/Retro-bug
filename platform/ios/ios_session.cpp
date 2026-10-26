@@ -208,6 +208,7 @@ bool RbIosSession::Boot(std::string* err) {
     rb::java::InstallCocos2dx(*java, env);
     rb::java::InstallDlgl(*java, env);
     self->java = java.get();
+    java->set_trace([self](const std::string& line) { self->Log(line); });
     return java;
   };
   cfg.resolve_host = [self](const std::string& name) -> std::optional<rb::exec::GuestAddr> {

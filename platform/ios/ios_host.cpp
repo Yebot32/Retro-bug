@@ -296,6 +296,10 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
   // is only checked for being a known reference and the answer is this host's manager.
   AddSpecial("AAssetManager_fromJava", [this](exec::MachineState& s, std::string*) {
     s.r[0] = handles_.Put(&asset_manager_marker_);
+    if (!manager_logged_) {
+      manager_logged_ = true;
+      if (log_) log_("assets: manager requested by the guest");
+    }
     return true;
   });
   AddSpecial("AAssetManager_open", [this](exec::MachineState& s, std::string* why) {
@@ -319,6 +323,10 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
       return true;
     }
     const std::uint32_t handle = handles_.Put(file.get());
+    if (asset_logs_ < 40 && log_) {
+      ++asset_logs_;
+      log_("assets: open(\"" + name + "\") = " + std::to_string(file->Length()) + " bytes");
+    }
     assets_[file.get()] = std::move(file);
     s.r[0] = handle;
     return true;
@@ -400,6 +408,10 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
       if (!child.empty() && seen.insert(child).second) state->names.push_back(child);
     }
     const std::uint32_t handle = handles_.Put(state.get());
+    if (asset_logs_ < 40 && log_) {
+      ++asset_logs_;
+      log_("assets: openDir(\"" + dir + "\") = " + std::to_string(state->names.size()) + " entr(y|ies)");
+    }
     dirs_[handle] = std::move(state);
     s.r[0] = handle;
     return true;

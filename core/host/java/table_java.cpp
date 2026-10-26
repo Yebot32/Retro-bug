@@ -216,6 +216,7 @@ TableJava::Ref TableJava::FindClass(const std::string& jni_name) {
   for (const auto& [id, k] : classes_) {
     if (k.name == jni_name) return MakeRefLocked(id);
   }
+  if (trace_) trace_("Java: FindClass miss " + jni_name);
   ThrowLocked("java/lang/NoClassDefFoundError", jni_name);
   return 0;
 }
@@ -292,7 +293,10 @@ void TableJava::DeleteWeakGlobalRef(Ref r) { DeleteLocalRef(r); }
 TableJava::Id TableJava::GetMethodID(Ref cls, const std::string& name, const std::string& sig, bool is_static) {
   std::lock_guard<std::mutex> lk(mu_);
   const int m = FindMethodLocked(Obj(cls), name, sig, is_static);
-  if (m == 0) ThrowLocked("java/lang/NoSuchMethodError", name + sig);
+  if (m == 0) {
+    if (trace_) trace_("Java: no method " + name + sig);
+    ThrowLocked("java/lang/NoSuchMethodError", name + sig);
+  }
   return static_cast<Id>(m);
 }
 
@@ -306,6 +310,7 @@ TableJava::Id TableJava::GetFieldID(Ref cls, const std::string& name, const std:
     const Class* k = ClassOfObj(c);
     c = k ? k->super : 0;
   }
+  if (trace_) trace_("Java: no field " + name + sig);
   ThrowLocked("java/lang/NoSuchFieldError", name);
   return 0;
 }
@@ -610,6 +615,15 @@ bool TableJava::AttachCurrentThread(bool /*daemon*/) {
 void TableJava::DetachCurrentThread() {
   std::lock_guard<std::mutex> lk(mu_);
   detached_[std::this_thread::get_id()] = true;
+}
+
+}  // namespace rb::java
+
+namespace rb::java {
+
+void TableJava::set_trace(std::function<void(const std::string&)> trace) {
+  std::lock_guard<std::mutex> lk(mu_);
+  trace_ = std::move(trace);
 }
 
 }  // namespace rb::java
