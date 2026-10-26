@@ -72,6 +72,9 @@ struct BootConfig {
   std::function<void(int status)> on_guest_exit;
   /// Start the liveness supervisor (a stall dump every 10 s with no guest instruction retired).
   bool monitor = true;
+  /// Build the JIT object. False on iOS: the backend allocates executable memory, which the platform
+  /// forbids; the boot still runs, on Tier I.
+  bool enable_jit = true;
 };
 
 struct BootResult {

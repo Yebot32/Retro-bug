@@ -131,6 +131,7 @@ bool Boot::BootScope(const std::string& apk, rb::loader::ZipReader& zip, std::st
   o.biased = true;
   o.unresolved_trap = cfg_.unresolved_trap;
   o.ctor_tier = cfg_.ctor_tier;
+  o.enable_jit = cfg_.enable_jit;
   o.log = [this](const std::string& s) { Live(s); };
   o.host_resolver = [this](const std::string& name) -> std::optional<rb::exec::GuestAddr> {
     return cfg_.resolve_host ? cfg_.resolve_host(name) : std::nullopt;

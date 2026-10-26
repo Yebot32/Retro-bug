@@ -64,6 +64,9 @@ struct GuestProcessOptions {
   std::function<void(const std::string&)> log;
   /// The tier IFUNC resolvers, the main-thread setup calls and constructors run on: 1 = I, 2 = J.
   int ctor_tier = 2;
+  /// Build the JIT object. False on a host that forbids executable memory (iOS): the AArch64 backend
+  /// allocates a 64 MiB code cache when constructed, and `engine(2)` then answers the interpreter.
+  bool enable_jit = true;
 };
 
 /// The static-TLS / thread layout of one bionic build, as `VerifyBionicLayout` derived and asserted it.

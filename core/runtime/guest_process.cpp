@@ -264,7 +264,7 @@ void GuestProcess::Log(const std::string& line) const {
 }
 
 exec::Executor& GuestProcess::engine(int tier) {
-  if (tier == 2) return *jit_;
+  if (tier == 2 && jit_ != nullptr) return *jit_;
   return *interp_;
 }
 
@@ -458,13 +458,15 @@ std::unique_ptr<GuestProcess> GuestProcess::Create(const GuestProcessOptions& op
   if (!p->jni_->ok()) return fail("the JNIEnv could not be built: " + jerr);
 
   p->interp_ = std::make_unique<exec::InterpExecutor>(m, kReturnAddress, p->abi_.get());
-  p->jit_ = std::make_unique<exec::JitExecutor>(m, kReturnAddress, p->abi_.get());
-  if (options.ctor_tier == 2 && !p->jit_->ok()) return fail("Tier J is unavailable: " + p->jit_->error());
+  if (options.enable_jit) {
+    p->jit_ = std::make_unique<exec::JitExecutor>(m, kReturnAddress, p->abi_.get());
+    if (options.ctor_tier == 2 && !p->jit_->ok()) return fail("Tier J is unavailable: " + p->jit_->error());
+  }
   p->abi_->set_executor(p->engine(options.ctor_tier));
   GuestProcess* self = p.get();
   p->monitor_->set_invalidator([self](GuestAddr from, GuestAddr to) {
     self->interp_->Invalidate(from, to);
-    if (self->jit_->ok()) self->jit_->Invalidate(from, to);
+    if (self->jit_ && self->jit_->ok()) self->jit_->Invalidate(from, to);
   });
   return p;
 }
@@ -1419,7 +1421,7 @@ void GuestProcess::RetireAdopted(GuestThread* t) {
     std::string e;
     if (!mem_->Unmap(t->mapping, t->mapping_size, &e)) note += "; unmapping its mapping: " + e;
     interp_->Invalidate(t->mapping, t->mapping + t->mapping_size);
-    if (jit_->ok()) jit_->Invalidate(t->mapping, t->mapping + t->mapping_size);
+    if (jit_ && jit_->ok()) jit_->Invalidate(t->mapping, t->mapping + t->mapping_size);
     note += "; its " + Hex(t->mapping_size) + "-byte mapping freed";
   }
   if (!fault.empty()) {

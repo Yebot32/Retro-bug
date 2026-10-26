@@ -171,7 +171,8 @@ rb::host::BootConfig MakeConfig(const std::shared_ptr<Rig>& rig) {
   rb::host::BootConfig c;
   c.window_bytes = 128u << 20;
   c.unresolved_trap = kTrap;
-  c.ctor_tier = 1;  // the iOS lane: Tier I boots a real libc and runs constructors
+  c.ctor_tier = 1;      // the iOS lane: Tier I boots a real libc and runs constructors
+  c.enable_jit = false; // no AArch64 backend in this lane, as on iOS (it allocates executable memory)
   c.monitor = false;
   c.log = [rig](const std::string& line) { rig->lines.push_back(line); };
   c.make_java = [](std::string*) -> std::unique_ptr<rb::abi::HostJava> {
@@ -254,6 +255,8 @@ void boots_a_scope_and_the_sibling_first(const std::string& apk) {
   CHECK_CTX(r.report.find("RESULT: startup finished with no fault") != std::string::npos, "no RESULT line");
 
   GuestProcess& p = *boot.process();
+  // The iOS shape: no JIT object exists, so both tier numbers answer the interpreter.
+  CHECK_CTX(&p.engine(1) == &p.engine(2), "engine(2) is not the interpreter with enable_jit=false");
   // Constructors ran, and ran in bionic's order: mid's constructor saw the leaf's value.
   const loader::Symbol* leaf = Export(boot, "librbleaf.so", "g_leaf_ran");
   CHECK(leaf != nullptr);

@@ -113,7 +113,8 @@ extern "C" RbIosSession* rb_ios_create(const char* apk_path, const char* lib_nam
   env.sdk_int = 34;
 
   rb::host::BootConfig cfg;
-  cfg.ctor_tier = 1;  // iOS runs guest code on Tier I only
+  cfg.ctor_tier = 1;    // iOS runs guest code on Tier I only
+  cfg.enable_jit = false;  // and never builds the JIT object: iOS forbids executable memory
   cfg.monitor = false;
   cfg.log = [sp = s.get()](const std::string& line) { sp->Log(line); };
   cfg.make_java = [sp = s.get(), env](std::string*) -> std::unique_ptr<rb::abi::HostJava> {
