@@ -770,3 +770,18 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
 - **Next:** the title bootstrap. Blocky Roads is Cocos2d-x and its exports are known
   (`Cocos2dxHelper_nativeSetApkPath`, `Cocos2dxRenderer_nativeInit/nativeRender`, the touch natives);
   the Java-layer order and the Surface hand-off must come from classes.dex/trace, not from memory.
+
+### 2026-10-26 — iOS S1d: the app and an unsigned IPA
+- **A real app.** SwiftUI imports an APK from Files and plays it; the engine's C surface
+  (`rb_ios_create/start/touch/*`) owns the boot, the EAGL context and the one render thread. The game's
+  Cocos2d-x entry points are called directly (`nativeSetApkPath`, `nativeInit`, `nativeRender`, touches),
+  with the Java-layer order read from the APK's DEX.
+- **Packaging.** CMake merges the component libraries into `librbengine.a` (`libtool -static`, after renaming
+  the platform bootstrap so no two objects share a basename); XcodeGen generates the project;
+  `tools/build_ios_ipa.sh` produces `Payload/RetroBug.app` → unsigned IPA. CI builds it on macos-15 (the
+  XcodeGen project format is newer than macos-14's Xcode).
+- **Artifact:** 1,211,326 bytes, SHA-256 `5a276c87…0552b850`, arm64 executable 5.3 MB.
+- **Constraint found and documented:** the boot reads `assets/rb32/` + `assets/rb32sys/`, so the first run
+  needs a bootcheck APK (`tools/make_bootcheck_apk.sh`); a store APK has `lib/armeabi-v7a/` and no bionic.
+  Bundling bionic into the app is the next step for "import in place".
+- **Verified:** device gate 30/30, 0 failures; macOS host lanes 26/25/37/41; the IPA job builds and uploads.

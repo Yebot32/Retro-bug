@@ -475,3 +475,31 @@ DATA HYGIENE:
     view is the next subsystem.
 - Still absent: the SwiftUI/Xcode shell (app target, CADisplayLink render loop, touch → those natives),
   a C API for it, and the unsigned-IPA CI job.
+
+1k. 2026-10-26 (iOS S1d) — the app, the IPA, and the first-run constraint
+---------------------------------------------------------------------------
+- **The iOS app exists and builds an unsigned IPA in CI.** `ios/RetroBug` (SwiftUI: import an APK from
+  Files, play it) over `platform/ios/rb_ios.h`: `rb_ios_create` boots (Tier I, TableJava + base/Cocos2d-x
+  profiles, IosHost, ApkArchive), `rb_ios_start` owns the render thread (EAGL context, nativeInit,
+  nativeRender + present), touches are queued to it. CMake merges the engine into `librbengine.a`
+  (`rb_engine_ios`), XcodeGen generates the project, `tools/build_ios_ipa.sh` packages Payload/*.app.
+  CI job `ios-ipa` runs on **macos-15** (XcodeGen's project format 77 is newer than macos-14's Xcode 15.4).
+  Artifact from run 40264294935: `RetroBug-unsigned.ipa`, 1,211,326 bytes, SHA-256
+  `5a276c8746433c66e9854b0af11930cd00320a0fe88b6bac0d32a9660552b850`; the binary is arm64, 5.3 MB.
+- **The app must import a bootcheck APK, not a store APK.** `rb::host::Boot` reads the guest libraries from
+  `assets/rb32/<lib>` and `assets/rb32sys/{libc,libm,libz}`. A store APK keeps them in `lib/armeabi-v7a/`
+  and has no 32-bit bionic at all. `tools/make_bootcheck_apk.sh <store.apk> <out.apk>` produces the right
+  layout (it uses build/device-libs and build/guest-libs, which are not in git). A prepared one for the
+  first run: `build/blockyroads.bootcheck.apk` (52 MB, libgame.so + libc/libm/libz).
+  To honour the owner's "import in place" decision (plan §2.2), the app must eventually bundle the three
+  bionic images and let the boot fall back to them; that is not done.
+- **Verified:** device gate 30/30 suites, 0 failures after the whole change set (rb_table_java_tests 41,
+  rb_apk_assets_tests 37, rb_host_boot_tests 46). macOS CI: 26/25/37/41; iOS CI compiles `rb_ios` and the
+  IPA job builds, packages and uploads.
+- **First-run unknowns, in the order they will appear:** (1) does EAGL accept `kEAGLRenderingAPIOpenGLES2`
+  for this title (the app asks for ES2; ES1 existence is still unverified); (2) the Cocos2d-x Java order
+  after `nativeSetApkPath`/`nativeInit` (the error label and stderr say where it stops); (3) `AAssetDir`
+  listing (answers "no directory" today); (4) audio is silent (no OpenSL/Core Audio yet).
+- **Next:** sign and install the IPA, import `blockyroads.bootcheck.apk`, set `libgame.so`, Play; read the
+  on-screen error label. Then fix from that report. After the first frame: bundle the bionic images (store
+  APK in place), audio, and the Unity profile (S2).
