@@ -87,6 +87,16 @@ add_library(rb_abi STATIC abi/call.cpp abi/jni_env.cpp abi/jni_args.cpp abi/jni_
 target_compile_features(rb_abi PUBLIC cxx_std_20)
 target_link_libraries(rb_abi PUBLIC rb_exec rb_mem rb_syscall rb_guest_thread)
 
+# rb::java (S1): the table-driven Java the core lanes already exercised as `FakeJava`, promoted so the iOS
+# app can answer a guest's JNI calls with no VM. Classes, methods and fields are registered as data; a profile
+# (android_base, unity_player) is the part that knows which classes a title expects.
+add_library(rb_java STATIC host/java/table_java.cpp)
+target_compile_features(rb_java PUBLIC cxx_std_20)
+target_include_directories(rb_java PUBLIC
+  "${CMAKE_CURRENT_SOURCE_DIR}/include"
+  "${CMAKE_CURRENT_SOURCE_DIR}/..")
+target_link_libraries(rb_java PUBLIC rb_abi)
+
 # rb::diag (C17) has no engine dependency and must not gain one: it is the component that reports on the
 # others, so a report that could not be produced because something else failed to build would be the
 # worst possible failure mode for it. Header-only dependency is <string>/<vector>.

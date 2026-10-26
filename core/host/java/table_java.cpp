@@ -1,10 +1,10 @@
 // RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
-#include "fake_java.h"
+#include "rb/java/table_java.h"
 
 #include <cstdio>
 #include <cstring>
 
-namespace rb::test {
+namespace rb::java {
 
 namespace {
 constexpr abi::HostId kFieldIdBase = 0x10000;
@@ -24,7 +24,7 @@ std::size_t ElemSize(char k) {
 
 // ------------------------------------------------------------------------------------------- test-side helpers
 
-int FakeJava::DefineClass(const std::string& name, const std::string& super_name) {
+int TableJava::DefineClass(const std::string& name, const std::string& super_name) {
   std::lock_guard<std::mutex> lk(mu_);
   objects_.push_back(Object{});
   const int self = static_cast<int>(objects_.size()) - 1;
@@ -38,7 +38,7 @@ int FakeJava::DefineClass(const std::string& name, const std::string& super_name
   return self;
 }
 
-void FakeJava::DefineMethod(const std::string& cls, const std::string& name, const std::string& sig, bool is_static,
+void TableJava::DefineMethod(const std::string& cls, const std::string& name, const std::string& sig, bool is_static,
                             Body body) {
   std::lock_guard<std::mutex> lk(mu_);
   for (Method& m : methods_) {  // redefining replaces the body (a row may swap in its own)
@@ -53,14 +53,14 @@ void FakeJava::DefineMethod(const std::string& cls, const std::string& name, con
   }
 }
 
-void FakeJava::DefineField(const std::string& cls, const std::string& name, const std::string& sig, bool is_static) {
+void TableJava::DefineField(const std::string& cls, const std::string& name, const std::string& sig, bool is_static) {
   std::lock_guard<std::mutex> lk(mu_);
   for (const auto& [id, k] : classes_) {
     if (k.name == cls) fields_.push_back(Field{id, name, sig, is_static});
   }
 }
 
-FakeJava::Ref FakeJava::NewInstance(const std::string& cls) {
+TableJava::Ref TableJava::NewInstance(const std::string& cls) {
   std::lock_guard<std::mutex> lk(mu_);
   for (const auto& [id, k] : classes_) {
     if (k.name == cls) return MakeRefLocked(NewObjectLocked(id));
@@ -68,26 +68,26 @@ FakeJava::Ref FakeJava::NewInstance(const std::string& cls) {
   return 0;
 }
 
-FakeJava::Ref FakeJava::NewJavaString(const std::u16string& s) { return NewString(s); }
+TableJava::Ref TableJava::NewJavaString(const std::u16string& s) { return NewString(s); }
 
-int FakeJava::ObjectOf(Ref r) const {
+int TableJava::ObjectOf(Ref r) const {
   std::lock_guard<std::mutex> lk(mu_);
   return Obj(r);
 }
 
-std::u16string FakeJava::StringOf(int obj) const {
+std::u16string TableJava::StringOf(int obj) const {
   std::lock_guard<std::mutex> lk(mu_);
   return obj > 0 && obj < static_cast<int>(objects_.size()) ? objects_[obj].str : std::u16string{};
 }
 
-std::uint64_t FakeJava::FieldOf(int obj, const std::string& name) const {
+std::uint64_t TableJava::FieldOf(int obj, const std::string& name) const {
   std::lock_guard<std::mutex> lk(mu_);
   if (obj <= 0 || obj >= static_cast<int>(objects_.size())) return 0;
   const auto it = objects_[obj].fields.find(name);
   return it == objects_[obj].fields.end() ? 0 : it->second;
 }
 
-std::uint64_t FakeJava::StaticOf(const std::string& cls, const std::string& name) const {
+std::uint64_t TableJava::StaticOf(const std::string& cls, const std::string& name) const {
   std::lock_guard<std::mutex> lk(mu_);
   for (const auto& [id, k] : classes_) {
     if (k.name != cls) continue;
@@ -97,40 +97,40 @@ std::uint64_t FakeJava::StaticOf(const std::string& cls, const std::string& name
   return 0;
 }
 
-FakeJava::Ref FakeJava::MakeRef(int obj) {
+TableJava::Ref TableJava::MakeRef(int obj) {
   std::lock_guard<std::mutex> lk(mu_);
   return MakeRefLocked(obj);
 }
 
-void FakeJava::PutField(int obj, const std::string& name, std::uint64_t v) {
+void TableJava::PutField(int obj, const std::string& name, std::uint64_t v) {
   std::lock_guard<std::mutex> lk(mu_);
   if (obj > 0 && obj < static_cast<int>(objects_.size())) objects_[obj].fields[name] = v;
 }
 
-void FakeJava::SetPending(const std::string& cls, const std::string& message) {
+void TableJava::SetPending(const std::string& cls, const std::string& message) {
   std::lock_guard<std::mutex> lk(mu_);
   ThrowLocked(cls, message);
 }
 
-std::string FakeJava::PendingClass() const {
+std::string TableJava::PendingClass() const {
   std::lock_guard<std::mutex> lk(mu_);
   if (pending_ == 0) return {};
   const Class* k = ClassOfObj(objects_[pending_].cls);
   return k ? k->name : std::string{};
 }
 
-std::size_t FakeJava::live_refs() const {
+std::size_t TableJava::live_refs() const {
   std::lock_guard<std::mutex> lk(mu_);
   return refs_.size();
 }
 
-std::size_t FakeJava::calls(const std::string& name) const {
+std::size_t TableJava::calls(const std::string& name) const {
   std::lock_guard<std::mutex> lk(mu_);
   const auto it = calls_.find(name);
   return it == calls_.end() ? 0 : it->second;
 }
 
-std::vector<abi::HostJava::NativeBinding> FakeJava::natives(const std::string& cls) const {
+std::vector<abi::HostJava::NativeBinding> TableJava::natives(const std::string& cls) const {
   std::lock_guard<std::mutex> lk(mu_);
   for (const auto& [id, k] : classes_) {
     if (k.name == cls) return k.natives;
@@ -138,19 +138,19 @@ std::vector<abi::HostJava::NativeBinding> FakeJava::natives(const std::string& c
   return {};
 }
 
-int FakeJava::monitor_depth(int obj) const {
+int TableJava::monitor_depth(int obj) const {
   std::lock_guard<std::mutex> lk(mu_);
   return obj > 0 && obj < static_cast<int>(objects_.size()) ? objects_[obj].monitor : 0;
 }
 
-void FakeJava::set_attached(bool attached) {
+void TableJava::set_attached(bool attached) {
   std::lock_guard<std::mutex> lk(mu_);
   detached_[std::this_thread::get_id()] = !attached;
 }
 
 // ------------------------------------------------------------------------------------------------- internals
 
-FakeJava::Ref FakeJava::MakeRefLocked(int obj) {
+TableJava::Ref TableJava::MakeRefLocked(int obj) {
   if (obj <= 0) return 0;
   const Ref r = next_ref_;
   next_ref_ += 0x10;
@@ -160,17 +160,17 @@ FakeJava::Ref FakeJava::MakeRefLocked(int obj) {
   return r;
 }
 
-int FakeJava::Obj(Ref r) const {
+int TableJava::Obj(Ref r) const {
   const auto it = refs_.find(r);
   return it == refs_.end() ? 0 : it->second;
 }
 
-const FakeJava::Class* FakeJava::ClassOfObj(int cls_obj) const {
+const TableJava::Class* TableJava::ClassOfObj(int cls_obj) const {
   const auto it = classes_.find(cls_obj);
   return it == classes_.end() ? nullptr : &it->second;
 }
 
-int FakeJava::ClassNamed(const std::string& name) {
+int TableJava::ClassNamed(const std::string& name) {
   for (const auto& [id, k] : classes_) {
     if (k.name == name) return id;
   }
@@ -183,14 +183,14 @@ int FakeJava::ClassNamed(const std::string& name) {
   return self;
 }
 
-int FakeJava::NewObjectLocked(int cls) {
+int TableJava::NewObjectLocked(int cls) {
   Object o;
   o.cls = cls;
   objects_.push_back(o);
   return static_cast<int>(objects_.size()) - 1;
 }
 
-int FakeJava::FindMethodLocked(int cls_obj, const std::string& name, const std::string& sig, bool is_static) const {
+int TableJava::FindMethodLocked(int cls_obj, const std::string& name, const std::string& sig, bool is_static) const {
   for (int c = cls_obj; c != 0;) {
     for (std::size_t i = 1; i < methods_.size(); ++i) {
       const Method& m = methods_[i];
@@ -202,7 +202,7 @@ int FakeJava::FindMethodLocked(int cls_obj, const std::string& name, const std::
   return 0;
 }
 
-void FakeJava::ThrowLocked(const std::string& cls, const std::string& message) {
+void TableJava::ThrowLocked(const std::string& cls, const std::string& message) {
   const int t = NewObjectLocked(ClassNamed(cls));
   objects_[t].str = std::u16string(message.begin(), message.end());
   pending_ = t;
@@ -210,7 +210,7 @@ void FakeJava::ThrowLocked(const std::string& cls, const std::string& message) {
 
 // ------------------------------------------------------------------------------------------------- HostJava
 
-FakeJava::Ref FakeJava::FindClass(const std::string& jni_name) {
+TableJava::Ref TableJava::FindClass(const std::string& jni_name) {
   std::lock_guard<std::mutex> lk(mu_);
   ++calls_["FindClass(" + jni_name + ")"];
   for (const auto& [id, k] : classes_) {
@@ -220,13 +220,13 @@ FakeJava::Ref FakeJava::FindClass(const std::string& jni_name) {
   return 0;
 }
 
-FakeJava::Ref FakeJava::GetSuperclass(Ref cls) {
+TableJava::Ref TableJava::GetSuperclass(Ref cls) {
   std::lock_guard<std::mutex> lk(mu_);
   const Class* k = ClassOfObj(Obj(cls));
   return k && k->super ? MakeRefLocked(k->super) : 0;
 }
 
-bool FakeJava::IsAssignableFrom(Ref from, Ref to) {
+bool TableJava::IsAssignableFrom(Ref from, Ref to) {
   std::lock_guard<std::mutex> lk(mu_);
   const int target = Obj(to);
   for (int c = Obj(from); c != 0;) {
@@ -237,13 +237,13 @@ bool FakeJava::IsAssignableFrom(Ref from, Ref to) {
   return false;
 }
 
-FakeJava::Ref FakeJava::GetObjectClass(Ref obj) {
+TableJava::Ref TableJava::GetObjectClass(Ref obj) {
   std::lock_guard<std::mutex> lk(mu_);
   const int o = Obj(obj);
   return o ? MakeRefLocked(objects_[o].cls) : 0;
 }
 
-bool FakeJava::IsInstanceOf(Ref obj, Ref cls) {
+bool TableJava::IsInstanceOf(Ref obj, Ref cls) {
   std::lock_guard<std::mutex> lk(mu_);
   const int o = Obj(obj);
   if (o == 0) return true;  // JNI: null is an instance of every class
@@ -256,27 +256,27 @@ bool FakeJava::IsInstanceOf(Ref obj, Ref cls) {
   return false;
 }
 
-bool FakeJava::IsSameObject(Ref a, Ref b) {
+bool TableJava::IsSameObject(Ref a, Ref b) {
   std::lock_guard<std::mutex> lk(mu_);
   return Obj(a) == Obj(b);
 }
 
-FakeJava::Ref FakeJava::AllocObject(Ref cls) {
+TableJava::Ref TableJava::AllocObject(Ref cls) {
   std::lock_guard<std::mutex> lk(mu_);
   const int c = Obj(cls);
   if (ClassOfObj(c) == nullptr) return 0;
   return MakeRefLocked(NewObjectLocked(c));
 }
 
-FakeJava::Ref FakeJava::NewLocalRef(Ref r) {
+TableJava::Ref TableJava::NewLocalRef(Ref r) {
   std::lock_guard<std::mutex> lk(mu_);
   return MakeRefLocked(Obj(r));
 }
-void FakeJava::DeleteLocalRef(Ref r) {
+void TableJava::DeleteLocalRef(Ref r) {
   std::lock_guard<std::mutex> lk(mu_);
   refs_.erase(r);
 }
-FakeJava::Ref FakeJava::NewGlobalRef(Ref r) {
+TableJava::Ref TableJava::NewGlobalRef(Ref r) {
   std::lock_guard<std::mutex> lk(mu_);
   const int o = Obj(r);
   if (o == 0) return 0;
@@ -285,18 +285,18 @@ FakeJava::Ref FakeJava::NewGlobalRef(Ref r) {
   refs_[g] = o;
   return g;
 }
-void FakeJava::DeleteGlobalRef(Ref r) { DeleteLocalRef(r); }
-FakeJava::Ref FakeJava::NewWeakGlobalRef(Ref r) { return NewGlobalRef(r); }
-void FakeJava::DeleteWeakGlobalRef(Ref r) { DeleteLocalRef(r); }
+void TableJava::DeleteGlobalRef(Ref r) { DeleteLocalRef(r); }
+TableJava::Ref TableJava::NewWeakGlobalRef(Ref r) { return NewGlobalRef(r); }
+void TableJava::DeleteWeakGlobalRef(Ref r) { DeleteLocalRef(r); }
 
-FakeJava::Id FakeJava::GetMethodID(Ref cls, const std::string& name, const std::string& sig, bool is_static) {
+TableJava::Id TableJava::GetMethodID(Ref cls, const std::string& name, const std::string& sig, bool is_static) {
   std::lock_guard<std::mutex> lk(mu_);
   const int m = FindMethodLocked(Obj(cls), name, sig, is_static);
   if (m == 0) ThrowLocked("java/lang/NoSuchMethodError", name + sig);
   return static_cast<Id>(m);
 }
 
-FakeJava::Id FakeJava::GetFieldID(Ref cls, const std::string& name, const std::string& sig, bool is_static) {
+TableJava::Id TableJava::GetFieldID(Ref cls, const std::string& name, const std::string& sig, bool is_static) {
   std::lock_guard<std::mutex> lk(mu_);
   for (int c = Obj(cls); c != 0;) {
     for (std::size_t i = 1; i < fields_.size(); ++i) {
@@ -310,7 +310,7 @@ FakeJava::Id FakeJava::GetFieldID(Ref cls, const std::string& name, const std::s
   return 0;
 }
 
-std::uint64_t FakeJava::Call(char /*ret_kind*/, bool is_static, Ref target, Ref nonvirtual_cls, Id method,
+std::uint64_t TableJava::Call(char /*ret_kind*/, bool is_static, Ref target, Ref nonvirtual_cls, Id method,
                              const std::vector<std::uint64_t>& args) {
   Body body;
   int self = 0;
@@ -331,7 +331,7 @@ std::uint64_t FakeJava::Call(char /*ret_kind*/, bool is_static, Ref target, Ref 
   return body ? body(*this, self, args) : 0;  // outside the lock: a body may call back into the fake
 }
 
-FakeJava::Ref FakeJava::NewObject(Ref cls, Id ctor, const std::vector<std::uint64_t>& args) {
+TableJava::Ref TableJava::NewObject(Ref cls, Id ctor, const std::vector<std::uint64_t>& args) {
   const Ref obj = AllocObject(cls);
   if (obj == 0) return 0;
   Body body;
@@ -346,7 +346,7 @@ FakeJava::Ref FakeJava::NewObject(Ref cls, Id ctor, const std::vector<std::uint6
   return obj;
 }
 
-std::uint64_t FakeJava::GetField(char kind, bool is_static, Ref target, Id field) {
+std::uint64_t TableJava::GetField(char kind, bool is_static, Ref target, Id field) {
   std::lock_guard<std::mutex> lk(mu_);
   if (field < kFieldIdBase || field - kFieldIdBase >= fields_.size()) return 0;
   const Field& f = fields_[field - kFieldIdBase];
@@ -362,7 +362,7 @@ std::uint64_t FakeJava::GetField(char kind, bool is_static, Ref target, Id field
   return kind == 'L' ? MakeRefLocked(static_cast<int>(v)) : v;  // a reference read is a new local
 }
 
-void FakeJava::SetField(char kind, bool is_static, Ref target, Id field, std::uint64_t value) {
+void TableJava::SetField(char kind, bool is_static, Ref target, Id field, std::uint64_t value) {
   std::lock_guard<std::mutex> lk(mu_);
   if (field < kFieldIdBase || field - kFieldIdBase >= fields_.size()) return;
   const Field& f = fields_[field - kFieldIdBase];
@@ -375,19 +375,19 @@ void FakeJava::SetField(char kind, bool is_static, Ref target, Id field, std::ui
   }
 }
 
-FakeJava::Ref FakeJava::NewString(const std::u16string& chars) {
+TableJava::Ref TableJava::NewString(const std::u16string& chars) {
   std::lock_guard<std::mutex> lk(mu_);
   const int o = NewObjectLocked(ClassNamed("java/lang/String"));
   objects_[o].str = chars;
   return MakeRefLocked(o);
 }
 
-std::u16string FakeJava::GetStringChars(Ref s) {
+std::u16string TableJava::GetStringChars(Ref s) {
   std::lock_guard<std::mutex> lk(mu_);
   return objects_[Obj(s)].str;
 }
 
-FakeJava::Ref FakeJava::NewArray(char kind, std::int32_t length, Ref elem_cls, Ref init) {
+TableJava::Ref TableJava::NewArray(char kind, std::int32_t length, Ref elem_cls, Ref init) {
   std::lock_guard<std::mutex> lk(mu_);
   if (length < 0) {
     ThrowLocked("java/lang/NegativeArraySizeException", std::to_string(length));
@@ -408,19 +408,19 @@ FakeJava::Ref FakeJava::NewArray(char kind, std::int32_t length, Ref elem_cls, R
   return MakeRefLocked(o);
 }
 
-std::int32_t FakeJava::GetArrayLength(Ref a) {
+std::int32_t TableJava::GetArrayLength(Ref a) {
   std::lock_guard<std::mutex> lk(mu_);
   const Object& o = objects_[Obj(a)];
   if (o.array_kind == 'L') return static_cast<std::int32_t>(o.elems.size());
   return o.array_kind ? static_cast<std::int32_t>(o.bytes.size() / ElemSize(o.array_kind)) : 0;
 }
 
-char FakeJava::ArrayKind(Ref a) {
+char TableJava::ArrayKind(Ref a) {
   std::lock_guard<std::mutex> lk(mu_);
   return objects_[Obj(a)].array_kind;
 }
 
-bool FakeJava::GetArrayRegion(char kind, Ref a, std::int32_t start, std::int32_t len, void* out) {
+bool TableJava::GetArrayRegion(char kind, Ref a, std::int32_t start, std::int32_t len, void* out) {
   std::lock_guard<std::mutex> lk(mu_);
   Object& o = objects_[Obj(a)];
   const std::size_t es = ElemSize(kind);
@@ -433,7 +433,7 @@ bool FakeJava::GetArrayRegion(char kind, Ref a, std::int32_t start, std::int32_t
   return true;
 }
 
-bool FakeJava::SetArrayRegion(char kind, Ref a, std::int32_t start, std::int32_t len, const void* in) {
+bool TableJava::SetArrayRegion(char kind, Ref a, std::int32_t start, std::int32_t len, const void* in) {
   std::lock_guard<std::mutex> lk(mu_);
   Object& o = objects_[Obj(a)];
   const std::size_t es = ElemSize(kind);
@@ -446,7 +446,7 @@ bool FakeJava::SetArrayRegion(char kind, Ref a, std::int32_t start, std::int32_t
   return true;
 }
 
-FakeJava::Ref FakeJava::GetObjectArrayElement(Ref a, std::int32_t index) {
+TableJava::Ref TableJava::GetObjectArrayElement(Ref a, std::int32_t index) {
   std::lock_guard<std::mutex> lk(mu_);
   const Object& o = objects_[Obj(a)];
   if (index < 0 || static_cast<std::size_t>(index) >= o.elems.size()) {
@@ -456,7 +456,7 @@ FakeJava::Ref FakeJava::GetObjectArrayElement(Ref a, std::int32_t index) {
   return MakeRefLocked(o.elems[index]);
 }
 
-void FakeJava::SetObjectArrayElement(Ref a, std::int32_t index, Ref value) {
+void TableJava::SetObjectArrayElement(Ref a, std::int32_t index, Ref value) {
   std::lock_guard<std::mutex> lk(mu_);
   Object& o = objects_[Obj(a)];
   if (index < 0 || static_cast<std::size_t>(index) >= o.elems.size()) {
@@ -466,18 +466,18 @@ void FakeJava::SetObjectArrayElement(Ref a, std::int32_t index, Ref value) {
   o.elems[index] = Obj(value);
 }
 
-bool FakeJava::ExceptionCheck() {
+bool TableJava::ExceptionCheck() {
   std::lock_guard<std::mutex> lk(mu_);
   return pending_ != 0;
 }
 
-std::int32_t FakeJava::Throw(Ref throwable) {
+std::int32_t TableJava::Throw(Ref throwable) {
   std::lock_guard<std::mutex> lk(mu_);
   pending_ = Obj(throwable);
   return pending_ != 0 ? 0 : -1;
 }
 
-std::int32_t FakeJava::ThrowNew(Ref cls, const std::string& message) {
+std::int32_t TableJava::ThrowNew(Ref cls, const std::string& message) {
   std::lock_guard<std::mutex> lk(mu_);
   const int c = Obj(cls);
   if (ClassOfObj(c) == nullptr) return -1;
@@ -487,28 +487,28 @@ std::int32_t FakeJava::ThrowNew(Ref cls, const std::string& message) {
   return 0;
 }
 
-FakeJava::Ref FakeJava::ExceptionOccurred() {
+TableJava::Ref TableJava::ExceptionOccurred() {
   std::lock_guard<std::mutex> lk(mu_);
   return pending_ != 0 ? MakeRefLocked(pending_) : 0;
 }
 
-void FakeJava::ExceptionDescribe() {
+void TableJava::ExceptionDescribe() {
   const std::string cls = PendingClass();
-  std::fprintf(stderr, "#   FakeJava: pending %s\n", cls.c_str());
+  std::fprintf(stderr, "#   TableJava: pending %s\n", cls.c_str());
 }
 
-void FakeJava::ExceptionClear() {
+void TableJava::ExceptionClear() {
   std::lock_guard<std::mutex> lk(mu_);
   pending_ = 0;
 }
 
-std::int32_t FakeJava::PushLocalFrame(std::int32_t /*capacity*/) {
+std::int32_t TableJava::PushLocalFrame(std::int32_t /*capacity*/) {
   std::lock_guard<std::mutex> lk(mu_);
   frames_[std::this_thread::get_id()].emplace_back();
   return 0;
 }
 
-FakeJava::Ref FakeJava::PopLocalFrame(Ref result) {
+TableJava::Ref TableJava::PopLocalFrame(Ref result) {
   std::lock_guard<std::mutex> lk(mu_);
   auto& frames = frames_[std::this_thread::get_id()];
   const int kept = Obj(result);
@@ -519,13 +519,13 @@ FakeJava::Ref FakeJava::PopLocalFrame(Ref result) {
   return MakeRefLocked(kept);
 }
 
-std::int32_t FakeJava::MonitorEnter(Ref obj) {
+std::int32_t TableJava::MonitorEnter(Ref obj) {
   std::lock_guard<std::mutex> lk(mu_);
   ++objects_[Obj(obj)].monitor;
   return 0;
 }
 
-std::int32_t FakeJava::MonitorExit(Ref obj) {
+std::int32_t TableJava::MonitorExit(Ref obj) {
   std::lock_guard<std::mutex> lk(mu_);
   Object& o = objects_[Obj(obj)];
   if (o.monitor <= 0) {
@@ -536,7 +536,7 @@ std::int32_t FakeJava::MonitorExit(Ref obj) {
   return 0;
 }
 
-std::int32_t FakeJava::RegisterNatives(Ref cls, const std::vector<NativeBinding>& methods) {
+std::int32_t TableJava::RegisterNatives(Ref cls, const std::vector<NativeBinding>& methods) {
   std::lock_guard<std::mutex> lk(mu_);
   const auto it = classes_.find(Obj(cls));
   if (it == classes_.end()) return -1;
@@ -544,7 +544,7 @@ std::int32_t FakeJava::RegisterNatives(Ref cls, const std::vector<NativeBinding>
   return 0;
 }
 
-std::int32_t FakeJava::UnregisterNatives(Ref cls) {
+std::int32_t TableJava::UnregisterNatives(Ref cls) {
   std::lock_guard<std::mutex> lk(mu_);
   const auto it = classes_.find(Obj(cls));
   if (it == classes_.end()) return -1;
@@ -552,7 +552,7 @@ std::int32_t FakeJava::UnregisterNatives(Ref cls) {
   return 0;
 }
 
-FakeJava::Ref FakeJava::ToReflected(Ref /*cls*/, Id id, bool is_field, bool /*is_static*/) {
+TableJava::Ref TableJava::ToReflected(Ref /*cls*/, Id id, bool is_field, bool /*is_static*/) {
   std::lock_guard<std::mutex> lk(mu_);
   const int o = NewObjectLocked(ClassNamed(is_field ? "java/lang/reflect/Field" : "java/lang/reflect/Method"));
   objects_[o].member = id;
@@ -560,7 +560,7 @@ FakeJava::Ref FakeJava::ToReflected(Ref /*cls*/, Id id, bool is_field, bool /*is
   return MakeRefLocked(o);
 }
 
-FakeJava::Id FakeJava::FromReflected(Ref member, bool is_field, std::string* name, std::string* sig, bool* is_static) {
+TableJava::Id TableJava::FromReflected(Ref member, bool is_field, std::string* name, std::string* sig, bool* is_static) {
   std::lock_guard<std::mutex> lk(mu_);
   const Object& o = objects_[Obj(member)];
   if (o.member == 0 || o.member_is_field != is_field) return 0;
@@ -578,7 +578,7 @@ FakeJava::Id FakeJava::FromReflected(Ref member, bool is_field, std::string* nam
   return o.member;
 }
 
-FakeJava::Ref FakeJava::NewDirectByteBuffer(void* address, std::int64_t capacity) {
+TableJava::Ref TableJava::NewDirectByteBuffer(void* address, std::int64_t capacity) {
   std::lock_guard<std::mutex> lk(mu_);
   const int o = NewObjectLocked(ClassNamed("java/nio/DirectByteBuffer"));
   objects_[o].direct = address;
@@ -586,30 +586,30 @@ FakeJava::Ref FakeJava::NewDirectByteBuffer(void* address, std::int64_t capacity
   return MakeRefLocked(o);
 }
 
-void* FakeJava::GetDirectBufferAddress(Ref buf) {
+void* TableJava::GetDirectBufferAddress(Ref buf) {
   std::lock_guard<std::mutex> lk(mu_);
   return objects_[Obj(buf)].direct;
 }
 
-std::int64_t FakeJava::GetDirectBufferCapacity(Ref buf) {
+std::int64_t TableJava::GetDirectBufferCapacity(Ref buf) {
   std::lock_guard<std::mutex> lk(mu_);
   return objects_[Obj(buf)].capacity;
 }
 
-bool FakeJava::IsAttached() {
+bool TableJava::IsAttached() {
   std::lock_guard<std::mutex> lk(mu_);
   return !detached_[std::this_thread::get_id()];
 }
 
-bool FakeJava::AttachCurrentThread(bool /*daemon*/) {
+bool TableJava::AttachCurrentThread(bool /*daemon*/) {
   std::lock_guard<std::mutex> lk(mu_);
   detached_[std::this_thread::get_id()] = false;
   return true;
 }
 
-void FakeJava::DetachCurrentThread() {
+void TableJava::DetachCurrentThread() {
   std::lock_guard<std::mutex> lk(mu_);
   detached_[std::this_thread::get_id()] = true;
 }
 
-}  // namespace rb::test
+}  // namespace rb::java
