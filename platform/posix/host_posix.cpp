@@ -9,6 +9,9 @@
 #include <sys/epoll.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
+
+#include <array>
+#include <cstddef>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -254,13 +257,14 @@ bool ResourceLimit(std::int32_t guest_resource, Limit* out) {
   // The guest's numbers are this kernel's numbers (both asm-generic), so the value passes straight
   // through. pid 0 is the calling process, which is the only process the guest has.
   rlimit host{};
-  // glibc takes the resource as an enum (`__rlimit_resource_t`); bionic takes an int.
-#if defined(__GLIBC__)
-  const auto resource = static_cast<__rlimit_resource_t>(guest_resource);
-#else
-  const int resource = static_cast<int>(guest_resource);
-#endif
-  if (::prlimit(0, resource, nullptr, &host) != 0) return false;
+  // The guest's numbers are asm-generic (0..15); the host's constants carry the type its prlimit
+  // wants (an enum on glibc, an int on bionic), so the table is typed by deduction rather than a cast.
+  static const auto kResources = std::array{RLIMIT_CPU,   RLIMIT_FSIZE, RLIMIT_DATA,  RLIMIT_STACK,
+                                            RLIMIT_CORE,  RLIMIT_RSS,   RLIMIT_NPROC, RLIMIT_NOFILE,
+                                            RLIMIT_MEMLOCK, RLIMIT_AS,  RLIMIT_LOCKS, RLIMIT_SIGPENDING,
+                                            RLIMIT_MSGQUEUE, RLIMIT_NICE, RLIMIT_RTPRIO, RLIMIT_RTTIME};
+  if (guest_resource < 0 || static_cast<std::size_t>(guest_resource) >= kResources.size()) return false;
+  if (::prlimit(0, kResources[static_cast<std::size_t>(guest_resource)], nullptr, &host) != 0) return false;
   out->cur = host.rlim_cur == RLIM_INFINITY ? kInfinite : static_cast<std::uint64_t>(host.rlim_cur);
   out->max = host.rlim_max == RLIM_INFINITY ? kInfinite : static_cast<std::uint64_t>(host.rlim_max);
   return true;
