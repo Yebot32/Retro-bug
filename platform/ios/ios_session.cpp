@@ -179,9 +179,9 @@ bool RbIosSession::Boot(std::string* err) {
   cfg.resolve_host = [self](const std::string& name) -> std::optional<rb::exec::GuestAddr> {
     return self->host ? self->host->Resolve(name) : std::nullopt;
   };
-  cfg.on_bridge = [self](rb::host::Boot&, rb::runtime::GuestProcess& process) {
+  cfg.on_bridge = [self](rb::host::Boot& boot, rb::runtime::GuestProcess& process) {
     self->host = std::make_unique<rb::platform::ios::IosHost>(
-        process, [self](const std::string& line) { self->Log(line); });
+        process, boot, [self](const std::string& line) { self->Log(line); });
     std::string why;
     if (!self->host->OpenApk(self->apk, &why)) self->Log("assets: " + why);
   };

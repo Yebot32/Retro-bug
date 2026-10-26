@@ -167,8 +167,10 @@ bool Boot::BootScope(const std::string& apk, rb::loader::ZipReader& zip, std::st
     DropScope();
     return false;
   }
-  Say("scope: booted once — libc.so, libm.so, libz.so in a 4 GiB biased window, unresolved imports"
-      " bound to " + Hex(cfg_.unresolved_trap) + "; process-lifetime, reused by every later rb_runtime_boot");
+  Say("scope: booted once — libc.so, libm.so, libz.so in a " +
+      std::to_string(proc_->memory().window_bytes() >> 20) +
+      " MiB biased window, unresolved imports bound to " + Hex(cfg_.unresolved_trap) +
+      "; process-lifetime, reused by every later rb_runtime_boot");
   return true;
 }
 

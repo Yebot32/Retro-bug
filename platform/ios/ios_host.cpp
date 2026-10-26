@@ -13,6 +13,7 @@
 #include "gl_symbols.h"
 #include "rb/abi/guest_log.h"
 #include "rb/gfx/thunk_table.h"
+#include "rb/host/boot.h"
 #include "rb/loader/apk_assets.h"
 
 namespace rb::platform::ios {
@@ -57,8 +58,9 @@ void* IosHost::HostSymbol(const std::string& name) {
   return GlSymbol(name);
 }
 
-IosHost::IosHost(rb::runtime::GuestProcess& process, std::function<void(const std::string&)> log)
-    : p_(process), log_(std::move(log)) {
+IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
+                       std::function<void(const std::string&)> log)
+    : p_(process), boot_(&boot), log_(std::move(log)) {
   // glGetString/glGetStringi return a host string: copied into guest memory, as a device's driver's is not.
   AddSpecial("glGetString", [this](exec::MachineState& s, std::string* why) {
     using Fn = const unsigned char* (*)(unsigned);
@@ -312,6 +314,66 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, std::function<void(const st
     s.r[0] = 0;
     return true;
   });
+
+  // ---- the dynamic-linker interface libc and the game import. The boot answers the game's own
+  // libraries from the APK; anything else is NULL, which callers that probe (bionic's netd init) check.
+  AddSpecial("dlopen", [this](exec::MachineState& s, std::string*) {
+    const std::string path = GuestStringOrEmpty(p_.memory(), s.r[0]);
+    std::string why;
+    const std::uint32_t handle = boot_ != nullptr ? boot_->DlOpen(path, &why) : 0u;
+    if (handle == 0 && !path.empty() && refused_.insert("dlopen:" + path).second && log_) {
+      log_("dl: dlopen(\"" + path + "\") = NULL: " + (why.empty() ? std::string{"not provided"} : why));
+    }
+    s.r[0] = handle;
+    return true;
+  });
+  AddSpecial("android_dlopen_ext", [this](exec::MachineState& s, std::string*) {
+    // (path, flags, const android_dlextinfo*): the extinfo is ignored — the libraries live in the APK.
+    const std::string path = GuestStringOrEmpty(p_.memory(), s.r[0]);
+    std::string why;
+    const std::uint32_t handle = boot_ != nullptr ? boot_->DlOpen(path, &why) : 0u;
+    if (handle == 0 && !path.empty() && refused_.insert("dlopen:" + path).second && log_) {
+      log_("dl: android_dlopen_ext(\"" + path + "\") = NULL: " + (why.empty() ? std::string{"not provided"} : why));
+    }
+    s.r[0] = handle;
+    return true;
+  });
+  AddSpecial("dlsym", [this](exec::MachineState& s, std::string*) {
+    const std::string name = GuestStringOrEmpty(p_.memory(), s.r[1]);
+    const auto at = boot_ != nullptr ? boot_->DlSym(s.r[0], name) : std::nullopt;
+    s.r[0] = at ? *at : 0u;
+    return true;
+  });
+  AddSpecial("dlclose", [](exec::MachineState& s, std::string*) { s.r[0] = 0; return true; });
+  AddSpecial("dladdr", [](exec::MachineState& s, std::string*) { s.r[0] = 0; return true; });
+  AddSpecial("dlerror", [](exec::MachineState& s, std::string*) { s.r[0] = 0; return true; });
+  AddSpecial("dl_unwind_find_exidx", [this](exec::MachineState& s, std::string* why) {
+    // `_Unwind_Ptr dl_unwind_find_exidx(_Unwind_Ptr pc, int* pcount)`: the module whose range holds pc
+    // gives its `.ARM.exidx`; no module, NULL and 0. Without this every C++ throw terminates.
+    const std::uint32_t pc = s.r[0] & ~1u;
+    std::uint32_t at = 0, count = 0;
+    for (const auto& m : p_.modules()) {
+      if (pc >= m->base && pc - m->base < m->extent && m->exidx != 0) {
+        at = m->exidx;
+        count = m->exidx_count;
+        break;
+      }
+    }
+    if (s.r[1] != 0 && !p_.memory().Write(s.r[1], &count, 4)) {
+      if (why != nullptr) *why = "dl_unwind_find_exidx: pcount is not writable";
+      return false;
+    }
+    s.r[0] = at;
+    return true;
+  });
+  AddSpecial("android_get_application_target_sdk_version", [](exec::MachineState& s, std::string*) {
+    s.r[0] = 34;
+    return true;
+  });
+  for (const char* name : {"__loader_add_thread_local_dtor", "__loader_remove_thread_local_dtor",
+                           "__loader_android_get_exported_namespace"}) {
+    AddSpecial(name, [](exec::MachineState& s, std::string*) { s.r[0] = 0; return true; });
+  }
 }
 
 bool IosHost::OpenApk(const std::string& path, std::string* err) {

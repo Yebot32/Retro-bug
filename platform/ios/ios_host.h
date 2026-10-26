@@ -22,6 +22,10 @@
 #include "rb/abi/thunk.h"
 #include "rb/runtime/guest_process.h"
 
+namespace rb::host {
+class Boot;
+}
+
 namespace rb::loader {
 class ApkArchive;
 class ApkFile;
@@ -34,7 +38,8 @@ class IosHost {
   static constexpr std::uint32_t kThunkSlotBase = 1024u;
   using Special = std::function<bool(exec::MachineState& s, std::string* why)>;
 
-  IosHost(rb::runtime::GuestProcess& process, std::function<void(const std::string&)> log);
+  IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
+          std::function<void(const std::string&)> log);
   // Out of line: the members own APK objects that are only forward-declared here.
   ~IosHost();
   IosHost(const IosHost&) = delete;
@@ -58,6 +63,7 @@ class IosHost {
   static void* HostSymbol(const std::string& name);
 
   rb::runtime::GuestProcess& p_;
+  rb::host::Boot* boot_ = nullptr;
   abi::HandleTable handles_;
   std::function<void(const std::string&)> log_;
   std::map<std::string, Special> specials_;
