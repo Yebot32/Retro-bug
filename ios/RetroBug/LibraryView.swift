@@ -29,7 +29,7 @@ struct LibraryView: View {
             List {
                 Section("Games") {
                     if games.isEmpty {
-                        Text("Import an APK with the + button.")
+                        Text("Import an APK with the + button, or copy one into On My iPhone › RetroBug › Games.")
                             .foregroundColor(.secondary)
                     }
                     ForEach(games) { game in
@@ -60,11 +60,14 @@ struct LibraryView: View {
             }
             .fileImporter(
                 isPresented: $importing,
-                allowedContentTypes: [UTType(filenameExtension: "apk") ?? .data],
+                allowedContentTypes: [.item],
                 allowsMultipleSelection: false
             ) { result in
                 importGame(result)
             }
+            // Tapping an APK in Files ("Open in RetroBug") arrives here. The document types in Info.plist
+            // make the app an option for .apk; the picker above accepts any file and filters by extension.
+            .onOpenURL { url in importURL(url) }
             .fullScreenCover(item: $playing) { game in
                 GameView(apk: game.url, lib: libName)
             }
@@ -86,20 +89,34 @@ struct LibraryView: View {
         case .failure(let error):
             notice = "could not import: \(error.localizedDescription)"
         case .success(let urls):
-            guard let url = urls.first else { return }
-            let scoped = url.startAccessingSecurityScopedResource()
-            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-            do {
-                try FileManager.default.createDirectory(at: gamesDir, withIntermediateDirectories: true)
-                let dest = gamesDir.appendingPathComponent(url.lastPathComponent)
-                try? FileManager.default.removeItem(at: dest)
-                try FileManager.default.copyItem(at: url, to: dest)
-                notice = "copied \(url.lastPathComponent)"
-            } catch {
-                notice = "could not copy: \(error.localizedDescription)"
-            }
-            reload()
+            if let url = urls.first { importURL(url) }
         }
+    }
+
+    /// Copies an APK into the library. The Files picker hands back a security-scoped URL; the copy is what
+    /// the session reads later, so the source can be anywhere (iCloud Drive, a share, another app).
+    private func importURL(_ url: URL) {
+        print("retrobug: import \(url.path)")
+        guard url.pathExtension.lowercased() == "apk" else {
+            notice = "\(url.lastPathComponent) is not an APK"
+            return
+        }
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        do {
+            try FileManager.default.createDirectory(at: gamesDir, withIntermediateDirectories: true)
+            let dest = gamesDir.appendingPathComponent(url.lastPathComponent)
+            try? FileManager.default.removeItem(at: dest)
+            try FileManager.default.copyItem(at: url, to: dest)
+            let bytes = (try? FileManager.default.attributesOfItem(atPath: dest.path)[.size] as? Int64) ?? 0
+            let size = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+            notice = "added \(url.lastPathComponent) (\(size))"
+            print("retrobug: imported \(dest.path) (\(size))")
+        } catch {
+            notice = "could not copy \(url.lastPathComponent): \(error.localizedDescription)"
+            print("retrobug: import failed: \(error)")
+        }
+        reload()
     }
 
     private func delete(at offsets: IndexSet) {
