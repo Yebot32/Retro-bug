@@ -191,6 +191,78 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
     return true;
   });
 
+  // ---- framebuffer 0. A device's default framebuffer is the window surface; EAGL has no such object,
+  // and the shim's drawable is its own FBO. The game (Horde3D) binds 0 to return to the screen, so 0 is
+  // answered with that FBO and GL_FRAMEBUFFER_BINDING reports 0 back.
+  AddSpecial("glBindFramebuffer", [this](exec::MachineState& s, std::string* why) {
+    const std::uint32_t fbo = s.r[1];
+    if (fbo == 0) {
+      if (!EglShim::Instance().BindDrawable(why)) return false;
+      bound_fbo_ = 0;
+      return true;
+    }
+    using Fn = void (*)(unsigned, unsigned);
+    const auto f = reinterpret_cast<Fn>(HostSymbol("glBindFramebuffer"));
+    if (f == nullptr) {
+      *why = "glBindFramebuffer is not exported by OpenGLES.framework";
+      return false;
+    }
+    f(static_cast<unsigned>(s.r[0]), fbo);
+    bound_fbo_ = fbo;
+    return true;
+  });
+  AddSpecial("glBindFramebufferOES", [this](exec::MachineState& s, std::string* why) {
+    const std::uint32_t fbo = s.r[1];
+    if (fbo == 0) {
+      if (!EglShim::Instance().BindDrawable(why)) return false;
+      bound_fbo_ = 0;
+      return true;
+    }
+    using Fn = void (*)(unsigned, unsigned);
+    const auto f = reinterpret_cast<Fn>(HostSymbol("glBindFramebufferOES"));
+    if (f == nullptr) {
+      *why = "glBindFramebufferOES is not exported by OpenGLES.framework";
+      return false;
+    }
+    f(static_cast<unsigned>(s.r[0]), fbo);
+    bound_fbo_ = fbo;
+    return true;
+  });
+  AddSpecial("glGetIntegerv", [this](exec::MachineState& s, std::string* why) {
+    const std::uint32_t pname = s.r[0];
+    int* out = s.r[1] == 0 ? nullptr : static_cast<int*>(p_.memory().Host(s.r[1]));
+    if (out == nullptr) {
+      *why = "glGetIntegerv: the out pointer is not guest memory";
+      return false;
+    }
+    if (pname == 0x8CA6u) {  // GL_FRAMEBUFFER_BINDING
+      *out = static_cast<int>(bound_fbo_);
+      return true;
+    }
+    using Fn = void (*)(unsigned, int*);
+    const auto f = reinterpret_cast<Fn>(GlSymbol("glGetIntegerv"));
+    if (f == nullptr) {
+      *why = "glGetIntegerv is not exported by OpenGLES.framework";
+      return false;
+    }
+    f(pname, out);
+    return true;
+  });
+  AddSpecial("glCheckFramebufferStatus", [this](exec::MachineState& s, std::string* why) {
+    if (bound_fbo_ == 0) {
+      s.r[0] = 0x8CD5u;  // GL_FRAMEBUFFER_COMPLETE: the drawable is complete by construction
+      return true;
+    }
+    using Fn = unsigned (*)(unsigned);
+    const auto f = reinterpret_cast<Fn>(GlSymbol("glCheckFramebufferStatus"));
+    if (f == nullptr) {
+      *why = "glCheckFramebufferStatus is not exported by OpenGLES.framework";
+      return false;
+    }
+    s.r[0] = f(static_cast<unsigned>(s.r[0]));
+    return true;
+  });
+
   // ---- liblog. A game's own log lines become the boot's log, formatted on the host (shared with Android).
   AddSpecial("__android_log_write", [this](exec::MachineState& s, std::string*) {
     const auto& mem = p_.memory();

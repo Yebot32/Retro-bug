@@ -78,6 +78,7 @@ class IosHost {
   /// Data imports (the OpenSL ES interface IDs): their guest address is a cell holding a value, not a
   /// host slot — the guest loads the value rather than calling it.
   std::map<std::string, std::uint32_t> data_symbols_;
+  std::uint32_t bound_fbo_ = 0;  ///< the guest's current framebuffer; 0 is our EAGL drawable
   struct DirState;
   std::map<std::uint32_t, std::unique_ptr<DirState>> dirs_;
 };

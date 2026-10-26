@@ -4,6 +4,7 @@
 
 #include "rb/java/cocos2dx.h"
 
+#include <algorithm>
 #include <cstring>
 #include <functional>
 #include <string>
@@ -78,12 +79,31 @@ void InstallCocos2dx(TableJava& j, const AndroidEnv& env) {
     j.DefineClass(view, "java/lang/Object");
   }
   j.DefineClass("org/cocos2dx/lib/Cocos2dxActivity", "android/app/Activity");
-  // Cocos2d-x 3.x text: the Java class renders into a static bitmap and calls the native
-  // nativeInitBitmapDC back. With no renderer here the method returns without doing so; the engine then
-  // reports a failed label rather than crashing, which is enough to reach the first frame.
+  NoOp(j, "org/cocos2dx/lib/Cocos2dxGLSurfaceView", "openIMEKeyboard", "()V");
+  NoOp(j, "org/cocos2dx/lib/Cocos2dxGLSurfaceView", "closeIMEKeyboard", "()V");
+  // Cocos2d-x 3.x text: the Java class renders a bitmap and hands its pixels to the guest's
+  // nativeInitBitmapDC. There is no glyph rasteriser yet, so the bitmap is correctly sized and transparent
+  // 2014 layout works and the guest path runs; the glyphs come with the CoreText pass.
   j.DefineMethod("org/cocos2dx/lib/Cocos2dxBitmap", "createTextBitmapShadowStroke",
                  "([BLjava/lang/String;IFFFIIIZFFFZFFFF)V", true,
-                 [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+                 [env](TableJava& f, int, const std::vector<std::uint64_t>& a) -> std::uint64_t {
+                   if (!env.publish_text) return 0;
+                   const auto text = static_cast<TableJava::Ref>(a[0]);
+                   const auto size = static_cast<float>(static_cast<std::int32_t>(a[2]));
+                   const auto max_w = static_cast<std::int32_t>(a[7]);
+                   const auto max_h = static_cast<std::int32_t>(a[8]);
+                   const std::int32_t len = f.GetArrayLength(text);
+                   std::vector<char> utf8(static_cast<std::size_t>(len > 0 ? len : 0));
+                   if (len > 0 && !f.GetArrayRegion('B', text, 0, len, utf8.data())) return 0;
+                   int w = std::max(1, static_cast<int>(utf8.size() * size * 0.55f));
+                   if (max_w > 0) w = std::min(w, max_w);
+                   int h = std::max(1, static_cast<int>(size * 1.35f));
+                   if (max_h > 0) h = std::min(h, max_h);
+                   const auto pixels = f.NewArray('B', w * h * 4, 0, 0);
+                   if (pixels == 0) return 0;
+                   env.publish_text(w, h, pixels);
+                   return std::uint64_t{0};
+                 });
   NoOp(j, cls, "runOnUiThread", "(Ljava/lang/Runnable;)V");
   NoOp(j, cls, "showDialog", "(Ljava/lang/String;Ljava/lang/String;)V");
   NoOp(j, cls, "showEditTextDialog", "(Ljava/lang/String;Ljava/lang/String;IIII)V");

@@ -64,6 +64,9 @@ class EglShim {
   /// Makes the context current on the calling (render) thread and builds the drawable. The shell calls this
   /// before any guest code; MakeCurrent() below is the guest-visible EGL function.
   bool Begin(std::string* err);
+  /// Binds the drawable framebuffer (what the guest means by framebuffer 0) and returns true, or false
+  /// with `err` when no drawable is ready. A device's default framebuffer is the surface; EAGL has none.
+  bool BindDrawable(std::string* err);
   /// Presents the drawable (the shell calls it after the guest render entry; the guest never swaps).
   bool Present(std::string* err);
 
@@ -77,7 +80,7 @@ class EglShim {
   void* context_ = nullptr;  ///< EAGLContext*, retained
   int client_version_ = 1;
   int width_ = 0, height_ = 0;
-  std::uint32_t framebuffer_ = 0, color_buffer_ = 0;
+  std::uint32_t framebuffer_ = 0, color_buffer_ = 0, depth_buffer_ = 0;
   bool drawable_ready_ = false;
   std::int32_t swap_interval_ = 1;
   std::int32_t error_ = 0;  ///< 0x3000 (EGL_SUCCESS)

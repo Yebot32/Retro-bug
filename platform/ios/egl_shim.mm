@@ -25,6 +25,7 @@
 // same unit (both headers share a guard), so the core names are declared where they are used.
 extern "C" {
 void glGenFramebuffers(GLsizei n, GLuint* framebuffers);
+void glRenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width, GLsizei height);
 void glBindFramebuffer(GLenum target, GLuint framebuffer);
 void glGenRenderbuffers(GLsizei n, GLuint* renderbuffers);
 void glBindRenderbuffer(GLenum target, GLuint renderbuffer);
@@ -416,6 +417,20 @@ bool EglShim::EnsureDrawable(std::string* err) {
       glFramebufferRenderbufferOES(GL_FRAMEBUFFER_OES, GL_COLOR_ATTACHMENT0_OES, GL_RENDERBUFFER_OES, color_buffer_);
       glGetRenderbufferParameterivOES(GL_RENDERBUFFER_OES, GL_RENDERBUFFER_WIDTH_OES, &width_);
       glGetRenderbufferParameterivOES(GL_RENDERBUFFER_OES, GL_RENDERBUFFER_HEIGHT_OES, &height_);
+      // The config promises a 16-bit depth buffer (eglGetConfigAttrib); without one the game's depth test
+      // is undefined. Then bind the colour buffer back: presentRenderbuffer presents the bound one.
+      glGenRenderbuffersOES(1, &depth_buffer_);
+      glBindRenderbufferOES(GL_RENDERBUFFER_OES, depth_buffer_);
+      glRenderbufferStorageOES(GL_RENDERBUFFER_OES, GL_DEPTH_COMPONENT16_OES, width_, height_);
+      glFramebufferRenderbufferOES(GL_FRAMEBUFFER_OES, GL_DEPTH_ATTACHMENT_OES, GL_RENDERBUFFER_OES, depth_buffer_);
+      glBindRenderbufferOES(GL_RENDERBUFFER_OES, color_buffer_);
+      // The config promises a 16-bit depth buffer (eglGetConfigAttrib); without one the game's depth
+      // test is undefined. Then bind the colour buffer back: presentRenderbuffer presents the bound one.
+      glGenRenderbuffersOES(1, &depth_buffer_);
+      glBindRenderbufferOES(GL_RENDERBUFFER_OES, depth_buffer_);
+      glRenderbufferStorageOES(GL_RENDERBUFFER_OES, GL_DEPTH_COMPONENT16_OES, width_, height_);
+      glFramebufferRenderbufferOES(GL_FRAMEBUFFER_OES, GL_DEPTH_ATTACHMENT_OES, GL_RENDERBUFFER_OES, depth_buffer_);
+      glBindRenderbufferOES(GL_RENDERBUFFER_OES, color_buffer_);
       if (glCheckFramebufferStatusOES(GL_FRAMEBUFFER_OES) != GL_FRAMEBUFFER_COMPLETE_OES) {
         if (err != nullptr) *err = "the EAGL framebuffer is incomplete";
         error_ = kBadSurface;
@@ -434,6 +449,16 @@ bool EglShim::EnsureDrawable(std::string* err) {
       glFramebufferRenderbuffer(0x8D40, 0x8CE0, 0x8D41, color_buffer_);  // FRAMEBUFFER, COLOR_ATTACHMENT0
       glGetRenderbufferParameteriv(0x8D41, 0x8D42, &width_);             // RENDERBUFFER_WIDTH
       glGetRenderbufferParameteriv(0x8D41, 0x8D43, &height_);            // RENDERBUFFER_HEIGHT
+      glGenRenderbuffers(1, &depth_buffer_);
+      glBindRenderbuffer(0x8D41, depth_buffer_);
+      glRenderbufferStorage(0x8D41, 0x81A5, width_, height_);              // DEPTH_COMPONENT16
+      glFramebufferRenderbuffer(0x8D40, 0x8D00, 0x8D41, depth_buffer_);    // DEPTH_ATTACHMENT
+      glBindRenderbuffer(0x8D41, color_buffer_);
+      glGenRenderbuffers(1, &depth_buffer_);
+      glBindRenderbuffer(0x8D41, depth_buffer_);
+      glRenderbufferStorage(0x8D41, 0x81A5, width_, height_);              // DEPTH_COMPONENT16
+      glFramebufferRenderbuffer(0x8D40, 0x8D00, 0x8D41, depth_buffer_);    // DEPTH_ATTACHMENT
+      glBindRenderbuffer(0x8D41, color_buffer_);
       if (glCheckFramebufferStatus(0x8D40) != 0x8CD5) {                  // GL_FRAMEBUFFER_COMPLETE
         if (err != nullptr) *err = "the EAGL framebuffer is incomplete";
         error_ = kBadSurface;
@@ -441,6 +466,20 @@ bool EglShim::EnsureDrawable(std::string* err) {
       }
     }
     drawable_ready_ = true;
+  }
+  return true;
+}
+
+bool EglShim::BindDrawable(std::string* err) {
+  std::string why;
+  if (!EnsureDrawable(&why)) {
+    if (err != nullptr) *err = why;
+    return false;
+  }
+  if (client_version_ == 1) {
+    glBindFramebufferOES(GL_FRAMEBUFFER_OES, framebuffer_);
+  } else {
+    glBindFramebuffer(0x8D40, framebuffer_);
   }
   return true;
 }
@@ -477,6 +516,11 @@ std::uint32_t EglShim::SwapBuffers(void* display, void* surface) {
   std::string err;
   if (!EnsureDrawable(&err)) return 0;
   EAGLContext* ctx = (__bridge EAGLContext*)context_;
+  if (client_version_ == 1) {
+    glBindRenderbufferOES(GL_RENDERBUFFER_OES, color_buffer_);
+  } else {
+    glBindRenderbuffer(0x8D41, color_buffer_);
+  }
   if (![ctx presentRenderbuffer:0x8D41]) {  // GL_RENDERBUFFER
     error_ = kBadSurface;
     return 0;

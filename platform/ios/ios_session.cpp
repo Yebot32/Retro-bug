@@ -32,6 +32,8 @@
 #include "rb/java/android_base.h"
 #include "rb/java/cocos2dx.h"
 #include "rb/java/table_java.h"
+#include "rb/loader/guest_elf.h"
+#include "rb/runtime/inbound.h"
 
 struct RbIosSession {
   struct Touch {
@@ -163,6 +165,26 @@ bool RbIosSession::Boot(std::string* err) {
   env.device = "iPad";
   env.fingerprint = "retrobug/ios";
   env.sdk_int = 34;
+  env.publish_text = [self](int width, int height, std::uintptr_t pixels) {
+    if (self->boot == nullptr || self->boot->inbound() == nullptr) return;
+    const rb::loader::GuestModule* m = self->boot->module(self->lib);
+    const auto fn = m != nullptr ? m->FindExport("Java_org_cocos2dx_lib_Cocos2dxBitmap_nativeInitBitmapDC")
+                                 : std::nullopt;
+    if (!fn) {
+      self->Log("text: the game exports no nativeInitBitmapDC");
+      return;
+    }
+    // A Java->native call from inside a HostJava body: Inbound marshals it to the guest, as ART
+    // would (its own frame, the guest thread that is already running this call).
+    rb::runtime::CapturedArgs args{};
+    args.x[0] = self->boot->jni()->env();
+    args.x[1] = 0;
+    args.x[2] = static_cast<std::uint64_t>(width);
+    args.x[3] = static_cast<std::uint64_t>(height);
+    args.x[4] = pixels;
+    args.stack = nullptr;
+    self->boot->inbound()->Dispatch({fn->tagged(), "VIIL", "nativeInitBitmapDC"}, args);
+  };
 
   RbIosSession* self = this;
   rb::host::BootConfig cfg;

@@ -36,6 +36,9 @@ struct AndroidEnv {
   std::function<std::int64_t()> uptime_ms;
   /// What android.util.Log receives (priority, tag, text). Empty: dropped.
   std::function<void(int priority, const std::string& tag, const std::string& text)> log;
+  /// Text rendering: the Cocos2d-x Java class computes a bitmap and hands the pixels to the guest's
+  /// nativeInitBitmapDC. `pixels` is a TableJava byte[] reference of width*height RGBA bytes.
+  std::function<void(int width, int height, std::uintptr_t pixels)> publish_text;
 };
 
 /// Registers `java/lang/Object`, `java/lang/String`, `java/lang/System`, `java/lang/Integer`,
