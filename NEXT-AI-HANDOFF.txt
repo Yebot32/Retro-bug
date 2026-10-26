@@ -436,3 +436,36 @@ DATA HYGIENE:
 - **Next S1:** `platform/ios` EAGL/EGL adapter, UIKit touch queue, Core Audio sink, `IosJavaHost` (class
   table driven by a recorded guest→Java call trace), an Xcode shell built unsigned in CI, then the first
   native title on an iPad; the Tier-I Rolling Sky number (CPU=Safe) is still the open G1b measurement.
+
+1j. 2026-10-26 (iOS S1c) — the GL/Java half of the iOS adapter, compiled for iOS
+---------------------------------------------------------------------------
+- `rb::gfx::FindThunk` (core/gfx/thunk_table.cpp) is the import→signature table, shared. Android's
+  android/jni/thunks.cpp is now only its symbol source (dlopen + eglGetProcAddress).
+- `platform/ios/egl_shim.{h,mm}`: EGL 1.4 subset on EAGL (display/config/context/surface, choose/get
+  config, make current, swap, query string/surface, getProcAddress), one render thread, layer set by the
+  shell via `SetLayer(CAEAGLLayer*, client_version)`.
+- `platform/ios/gl_symbols.mm`: `dlsym(RTLD_DEFAULT)` over the linked OpenGLES.framework.
+- `platform/ios/ios_host.{h,cpp}`: the iOS host slots. `rb::gfx` names go through `ThunkCaller`;
+  glGetString[i], eglQueryString, eglGetProcAddress (answers a guest slot), eglChooseConfig/GetConfigs
+  (handle arrays) and glShaderSource are hand-written.
+- `rb::java::TableJava` (core/host/java/table_java.cpp) is the promoted FakeJava — the same tested
+  implementation, now a library; `core/tests/fake_java.h` is an alias.
+- `rb::java::InstallAndroidBase` (core/host/java/android_base.cpp): System, SystemClock, String, Integer,
+  Build + Build$VERSION, Log, Locale, File, Context, Activity. An unregistered class throws
+  NoClassDefFoundError by name — that is the list to add from a title's trace.
+- **Verified:** macOS CI runs `rb_table_java_tests` 36 checks, `rb_zip_tests` 25, platform 26; iOS CI builds
+  `rb_ios` (the EAGL shim + IosHost) and `rb_java`. The Tab S9 dropped off USB during this step, so the
+  Android gate has NOT been rerun since the rb_java move; run it when the tablet is back.
+- **Next, and this is now the critical path:** a title bootstrap. Blocky Roads is Cocos2d-x; its
+  `libgame.so` exports (llvm-nm) include
+  `Java_org_cocos2dx_lib_Cocos2dxHelper_nativeSetApkPath(JNIEnv*, jclass, jstring)`,
+  `Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeInit(JNIEnv*, jobject, jint, jint)`,
+  `..._nativeRender(JNIEnv*, jobject)`, `..._nativeTouchesBegin/Move/End/Cancel(JNIEnv*, jobject, jint, jfloat, jfloat)`,
+  `..._nativeOnPause/Resume/Start/Stop`, `..._Cocos2dxAccelerometer_onSensorChanged`,
+  `..._Cocos2dxBitmap_nativeInitBitmapDC`, `..._Cocos2dxRenderer_nativeKeyDown/Up`.
+  **Do not guess the Java-layer call order**: read it from the APK's classes.dex (dexdump) or record a
+  guest→Java trace with `ForwardingJni::SetCallTrace` on the device. In particular the Surface/ANativeWindow
+  hand-off (how the C++ EGL view gets its window) is the unclear step.
+- Still absent: the SwiftUI/Xcode shell (app target, CADisplayLink render loop, touch → those natives),
+  a C API for it, and the unsigned-IPA CI job. `ANativeWindow_fromSurface` needs an IosHost special (a fake
+  guest handle is enough, because `eglCreateWindowSurface` ignores it and uses the layer).

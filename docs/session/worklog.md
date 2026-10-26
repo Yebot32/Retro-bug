@@ -750,3 +750,23 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
   (SIGABRT) before reporting. It now clears the exception and puts it in the report.
 - **Not done yet:** EAGL/EGL, touch, audio, `IosJavaHost`, the SwiftUI shell and the unsigned-IPA job; the
   Tier-I Rolling Sky throughput is still the open G1b measurement.
+
+### 2026-10-26 — iOS S1c: EGL on EAGL, the iOS host slots, and the Java shim as a library
+- **The GL thunk table moved to `rb::gfx`** so both platforms answer the same imports; Android keeps only the
+  symbol source. `rb_gl_thunk_tests` still passes on the tablet (22 checks).
+- **EGL on EAGL.** iOS has no libEGL, so `platform/ios/egl_shim.mm` implements the 1.4 subset a
+  GLSurfaceView-era title uses: display/config/context/surface life, make-current over a CAEAGLLayer,
+  present on swap, query strings/surfaces, and eglGetProcAddress. Compiled for iOS by CI.
+- **iOS host slots.** `platform/ios/ios_host.cpp` resolves `rb::gfx` names through `ThunkCaller` to the
+  shim/framework and hand-writes what a signature cannot express (returned strings, config handle arrays,
+  eglGetProcAddress's guest slot, glShaderSource's pointer array).
+- **The Java replacement.** `FakeJava` — already the engine's no-VM Java, covered by the JNI bridge lane —
+  is now `rb::java::TableJava`, a library, with `core/tests/fake_java.h` as an alias. The base Android
+  profile registers System, SystemClock, String, Integer, Build, Log, Locale, File, Context and Activity;
+  an unregistered class is a `NoClassDefFoundError` by name.
+- **Verified:** macOS CI: `rb_table_java_tests` 36 checks, `rb_zip_tests` 25, `rb_platform_tests` 26, all 0
+  failures; iOS CI builds `rb_gfx rb_java rb_host rb_ios`. The Tab S9 disconnected during this step, so the
+  Android gate was last green at S1b (28/28) and must be rerun before the next device claim.
+- **Next:** the title bootstrap. Blocky Roads is Cocos2d-x and its exports are known
+  (`Cocos2dxHelper_nativeSetApkPath`, `Cocos2dxRenderer_nativeInit/nativeRender`, the touch natives);
+  the Java-layer order and the Surface hand-off must come from classes.dex/trace, not from memory.
