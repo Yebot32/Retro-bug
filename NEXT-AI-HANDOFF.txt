@@ -527,3 +527,23 @@ DATA HYGIENE:
 - **What to ask the user for next:** the footer's commit (`0.1 (3) · <commit>`; older = stale build), and
   `retrobug.log` via Share log after reproducing. The log says whether the picker presented, whether a pick
   callback fired, whether the copy failed, and the engine's boot lines.
+
+1m. 2026-10-26 (iOS S1f) — the first real iOS boot, and the memory host
+---------------------------------------------------------------------------
+- **Import and boot work on the device.** The log shows: picker presented (UIKit, asCopy) → picked →
+  copied 53,500,147 bytes → play → create → render thread → boot. So S1e's diagnostics/import fixes are
+  confirmed on real hardware (iPad, iOS 18.7.7).
+- **First memory failure:** `GuestProcess::Create: reserving the host-entry window: withdrawing an empty
+  granule failed: ENOMEM`. The guard granule is already PROT_NONE from the reservation, so the mprotect was
+  a no-op; iOS refuses it anyway. Fixed by skipping never-live granules.
+- **Second:** `mapping the main stack below 0xffe00000: withdrawing the window granule failed: ENOMEM at
+  0xff600000 len 16384 (granule 261504)`. Same class, in RebalanceGranuleOutOfLine (the stack's guard page
+  shares a granule, so it goes out of line). The withdrawal now falls back to
+  `mmap(MAP_FIXED, PROT_NONE)`; in-place protection changes that change nothing are skipped.
+- **A one-time probe** in the iOS session now logs to retrobug.log what this iOS build permits on a 4 GiB
+  PROT_NONE reservation: `mprotect(NONE)`, `MAP_FIXED(NONE)`, `MAP_FIXED(RW)`, `mprotect(RW)`,
+  `mprotect(NONE2)` with addresses/errnos. The next device run's log decides whether mprotect works at all
+  on the window; if it does not, the fallback is to keep host pages writable (Tier I enforces guest
+  permissions in the page table, so the host protection is defence in depth, not the mechanism).
+- Android unaffected: guest memory 190, guest process 161, boot 47, tier-diff 1039, 0 failures.
+- **Artifact:** 1,984,??? bytes (rebuild), SHA-256 `6ca4d76dba761f312e1304a14a69340fd4f57978bca8c5e3d2546022c820c590`.
