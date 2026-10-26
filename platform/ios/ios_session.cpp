@@ -18,7 +18,7 @@
 #include <thread>
 #include <vector>
 
-#include "cocos2dx.h"
+#include "cocos2dx_bootstrap.h"
 #include "egl_shim.h"
 #include "ios_host.h"
 #include "rb/host/boot.h"

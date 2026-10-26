@@ -4,6 +4,7 @@
 # CMake for iOS; hand it to the app with `RB_ENGINE_DIR=<dir containing librbengine.a>` as a build setting.
 name: RetroBug
 options:
+  xcodeVersion: "15.4"
   bundleIdPrefix: com.retrobug
   deploymentTarget:
     iOS: "15.0"

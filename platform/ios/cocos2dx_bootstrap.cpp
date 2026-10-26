@@ -2,7 +2,7 @@
 //
 // The Cocos2d-x bootstrap: see cocos2dx.h.
 
-#include "cocos2dx.h"
+#include "cocos2dx_bootstrap.h"
 
 #include <cstdio>
 
