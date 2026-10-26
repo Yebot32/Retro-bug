@@ -515,7 +515,11 @@ bool GuestMemory::RebalanceGranule(std::size_t granule, std::string* err,
         }
       }
     }
-    if (mprotect(granule_host, GranuleBytes(), ToHostProt(prot)) != 0) {
+    const int mapped_prot = ToHostProt(prot) | PROT_WRITE;
+    const int final_prot = ToHostProt(prot);
+    // Dropping the temporary write permission is a no-op when the caller wanted write anyway; iOS
+    // refuses some protection changes on the window, so the calls that change nothing are not made.
+    if (mapped_prot != final_prot && mprotect(granule_host, GranuleBytes(), final_prot) != 0) {
       if (err) *err = GranuleErr("applying in-place granule protection failed", granule_host, GranuleBytes(), granule, errno);
       return false;
     }
@@ -566,8 +570,15 @@ bool GuestMemory::RebalanceGranuleOutOfLine(std::size_t granule, std::string* er
   if (mprotect(granule_host, GranuleBytes(), PROT_NONE) != 0) {
     // Unchecked once, and the failure mode was exactly the one the comment below promises cannot
     // happen: the table said the granule was withdrawn while the host pages kept live permissions.
-    if (err) *err = GranuleErr("withdrawing the window granule failed", granule_host, GranuleBytes(), granule, errno);
-    return false;
+    // iOS refuses this protection change on a subrange of the window reservation (ENOMEM, measured);
+    // MAP_FIXED reaches the same end state without asking the kernel to keep any of the old pages.
+    const int mp_errno = errno;
+    void* got = ::mmap(granule_host, GranuleBytes(), PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    if (got != granule_host) {
+      if (err) *err = GranuleErr("withdrawing the window granule failed (mprotect and MAP_FIXED)",
+                                 granule_host, GranuleBytes(), granule, mp_errno);
+      return false;
+    }
   }
 
   for (std::size_t i : live) {

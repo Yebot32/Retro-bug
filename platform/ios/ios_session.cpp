@@ -22,6 +22,8 @@
 #include <thread>
 #include <vector>
 
+#include <sys/mman.h>
+
 #include "cocos2dx_bootstrap.h"
 #include "egl_shim.h"
 #include "ios_host.h"
@@ -89,6 +91,30 @@ void CopyOut(const std::string& text, char* out, int out_len) {
   const std::size_t n = std::min<std::size_t>(text.size(), static_cast<std::size_t>(out_len - 1));
   std::memcpy(out, text.data(), n);
   out[n] = '\0';
+}
+
+/// One-time look at what this iOS build permits on a 4 GiB PROT_NONE reservation: the engine needs
+/// subrange mprotect and MAP_FIXED, and the difference decides the memory-host strategy. Logged to
+/// retrobug.log so a device run answers it without a debugger.
+void ProbeWindowMemory(RbIosSession* s) {
+  constexpr std::size_t kGiB = std::size_t{1} << 30;
+  void* p = ::mmap(nullptr, 4 * kGiB, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (p == MAP_FAILED) {
+    s->Log("probe: 4 GiB reservation failed (errno " + std::to_string(errno) + ")");
+    return;
+  }
+  char* at = static_cast<char*>(p) + 12 * kGiB;
+  errno = 0; const int mp_none = ::mprotect(at, 16384, PROT_NONE); const int e1 = errno;
+  errno = 0; void* fx_none = ::mmap(at, 16384, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0); const int e2 = errno;
+  errno = 0; void* fx_rw = ::mmap(at, 16384, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0); const int e3 = errno;
+  errno = 0; const int mp_rw = ::mprotect(at, 16384, PROT_READ | PROT_WRITE); const int e4 = errno;
+  errno = 0; const int mp_none2 = ::mprotect(at, 16384, PROT_NONE); const int e5 = errno;
+  char buf[384];
+  std::snprintf(buf, sizeof buf,
+                "probe: reserve=%p mprotect(NONE)=%d/%d MAP_FIXED(NONE)=%p/%d MAP_FIXED(RW)=%p/%d mprotect(RW)=%d/%d mprotect(NONE2)=%d/%d",
+                p, mp_none, e1, fx_none, e2, fx_rw, e3, mp_rw, e4, mp_none2, e5);
+  s->Log(buf);
+  ::munmap(p, 4 * kGiB);
 }
 
 void Take(RbIosSession* s, int kind, int id, float x, float y) {
@@ -205,6 +231,8 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
     rb::platform::ios::EglShim& egl = rb::platform::ios::EglShim::Instance();
     std::string why;
     try {
+      static std::atomic<bool> probed{false};
+      if (!probed.exchange(true)) ProbeWindowMemory(s);
       if (!s->booted) {
         s->Log("game: booting " + s->apk + " lib=" + s->lib);
         if (!s->Boot(&why)) {
