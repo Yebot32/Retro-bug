@@ -34,6 +34,15 @@ std::string SysErr(const char* what, int e) {
   return buf;
 }
 
+/// A failure that also names where: a granule mprotect that the kernel refuses is impossible to act on
+/// without the address and length it was asked about.
+std::string GranuleErr(const char* what, const void* at, std::size_t len, std::size_t granule, int e) {
+  char buf[256];
+  std::snprintf(buf, sizeof buf, "%s: %s (errno %d) at %p len %zu (granule %zu)", what,
+                std::strerror(e), e, at, len, granule);
+  return buf;
+}
+
 std::size_t RoundUpPages(std::uint32_t at, std::size_t len) {
   return (static_cast<std::size_t>(at & (kGuestPage - 1)) + len + kGuestPage - 1) >> kGuestPageShift;
 }
@@ -127,6 +136,7 @@ std::unique_ptr<GuestMemory> GuestMemory::Create(std::size_t window_bytes, const
   // chunking before shipping; see the note in docs/30. Not premature here: nothing maps more than
   // a module yet, and a chunked table would make the mixed-granule logic harder to read.
   self->pages_.resize(window_bytes / kGuestPage);
+  self->live_granules_.assign((window_bytes >> model.host_page_shift) + 1, false);
   return self;
 }
 
@@ -361,12 +371,25 @@ bool GuestMemory::RebalanceGranule(std::size_t granule, std::string* err,
     if (pages_[i].prot != kNone) live.push_back(i);
   }
   if (live.empty()) {
+    // A granule that never held a live page is still the reservation's PROT_NONE: withdrawing it is a
+    // no-op, and on iOS that redundant mprotect is refused with ENOMEM (measured at the first guard map
+    // of the host-entry window). The flag keeps the real withdrawal — after an unmap — unchanged.
+    if (granule < live_granules_.size() && !live_granules_[granule]) return true;
     if (mprotect(granule_host, GranuleBytes(), PROT_NONE) != 0) {
-      if (err) *err = SysErr("withdrawing an empty granule failed", errno);
-      return false;
+      const int mp_errno = errno;
+      // MAP_FIXED replaces the range with a fresh PROT_NONE reservation. It is the same end state, and a
+      // path the platform honors when the protection change itself is refused.
+      void* got = ::mmap(granule_host, GranuleBytes(), PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+      if (got != granule_host) {
+        if (err) *err = GranuleErr("withdrawing an empty granule failed (mprotect and MAP_FIXED)",
+                                   granule_host, GranuleBytes(), granule, mp_errno);
+        return false;
+      }
     }
+    if (granule < live_granules_.size()) live_granules_[granule] = false;
     return true;
   }
+  if (granule < live_granules_.size()) live_granules_[granule] = true;
 
   const unsigned prot = pages_[live.front()].prot;
   bool uniform = true;
@@ -493,7 +516,7 @@ bool GuestMemory::RebalanceGranule(std::size_t granule, std::string* err,
       }
     }
     if (mprotect(granule_host, GranuleBytes(), ToHostProt(prot)) != 0) {
-      if (err) *err = SysErr("applying in-place granule protection failed", errno);
+      if (err) *err = GranuleErr("applying in-place granule protection failed", granule_host, GranuleBytes(), granule, errno);
       return false;
     }
     for (std::size_t i : live) {
@@ -543,7 +566,7 @@ bool GuestMemory::RebalanceGranuleOutOfLine(std::size_t granule, std::string* er
   if (mprotect(granule_host, GranuleBytes(), PROT_NONE) != 0) {
     // Unchecked once, and the failure mode was exactly the one the comment below promises cannot
     // happen: the table said the granule was withdrawn while the host pages kept live permissions.
-    if (err) *err = SysErr("withdrawing the window granule failed", errno);
+    if (err) *err = GranuleErr("withdrawing the window granule failed", granule_host, GranuleBytes(), granule, errno);
     return false;
   }
 

@@ -195,6 +195,10 @@ class GuestMemory {
   unsigned real_page_shift_ = kGuestPageShift;
   AddressModel::Kind kind_ = AddressModel::kFlatIdentity;
   std::vector<Page> pages_;
+  /// Granules that have held (or now hold) a live page since the reservation. A granule that never has
+  /// is still PROT_NONE from the window reservation, so withdrawing it is a no-op — and on iOS that
+  /// redundant mprotect is refused with ENOMEM (measured), which is why it is not made.
+  std::vector<bool> live_granules_;
   std::vector<OutOfLine> out_of_line_;
   /// Descriptors duplicated from the `MapFile` arguments, closed with the instance. See `MapFile`: the
   /// caller may close its own fd as soon as the mapping exists, and a later re-granulation still needs
