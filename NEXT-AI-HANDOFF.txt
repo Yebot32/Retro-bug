@@ -547,3 +547,18 @@ DATA HYGIENE:
   permissions in the page table, so the host protection is defence in depth, not the mechanism).
 - Android unaffected: guest memory 190, guest process 161, boot 47, tier-diff 1039, 0 failures.
 - **Artifact:** 1,984,215 bytes, SHA-256 `6ca4d76dba761f312e1304a14a69340fd4f57978bca8c5e3d2546022c820c590`.
+
+1n. 2026-10-26 (iOS S1g) — the window was never reserved: MAP_FAILED is not nullptr
+---------------------------------------------------------------------------
+- **The probe was the answer:** `probe: 4 GiB reservation failed (errno 12)` — iOS refuses one 4 GiB
+  PROT_NONE mapping. The boot had continued anyway, and the error's address (0xff600000 with granule
+  261504 ⇒ base 0) proved why: `platform::ReserveWindow` returned `MAP_FAILED`, `GuestMemory::Create`
+  compared it against `nullptr`, and the alignment `(raw + page-1) & ~(page-1)` wrapped it to zero. Every
+  later mprotect/MAP_FIXED named a low address that was never ours.
+- **Fix:** both reserve implementations return nullptr on MAP_FAILED; Create also refuses MAP_FAILED and a
+  zero-aligned base; the iOS session tries 4G, 3G, 2G, 1.5G, 1G, 768M, 512M at creation and boots in the
+  largest window the device grants (logged: `window: N MiB is reservable; using it`). The probe now runs on
+  the chosen window and logs mprotect/MAP_FIXED results.
+- Android unchanged: platform 29, guest memory 190, guest process 161, boot 47, tier-diff 1039.
+- **Artifact:** 1,985,148 bytes, SHA-256 `67bf76455dd644e4583c15fe2f853de862601a3fe5b32511c6c3b968f7fb6030`
+  (commit 8fe316f). Next device run: check the window/probe lines, then the first guest-side stop.
