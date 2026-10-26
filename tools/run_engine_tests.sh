@@ -42,7 +42,7 @@ ADB="$SDK/platform-tools/adb.exe"
 
 # One list for build, push and run: a suite that is missing here silently does not execute, which is
 # the least useful kind of green.
-SUITES="rb_platform_tests rb_zip_tests rb_table_java_tests rb_interval_compat_tests rb_variant_compat_tests rb_guest_memory_tests rb_guest_elf_tests rb_linker_tests rb_isa_front_end_tests rb_exec_census_tests rb_exec_interp_tests rb_abi_call_tests rb_abi_jni_tests rb_exec_tier_diff_tests rb_diag_tests rb_syscall_monitor_tests rb_codecache_tests rb_profile_tests rb_guest_process_tests rb_guest_thread_tests rb_jni_forward_tests rb_inbound_tests rb_thunk_tests rb_host_io_tests rb_sles_tests rb_gl_thunk_tests dynarmic_tests"
+SUITES="rb_platform_tests rb_zip_tests rb_apk_assets_tests rb_table_java_tests rb_interval_compat_tests rb_variant_compat_tests rb_guest_memory_tests rb_guest_elf_tests rb_linker_tests rb_isa_front_end_tests rb_exec_census_tests rb_exec_interp_tests rb_abi_call_tests rb_abi_jni_tests rb_exec_tier_diff_tests rb_diag_tests rb_syscall_monitor_tests rb_codecache_tests rb_profile_tests rb_guest_process_tests rb_guest_thread_tests rb_jni_forward_tests rb_inbound_tests rb_thunk_tests rb_host_io_tests rb_sles_tests rb_gl_thunk_tests dynarmic_tests"
 # The boot lane owns an `Inbound`, which only exists on the host architectures that can run the guest.
 if [ "$ABI" = "arm64-v8a" ]; then SUITES="$SUITES rb_host_boot_tests"; fi
 # Lanes that are red on purpose because every failure names a real gap (a Tier I refusal, an unlinked

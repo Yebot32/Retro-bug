@@ -205,3 +205,7 @@ endif()
 # no device, no fixtures — so this lane runs wherever the tree builds.
 add_executable(rb_table_java_tests table_java_test.cpp)
 target_link_libraries(rb_table_java_tests PRIVATE rb_java)
+
+# S1: the APK byte-stream view the iOS AAsset thunks read through. No guest, no device.
+add_executable(rb_apk_assets_tests apk_assets_test.cpp)
+target_link_libraries(rb_apk_assets_tests PRIVATE rb_loader)
