@@ -175,6 +175,74 @@ void InstallAndroidBase(TableJava& j, AndroidEnv env) {
                    return static_cast<std::uint64_t>(f.NewJavaString(U(buf)));
                  });
 
+  // ---- java/lang/Throwable and the throwables the profiles and guests name. A native that checks
+  // FindClass("java/lang/Error") after a failed Java call needs these to exist; a missing class made the
+  // throw itself fail. The hierarchy mirrors Android's, so IsAssignableFrom answers a catch-shaped query.
+  const auto define_throwable = [&j](const std::string& cls, const std::string& super) {
+    j.DefineClass(cls, super);
+    j.DefineField(cls, "message", "Ljava/lang/String;", false);
+    j.DefineMethod(cls, "<init>", "()V", false,
+                   [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+    j.DefineMethod(cls, "<init>", "(Ljava/lang/String;)V", false,
+                   [](TableJava& f, int self, const std::vector<std::uint64_t>& a) {
+                     f.PutField(self, "message", a.empty() ? 0u : a[0]);
+                     return std::uint64_t{0};
+                   });
+    j.DefineMethod(cls, "getMessage", "()Ljava/lang/String;", false,
+                   [](TableJava& f, int self, const std::vector<std::uint64_t>&) -> std::uint64_t {
+                     const auto message = static_cast<Ref>(f.FieldOf(self, "message"));
+                     if (message != 0) return message;
+                     const auto text = f.StringOf(self);  // SetPending keeps its message on the object
+                     return text.empty() ? 0u : static_cast<std::uint64_t>(f.NewJavaString(text));
+                   });
+    j.DefineMethod(cls, "getLocalizedMessage", "()Ljava/lang/String;", false,
+                   [](TableJava& f, int self, const std::vector<std::uint64_t>&) -> std::uint64_t {
+                     const auto message = static_cast<Ref>(f.FieldOf(self, "message"));
+                     if (message != 0) return message;
+                     const auto text = f.StringOf(self);
+                     return text.empty() ? 0u : static_cast<std::uint64_t>(f.NewJavaString(text));
+                   });
+    j.DefineMethod(cls, "toString", "()Ljava/lang/String;", false,
+                   [cls](TableJava& f, int self, const std::vector<std::uint64_t>&) {
+                     std::u16string out(cls.begin(), cls.end());
+                     const auto message = static_cast<Ref>(f.FieldOf(self, "message"));
+                     const std::u16string text = message != 0 ? f.StringOf(f.ObjectOf(message)) : f.StringOf(self);
+                     if (!text.empty()) {
+                       out += u": ";
+                       out += text;
+                     }
+                     return static_cast<std::uint64_t>(f.NewJavaString(out));
+                   });
+    j.DefineMethod(cls, "printStackTrace", "()V", false,
+                   [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+    j.DefineMethod(cls, "getCause", "()Ljava/lang/Throwable;", false,
+                   [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+    j.DefineMethod(cls, "fillInStackTrace", "()Ljava/lang/Throwable;", false,
+                   [](TableJava& f, int self, const std::vector<std::uint64_t>&) {
+                     return static_cast<std::uint64_t>(f.MakeRef(self));
+                   });
+  };
+  define_throwable("java/lang/Throwable", "java/lang/Object");
+  define_throwable("java/lang/Exception", "java/lang/Throwable");
+  define_throwable("java/lang/Error", "java/lang/Throwable");
+  define_throwable("java/lang/RuntimeException", "java/lang/Exception");
+  define_throwable("java/lang/LinkageError", "java/lang/Error");
+  define_throwable("java/lang/NoClassDefFoundError", "java/lang/LinkageError");
+  define_throwable("java/lang/ClassNotFoundException", "java/lang/Exception");
+  define_throwable("java/lang/OutOfMemoryError", "java/lang/Error");
+  define_throwable("java/lang/StackOverflowError", "java/lang/Error");
+  define_throwable("java/lang/IllegalStateException", "java/lang/RuntimeException");
+  define_throwable("java/lang/IllegalArgumentException", "java/lang/RuntimeException");
+  define_throwable("java/lang/NullPointerException", "java/lang/RuntimeException");
+  define_throwable("java/lang/ArithmeticException", "java/lang/RuntimeException");
+  define_throwable("java/lang/UnsupportedOperationException", "java/lang/RuntimeException");
+  define_throwable("java/lang/ClassCastException", "java/lang/RuntimeException");
+  define_throwable("java/lang/IndexOutOfBoundsException", "java/lang/RuntimeException");
+  define_throwable("java/lang/StringIndexOutOfBoundsException", "java/lang/IndexOutOfBoundsException");
+  define_throwable("java/lang/ArrayIndexOutOfBoundsException", "java/lang/IndexOutOfBoundsException");
+  define_throwable("java/lang/NumberFormatException", "java/lang/IllegalArgumentException");
+  define_throwable("java/lang/InterruptedException", "java/lang/Exception");
+
   // ---- java/lang/Integer: parse/format, and the boxed form a game stores in collections.
   j.DefineClass("java/lang/Integer", "java/lang/Object");
   j.DefineField("java/lang/Integer", "value", "I", false);

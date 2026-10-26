@@ -818,3 +818,18 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
   OpenSL failure semantics) from the binary; their findings decide whether a CoreText text renderer and a
   fake-engine vtable are needed before the first frame.
 - Verified: `rb_table_java_tests` 41 on the tablet; CI builds the IPA (c987fa1).
+
+### 2026-10-26 — iOS S1m: the DLGE app singleton, and the second Java load
+- Disassembled KitKat's two libraries. `libdlgl.so:dlxSurfaceChanged` (0x37410) never creates the app:
+  it copies `DLApp::_currentInstance` and logs "something wrong, app is null" when that is zero.
+  `libandroidkitkat.so:JNI_OnLoad` (0x2b574) is the writer — `new Main`, whose constructor calls
+  `DLApp::DLApp` and stores `this` in `_currentInstance`. The DEX's `AndroidKitKatActivity.<clinit>`
+  loads `dlgl` then `androidkitkat`; the iOS session booted only the first.
+- Added `Boot::BootJavaLibraries` (shared by `rb_runtime_boot` and the iOS session): for a DLGE APK it
+  boots `libdlgl.so` first, then every bundled library whose DT_NEEDED reaches one already in the order.
+  The iOS profile choice is now the APK's contents (`BundlesDlgl`) rather than the library's name.
+- Added the Throwable family to the Android base profile (`Error`, `NoClassDefFoundError`, ...): the
+  fault path's `FindClass("java/lang/Error")` now resolves instead of queueing a second throwable.
+- The tablet bootcheck of the same APK stops earlier, at `RegisterNatives: null class`: its ART
+  `FindClass` runs on the launcher's loader, not the game's. That is the diagnostic harness, not the
+  installed game — noted in the handoff so it is not mistaken for the product path.

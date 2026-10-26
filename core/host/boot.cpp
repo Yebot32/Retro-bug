@@ -382,6 +382,87 @@ BootResult Boot::BootLibrary(const std::string& apk, const std::string& lib) {
   return res;
 }
 
+std::vector<std::string> Boot::BundledLibraries(const std::string& apk) {
+  std::vector<std::string> names;
+  std::string err;
+  auto zip = rb::loader::ZipReader::OpenFile(apk, &err);
+  if (!zip) return names;
+  const std::string prefix = "assets/rb32/";
+  for (const std::string& entry : zip->Names()) {
+    if (entry.rfind(prefix, 0) != 0 || entry.size() <= prefix.size() + 3 ||
+        entry.compare(entry.size() - 3, 3, ".so") != 0) {
+      continue;
+    }
+    const std::string base = entry.substr(prefix.size());
+    if (base.find('/') == std::string::npos) names.push_back(base);
+  }
+  std::sort(names.begin(), names.end());
+  return names;
+}
+
+bool Boot::BundlesDlgl(const std::string& apk) {
+  std::string err;
+  auto zip = rb::loader::ZipReader::OpenFile(apk, &err);
+  return zip != nullptr && zip->Has("assets/rb32/libdlgl.so");
+}
+
+BootResult Boot::BootJavaLibraries(const std::string& apk, const std::string& lib) {
+  // Java's own order, from AndroidKitKatActivity.<clinit>: System.loadLibrary("dlgl") then
+  // System.loadLibrary("androidkitkat"). The second library is the app: its JNI_OnLoad constructs Main and
+  // stores it in DLApp::_currentInstance, which libdlgl only reads. A DLGL APK ships both, and a library
+  // whose DT_NEEDED reaches one already in the order is part of that same Java load sequence.
+  std::vector<std::string> order;
+  const auto add = [&order](const std::string& name) {
+    if (std::find(order.begin(), order.end(), name) == order.end()) order.push_back(name);
+  };
+  add(lib);
+  if (BundlesDlgl(apk)) {
+    if (lib != "libdlgl.so") add("libdlgl.so");
+    std::string err;
+    auto zip = rb::loader::ZipReader::OpenFile(apk, &err);
+    if (zip) {
+      const auto bundled = BundledLibraries(apk);
+      for (bool changed = true; changed;) {
+        changed = false;
+        for (const std::string& name : bundled) {
+          if (std::find(order.begin(), order.end(), name) != order.end()) continue;
+          auto image = zip->Read("assets/rb32/" + name, &err);
+          if (!image) continue;
+          for (const std::string& need : rb::loader::NeededSonames(*image)) {
+            if (std::find(order.begin(), order.end(), need) != order.end()) {
+              add(name);
+              changed = true;
+              break;
+            }
+          }
+        }
+      }
+    }
+    // Boot dlgl first, whatever the caller picked: its JNI_OnLoad sets the JavaVM/JNIEnv the engine's Java
+    // calls use, and registers the natives the DLGL surface calls.
+    std::stable_sort(order.begin(), order.end(), [](const std::string& a, const std::string& b) {
+      return a == "libdlgl.so" && b != "libdlgl.so";
+    });
+  }
+  if (order.size() > 1) {
+    std::string line = "java: loads";
+    for (const std::string& name : order) line += " " + name;
+    Live(line + " (the APK's Java loads every library it ships, in this order)");
+  }
+  BootResult all;
+  for (const std::string& name : order) {
+    const BootResult one = BootLibrary(apk, name);
+    all.ok = one.ok;
+    all.already = one.already;
+    if (!one.report.empty()) {
+      if (!all.report.empty() && all.report.back() != '\n') all.report += '\n';
+      all.report += one.report;
+    }
+    if (!one.ok) return all;
+  }
+  return all;
+}
+
 std::uint32_t Boot::DlHandle(const rb::loader::GuestModule* m) {
   for (std::size_t i = 0; i < dl_handles_.size(); ++i) {
     if (dl_handles_[i] == m) return kDlModuleBase | static_cast<std::uint32_t>(i);

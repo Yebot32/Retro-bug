@@ -95,6 +95,16 @@ class Boot {
   /// failure after guest state changed poisons the process for every later boot.
   BootResult BootLibrary(const std::string& apk, const std::string& lib);
 
+  /// Boots the libraries the APK's Java loads, in its order. A DLGL title's static initializer loads the
+  /// engine first and then the game library that carries the app and registers it in its JNI_OnLoad; booting
+  /// only the engine leaves the app singleton null. Every other APK is just `BootLibrary(lib)`.
+  BootResult BootJavaLibraries(const std::string& apk, const std::string& lib);
+
+  /// The `.so` files an APK carries directly under `assets/rb32/`, by file name, sorted.
+  static std::vector<std::string> BundledLibraries(const std::string& apk);
+  /// True when the APK carries `assets/rb32/libdlgl.so` (the DLGE engine family).
+  static bool BundlesDlgl(const std::string& apk);
+
   /// A line that belongs in the live log and, while a boot is collecting one, in its report.
   void Live(const std::string& line);
 

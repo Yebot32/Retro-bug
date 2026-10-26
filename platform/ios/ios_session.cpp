@@ -58,6 +58,7 @@ struct RbIosSession {
   std::unique_ptr<rb::platform::ios::IosHost> host;                  ///< the guest's import answers
   std::unique_ptr<rb::platform::ios::Cocos2dxBootstrap> game;
   std::unique_ptr<rb::platform::ios::DlglBootstrap> dlgl;  ///< KitKat Challenge's DLGE engine, when that is the lib
+  bool dlgl_apk = false;  ///< the APK ships assets/rb32/libdlgl.so: boot the whole DLGE Java load order
   bool booted = false;  ///< render thread only
 
   std::thread render;
@@ -222,7 +223,7 @@ bool RbIosSession::Boot(std::string* err) {
   };
 
   boot = std::make_unique<rb::host::Boot>(std::move(cfg));
-  const rb::host::BootResult result = boot->BootLibrary(apk, lib);
+  const rb::host::BootResult result = boot->BootJavaLibraries(apk, lib);
   if (!result.ok) {
     *err = result.report.empty() ? std::string{"the boot failed"} : result.report;
     // A failed boot leaves a half-initialised process; dropping it lets the next play start clean.
@@ -237,7 +238,7 @@ bool RbIosSession::Boot(std::string* err) {
     host.reset();
     return false;
   }
-  if (lib == "libdlgl.so") {
+  if (dlgl_apk || lib == "libdlgl.so") {
     dlgl = std::make_unique<rb::platform::ios::DlglBootstrap>(*java, lib,
                                                               [self](const std::string& line) { self->Log(line); });
   } else {
@@ -283,7 +284,8 @@ extern "C" RbIosSession* rb_ios_create(const char* apk_path, const char* lib_nam
   }
   s->data_dir = data_dir != nullptr ? data_dir : "";
   s->client_version = client_version == 1 ? 1 : 2;
-  if (s->lib == "libdlgl.so") s->client_version = 1;  // KitKat's DLGE draws with GLES1
+  s->dlgl_apk = rb::host::Boot::BundlesDlgl(s->apk);
+  if (s->dlgl_apk || s->lib == "libdlgl.so") s->client_version = 1;  // KitKat's DLGE draws with GLES1
   if (!s->data_dir.empty()) {
     ::mkdir((s->data_dir + "/files").c_str(), 0755);
     ::mkdir((s->data_dir + "/cache").c_str(), 0755);

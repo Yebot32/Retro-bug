@@ -359,7 +359,7 @@ extern "C" int rb_runtime_boot(JavaVM* vm, const char* apk_path, const char* lib
     if (p.vm == nullptr) p.vm = vm;  // one VM per process: the first stub's
     if (!p.boot) p.boot = std::make_unique<rb::host::Boot>(MakeConfig(p));
   }
-  const rb::host::BootResult res = p.boot->BootLibrary(apk, lib);
+  const rb::host::BootResult res = p.boot->BootJavaLibraries(apk, lib);
   if (res.already) return JNI_VERSION_1_6;
 
   const std::string pkg = PackageName();

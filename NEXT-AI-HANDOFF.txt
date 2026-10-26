@@ -638,3 +638,24 @@ DATA HYGIENE:
 - **First-run risks for KitKat:** EAGL `kEAGLRenderingAPIOpenGLES1` availability on iOS 18 (if nil, the
   log says "EAGLContext creation failed" and ES1 needs a fallback), JNI_OnLoad registering on our empty
   DLGL classes, and the AssetManager hand-off.
+
+1t. 2026-10-26 (iOS S1m) — KitKat's null app: the game library's JNI_OnLoad never ran
+---------------------------------------------------------------------------
+- The black screen was not a GL problem. `dlxSurfaceChanged` (libdlgl.so, 0x37410) only *reads*
+  `DLApp::_currentInstance`; the writer is `libandroidkitkat.so`'s JNI_OnLoad (0x2b574): it `new`s a
+  `Main`, whose constructor calls `DLApp::DLApp` and stores itself into `_currentInstance`. The APK's
+  `AndroidKitKatActivity.<clinit>` loads "dlgl" and then "androidkitkat"; our session booted only the
+  largest library (libdlgl), so the second load — and the app — never happened. The missing "creating
+  main app" line (tag tApp) in the log was the tell.
+- `rb::host::Boot::BootJavaLibraries` now mirrors that order: for a DLGE APK (it ships
+  assets/rb32/libdlgl.so) it boots libdlgl first, then every bundled library whose DT_NEEDED reaches one
+  already in the order. Both hosts call it — the Android runtime (`rb_runtime_boot`) and the iOS session.
+  The iOS session now picks the DLGL profile from the APK's contents, not the library's name.
+- `android_base` gained Throwable/Exception/Error/NoClassDefFoundError and the common throwables, so a
+  guest's FindClass("java/lang/Error") on an error path no longer turns into a second pending throw.
+- Android bootcheck note: on the tablet, libdlgl's JNI_OnLoad stops at RegisterNatives with a null class —
+  the launcher's ART FindClass cannot see the game's classes from a native frame. That is the bootcheck
+  harness, not the installed path (whose System.loadLibrary frame carries the game's loader), and it is
+  why this proof came from the binary rather than the tablet.
+- Next: the IPA with this boot order, then the first surfaceChanged with a non-null app — expect asset
+  reads (AAssetManager_open of default/textures/...) and the ES1 texture path to be the next layer.
