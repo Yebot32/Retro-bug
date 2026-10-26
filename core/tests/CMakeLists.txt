@@ -200,3 +200,8 @@ if(TARGET rb_inbound)
     RB_LINK_MID_PATH="/data/local/tmp/librbmid.so"
     RB_CTOR_FAULT_PATH="/data/local/tmp/librbctorfault.so")
 endif()
+
+# S1: the iOS Java replacement. `TableJava` plus the base Android profile are pure host code — no guest,
+# no device, no fixtures — so this lane runs wherever the tree builds.
+add_executable(rb_table_java_tests table_java_test.cpp)
+target_link_libraries(rb_table_java_tests PRIVATE rb_java)
