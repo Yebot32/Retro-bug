@@ -72,7 +72,8 @@ jobs:
 
   ios-ipa:
     name: iOS — unsigned IPA
-    runs-on: macos-14
+    # XcodeGen writes the current project format; macos-15's Xcode 16 reads it (macos-14's 15.4 does not).
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
         with:
