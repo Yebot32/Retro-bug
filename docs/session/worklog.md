@@ -785,3 +785,22 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
   needs a bootcheck APK (`tools/make_bootcheck_apk.sh`); a store APK has `lib/armeabi-v7a/` and no bionic.
   Bundling bionic into the app is the next step for "import in place".
 - **Verified:** device gate 30/30, 0 failures; macOS host lanes 26/25/37/41; the IPA job builds and uploads.
+
+### 2026-10-26 — iOS S1e: the import/Files evidence, and a log worth sending
+- **Report:** on the iPad, the "+" picker showed the .apk but a tap did nothing; the app's Documents folder
+  was absent in Files; the app felt unstable.
+- **Two agents, one answer each.** Research: Files hides an app's Documents folder **while it is empty**
+  (the README file now prevents that), and SwiftUI's `.fileImporter` has a known real-device failure where
+  a tap is swallowed even with `.item`; the UIKit `UIDocumentPickerViewController(asCopy:)` is the reliable
+  path. Review: the boot ran on the main thread inside `makeUIView`; `rb_ios_start` could assign over a
+  joinable `std::thread` after an error (terminate); resize re-ran nativeInit without a pause; nothing
+  observed backgrounding.
+- **Fixes:** UIKit picker with logged delegate callbacks; crash-safe `retrobug.log` (engine lines included
+  through `rb_ios_create(log_path)`) and a Share log button; README in Games; build marker (version, build,
+  git commit) in the UI and log; boot deferred to the render thread; join-before-restart; error/touch/frame
+  reset per start; exception guards; `rb_ios_pause/resume` applied on the render thread via a flag, wired
+  to willResignActive/didBecomeActive.
+- **Artifact:** 1,983,433 bytes, SHA-256 `4af3b1d0c937ae5c8961d5178d3817f120ec910854a633b1966528d4b16a61d7`.
+- **Still to confirm on device:** whether the picker now delivers `.apk` (log: "picked"/"copied"), whether
+  "On My iPhone › RetroBug" appears with the README present, and the first boot's failure point from the
+  log (ES2/ES1 acceptance, AAsset, Cocos order).

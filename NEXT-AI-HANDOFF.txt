@@ -503,3 +503,27 @@ DATA HYGIENE:
 - **Next:** sign and install the IPA, import `blockyroads.bootcheck.apk`, set `libgame.so`, Play; read the
   on-screen error label. Then fix from that report. After the first frame: bundle the bionic images (store
   APK in place), audio, and the Unity profile (S2).
+
+1l. 2026-10-26 (iOS S1e) — evidence-first fix for import/Files, and the log the user can send
+---------------------------------------------------------------------------
+- **User report on the real device:** "+" opens Files, tapping the .apk does nothing; the app's folder is
+  not in Files; the app feels unstable.
+- **Research (two agents, sources in the worklog):** (1) Files hides an app's Documents folder while it is
+  *empty* — this matches the missing folder exactly; key set was already right (UIFileSharingEnabled +
+  LSSupportsOpeningDocumentsInPlace). (2) SwiftUI's `.fileImporter` has a real-device failure mode where a
+  tap neither dismisses nor calls the completion, reproduced by others with `[.item]` — the UIKit
+  `UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: true)` is the fix.
+- **What changed:** `DocumentPicker.swift` (UIKit, both delegate callbacks logged); `AppLog.swift` appends
+  and flushes every line to `Documents/retrobug.log`, and the engine writes its own report lines to the
+  same file (`rb_ios_create` takes `log_path`); "Share log" in the library; `Games/README.txt` created at
+  launch (so the folder is never empty); the footer + log carry version, build and git commit.
+- **Stability fixes from the review:** the boot moved from `makeUIView` (main thread, watchdog risk) to the
+  render thread's first run — which also keeps the guest main thread's host binding on a live thread;
+  `rb_ios_start` joins an exited thread before assigning a new one (assigning over a joinable std::thread
+  is `std::terminate`); errors/touches/frames are reset per start; host exceptions are caught; background/
+  foreground flips a flag the render thread applies as `nativeOnPause/Resume` (`rb_ios_pause/resume`).
+- **Artifact:** `RetroBug-unsigned.ipa`, 1,983,433 bytes, SHA-256
+  `4af3b1d0c937ae5c8961d5178d3817f120ec910854a633b1966528d4b16a61d7` (run 40268988258).
+- **What to ask the user for next:** the footer's commit (`0.1 (3) · <commit>`; older = stale build), and
+  `retrobug.log` via Share log after reproducing. The log says whether the picker presented, whether a pick
+  callback fired, whether the copy failed, and the engine's boot lines.
