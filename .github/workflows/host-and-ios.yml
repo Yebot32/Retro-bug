@@ -69,3 +69,25 @@ jobs:
       # data, as iOS requires.
       - name: Build for iOS
         run: cmake --build build/ios --target rb_platform rb_mem rb_loader rb_syscall rb_gfx rb_java rb_host rb_ios -j 4
+
+  ios-ipa:
+    name: iOS — unsigned IPA
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      # Configures and builds the engine archive, generates the Xcode project and packages Payload/*.app.
+      # Signing is off: the artifact is for AltStore/SideStore/a personal team to sign.
+      - name: Build the unsigned IPA
+        run: bash tools/build_ios_ipa.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RetroBug-unsigned-ipa
+          path: build/ios/ipa/RetroBug-unsigned.ipa
+          if-no-files-found: error

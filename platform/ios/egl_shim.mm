@@ -242,8 +242,9 @@ void EglShim::SetLayer(void* ca_eagl_layer, int client_version) {
   }
   if (ca_eagl_layer != nullptr && layer_ != ca_eagl_layer) {
     layer_ = const_cast<void*>(CFBridgingRetain((__bridge id)ca_eagl_layer));
-    drawable_ready_ = false;
   }
+  // A restart after a resize or a stop keeps the same layer but needs the drawable rebuilt.
+  if (ca_eagl_layer != nullptr) drawable_ready_ = false;
   if (client_version == 1 || client_version == 2) client_version_ = client_version;
 }
 

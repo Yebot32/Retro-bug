@@ -1,0 +1,39 @@
+# RetroBug iOS app (S1). SPDX-License-Identifier: Apache-2.0
+#
+# XcodeGen input: `cd ios && xcodegen generate`. The engine is one static archive (`librbengine.a`) built by
+# CMake for iOS; hand it to the app with `RB_ENGINE_DIR=<dir containing librbengine.a>` as a build setting.
+name: RetroBug
+options:
+  bundleIdPrefix: com.retrobug
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+
+targets:
+  RetroBug:
+    type: application
+    platform: iOS
+    sources:
+      - path: RetroBug
+        excludes:
+          - "Info.plist"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.retrobug.ios
+        INFOPLIST_FILE: RetroBug/Info.plist
+        SWIFT_OBJC_BRIDGING_HEADER: RetroBug/Retrobug-Bridging-Header.h
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/../platform/ios"
+        LIBRARY_SEARCH_PATHS:
+          - "$(RB_ENGINE_DIR)"
+        OTHER_LDFLAGS:
+          - "-lrbengine"
+          - "-lz"
+          - "-lc++"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_VERSION: "5.0"
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGNING_REQUIRED: "NO"
+    dependencies:
+      - sdk: OpenGLES.framework
+      - sdk: QuartzCore.framework
