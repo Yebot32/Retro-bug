@@ -804,3 +804,17 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
 - **Still to confirm on device:** whether the picker now delivers `.apk` (log: "picked"/"copied"), whether
   "On My iPhone › RetroBug" appears with the README present, and the first boot's failure point from the
   log (ES2/ES1 acceptance, AAsset, Cocos order).
+
+### 2026-10-26 — iOS S1i: the next layer in one build (assets, audio, Java text)
+- After the scope booted and the stop named `dlopen`, the next layer was mapped statically before another
+  device run: `llvm-nm` on libgame.so (289 imports), its JNI signature strings, and the Android host
+  layer as the reference.
+- Added: AAssetDir listing over the APK; OpenSL ES answered by failing `slCreateEngine` cleanly (audio
+  silent; the four `SL_IID_*` are data imports and answer guest cells); Cocos2d-x Java classes
+  (Bitmap/GLSurfaceView/Renderer/Activity) and the listener/Context methods; a safe text entry point (no
+  native bitmap yet); `files/` and `cache/` under Application Support; the scope line now prints the window
+  the device granted.
+- Two agents are auditing the two hard remaining paths (Java text via Bitmap/Canvas and the exact
+  OpenSL failure semantics) from the binary; their findings decide whether a CoreText text renderer and a
+  fake-engine vtable are needed before the first frame.
+- Verified: `rb_table_java_tests` 41 on the tablet; CI builds the IPA (c987fa1).
