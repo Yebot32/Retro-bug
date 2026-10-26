@@ -23,6 +23,7 @@
 #include <vector>
 
 #include <sys/mman.h>
+#include <sys/stat.h>
 
 #include "cocos2dx_bootstrap.h"
 #include "egl_shim.h"
@@ -153,6 +154,7 @@ void Take(RbIosSession* s, int kind, int id, float x, float y) {
 bool RbIosSession::Boot(std::string* err) {
   rb::java::AndroidEnv env;
   env.package_name = "retrobug.game";
+  env.apk_path = apk;
   env.files_dir = data_dir + "/files";
   env.cache_dir = data_dir + "/cache";
   env.model = "iPad";
@@ -218,6 +220,10 @@ extern "C" RbIosSession* rb_ios_create(const char* apk_path, const char* lib_nam
   s->lib = lib_name;
   s->data_dir = data_dir != nullptr ? data_dir : "";
   s->client_version = client_version == 1 ? 1 : 2;
+  if (!s->data_dir.empty()) {
+    ::mkdir((s->data_dir + "/files").c_str(), 0755);
+    ::mkdir((s->data_dir + "/cache").c_str(), 0755);
+  }
   s->window_bytes = PickWindowBytes(s.get());
   s->Log("create: apk=" + s->apk + " lib=" + s->lib + " (boot deferred to the render thread)");
   return s.release();

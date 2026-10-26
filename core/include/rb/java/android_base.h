@@ -21,6 +21,7 @@ namespace rb::java {
 /// What the base profile needs to know about the device the app is running on.
 struct AndroidEnv {
   std::string package_name = "com.retrobug.game";
+  std::string apk_path;  ///< the APK the game was imported from (ApplicationInfo.sourceDir)
   std::string files_dir;
   std::string cache_dir;
   std::string model = "iPad";

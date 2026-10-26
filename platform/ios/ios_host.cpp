@@ -51,6 +51,14 @@ bool Waits(const std::string& name) {
 
 }  // namespace
 
+/// One AAssetDir: the immediate children under a prefix, in central-directory order, and the guest cell
+/// the next name is copied to (AAssetDir_getNextFileName returns a pointer valid until the next call).
+struct IosHost::DirState {
+  std::vector<std::string> names;
+  std::size_t next = 0;
+  std::uint32_t buffer = 0;
+};
+
  IosHost::~IosHost() = default;
 
 void* IosHost::HostSymbol(const std::string& name) {
@@ -302,16 +310,83 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
   });
   // Directory listing over an APK needs a per-manager cursor and a name filter; until it lands, answering
   // "no directory" makes an engine fall back to its own file list rather than fail.
-  AddSpecial("AAssetManager_openDir", [](exec::MachineState& s, std::string*) {
-    s.r[0] = 0;
+  AddSpecial("AAssetManager_openDir", [this](exec::MachineState& s, std::string*) {
+    if (!archive_) {
+      s.r[0] = 0;
+      return true;
+    }
+    std::string dir = GuestStringOrEmpty(p_.memory(), s.r[1]);
+    if (!dir.empty() && dir.front() == '/') dir.erase(0, 1);
+    if (dir.rfind("assets/", 0) != 0) dir = "assets/" + dir;
+    if (!dir.empty() && dir.back() != '/') dir.push_back('/');
+    auto state = std::make_unique<DirState>();
+    std::set<std::string> seen;
+    for (const std::string& name : archive_->Names()) {
+      if (name.size() <= dir.size() || name.compare(0, dir.size(), dir) != 0) continue;
+      const std::string rest = name.substr(dir.size());
+      const std::string child = rest.substr(0, rest.find('/'));
+      if (!child.empty() && seen.insert(child).second) state->names.push_back(child);
+    }
+    const std::uint32_t handle = handles_.Put(state.get());
+    dirs_[handle] = std::move(state);
+    s.r[0] = handle;
     return true;
   });
-  AddSpecial("AAssetDir_getNextFileName", [](exec::MachineState& s, std::string*) {
-    s.r[0] = 0;
+  AddSpecial("AAssetDir_getNextFileName", [this](exec::MachineState& s, std::string*) {
+    const auto it = dirs_.find(s.r[0]);
+    if (it == dirs_.end() || it->second->next >= it->second->names.size()) {
+      s.r[0] = 0;
+      return true;
+    }
+    DirState& d = *it->second;
+    const std::string& name = d.names[d.next++];
+    if (d.buffer == 0) {
+      std::string e;
+      d.buffer = p_.MapFree(256, mem::kRead | mem::kWrite, &e);
+      if (d.buffer == 0) {
+        if (log_) log_("assets: no guest memory for a directory name: " + e);
+        s.r[0] = 0;
+        return true;
+      }
+    }
+    p_.memory().Write(d.buffer, name.c_str(), name.size() + 1);
+    s.r[0] = d.buffer;
     return true;
   });
-  AddSpecial("AAssetDir_close", [](exec::MachineState& s, std::string*) {
-    s.r[0] = 0;
+  AddSpecial("AAssetDir_close", [this](exec::MachineState& s, std::string*) {
+    const auto it = dirs_.find(s.r[0]);
+    if (it != dirs_.end()) {
+      handles_.Forget(it->second.get());
+      dirs_.erase(it);
+    }
+    return true;
+  });
+
+  // ---- OpenSL ES: audio is silent for now. Failing the engine creation is the safe answer — Cocos2d-x
+  // logs it and runs without sound; a half-implemented engine would crash on the first vtable call. The
+  // four interface IDs are data imports, so each answers a guest cell holding a value.
+  {
+    std::string e;
+    const std::uint32_t cells = p_.MapFree(0x1000, mem::kRead | mem::kWrite, &e);
+    const char* const kIds[] = {"SL_IID_ANDROIDSIMPLEBUFFERQUEUE", "SL_IID_BUFFERQUEUE", "SL_IID_ENGINE",
+                                "SL_IID_PLAY"};
+    if (cells != 0) {
+      for (std::size_t i = 0; i < 4; ++i) {
+        const std::uint32_t value = 0x1000u + static_cast<std::uint32_t>(i * 4);
+        p_.memory().Write(cells + static_cast<std::uint32_t>(i * 4), &value, 4);
+        data_symbols_[kIds[i]] = cells + static_cast<std::uint32_t>(i * 4);
+      }
+    } else if (log_) {
+      log_("sles: no guest memory for the interface IDs: " + e);
+    }
+  }
+  AddSpecial("slCreateEngine", [this](exec::MachineState& s, std::string*) {
+    if (s.r[0] != 0) {
+      const std::uint32_t none = 0;
+      p_.memory().Write(s.r[0], &none, 4);
+    }
+    if (log_) log_("sles: slCreateEngine -> SL_RESULT_FEATURE_UNSUPPORTED (audio is silent on iOS for now)");
+    s.r[0] = 12;  // SL_RESULT_FEATURE_UNSUPPORTED
     return true;
   });
 
@@ -393,6 +468,8 @@ void IosHost::EmitLog(int priority, const std::string& tag, const std::string& t
 }
 
 std::optional<std::uint32_t> IosHost::Resolve(const std::string& name) {
+  // Data imports answer an address the guest reads, not a slot it calls.
+  if (const auto it = data_symbols_.find(name); it != data_symbols_.end()) return it->second;
   if (const auto it = slots_.find(name); it != slots_.end()) return p_.abi().SlotFor(it->second);
 
   const auto special = specials_.find(name);

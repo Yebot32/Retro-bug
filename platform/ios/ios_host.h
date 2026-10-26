@@ -75,6 +75,11 @@ class IosHost {
   std::unique_ptr<rb::loader::ApkArchive> archive_;
   int asset_manager_marker_ = 0;
   std::map<const rb::loader::ApkFile*, std::unique_ptr<rb::loader::ApkFile>> assets_;
+  /// Data imports (the OpenSL ES interface IDs): their guest address is a cell holding a value, not a
+  /// host slot — the guest loads the value rather than calling it.
+  std::map<std::string, std::uint32_t> data_symbols_;
+  struct DirState;
+  std::map<std::uint32_t, std::unique_ptr<DirState>> dirs_;
 };
 
 }  // namespace rb::platform::ios

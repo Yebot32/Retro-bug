@@ -401,11 +401,31 @@ void InstallAndroidBase(TableJava& j, AndroidEnv env) {
                  [](TableJava& f, int, const std::vector<std::uint64_t>&) {
                    return static_cast<std::uint64_t>(f.NewJavaString(u""));
                  });
+  j.DefineClass("android/content/pm/ApplicationInfo", "java/lang/Object");
+  j.DefineField("android/content/pm/ApplicationInfo", "packageName", "Ljava/lang/String;", false);
+  j.DefineField("android/content/pm/ApplicationInfo", "sourceDir", "Ljava/lang/String;", false);
+  j.DefineMethod("android/content/Context", "getString", "(I[Ljava/lang/Object;)Ljava/lang/String;", false,
+                 [](TableJava& f, int, const std::vector<std::uint64_t>&) {
+                   return static_cast<std::uint64_t>(f.NewJavaString(u""));
+                 });
+  j.DefineMethod("android/content/Context", "getApplicationInfo", "()Landroid/content/pm/ApplicationInfo;", false,
+                 [env](TableJava& f, int, const std::vector<std::uint64_t>&) {
+                   const Ref info = f.NewInstance("android/content/pm/ApplicationInfo");
+                   if (info != 0) {
+                     f.PutField(f.ObjectOf(info), "packageName", f.NewJavaString(U(env.package_name)));
+                     f.PutField(f.ObjectOf(info), "sourceDir", f.NewJavaString(U(env.apk_path)));
+                   }
+                   return static_cast<std::uint64_t>(info);
+                 });
   for (const char* name : {"onCreate", "onResume", "onPause", "onDestroy", "onStart", "onStop"}) {
     // Activity lifecycle hooks, called by the shell through the same tables a game would use.
     j.DefineMethod("android/app/Activity", name, "()V", false,
                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return static_cast<std::uint64_t>(0); });
   }
+  j.DefineMethod("android/app/Activity", "showDialog", "(Ljava/lang/String;Ljava/lang/String;)V", false,
+                 [](TableJava&, int, const std::vector<std::uint64_t>&) { return static_cast<std::uint64_t>(0); });
+  j.DefineMethod("android/app/Activity", "terminateProcess", "()V", false,
+                 [](TableJava&, int, const std::vector<std::uint64_t>&) { return static_cast<std::uint64_t>(0); });
   j.DefineMethod("android/app/Activity", "runOnUiThread", "(Ljava/lang/Runnable;)V", false,
                  [](TableJava&, int, const std::vector<std::uint64_t>&) { return static_cast<std::uint64_t>(0); });
   j.DefineMethod("android/app/Activity", "getWindowManager", "()Landroid/view/WindowManager;", false,
