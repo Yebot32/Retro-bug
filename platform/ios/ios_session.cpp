@@ -154,6 +154,7 @@ void Take(RbIosSession* s, int kind, int id, float x, float y) {
 }  // namespace
 
 bool RbIosSession::Boot(std::string* err) {
+  RbIosSession* self = this;
   rb::java::AndroidEnv env;
   env.package_name = "retrobug.game";
   env.apk_path = apk;
@@ -186,7 +187,6 @@ bool RbIosSession::Boot(std::string* err) {
     self->boot->inbound()->Dispatch({fn->tagged(), "VIIL", "nativeInitBitmapDC"}, args);
   };
 
-  RbIosSession* self = this;
   rb::host::BootConfig cfg;
   if (window_bytes != 0) cfg.window_bytes = window_bytes;
   cfg.ctor_tier = 1;      // iOS runs guest code on Tier I only
