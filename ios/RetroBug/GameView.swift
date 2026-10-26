@@ -90,16 +90,37 @@ final class GameUIView: UIView {
             statusLabel.topAnchor.constraint(equalTo: topAnchor, constant: 44),
         ])
         boot()
+        // The render thread stops drawing and calls the game's nativeOnPause/Resume itself; this only
+        // flips a flag, so a backgrounding app never blocks on the guest.
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(appWillResignActive), name: UIApplication.willResignActiveNotification,
+            object: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(appDidBecomeActive), name: UIApplication.didBecomeActiveNotification,
+            object: nil)
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
     deinit {
+        NotificationCenter.default.removeObserver(self)
         timer?.invalidate()
         if let s = session {
             rb_ios_stop(s)
             rb_ios_destroy(s)
         }
+    }
+
+    @objc private func appWillResignActive() {
+        guard let s = session else { return }
+        AppLog.write("game: app resign active -> pause")
+        rb_ios_pause(s)
+    }
+
+    @objc private func appDidBecomeActive() {
+        guard let s = session else { return }
+        AppLog.write("game: app active -> resume")
+        rb_ios_resume(s)
     }
 
     private static func dataDir() -> String {

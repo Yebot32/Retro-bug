@@ -14,19 +14,28 @@ extern "C" {
 
 typedef struct RbIosSession RbIosSession;
 
-/// Boots `lib_name` from `apk_path`. `data_dir` is the app's writable directory (the game's files/ and
-/// cache/ live under it). `log_path`, when not NULL, receives every engine/report line (appended, flushed per
-/// line), so a failed boot is diagnosable from the file. `client_version` is the GLES version the game asks
-/// for (2 for Cocos2d-x 3.x). NULL with `err` filled when the boot fails; `err_len` includes the NUL.
+/// Creates a session for `lib_name` in `apk_path`. The boot happens on the render thread when rb_ios_start
+/// is called (so the UI never blocks on it); failures arrive through rb_ios_last_error and the log file.
+/// `data_dir` is the app's writable directory (the game's files/ and cache/ live under it). `log_path`,
+/// when not NULL, receives every engine/report line (appended, flushed per line), so a failed boot is
+/// diagnosable from the file. `client_version` is the GLES version the game asks for (2 for Cocos2d-x 3.x).
+/// NULL with `err` filled only for a bad argument; `err_len` includes the NUL.
 RbIosSession* rb_ios_create(const char* apk_path, const char* lib_name, const char* data_dir,
                             const char* log_path, int client_version, char* err, int err_len);
 
-/// Starts the render thread over `layer` (a CAEAGLLayer*) with a drawable of `width`x`height` pixels:
-/// makes the EGL context current, calls the game's nativeInit, then draws. 0 with `err` on failure.
+/// Starts the render thread over `layer` (a CAEAGLLayer*) with a drawable of `width`x`height` pixels. On
+/// its first run the thread boots the library, then makes the EGL context current, calls the game's
+/// nativeInit and draws. 0 with `err` only when the thread could not be started; boot/render failures are
+/// reported through rb_ios_last_error/the log.
 int rb_ios_start(RbIosSession* s, void* layer, int width, int height, char* err, int err_len);
 
 /// Stops and joins the render thread (the boot and its guest process stay alive; start may be called again).
 void rb_ios_stop(RbIosSession* s);
+
+/// The app moved to the background/foreground: the render thread stops drawing and calls the game's
+/// nativeOnPause/nativeOnResume on itself (never on the caller's thread).
+void rb_ios_pause(RbIosSession* s);
+void rb_ios_resume(RbIosSession* s);
 
 /// Stops, then tears everything down. Safe on NULL.
 void rb_ios_destroy(RbIosSession* s);
