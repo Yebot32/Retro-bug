@@ -15,10 +15,11 @@ extern "C" {
 typedef struct RbIosSession RbIosSession;
 
 /// Boots `lib_name` from `apk_path`. `data_dir` is the app's writable directory (the game's files/ and
-/// cache/ live under it). `client_version` is the GLES version the game asks for (2 for Cocos2d-x 3.x).
-/// NULL with `err` filled when the boot fails; `err_len` includes the NUL.
-RbIosSession* rb_ios_create(const char* apk_path, const char* lib_name, const char* data_dir, int client_version,
-                            char* err, int err_len);
+/// cache/ live under it). `log_path`, when not NULL, receives every engine/report line (appended, flushed per
+/// line), so a failed boot is diagnosable from the file. `client_version` is the GLES version the game asks
+/// for (2 for Cocos2d-x 3.x). NULL with `err` filled when the boot fails; `err_len` includes the NUL.
+RbIosSession* rb_ios_create(const char* apk_path, const char* lib_name, const char* data_dir,
+                            const char* log_path, int client_version, char* err, int err_len);
 
 /// Starts the render thread over `layer` (a CAEAGLLayer*) with a drawable of `width`x`height` pixels:
 /// makes the EGL context current, calls the game's nativeInit, then draws. 0 with `err` on failure.

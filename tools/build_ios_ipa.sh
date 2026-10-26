@@ -23,9 +23,11 @@ cmake --build "$BUILD" --target rb_engine_ios -j "$(sysctl -n hw.ncpu)"
 
 ( cd "$ROOT/ios" && xcodegen generate )
 
+COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 xcodebuild -project "$ROOT/ios/RetroBug.xcodeproj" -scheme RetroBug -configuration Release \
   -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath "$BUILD/dd" \
-  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO RB_ENGINE_DIR="$BUILD/ios-engine" build
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO RB_ENGINE_DIR="$BUILD/ios-engine" \
+  RB_GIT_COMMIT="$COMMIT" build
 
 APP="$BUILD/dd/Build/Products/Release-iphoneos/RetroBug.app"
 [ -d "$APP" ] || { echo "no app at $APP" >&2; exit 1; }

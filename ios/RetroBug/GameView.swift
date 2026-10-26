@@ -112,18 +112,24 @@ final class GameUIView: UIView {
     private func boot() {
         var err = [CChar](repeating: 0, count: 16384)
         let dir = GameUIView.dataDir()
+        AppLog.write("game: booting \(apk.lastPathComponent) lib=\(lib) dir=\(dir)")
         var created: OpaquePointer?
         apk.path.withCString { apkPtr in
             lib.withCString { libPtr in
                 dir.withCString { dirPtr in
-                    created = rb_ios_create(apkPtr, libPtr, dirPtr, 2, &err, Int32(err.count))
+                    AppLog.url.path.withCString { logPtr in
+                        created = rb_ios_create(apkPtr, libPtr, dirPtr, logPtr, 2, &err, Int32(err.count))
+                    }
                 }
             }
         }
         guard let created else {
-            errorLabel.text = String(cString: err)
+            let text = String(cString: err)
+            AppLog.write("game: create FAILED: \(text)")
+            errorLabel.text = text
             return
         }
+        AppLog.write("game: session created")
         session = created
         statusLabel.text = "booting…"
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
@@ -131,12 +137,17 @@ final class GameUIView: UIView {
         }
     }
 
+    private var lastError = ""
+
     private func refreshStatus() {
         guard let s = session else { return }
         var err = [CChar](repeating: 0, count: 4096)
         rb_ios_last_error(s, &err, Int32(err.count))
-        if err[0] != 0 {
-            errorLabel.text = String(cString: err)
+        let text = String(cString: err)
+        if !text.isEmpty && text != lastError {
+            lastError = text
+            AppLog.write("game: error: \(text)")
+            errorLabel.text = text
         }
         let frames = rb_ios_frame_count(s)
         statusLabel.text = started ? "\(frames) frames" : "starting…"
@@ -156,9 +167,16 @@ final class GameUIView: UIView {
         let h = Int32(bounds.height * scale)
         var err = [CChar](repeating: 0, count: 4096)
         let pointer = UnsafeMutableRawPointer(Unmanaged.passUnretained(layer).toOpaque())
+        AppLog.write("game: start \(bounds.width)x\(bounds.height) @\(scale) -> \(w)x\(h) px")
         let ok = rb_ios_start(s, pointer, w, h, &err, Int32(err.count))
         started = ok != 0
-        if !started { errorLabel.text = String(cString: err) }
+        if started {
+            AppLog.write("game: render thread started")
+        } else {
+            let text = String(cString: err)
+            AppLog.write("game: start FAILED: \(text)")
+            errorLabel.text = text
+        }
     }
 
     override func willMove(toWindow newWindow: UIWindow?) {

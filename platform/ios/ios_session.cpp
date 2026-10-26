@@ -46,9 +46,10 @@ struct RbIosSession {
   std::atomic<bool> running{false};
   std::atomic<int> frames{0};
 
-  std::mutex mu;  ///< leaf: `error` and `log`
+  std::mutex mu;  ///< leaf: `error`, `log` and `log_file`
   std::string error;
   std::deque<std::string> log;
+  std::FILE* log_file = nullptr;  ///< appended and flushed per line, so a crash leaves the lines that led to it
 
   std::mutex touch_mu;
   std::vector<Touch> touches;
@@ -58,6 +59,10 @@ struct RbIosSession {
     if (log.size() >= 400) log.pop_front();
     log.push_back(line);
     std::fprintf(stderr, "RB %s\n", line.c_str());
+    if (log_file != nullptr) {
+      std::fprintf(log_file, "%s\n", line.c_str());
+      std::fflush(log_file);
+    }
   }
   void Fail(const std::string& e) {
     {
@@ -90,12 +95,14 @@ void Take(RbIosSession* s, int kind, int id, float x, float y) {
 }  // namespace
 
 extern "C" RbIosSession* rb_ios_create(const char* apk_path, const char* lib_name, const char* data_dir,
-                                       int client_version, char* err, int err_len) {
+                                       const char* log_path, int client_version, char* err, int err_len) {
   if (apk_path == nullptr || lib_name == nullptr) {
     CopyOut("an APK path and a library name are required", err, err_len);
     return nullptr;
   }
   auto s = std::make_unique<RbIosSession>();
+  if (log_path != nullptr && log_path[0] != '\0') s->log_file = std::fopen(log_path, "ab");
+  s->Log("create: apk=" + std::string{apk_path} + " lib=" + std::string{lib_name});
   s->apk = apk_path;
   s->lib = lib_name;
   s->data_dir = data_dir != nullptr ? data_dir : "";
@@ -221,6 +228,11 @@ extern "C" void rb_ios_destroy(RbIosSession* s) {
   s->game.reset();
   s->host.reset();
   s->boot.reset();
+  s->Log("destroy");
+  if (s->log_file != nullptr) {
+    std::fclose(s->log_file);
+    s->log_file = nullptr;
+  }
   delete s;
 }
 
