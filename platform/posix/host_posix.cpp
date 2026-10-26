@@ -37,7 +37,11 @@ constexpr int kWindowFlags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE;
 }  // namespace
 
 void* ReserveWindow(std::size_t bytes) {
-  return ::mmap(nullptr, bytes, PROT_NONE, kWindowFlags, -1, 0);
+  // mmap hands back MAP_FAILED, not nullptr. Returning it as-is once let a failed 4 GiB reservation on
+  // iOS pass for a window at address 0 (the alignment then wrapped to zero) and every later mprotect
+  // named a low address that was never ours.
+  void* p = ::mmap(nullptr, bytes, PROT_NONE, kWindowFlags, -1, 0);
+  return p == MAP_FAILED ? nullptr : p;
 }
 
 void* ReserveWindowAt(void* hint, std::size_t bytes) {

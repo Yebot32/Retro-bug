@@ -111,8 +111,17 @@ std::unique_ptr<GuestMemory> GuestMemory::Create(std::size_t window_bytes, const
     }
   }
 
+  if (raw == MAP_FAILED) {
+    if (err) *err = SysErr("window reservation failed", errno);
+    return nullptr;
+  }
   const auto raw_addr = reinterpret_cast<std::uintptr_t>(raw);
   const auto aligned = (raw_addr + host_page - 1) & ~static_cast<std::uintptr_t>(host_page - 1);
+  if (aligned == 0) {
+    if (err) *err = "window reservation aligned to address 0";
+    munmap(raw, window_bytes + slack);
+    return nullptr;
+  }
   if (aligned + window_bytes > raw_addr + window_bytes + slack) {
     if (err) *err = "window reservation could not be aligned to the host page";
     munmap(raw, window_bytes + slack);

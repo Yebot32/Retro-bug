@@ -44,7 +44,10 @@ std::uint64_t PageBytes() {
 void* ReserveWindow(std::size_t bytes) {
   // No MAP_NORESERVE: a PROT_NONE reservation commits nothing on Darwin either way, and the flag's
   // meaning under the iOS VM limits is one more thing not worth relying on.
-  return ::mmap(nullptr, bytes, PROT_NONE, kWindowFlags, -1, 0);
+  // mmap hands back MAP_FAILED, not nullptr: returning it as-is let a refused reservation pass for a
+  // window at address 0, and the alignment arithmetic then wrapped to zero.
+  void* p = ::mmap(nullptr, bytes, PROT_NONE, kWindowFlags, -1, 0);
+  return p == MAP_FAILED ? nullptr : p;
 }
 
 void* ReserveWindowAt(void* hint, std::size_t bytes) {

@@ -42,6 +42,9 @@ struct RbIosSession {
   std::string apk, lib, data_dir;
   int client_version = 2;
   int width = 0, height = 0;
+  /// The guest window this iOS build can actually reserve (4 GiB is refused; measured), tried largest
+  /// first at session creation. 0 means none was found and the boot will fail by name.
+  std::size_t window_bytes = 0;
 
   std::unique_ptr<rb::host::Boot> boot;                              ///< owns the guest process and the Java
   rb::java::TableJava* java = nullptr;                               ///< owned by boot, as its HostJava
@@ -93,17 +96,35 @@ void CopyOut(const std::string& text, char* out, int out_len) {
   out[n] = '\0';
 }
 
-/// One-time look at what this iOS build permits on a 4 GiB PROT_NONE reservation: the engine needs
-/// subrange mprotect and MAP_FIXED, and the difference decides the memory-host strategy. Logged to
+/// The largest PROT_NONE window this process can reserve, tried largest first. iOS refuses a single
+/// 4 GiB mapping (measured: ENOMEM on a 4 GiB probe), so the Android default cannot be used as-is; the
+/// guest only addresses what the window covers, and every v1 native title fits in 2 GiB.
+std::size_t PickWindowBytes(RbIosSession* s) {
+  constexpr std::size_t kMiB = std::size_t{1} << 20;
+  for (const std::size_t mib : {std::size_t{4096}, std::size_t{3072}, std::size_t{2048}, std::size_t{1536},
+                                std::size_t{1024}, std::size_t{768}, std::size_t{512}}) {
+    void* p = ::mmap(nullptr, mib * kMiB, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p != MAP_FAILED) {
+      ::munmap(p, mib * kMiB);
+      s->Log("window: " + std::to_string(mib) + " MiB is reservable; using it");
+      return mib * kMiB;
+    }
+    s->Log("window: " + std::to_string(mib) + " MiB refused (errno " + std::to_string(errno) + ")");
+  }
+  return 0;
+}
+
+/// One-time look at what this iOS build permits on the window it chose: the engine needs subrange
+/// mprotect and MAP_FIXED, and the answer decides whether the host can enforce permissions. Logged to
 /// retrobug.log so a device run answers it without a debugger.
 void ProbeWindowMemory(RbIosSession* s) {
-  constexpr std::size_t kGiB = std::size_t{1} << 30;
-  void* p = ::mmap(nullptr, 4 * kGiB, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (s->window_bytes == 0) return;
+  void* p = ::mmap(nullptr, s->window_bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (p == MAP_FAILED) {
-    s->Log("probe: 4 GiB reservation failed (errno " + std::to_string(errno) + ")");
+    s->Log("probe: the chosen window was refused now (errno " + std::to_string(errno) + ")");
     return;
   }
-  char* at = static_cast<char*>(p) + 12 * kGiB;
+  char* at = static_cast<char*>(p) + (12u << 20);
   errno = 0; const int mp_none = ::mprotect(at, 16384, PROT_NONE); const int e1 = errno;
   errno = 0; void* fx_none = ::mmap(at, 16384, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0); const int e2 = errno;
   errno = 0; void* fx_rw = ::mmap(at, 16384, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0); const int e3 = errno;
@@ -111,10 +132,10 @@ void ProbeWindowMemory(RbIosSession* s) {
   errno = 0; const int mp_none2 = ::mprotect(at, 16384, PROT_NONE); const int e5 = errno;
   char buf[384];
   std::snprintf(buf, sizeof buf,
-                "probe: reserve=%p mprotect(NONE)=%d/%d MAP_FIXED(NONE)=%p/%d MAP_FIXED(RW)=%p/%d mprotect(RW)=%d/%d mprotect(NONE2)=%d/%d",
-                p, mp_none, e1, fx_none, e2, fx_rw, e3, mp_rw, e4, mp_none2, e5);
+                "probe: reserve=%p miB=%zu mprotect(NONE)=%d/%d MAP_FIXED(NONE)=%p/%d MAP_FIXED(RW)=%p/%d mprotect(RW)=%d/%d mprotect(NONE2)=%d/%d",
+                p, s->window_bytes >> 20, mp_none, e1, fx_none, e2, fx_rw, e3, mp_rw, e4, mp_none2, e5);
   s->Log(buf);
-  ::munmap(p, 4 * kGiB);
+  ::munmap(p, s->window_bytes);
 }
 
 void Take(RbIosSession* s, int kind, int id, float x, float y) {
@@ -143,6 +164,7 @@ bool RbIosSession::Boot(std::string* err) {
 
   RbIosSession* self = this;
   rb::host::BootConfig cfg;
+  if (window_bytes != 0) cfg.window_bytes = window_bytes;
   cfg.ctor_tier = 1;      // iOS runs guest code on Tier I only
   cfg.enable_jit = false;  // and never builds the JIT object: iOS forbids executable memory
   cfg.monitor = false;
@@ -196,6 +218,7 @@ extern "C" RbIosSession* rb_ios_create(const char* apk_path, const char* lib_nam
   s->lib = lib_name;
   s->data_dir = data_dir != nullptr ? data_dir : "";
   s->client_version = client_version == 1 ? 1 : 2;
+  s->window_bytes = PickWindowBytes(s);
   s->Log("create: apk=" + s->apk + " lib=" + s->lib + " (boot deferred to the render thread)");
   return s.release();
 }
