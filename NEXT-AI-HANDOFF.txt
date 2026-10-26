@@ -546,4 +546,4 @@ DATA HYGIENE:
   on the window; if it does not, the fallback is to keep host pages writable (Tier I enforces guest
   permissions in the page table, so the host protection is defence in depth, not the mechanism).
 - Android unaffected: guest memory 190, guest process 161, boot 47, tier-diff 1039, 0 failures.
-- **Artifact:** 1,984,??? bytes (rebuild), SHA-256 `6ca4d76dba761f312e1304a14a69340fd4f57978bca8c5e3d2546022c820c590`.
+- **Artifact:** 1,984,215 bytes, SHA-256 `6ca4d76dba761f312e1304a14a69340fd4f57978bca8c5e3d2546022c820c590`.
