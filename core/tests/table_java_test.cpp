@@ -16,6 +16,7 @@
 
 #include "rb/abi/host_java.h"
 #include "rb/java/android_base.h"
+#include "rb/java/cocos2dx.h"
 #include "rb/java/table_java.h"
 
 namespace {
@@ -49,9 +50,9 @@ std::string N(const std::u16string& s) { return std::string(s.begin(), s.end());
 struct Rig {
   TableJava java;
   std::vector<std::string> logs;
+  AndroidEnv env;
 
   Rig() {
-    AndroidEnv env;
     env.package_name = "com.test.game";
     env.files_dir = "/data/com.test.game/files";
     env.cache_dir = "/data/com.test.game/cache";
@@ -63,6 +64,7 @@ struct Rig {
       logs.push_back(std::to_string(prio) + "/" + tag + ": " + text);
     };
     rb::java::InstallAndroidBase(java, env);
+    rb::java::InstallCocos2dx(java, env);
   }
 
   TableJava::Ref Cls(const char* name) { return java.FindClass(name); }
@@ -176,6 +178,24 @@ void an_unimplemented_class_is_named() {
   CHECK(!r.java.ExceptionCheck());
 }
 
+void cocos2dx_helper_answers() {
+  Rig r;
+  const auto pkg = static_cast<TableJava::Ref>(
+      r.CallStatic("org/cocos2dx/lib/Cocos2dxHelper", "getCocos2dxPackageName", "()Ljava/lang/String;"));
+  CHECK_CTX(r.StringArg(pkg) == "com.test.game", r.StringArg(pkg));
+  const auto path = static_cast<TableJava::Ref>(
+      r.CallStatic("org/cocos2dx/lib/Cocos2dxHelper", "getCocos2dxWritablePath", "()Ljava/lang/String;"));
+  CHECK_CTX(r.StringArg(path) == "/data/com.test.game/files", r.StringArg(path));
+  CHECK(r.CallStatic("org/cocos2dx/lib/Cocos2dxHelper", "getAssetManager", "()Landroid/content/res/AssetManager;") != 0);
+  CHECK_CTX(static_cast<std::int32_t>(r.CallStatic("org/cocos2dx/lib/Cocos2dxHelper", "getDPI", "()I")) == 160, "DPI");
+  const auto key = r.java.NewString(u"k");
+  const auto fallback = r.java.NewString(u"fallback");
+  const auto got = static_cast<TableJava::Ref>(r.CallStatic("org/cocos2dx/lib/Cocos2dxHelper", "getStringForKey",
+                                                           "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+                                                           {key, fallback}));
+  CHECK_CTX(r.StringArg(got) == "fallback", r.StringArg(got));
+}
+
 void integers_behave() {
   Rig r;
   const auto parsed = r.CallStatic("java/lang/Integer", "parseInt", "(Ljava/lang/String;)I", {r.java.NewString(u"-123")});
@@ -199,6 +219,7 @@ int main() {
   log_reaches_the_sink();
   an_unimplemented_class_is_named();
   integers_behave();
+  cocos2dx_helper_answers();
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;
 }

@@ -11,7 +11,9 @@
 
 #include "egl_shim.h"
 #include "gl_symbols.h"
+#include "rb/abi/guest_log.h"
 #include "rb/gfx/thunk_table.h"
+#include "rb/loader/apk_assets.h"
 
 namespace rb::platform::ios {
 
@@ -47,6 +49,8 @@ bool Waits(const std::string& name) {
 // GL/EGL names whose values matter to the hand-written thunks below (the guest's numbers).
 
 }  // namespace
+
+ IosHost::~IosHost() = default;
 
 void* IosHost::HostSymbol(const std::string& name) {
   if (void* shim = EglShim::Symbol(name)) return shim;
@@ -176,6 +180,154 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, std::function<void(const st
     f(shader, static_cast<int>(count), ptrs.data(), static_cast<const int*>(lens));
     return true;
   });
+
+  // ---- liblog. A game's own log lines become the boot's log, formatted on the host (shared with Android).
+  AddSpecial("__android_log_write", [this](exec::MachineState& s, std::string*) {
+    const auto& mem = p_.memory();
+    EmitLog(static_cast<int>(s.r[0]), abi::GuestStringOrEmpty(mem, s.r[1]), abi::GuestStringOrEmpty(mem, s.r[2]));
+    s.r[0] = 1;  // liblog answers a positive byte count; 1 is truthful for "written"
+    return true;
+  });
+  AddSpecial("__android_log_print", [this](exec::MachineState& s, std::string*) {
+    const auto& mem = p_.memory();
+    abi::GuestVarargs va;
+    va.mem = &mem;
+    va.reg_free = true;  // the fourth argument is in r3, then the stack
+    va.reg = s.r[3];
+    va.at = s.r[13];
+    EmitLog(static_cast<int>(s.r[0]), abi::GuestStringOrEmpty(mem, s.r[1]), abi::GuestFormat(mem, s.r[2], va));
+    s.r[0] = 1;
+    return true;
+  });
+  AddSpecial("__android_log_vprint", [this](exec::MachineState& s, std::string*) {
+    const auto& mem = p_.memory();
+    abi::GuestVarargs va;
+    va.mem = &mem;
+    va.at = s.r[3];  // AAPCS va_list: one pointer into the argument area
+    EmitLog(static_cast<int>(s.r[0]), abi::GuestStringOrEmpty(mem, s.r[1]), abi::GuestFormat(mem, s.r[2], va));
+    s.r[0] = 1;
+    return true;
+  });
+
+  // ---- libandroid's asset API, over the APK's entries (rb::loader::ApkArchive). A game asks Java for its
+  // AssetManager and passes the object to AAssetManager_fromJava; there is one APK per process, so the object
+  // is only checked for being a known reference and the answer is this host's manager.
+  AddSpecial("AAssetManager_fromJava", [this](exec::MachineState& s, std::string*) {
+    s.r[0] = handles_.Put(&asset_manager_marker_);
+    return true;
+  });
+  AddSpecial("AAssetManager_open", [this](exec::MachineState& s, std::string* why) {
+    void* manager = nullptr;
+    if (!handles_.Get(s.r[0], &manager)) {
+      *why = "AAssetManager_open: manager " + Hex(s.r[0]) + " was never issued";
+      return false;
+    }
+    if (!archive_) {
+      *why = "AAssetManager_open: no APK is open";
+      return false;
+    }
+    std::string name = GuestStringOrEmpty(p_.memory(), s.r[1]);
+    if (!name.empty() && name.front() == '/') name.erase(0, 1);
+    if (name.rfind("assets/", 0) != 0) name = "assets/" + name;
+    std::string e;
+    auto file = archive_->OpenFile(name, &e);
+    if (!file) {
+      s.r[0] = 0;  // AAssetManager_open answers NULL, as on a device
+      if (refused_.insert("asset:" + name).second && log_) log_("assets: open(\"" + name + "\") = NULL: " + e);
+      return true;
+    }
+    const std::uint32_t handle = handles_.Put(file.get());
+    assets_[file.get()] = std::move(file);
+    s.r[0] = handle;
+    return true;
+  });
+  AddSpecial("AAsset_read", [this](exec::MachineState& s, std::string* why) {
+    void* host = nullptr;
+    if (!handles_.Get(s.r[0], &host)) {
+      *why = "AAsset_read: asset " + Hex(s.r[0]) + " was never issued or was closed";
+      return false;
+    }
+    const std::uint32_t count = s.r[2];
+    void* buffer = count == 0 ? nullptr : p_.memory().Host(s.r[1]);
+    if (count != 0 && buffer == nullptr) {
+      *why = "AAsset_read: the buffer " + Hex(s.r[1]) + " is not guest memory";
+      return false;
+    }
+    const auto got = static_cast<loader::ApkFile*>(host)->Read(buffer, static_cast<std::int64_t>(count));
+    s.r[0] = static_cast<std::uint32_t>(got);
+    return true;
+  });
+  AddSpecial("AAsset_getLength", [this](exec::MachineState& s, std::string* why) {
+    void* host = nullptr;
+    if (!handles_.Get(s.r[0], &host)) {
+      *why = "AAsset_getLength: asset " + Hex(s.r[0]) + " was never issued";
+      return false;
+    }
+    s.r[0] = static_cast<std::uint32_t>(static_cast<loader::ApkFile*>(host)->Length());
+    return true;
+  });
+  AddSpecial("AAsset_getRemainingLength", [this](exec::MachineState& s, std::string* why) {
+    void* host = nullptr;
+    if (!handles_.Get(s.r[0], &host)) {
+      *why = "AAsset_getRemainingLength: asset " + Hex(s.r[0]) + " was never issued";
+      return false;
+    }
+    auto* file = static_cast<loader::ApkFile*>(host);
+    s.r[0] = static_cast<std::uint32_t>(file->Length() - file->Position());
+    return true;
+  });
+  AddSpecial("AAsset_seek", [this](exec::MachineState& s, std::string* why) {
+    void* host = nullptr;
+    if (!handles_.Get(s.r[0], &host)) {
+      *why = "AAsset_seek: asset " + Hex(s.r[0]) + " was never issued";
+      return false;
+    }
+    const auto at = static_cast<loader::ApkFile*>(host)->Seek(static_cast<std::int32_t>(s.r[1]), static_cast<int>(s.r[2]));
+    s.r[0] = static_cast<std::uint32_t>(static_cast<std::int32_t>(at));
+    return true;
+  });
+  AddSpecial("AAsset_close", [this](exec::MachineState& s, std::string*) {
+    void* host = nullptr;
+    if (handles_.Get(s.r[0], &host)) {
+      handles_.Forget(host);
+      assets_.erase(static_cast<loader::ApkFile*>(host));
+    }
+    return true;
+  });
+  AddSpecial("AAsset_isAllocated", [](exec::MachineState& s, std::string*) {
+    s.r[0] = 1;
+    return true;
+  });
+  // Directory listing over an APK needs a per-manager cursor and a name filter; until it lands, answering
+  // "no directory" makes an engine fall back to its own file list rather than fail.
+  AddSpecial("AAssetManager_openDir", [](exec::MachineState& s, std::string*) {
+    s.r[0] = 0;
+    return true;
+  });
+  AddSpecial("AAssetDir_getNextFileName", [](exec::MachineState& s, std::string*) {
+    s.r[0] = 0;
+    return true;
+  });
+  AddSpecial("AAssetDir_close", [](exec::MachineState& s, std::string*) {
+    s.r[0] = 0;
+    return true;
+  });
+}
+
+bool IosHost::OpenApk(const std::string& path, std::string* err) {
+  if (path.empty()) {
+    if (err != nullptr) *err = "no APK path";
+    return false;
+  }
+  archive_ = loader::ApkArchive::Open(path, err);
+  return archive_ != nullptr;
+}
+
+void IosHost::EmitLog(int priority, const std::string& tag, const std::string& text) {
+  if (!log_) return;
+  std::string line = text;
+  while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
+  log_("guest log: " + abi::PrioName(priority) + "/" + tag + ": " + line);
 }
 
 std::optional<std::uint32_t> IosHost::Resolve(const std::string& name) {

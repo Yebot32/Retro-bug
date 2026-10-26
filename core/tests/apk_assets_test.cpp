@@ -1,7 +1,7 @@
 // RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
 //
-// `rb::loader::ApkAssets` (S1): the byte-stream view of an APK's entries the iOS AAsset thunks read through.
-// No device and no guest — the archive is written by the test.
+// `rb::loader::ApkArchive`/`ApkFile` (S1): the byte-stream view of an APK's entries the iOS AAsset thunks
+// read through. No device and no guest — the archive is written by the test.
 
 #include <unistd.h>
 
@@ -17,7 +17,7 @@
 
 namespace {
 
-using rb::loader::ApkAssets;
+using rb::loader::ApkArchive;
 using rb::test::Bytes;
 using rb::test::ZipWriter;
 
@@ -47,35 +47,54 @@ void reads_a_stored_entry() {
   ZipWriter w;
   w.AddStored("assets/hello.txt", Bytes("hello, apk"));
   std::string why;
-  auto assets = ApkAssets::OpenMemory(w.Finish(), &why);
-  CHECK_CTX(assets != nullptr, why);
-  if (!assets) return;
+  auto archive = ApkArchive::OpenMemory(w.Finish(), &why);
+  CHECK_CTX(archive != nullptr, why);
+  if (!archive) return;
 
-  CHECK(assets->Has("assets/hello.txt"));
-  CHECK(!assets->Has("assets/none.txt"));
-  CHECK_CTX(assets->Names().size() == 1, std::to_string(assets->Names().size()));
-  CHECK_CTX(assets->OpenEntry("assets/hello.txt", &why), why);
-  CHECK_CTX(assets->Length() == 10, std::to_string(assets->Length()));
+  CHECK(archive->Has("assets/hello.txt"));
+  CHECK(!archive->Has("assets/none.txt"));
+  CHECK_CTX(archive->Names().size() == 1, std::to_string(archive->Names().size()));
+  auto file = archive->OpenFile("assets/hello.txt", &why);
+  CHECK_CTX(file != nullptr, why);
+  if (!file) return;
+  CHECK_CTX(file->Length() == 10, std::to_string(file->Length()));
 
   char buf[16] = {};
-  CHECK_CTX(assets->Read(buf, 5) == 5, "first read");
+  CHECK_CTX(file->Read(buf, 5) == 5, "first read");
   CHECK_CTX(Str(buf, 5) == "hello", Str(buf, 5));
-  CHECK_CTX(assets->Position() == 5, std::to_string(assets->Position()));
+  CHECK_CTX(file->Position() == 5, std::to_string(file->Position()));
 
-  CHECK_CTX(assets->Seek(0, 0) == 0, "SEEK_SET");
-  CHECK_CTX(assets->Read(buf, 10) == 10, "whole read");
+  CHECK_CTX(file->Seek(0, 0) == 0, "SEEK_SET");
+  CHECK_CTX(file->Read(buf, 10) == 10, "whole read");
   CHECK_CTX(Str(buf, 10) == "hello, apk", Str(buf, 10));
-  CHECK_CTX(assets->Read(buf, 4) == 0, "read past the end");
+  CHECK_CTX(file->Read(buf, 4) == 0, "read past the end");
 
-  CHECK_CTX(assets->Seek(-3, 2) == 7, "SEEK_END");
-  CHECK_CTX(assets->Read(buf, 8) == 3, "tail read");
+  CHECK_CTX(file->Seek(-3, 2) == 7, "SEEK_END");
+  CHECK_CTX(file->Read(buf, 8) == 3, "tail read");
   CHECK_CTX(Str(buf, 3) == "apk", Str(buf, 3));
 
-  // A seek past the end is not an error, and the next read is empty; a seek before the start is.
-  CHECK_CTX(assets->Seek(100, 0) == 100, "seek past the end");
-  CHECK(assets->Read(buf, 4) == 0);
-  CHECK(assets->Seek(-100, 0) == -1);
-  CHECK(assets->Seek(0, 9) == -1);
+  CHECK_CTX(file->Seek(100, 0) == 100, "seek past the end");
+  CHECK(file->Read(buf, 4) == 0);
+  CHECK(file->Seek(-100, 0) == -1);
+  CHECK(file->Seek(0, 9) == -1);
+}
+
+void two_entries_have_independent_cursors() {
+  ZipWriter w;
+  w.AddStored("assets/a.txt", Bytes("aaaa"));
+  w.AddStored("assets/b.txt", Bytes("bbbbbb"));
+  std::string why;
+  auto archive = ApkArchive::OpenMemory(w.Finish(), &why);
+  CHECK(archive != nullptr);
+  if (!archive) return;
+  auto a = archive->OpenFile("assets/a.txt", &why);
+  auto b = archive->OpenFile("assets/b.txt", &why);
+  CHECK(a != nullptr && b != nullptr);
+  if (!a || !b) return;
+  char buf[8] = {};
+  CHECK(a->Read(buf, 2) == 2 && Str(buf, 2) == "aa");
+  CHECK(b->Read(buf, 3) == 3 && Str(buf, 3) == "bbb");
+  CHECK(a->Read(buf, 2) == 2 && Str(buf, 2) == "aa");
 }
 
 void reads_a_deflated_entry() {
@@ -87,13 +106,15 @@ void reads_a_deflated_entry() {
   ZipWriter w;
   w.AddDeflated("assets/levels/one.dat", big);
   std::string why;
-  auto assets = ApkAssets::OpenMemory(w.Finish(), &why);
-  CHECK_CTX(assets != nullptr, why);
-  if (!assets) return;
-  CHECK_CTX(assets->OpenEntry("assets/levels/one.dat", &why), why);
-  CHECK_CTX(assets->Length() == static_cast<std::int64_t>(big.size()), std::to_string(assets->Length()));
+  auto archive = ApkArchive::OpenMemory(w.Finish(), &why);
+  CHECK_CTX(archive != nullptr, why);
+  if (!archive) return;
+  auto file = archive->OpenFile("assets/levels/one.dat", &why);
+  CHECK_CTX(file != nullptr, why);
+  if (!file) return;
+  CHECK_CTX(file->Length() == static_cast<std::int64_t>(big.size()), std::to_string(file->Length()));
   std::vector<std::uint8_t> round(big.size());
-  CHECK_CTX(assets->Read(round.data(), static_cast<std::int64_t>(round.size())) ==
+  CHECK_CTX(file->Read(round.data(), static_cast<std::int64_t>(round.size())) ==
                 static_cast<std::int64_t>(big.size()),
             "read");
   CHECK(round == big);
@@ -103,10 +124,10 @@ void refuses_a_missing_entry() {
   ZipWriter w;
   w.AddStored("assets/hello.txt", Bytes("hi"));
   std::string why;
-  auto assets = ApkAssets::OpenMemory(w.Finish(), &why);
-  CHECK(assets != nullptr);
-  if (!assets) return;
-  CHECK(!assets->OpenEntry("assets/missing.txt", &why));
+  auto archive = ApkArchive::OpenMemory(w.Finish(), &why);
+  CHECK(archive != nullptr);
+  if (!archive) return;
+  CHECK(archive->OpenFile("assets/missing.txt", &why) == nullptr);
   CHECK_CTX(why.find("no entry named assets/missing.txt") != std::string::npos, why);
 }
 
@@ -127,13 +148,16 @@ void opens_from_a_file() {
   ::close(fd);
   CHECK(n == static_cast<ssize_t>(image.size()));
   std::string why;
-  auto assets = ApkAssets::Open(path.data(), &why);
-  CHECK_CTX(assets != nullptr, why);
-  if (assets) {
-    CHECK_CTX(assets->OpenEntry("assets/hello.txt", &why), why);
-    char buf[16] = {};
-    const auto got = assets->Read(buf, sizeof buf);
-    CHECK_CTX(Str(buf, got) == "file-backed", Str(buf, got));
+  auto archive = ApkArchive::Open(path.data(), &why);
+  CHECK_CTX(archive != nullptr, why);
+  if (archive) {
+    auto file = archive->OpenFile("assets/hello.txt", &why);
+    CHECK_CTX(file != nullptr, why);
+    if (file) {
+      char buf[16] = {};
+      const auto got = file->Read(buf, sizeof buf);
+      CHECK_CTX(Str(buf, got) == "file-backed", Str(buf, got));
+    }
   }
   std::remove(path.data());
 }
@@ -142,6 +166,7 @@ void opens_from_a_file() {
 
 int main() {
   reads_a_stored_entry();
+  two_entries_have_independent_cursors();
   reads_a_deflated_entry();
   refuses_a_missing_entry();
   opens_from_a_file();

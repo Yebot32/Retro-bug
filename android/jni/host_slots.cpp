@@ -4,6 +4,7 @@
 // answers the same names the same way.
 #include "host_slots.h"
 #include "thunks.h"
+#include "rb/abi/guest_log.h"
 
 #include <dlfcn.h>
 #include <sys/socket.h>
@@ -19,15 +20,14 @@
 namespace rb::launcher {
 namespace {
 
+using abi::GuestFormat;
+using abi::GuestVarargs;
+using abi::PrioName;
+
 std::string Hex(std::uint32_t v) {
   char buf[16];
   std::snprintf(buf, sizeof buf, "%x", v);
   return buf;
-}
-
-std::string PrioName(int prio) {
-  static const char* const kPrio[] = {"?", "?", "V", "D", "I", "W", "E", "F", "S"};
-  return (prio >= 0 && prio <= 8) ? kPrio[prio] : "?";
 }
 
 /// liblog: what a game calls is three functions; answering them puts the game's own log lines in the report.
@@ -46,122 +46,6 @@ std::optional<std::size_t> LogSlotIndex(const std::string& name) {
     if (name == kLogTable[i].name) return i;
   }
   return std::nullopt;
-}
-
-/// Where a guest printf's variadic arguments live: optionally one core register first (r3 for
-/// `__android_log_print(prio, tag, fmt, ...)`), then guest memory — the stack, or a `va_list`'s area.
-/// AAPCS puts a 64-bit value 8-aligned and never splits it into r3, which is the one rule that matters.
-struct GuestVarargs {
-  const mem::GuestMemory* mem = nullptr;
-  bool reg_free = false;
-  std::uint32_t reg = 0;
-  std::uint32_t at = 0;
-  bool ok = true;
-  std::uint32_t Next32() {
-    if (reg_free) {
-      reg_free = false;
-      return reg;
-    }
-    std::uint32_t v = 0;
-    if (!mem->Read(at, &v, 4)) ok = false;
-    at += 4;
-    return v;
-  }
-  std::uint64_t Next64() {
-    reg_free = false;
-    at = (at + 7u) & ~7u;
-    std::uint64_t v = 0;
-    if (!mem->Read(at, &v, 8)) ok = false;
-    at += 8;
-    return v;
-  }
-};
-
-/// A guest `printf` format rendered on the host: flags, width and precision (including `*`), the h/hh/l/
-/// ll/z/j/t/L lengths, and d i u o x X c s p f F e E g G a A %. `%s` reads a bounded guest string; `%n`
-/// writes nothing (a log call has no business storing through a guest pointer here). A conversion this
-/// does not know is copied through as text, so the line still says what the guest wrote.
-std::string GuestFormat(const mem::GuestMemory& mem, std::uint32_t fmt_at, GuestVarargs& va) {
-  const std::string fmt = GuestStringOrEmpty(mem, fmt_at);
-  std::string out;
-  for (std::size_t i = 0; i < fmt.size(); ++i) {
-    if (fmt[i] != '%') {
-      out.push_back(fmt[i]);
-      continue;
-    }
-    std::string spec = "%";
-    std::size_t j = i + 1;
-    while (j < fmt.size() && std::strchr("-+ #0", fmt[j]) != nullptr) spec.push_back(fmt[j++]);
-    if (j < fmt.size() && fmt[j] == '*') {
-      spec += std::to_string(static_cast<std::int32_t>(va.Next32()));
-      ++j;
-    } else {
-      while (j < fmt.size() && std::isdigit(static_cast<unsigned char>(fmt[j]))) spec.push_back(fmt[j++]);
-    }
-    if (j < fmt.size() && fmt[j] == '.') {
-      spec.push_back(fmt[j++]);
-      if (j < fmt.size() && fmt[j] == '*') {
-        spec += std::to_string(static_cast<std::int32_t>(va.Next32()));
-        ++j;
-      } else {
-        while (j < fmt.size() && std::isdigit(static_cast<unsigned char>(fmt[j]))) spec.push_back(fmt[j++]);
-      }
-    }
-    bool wide = false;  // a 64-bit integer argument
-    while (j < fmt.size() && std::strchr("hlLqjzt", fmt[j]) != nullptr) {
-      if (fmt[j] == 'l' && j + 1 < fmt.size() && fmt[j + 1] == 'l') {
-        wide = true;
-        ++j;
-      } else if (fmt[j] == 'q' || fmt[j] == 'j' || fmt[j] == 'L') {
-        wide = true;
-      }
-      ++j;  // h, hh, l, z, t are 32-bit on this ABI and promote to int
-    }
-    if (j >= fmt.size()) {
-      out += fmt.substr(i);
-      break;
-    }
-    const char c = fmt[j];
-    char buf[512];
-    buf[0] = 0;
-    if (c == '%') {
-      out.push_back('%');
-    } else if (std::strchr("diuoxX", c) != nullptr) {
-      const std::uint64_t raw = wide ? va.Next64() : va.Next32();
-      const std::string s = spec + "ll" + c;
-      if (c == 'd' || c == 'i') {
-        const long long v = wide ? static_cast<long long>(raw)
-                                 : static_cast<long long>(static_cast<std::int32_t>(raw));
-        std::snprintf(buf, sizeof buf, s.c_str(), v);
-      } else {
-        std::snprintf(buf, sizeof buf, s.c_str(), static_cast<unsigned long long>(raw));
-      }
-      out += buf;
-    } else if (c == 'c') {
-      std::snprintf(buf, sizeof buf, (spec + "c").c_str(), static_cast<int>(va.Next32() & 0xffu));
-      out += buf;
-    } else if (c == 'p') {
-      std::snprintf(buf, sizeof buf, "0x%x", va.Next32());
-      out += buf;
-    } else if (std::strchr("fFeEgGaA", c) != nullptr) {
-      const std::uint64_t bits = va.Next64();  // `...` promoted float to double
-      double d = 0;
-      std::memcpy(&d, &bits, 8);
-      std::snprintf(buf, sizeof buf, (spec + c).c_str(), d);
-      out += buf;
-    } else if (c == 's') {
-      const std::uint32_t p = va.Next32();
-      const std::string s = p == 0 ? std::string{"(null)"} : GuestStringOrEmpty(mem, p);
-      std::snprintf(buf, sizeof buf, (spec + "s").c_str(), s.c_str());
-      out += buf;
-    } else if (c == 'n') {
-      va.Next32();
-    } else {
-      out += fmt.substr(i, j - i + 1);
-    }
-    i = j;
-  }
-  return out;
 }
 
 /// The dynamic-linker surface this build answers, and the answer each name gives. A fixed table rather
@@ -214,18 +98,9 @@ static_assert(HostSlots::kDlSlotBase + HostSlots::kDlSlots <= HostSlots::kLogSlo
               "the liblog host slots would alias the dl window or be unreachable past kMaxSlots");
 static_assert(sizeof(kDlTable) / sizeof(kDlTable[0]) <= HostSlots::kDlSlots, "the dl table outgrew its window");
 
-/// A guest NUL-terminated string for diagnostic reports, bounded and refusal-free: a report line may
-/// not fault the run it describes, so an unreadable or absurd path yields the empty string. Only used
-/// for naming what a guest asked the host for.
+/// The launcher-facing spelling of the shared bounded reader (rb/abi/guest_log.h).
 std::string GuestStringOrEmpty(const mem::GuestMemory& mem, std::uint32_t at) {
-  std::string out;
-  if (at == 0 || at >= mem.window_bytes()) return out;
-  for (unsigned i = 0; i < 256; ++i) {
-    char c = 0;
-    if (!mem.Read(at + i, &c, 1) || c == '\0') break;
-    out.push_back(c);
-  }
-  return out;
+  return abi::GuestStringOrEmpty(mem, at);
 }
 
 HostSlots::HostSlots(runtime::GuestProcess& p, int target_sdk, std::function<void(const std::string&)> live_log)

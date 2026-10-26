@@ -83,14 +83,14 @@ target_link_libraries(rb_guest_thread PUBLIC rb_exec)
 # marshalling in abi/call.cpp is register arithmetic over MachineState, and the only executor coupling
 # is Run/resume around a host call or a guest syscall, so Tier J inherits the bridge unchanged
 # (docs/20 §C08).
-add_library(rb_abi STATIC abi/call.cpp abi/jni_env.cpp abi/jni_args.cpp abi/jni_forward.cpp abi/thunk.cpp)
+add_library(rb_abi STATIC abi/call.cpp abi/jni_env.cpp abi/jni_args.cpp abi/jni_forward.cpp abi/thunk.cpp abi/guest_log.cpp)
 target_compile_features(rb_abi PUBLIC cxx_std_20)
 target_link_libraries(rb_abi PUBLIC rb_exec rb_mem rb_syscall rb_guest_thread)
 
 # rb::java (S1): the table-driven Java the core lanes already exercised as `FakeJava`, promoted so the iOS
 # app can answer a guest's JNI calls with no VM. Classes, methods and fields are registered as data; a profile
 # (android_base, unity_player) is the part that knows which classes a title expects.
-add_library(rb_java STATIC host/java/table_java.cpp host/java/android_base.cpp)
+add_library(rb_java STATIC host/java/table_java.cpp host/java/android_base.cpp host/java/cocos2dx.cpp)
 target_compile_features(rb_java PUBLIC cxx_std_20)
 target_include_directories(rb_java PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}/include"

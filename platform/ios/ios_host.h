@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -20,6 +21,11 @@
 
 #include "rb/abi/thunk.h"
 #include "rb/runtime/guest_process.h"
+
+namespace rb::loader {
+class ApkArchive;
+class ApkFile;
+}
 
 namespace rb::platform::ios {
 
@@ -29,6 +35,8 @@ class IosHost {
   using Special = std::function<bool(exec::MachineState& s, std::string* why)>;
 
   IosHost(rb::runtime::GuestProcess& process, std::function<void(const std::string&)> log);
+  // Out of line: the members own APK objects that are only forward-declared here.
+  ~IosHost();
   IosHost(const IosHost&) = delete;
   IosHost& operator=(const IosHost&) = delete;
 
@@ -43,6 +51,9 @@ class IosHost {
   /// A hand-written thunk. Register before Resolve sees the name; a special wins over the shared table.
   void AddSpecial(const std::string& name, Special fn) { specials_[name] = std::move(fn); }
 
+  /// The APK whose assets the guest's AAsset* calls read. Call before the guest's libraries load.
+  bool OpenApk(const std::string& path, std::string* err);
+
  private:
   static void* HostSymbol(const std::string& name);
 
@@ -53,6 +64,11 @@ class IosHost {
   std::map<std::string, std::uint32_t> slots_;
   std::map<std::string, std::uint32_t> strings_;
   std::set<std::string> refused_;  ///< names already reported once (a refusal is a log line, not a flood)
+
+  void EmitLog(int priority, const std::string& tag, const std::string& text);
+  std::unique_ptr<rb::loader::ApkArchive> archive_;
+  int asset_manager_marker_ = 0;
+  std::map<const rb::loader::ApkFile*, std::unique_ptr<rb::loader::ApkFile>> assets_;
 };
 
 }  // namespace rb::platform::ios
