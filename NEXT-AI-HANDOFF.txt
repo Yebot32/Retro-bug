@@ -616,3 +616,25 @@ DATA HYGIENE:
 - Still open: multi-line wrapping (CoreText path draws one line; Cocos's Java wraps within maxW), real
   audio output, and the extensions the framework lacks (extension-gated only).
 - Artifact (this run): SHA-256 follows in the message; the build is commit 7a99338.
+
+1s. 2026-10-26 (iOS S1l) — public repo, free CI, and KitKat Challenge as the first target
+---------------------------------------------------------------------------
+- The repo is **public**; Actions is free on standard runners (including macOS), so the monthly-minute
+  block is gone. Pushes run the Linux host lane (platform 29, zip, assets, Java 45, layering clean);
+  macOS/iOS/IPA run on `workflow_dispatch` and were green on 40281144159.
+- **First target changed to KitKat Challenge** (`com.doubleleft.androidkitkat`): 2D GLES1 (DLGE engine),
+  in-engine text, Java layer = DLGLSurface/Renderer with seven registered natives:
+  dlxAssetManager, dlxInit, dlxSurfaceChanged(w,h,lang)+glViewport, dlxDraw, dlxTouchEvent(action,x,y),
+  dlxBackground, dlxBackButton. No Java Canvas/Bitmap, no jnigraphics.
+- New `platform/ios/dlgl_bootstrap.{h,cpp}` calls those through the inbound pool with the AAPCS64
+  signatures ART would use; `core/host/java/dlgl.cpp` defines the classes JNI_OnLoad registers on,
+  LocalStorage defaults, and a silent AudioTrack. The session auto-picks the largest `assets/rb32/*.so`
+  when no library is given, forces GLES1 for `libdlgl.so`, and branches Start/Render/Pause/Touch by
+  profile. The iOS app's library field defaults to empty ("auto").
+- `make_bootcheck_apk.sh` also stages `lib/armeabi` now (2014 APKs).
+- **Artifact:** `RetroBug-unsigned.ipa` 2,017,010 bytes, SHA-256
+  `97728aa6a3700652cc74571d2870de4caf0eb33909dc7c476f3ef95ed6408d51` (c44d4e7), and
+  `build/kitkat.bootcheck.apk` (27.6 MB).
+- **First-run risks for KitKat:** EAGL `kEAGLRenderingAPIOpenGLES1` availability on iOS 18 (if nil, the
+  log says "EAGLContext creation failed" and ES1 needs a fallback), JNI_OnLoad registering on our empty
+  DLGL classes, and the AssetManager hand-off.
