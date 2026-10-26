@@ -218,7 +218,7 @@ extern "C" RbIosSession* rb_ios_create(const char* apk_path, const char* lib_nam
   s->lib = lib_name;
   s->data_dir = data_dir != nullptr ? data_dir : "";
   s->client_version = client_version == 1 ? 1 : 2;
-  s->window_bytes = PickWindowBytes(s);
+  s->window_bytes = PickWindowBytes(s.get());
   s->Log("create: apk=" + s->apk + " lib=" + s->lib + " (boot deferred to the render thread)");
   return s.release();
 }
