@@ -562,3 +562,19 @@ DATA HYGIENE:
 - Android unchanged: platform 29, guest memory 190, guest process 161, boot 47, tier-diff 1039.
 - **Artifact:** 1,985,148 bytes, SHA-256 `67bf76455dd644e4583c15fe2f853de862601a3fe5b32511c6c3b968f7fb6030`
   (commit 8fe316f). Next device run: check the window/probe lines, then the first guest-side stop.
+
+1o. 2026-10-26 (iOS S1h) — the scope boots on the iPad; libc's dlopen was unbound
+---------------------------------------------------------------------------
+- Device: iPad 7, iOS 18.7.7, signed with ksign (no JIT). The log now reaches the guest: the window was
+  reserved and a scope booted (libc/libm/libz), IFUNC slots resolved, bionic layout verified, the main
+  thread built — then the first guest fault:
+  `libc.so DT_INIT_ARRAY[0] ... called the unanswered import dlopen (bound to trap slot 0xfffe0040)`.
+  bionic's netd init dlopens `libnetd_client.so` from a constructor; IosHost had no dl* answers.
+- **Fix:** IosHost now binds dlopen/android_dlopen_ext (via `Boot::DlOpen`, the APK's own libraries),
+  dlsym, dlclose, dladdr, dlerror, dl_unwind_find_exidx (module PT_ARM_EXIDX; without it every C++ throw
+  terminates), android_get_application_target_sdk_version and the three `__loader_*` hooks. netd's dlopen
+  returns NULL, which bionic treats as "no netd".
+- The window is picked at session creation (largest reservable; the scope line now prints the actual MiB).
+- **Known next stops:** `libgame.so` imports five OpenSL ES symbols (`slCreateEngine`, `SL_IID_*`) that have
+  no iOS answers yet — audio is the next subsystem; then the Java classes Cocos2d-x asks for at runtime.
+- **Artifact:** 1,993,341 bytes, SHA-256 `ba5fbfd319febebe3704d90d2fae30f2b356ba8d76dee4940c63eb9015bfaf98` (18e87ef).
