@@ -61,6 +61,12 @@ class EglShim {
   std::uint32_t WaitClient();
   void* GetCurrentDisplay();
 
+  /// Makes the context current on the calling (render) thread and builds the drawable. The shell calls this
+  /// before any guest code; MakeCurrent() below is the guest-visible EGL function.
+  bool Begin(std::string* err);
+  /// Presents the drawable (the shell calls it after the guest render entry; the guest never swaps).
+  bool Present(std::string* err);
+
   /// Drops the context and layer (the shim's destructor does this too). Called on the render thread.
   void Detach();
 

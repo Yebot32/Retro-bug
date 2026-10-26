@@ -201,6 +201,22 @@ EglShim::EglShim() = default;
 
 EglShim::~EglShim() { Detach(); }
 
+bool EglShim::Begin(std::string* err) {
+  if (context_ == nullptr) {
+    if (CreateContext(&g_display_marker, &g_config_marker, nullptr, nullptr) == nullptr) {
+      if (err != nullptr) *err = "EAGLContext creation failed";
+      return false;
+    }
+  }
+  return EnsureDrawable(err);
+}
+
+bool EglShim::Present(std::string* err) {
+  if (SwapBuffers(&g_display_marker, &g_surface_marker) != 0) return true;
+  if (err != nullptr) *err = "eglSwapBuffers failed";
+  return false;
+}
+
 void EglShim::Detach() {
   if (drawable_ready_) {
     if (context_ != nullptr) [EAGLContext setCurrentContext:nil];

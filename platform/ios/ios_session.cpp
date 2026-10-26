@@ -161,7 +161,7 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
     rb::platform::ios::EglShim& egl = rb::platform::ios::EglShim::Instance();
     egl.SetLayer(layer, s->client_version);
     std::string why;
-    if (!egl.MakeCurrent(&why)) {
+    if (!egl.Begin(&why)) {
       s->Fail("EGL context: " + why);
       egl.ReleaseThread();
       s->running.store(false);
@@ -192,7 +192,7 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
         s->Fail("nativeRender: " + why);
         break;
       }
-      if (!egl.Swap(&why)) {
+      if (!egl.Present(&why)) {
         s->Fail("eglSwapBuffers: " + why);
         break;
       }
