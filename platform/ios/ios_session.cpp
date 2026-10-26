@@ -34,6 +34,7 @@
 #include "rb/java/table_java.h"
 #include "rb/loader/guest_elf.h"
 #include "rb/runtime/inbound.h"
+#include "text_render.h"
 
 struct RbIosSession {
   struct Touch {
@@ -166,6 +167,10 @@ bool RbIosSession::Boot(std::string* err) {
   env.device = "iPad";
   env.fingerprint = "retrobug/ios";
   env.sdk_int = 34;
+  env.render_text = [](const std::string& text, float font_size, int max_w, int max_h, int& w, int& h,
+                       std::vector<std::uint8_t>& pixels) {
+    return rb::platform::ios::RenderText(text, font_size, max_w, max_h, w, h, pixels);
+  };
   env.publish_text = [self](int width, int height, std::uintptr_t pixels) {
     if (self->boot == nullptr || self->boot->inbound() == nullptr) return;
     const rb::loader::GuestModule* m = self->boot->module(self->lib);

@@ -39,6 +39,10 @@ struct AndroidEnv {
   /// Text rendering: the Cocos2d-x Java class computes a bitmap and hands the pixels to the guest's
   /// nativeInitBitmapDC. `pixels` is a TableJava byte[] reference of width*height RGBA bytes.
   std::function<void(int width, int height, std::uintptr_t pixels)> publish_text;
+  /// Renders one line of UTF-8 text into ARGB_8888 pixels in Android's byte order (little-endian ints:
+  /// B,G,R,A), white glyphs on transparent. False when the platform has no renderer.
+  std::function<bool(const std::string& text, float font_size, int max_w, int max_h, int& w, int& h,
+                     std::vector<std::uint8_t>& pixels)> render_text;
 };
 
 /// Registers `java/lang/Object`, `java/lang/String`, `java/lang/System`, `java/lang/Integer`,
