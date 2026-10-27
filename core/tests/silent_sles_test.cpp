@@ -23,6 +23,8 @@
 #include <string>
 #include <vector>
 
+#include <unistd.h>
+
 #include "rb/audio/silent_sles.h"
 #include "rb/exec/machine_state.h"
 #include "rb/mem/guest_memory.h"
@@ -65,14 +67,20 @@ struct Rig {
   std::map<std::string, std::uint32_t> data;
   std::vector<std::string> said;
   std::unique_ptr<audio::SilentSles> sles;
+  bool ok = false;
 
   Rig() {
     mem::AddressModel model;
     model.kind = mem::AddressModel::kBiased;
+    // Apple Silicon has 16 KiB host pages; the model refuses a finer granule rather than lie about it.
+    const long page = ::sysconf(_SC_PAGESIZE);
+    while (page > 0 && (static_cast<long>(1) << model.host_page_shift) < page) ++model.host_page_shift;
     std::string err;
     mem = mem::GuestMemory::Create(std::size_t{16} << 20, model, &err);
-    mem->Map(kStack, 0x4000, mem::kRead | mem::kWrite, &err);
-    mem->Map(kScratch, 0x10000, mem::kRead | mem::kWrite, &err);
+    if (!mem) return;
+    if (!mem->Map(kStack, 0x4000, mem::kRead | mem::kWrite, &err)) return;
+    if (!mem->Map(kScratch, 0x10000, mem::kRead | mem::kWrite, &err)) return;
+    ok = true;
 
     audio::SilentSlesHost h;
     h.mem = mem.get();
@@ -149,6 +157,8 @@ struct Rig {
 
 void iids_are_guest_pointers_to_distinct_guids() {
   Rig r;
+  CHECK(r.ok);
+  if (!r.ok) return;
   const char* const names[] = {"SL_IID_ENGINE", "SL_IID_PLAY", "SL_IID_BUFFERQUEUE",
                                "SL_IID_ANDROIDSIMPLEBUFFERQUEUE"};
   std::vector<std::uint32_t> guids;
@@ -172,6 +182,8 @@ void iids_are_guest_pointers_to_distinct_guids() {
 
 void openal_startup_contract_succeeds() {
   Rig r;
+  CHECK(r.ok);
+  if (!r.ok) return;
   CHECK(r.names.count("slCreateEngine") == 1);
   if (r.names.count("slCreateEngine") == 0) return;
 
@@ -227,6 +239,8 @@ void openal_startup_contract_succeeds() {
 
 void unknown_interface_is_named_and_does_not_write_out() {
   Rig r;
+  CHECK(r.ok);
+  if (!r.ok) return;
   r.Call(r.names["slCreateEngine"], {kScratch, 0, 0, 0, 0, 0});
   const std::uint32_t player_out = kScratch + 8;
   // Build an engine, then use it only to reach the player (keeps the test independent of layout).
