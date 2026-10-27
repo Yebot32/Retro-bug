@@ -27,7 +27,7 @@ concurrency:
 
 jobs:
   linux-host:
-    name: Linux host — seam, zip, Java, assets, layering
+    name: Linux host — seam, zip, Java, assets, audio, layering
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,11 +40,12 @@ jobs:
       - name: Build and run the host lanes
         run: |
           set -euo pipefail
-          cmake --build build/host --target rb_platform_tests rb_zip_tests rb_apk_assets_tests rb_table_java_tests -j 4
+          cmake --build build/host --target rb_platform_tests rb_zip_tests rb_apk_assets_tests rb_table_java_tests rb_silent_sles_tests -j 4
           ./build/host/core/tests/rb_platform_tests
           ./build/host/core/tests/rb_zip_tests
           ./build/host/core/tests/rb_apk_assets_tests
           ./build/host/core/tests/rb_table_java_tests
+          ./build/host/core/tests/rb_silent_sles_tests
 
       - name: Layering gate
         run: bash tools/check_layering.sh
@@ -64,11 +65,12 @@ jobs:
       - name: Build and run the platform seam test
         run: |
           set -euo pipefail
-          cmake --build build/host --target rb_platform_tests rb_zip_tests rb_apk_assets_tests rb_table_java_tests rb_host_boot_tests -j 4
+          cmake --build build/host --target rb_platform_tests rb_zip_tests rb_apk_assets_tests rb_table_java_tests rb_silent_sles_tests rb_host_boot_tests -j 4
           ./build/host/core/tests/rb_platform_tests
           ./build/host/core/tests/rb_zip_tests
           ./build/host/core/tests/rb_apk_assets_tests
           ./build/host/core/tests/rb_table_java_tests
+          ./build/host/core/tests/rb_silent_sles_tests
           # The boot lane needs the tablet's libc and the gate's fixtures, which a CI runner does not have:
           # it reports "skipped" and exits 0. Building it here is the point — the shared boot compiles for
           # Darwin and links the same core the Android app does.

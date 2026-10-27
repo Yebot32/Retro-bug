@@ -87,6 +87,13 @@ add_library(rb_abi STATIC abi/call.cpp abi/jni_env.cpp abi/jni_args.cpp abi/jni_
 target_compile_features(rb_abi PUBLIC cxx_std_20)
 target_link_libraries(rb_abi PUBLIC rb_exec rb_mem rb_syscall rb_guest_thread)
 
+# rb::audio (S1): the guest-side OpenSL ES object model a host with no audio backend hands a title.
+# It owns no engine or platform types: memory, slot binding, data imports and logging are injected.
+add_library(rb_audio STATIC audio/silent_sles.cpp)
+target_compile_features(rb_audio PUBLIC cxx_std_20)
+target_include_directories(rb_audio PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(rb_audio PUBLIC rb_abi rb_mem)
+
 # rb::java (S1): the table-driven Java the core lanes already exercised as `FakeJava`, promoted so the iOS
 # app can answer a guest's JNI calls with no VM. Classes, methods and fields are registered as data; a profile
 # (android_base, unity_player) is the part that knows which classes a title expects.
@@ -140,7 +147,7 @@ target_include_directories(rb_gfx PUBLIC
 # rb_core is the aggregate the engine-facing components will hang off.
 add_library(rb_core INTERFACE)
 target_link_libraries(rb_core INTERFACE rb_mem rb_loader rb_linker rb_isa rb_exec rb_abi rb_diag
-                                        rb_syscall rb_guest_thread rb_codecache rb_profile rb_gfx dynarmic)
+                                        rb_syscall rb_guest_thread rb_codecache rb_profile rb_gfx rb_audio dynarmic)
 
 if(DEFINED RB_COMPAT_INCLUDE_DIR)
   target_include_directories(rb_core INTERFACE "${RB_COMPAT_INCLUDE_DIR}")

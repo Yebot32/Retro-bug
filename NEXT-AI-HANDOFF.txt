@@ -659,3 +659,28 @@ DATA HYGIENE:
   why this proof came from the binary rather than the tablet.
 - Next: the IPA with this boot order, then the first surfaceChanged with a non-null app — expect asset
   reads (AAssetManager_open of default/textures/...) and the ES1 texture path to be the next layer.
+
+1u. 2026-10-27 (iOS S1n) — OpenSL's startup contract, a shared muted object model, and crash evidence
+---------------------------------------------------------------------------
+- `retrobug (7).log` (IPA `9a3a4bf`) proves the load-order fix worked: both `libdlgl.so` and
+  `libandroidkitkat.so` boot, and the old `app is null` surfaceChanged path is absent. Both attempts
+  now stop in libandroidkitkat's JNI_OnLoad right after `sles: slCreateEngine ->
+  SL_RESULT_FEATURE_UNSUPPORTED`, before `creating main app`, and a fresh process starts. There is no
+  guest `signals:` line.
+- Binary path: JNI_OnLoad 0x2b574 -> Main::Main 0x2b458 -> DLApp::DLApp 0x3584c -> SoundContext
+  0x38024 -> alcOpenDevice 0x418b0 -> OpenAL's OpenSL setup at 0x4d648. Working Android log shows an
+  output mix, an audio player and a buffer callback before the title's `creating main app`. Failure
+  of slCreateEngine takes a safe cleanup path but not the startup path.
+- New shared `rb::audio::SilentSles` (core/audio/silent_sles.cpp, header core/include/rb/audio):
+  complete guest IID cells + GUIDs, guest vtables, Engine -> OutputMix -> Player, Play and both
+  buffer-queue interfaces; buffers are counted and dropped. It has no OpenSL device dependency:
+  IosHost supplies alloc/bind/data/log callbacks. The iOS engine archive now includes `rb_audio`.
+- New `rb_silent_sles_tests` (`core/tests/silent_sles_test.cpp`) drives the guest ABI through
+  slCreateEngine -> Realize -> GetInterface(SL_IID_ENGINE) -> CreateOutputMix/CreateAudioPlayer ->
+  Realize -> PLAY/BUFFERQUEUE -> enqueue/clear -> Destroy, plus unknown-IID refusal. Added to the
+  Linux/macOS host lanes and the device gate list.
+- New host crash evidence: SIGABRT/SIGBUS/SIGFPE/SIGILL/SIGSEGV/SIGTRAP and std::terminate append a
+  `=== RetroBug host crash ...` / `terminate` line to retrobug.log. iOS build number is 4 so the next
+  log identifies itself.
+- Do not call the startup fixed until the device log reaches `I/tApp: creating main app`; if it still
+  stops at slCreateEngine, read the new SLES milestone lines and host-crash marker first.

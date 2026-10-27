@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -24,6 +25,7 @@
 
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "cocos2dx_bootstrap.h"
 #include "dlgl_bootstrap.h"
@@ -38,6 +40,52 @@
 #include "rb/loader/guest_elf.h"
 #include "rb/runtime/inbound.h"
 #include "text_render.h"
+
+namespace {
+
+/// The last line a real host fault can write: the guest's own faults go through the interpreter and
+/// already have names; this catches the host failing under it (terminate, a bad callback, a driver).
+std::atomic<int> g_crash_fd{-1};
+std::atomic<bool> g_crash_handlers_installed{false};
+
+void CrashWrite(const char* text) {
+  const int fd = g_crash_fd.load(std::memory_order_relaxed);
+  if (fd >= 0 && text != nullptr) (void)::write(fd, text, std::strlen(text));
+}
+
+void CrashSignal(int sig) {
+  CrashWrite("\n=== RetroBug host crash: signal ");
+  switch (sig) {
+    case SIGABRT: CrashWrite("SIGABRT"); break;
+    case SIGBUS: CrashWrite("SIGBUS"); break;
+    case SIGFPE: CrashWrite("SIGFPE"); break;
+    case SIGILL: CrashWrite("SIGILL"); break;
+    case SIGSEGV: CrashWrite("SIGSEGV"); break;
+    case SIGTRAP: CrashWrite("SIGTRAP"); break;
+    default: CrashWrite("unknown"); break;
+  }
+  CrashWrite(" ===\n");
+  // Let the platform's crash reporter see the original fault too.
+  std::signal(sig, SIG_DFL);
+  std::raise(sig);
+}
+
+void CrashTerminate() {
+  CrashWrite("\n=== RetroBug host terminate: uncaught C++ exception ===\n");
+  std::abort();
+}
+
+void InstallCrashLog(std::FILE* file) {
+  if (file == nullptr) return;
+  const int fd = ::dup(fileno(file));
+  if (fd < 0) return;
+  g_crash_fd.store(fd, std::memory_order_release);
+  if (g_crash_handlers_installed.exchange(true)) return;
+  for (const int sig : {SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGSEGV, SIGTRAP}) std::signal(sig, CrashSignal);
+  std::set_terminate(CrashTerminate);
+}
+
+}  // namespace
 
 struct RbIosSession {
   struct Touch {
@@ -255,6 +303,7 @@ extern "C" RbIosSession* rb_ios_create(const char* apk_path, const char* lib_nam
   }
   auto s = std::make_unique<RbIosSession>();
   if (log_path != nullptr && log_path[0] != '\0') s->log_file = std::fopen(log_path, "ab");
+  InstallCrashLog(s->log_file);
   s->apk = apk_path;
   s->lib = lib_name;
   if (s->lib.empty()) {

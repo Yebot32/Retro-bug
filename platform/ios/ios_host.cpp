@@ -12,6 +12,7 @@
 #include "egl_shim.h"
 #include "gl_symbols.h"
 #include "rb/abi/guest_log.h"
+#include "rb/audio/silent_sles.h"
 #include "rb/gfx/thunk_table.h"
 #include "rb/host/boot.h"
 #include "rb/loader/apk_assets.h"
@@ -446,33 +447,25 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
     return true;
   });
 
-  // ---- OpenSL ES: audio is silent for now. Failing the engine creation is the safe answer — Cocos2d-x
-  // logs it and runs without sound; a half-implemented engine would crash on the first vtable call. The
-  // four interface IDs are data imports, so each answers a guest cell holding a value.
+  // ---- OpenSL ES over a muted sink. Failing engine creation is not a "run silently" contract:
+  // KitKat's OpenAL startup asks for an output mix and a player regardless, so the guest gets the
+  // same object model a device would hand it and its buffers are dropped. See silent_sles.h.
   {
-    std::string e;
-    const std::uint32_t cells = p_.MapFree(0x1000, mem::kRead | mem::kWrite, &e);
-    const char* const kIds[] = {"SL_IID_ANDROIDSIMPLEBUFFERQUEUE", "SL_IID_BUFFERQUEUE", "SL_IID_ENGINE",
-                                "SL_IID_PLAY"};
-    if (cells != 0) {
-      for (std::size_t i = 0; i < 4; ++i) {
-        const std::uint32_t value = 0x1000u + static_cast<std::uint32_t>(i * 4);
-        p_.memory().Write(cells + static_cast<std::uint32_t>(i * 4), &value, 4);
-        data_symbols_[kIds[i]] = cells + static_cast<std::uint32_t>(i * 4);
-      }
-    } else if (log_) {
-      log_("sles: no guest memory for the interface IDs: " + e);
-    }
+    rb::audio::SilentSlesHost h;
+    h.mem = &p_.memory();
+    h.alloc = [this](std::size_t bytes) -> std::uint32_t {
+      std::string e;
+      return p_.MapFree(static_cast<std::uint32_t>(bytes), mem::kRead | mem::kWrite, &e);
+    };
+    h.bind = [this](const std::string& name, rb::audio::SilentSlesHost::Method fn) -> std::uint32_t {
+      AddSpecial(name, std::move(fn));
+      const auto slot = Resolve(name);
+      return slot ? *slot : 0u;
+    };
+    h.data_symbol = [this](const std::string& name, std::uint32_t at) { AddDataSymbol(name, at); };
+    h.log = log_;
+    sles_ = std::make_unique<rb::audio::SilentSles>(std::move(h));
   }
-  AddSpecial("slCreateEngine", [this](exec::MachineState& s, std::string*) {
-    if (s.r[0] != 0) {
-      const std::uint32_t none = 0;
-      p_.memory().Write(s.r[0], &none, 4);
-    }
-    if (log_) log_("sles: slCreateEngine -> SL_RESULT_FEATURE_UNSUPPORTED (audio is silent on iOS for now)");
-    s.r[0] = 12;  // SL_RESULT_FEATURE_UNSUPPORTED
-    return true;
-  });
 
   // ---- the dynamic-linker interface libc and the game import. The boot answers the game's own
   // libraries from the APK; anything else is NULL, which callers that probe (bionic's netd init) check.

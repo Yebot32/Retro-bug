@@ -22,6 +22,10 @@
 #include "rb/abi/thunk.h"
 #include "rb/runtime/guest_process.h"
 
+namespace rb::audio {
+class SilentSles;
+}
+
 namespace rb::host {
 class Boot;
 }
@@ -55,6 +59,8 @@ class IosHost {
 
   /// A hand-written thunk. Register before Resolve sees the name; a special wins over the shared table.
   void AddSpecial(const std::string& name, Special fn) { specials_[name] = std::move(fn); }
+  /// An imported object whose guest address the guest reads rather than calls (an OpenSL ES IID).
+  void AddDataSymbol(const std::string& name, std::uint32_t at) { data_symbols_[name] = at; }
 
   /// The APK whose assets the guest's AAsset* calls read. Call before the guest's libraries load.
   bool OpenApk(const std::string& path, std::string* err);
@@ -66,6 +72,7 @@ class IosHost {
   rb::host::Boot* boot_ = nullptr;
   abi::HandleTable handles_;
   std::function<void(const std::string&)> log_;
+  std::unique_ptr<rb::audio::SilentSles> sles_;  ///< no audio device: a real object model over a muted sink
   std::map<std::string, Special> specials_;
   std::map<std::string, std::uint32_t> slots_;
   std::map<std::string, std::uint32_t> strings_;

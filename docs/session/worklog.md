@@ -833,3 +833,29 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
 - The tablet bootcheck of the same APK stops earlier, at `RegisterNatives: null class`: its ART
   `FindClass` runs on the launcher's loader, not the game's. That is the diagnostic harness, not the
   installed game — noted in the handoff so it is not mistaken for the product path.
+
+### 2026-10-27 — iOS S1n: OpenSL has to be a real object model, not a failed call
+- The IPA at commit `9a3a4bf` fixed the old failure: `retrobug (7).log` shows
+  `java: loads libdlgl.so libandroidkitkat.so`, and the old `surfaceChanged … app is null` block is
+  gone. Both attempts now stop inside `libandroidkitkat`'s JNI_OnLoad immediately after
+  `sles: slCreateEngine -> SL_RESULT_FEATURE_UNSUPPORTED`, before `creating main app`, then the app
+  starts a fresh process. No `signals:` line is written, so the guest interpreter did not name a fault.
+- Disassembly narrowed the path: JNI_OnLoad -> `Main::Main` -> `DLApp::DLApp` (0x3584c) -> `new
+  SoundContext` -> `alcOpenDevice`. The known-good Android trace creates an output mix **and an
+  audio player**, and receives a buffer-queue callback, before `creating main app`. A failed engine is
+  therefore not the "run silently" contract; the failure branch is null-safe, but it is not the path
+  the title starts on.
+- Added `rb::audio::SilentSles` (`core/audio/silent_sles.cpp`): guest IID cells and GUIDs, guest
+  vtables, Engine -> OutputMix -> Player, Play and both buffer-queue interfaces, and a muted sink that
+  counts and drops buffers. It is platform-free; the iOS host injects memory, slot binding, data
+  imports and logging. `rb::audio` is part of the shared core and the iOS engine archive.
+- Added `rb_silent_sles_tests`: it drives the same `(*itf)->Method(self, …)` ABI and covers the
+  OpenAL startup sequence, IID identity, play/queue state, an unknown IID, and Destroy invalidating
+  derived interfaces. The Linux and macOS host lanes run it.
+- Added a host-only crash line: SIGABRT/BUS/FPE/ILL/SEGV/TRAP and uncaught C++ termination append
+  `RetroBug host crash/terminate` to `retrobug.log` (the guest's own faults still go through the
+  interpreter). The next device log can distinguish a guest stop from a host/driver exit.
+- **Not yet proven:** that this is the only remaining stop, or that the constructor now returns.
+  Next device log should contain `sles: silent backend installed`, `slCreateEngine -> 0`,
+  `CreateOutputMix`, `CreateAudioPlayer`, then `I/tApp: creating main app`, and the first
+  `surfaceChanged`. If it stops earlier, the new SLES lines and host-crash marker name the layer.
