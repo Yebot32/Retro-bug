@@ -682,5 +682,8 @@ DATA HYGIENE:
 - New host crash evidence: SIGABRT/SIGBUS/SIGFPE/SIGILL/SIGSEGV/SIGTRAP and std::terminate append a
   `=== RetroBug host crash ...` / `terminate` line to retrobug.log. iOS build number is 4 so the next
   log identifies itself.
+- **Verified on 98df2aa:** rb_silent_sles_tests 55 checks / 0 failures on both Linux and macOS; Linux
+  layering gate clean; iOS arm64 compile and unsigned IPA green. IPA 2,050,910 bytes, SHA-256
+  `afb90d5a581f151e9af3e2a997dfccb1536b8f8ae67b6cbbdf03779c0c6446b6`, CFBundleVersion 4.
 - Do not call the startup fixed until the device log reaches `I/tApp: creating main app`; if it still
   stops at slCreateEngine, read the new SLES milestone lines and host-crash marker first.

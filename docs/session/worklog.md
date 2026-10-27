@@ -855,6 +855,10 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
 - Added a host-only crash line: SIGABRT/BUS/FPE/ILL/SEGV/TRAP and uncaught C++ termination append
   `RetroBug host crash/terminate` to `retrobug.log` (the guest's own faults still go through the
   interpreter). The next device log can distinguish a guest stop from a host/driver exit.
+- **Verified:** `rb_silent_sles_tests` 55 checks / 0 failures on Linux and macOS; layering clean;
+  iOS arm64 compile green; unsigned IPA built from commit `98df2aa`, build 4.
+  `build/RetroBug-unsigned.ipa`, 2,050,910 bytes, SHA-256
+  `afb90d5a581f151e9af3e2a997dfccb1536b8f8ae67b6cbbdf03779c0c6446b6`.
 - **Not yet proven:** that this is the only remaining stop, or that the constructor now returns.
   Next device log should contain `sles: silent backend installed`, `slCreateEngine -> 0`,
   `CreateOutputMix`, `CreateAudioPlayer`, then `I/tApp: creating main app`, and the first
