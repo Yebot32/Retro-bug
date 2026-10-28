@@ -900,3 +900,15 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
 - **Verified:** build-6 CI run `40619908982` green on Linux/macOS/iOS compile/IPA; host tests remain
   60/61/23. `build/RetroBug-unsigned.ipa` is build 6, commit `1a2dfe0`, 2,054,874 bytes, SHA-256
   `6f56f5535c0a0e3644fde7840f8b8860e4e1fc6ecb0da6a5af147d9eb98930c5`.
+
+### 2026-10-28 — iOS S1q: the crash is in the ARM front end, not the audio shim
+- Build-6 device log: the first attempt crashed after `output mix realized`; the second reached
+  `creating main app`, `surfaceChanged`, and `language: en`. Both host backtraces are
+  `TranslateOne -> A32::TranslateArm -> arm_SUB_imm` / `arm_MOV_reg -> PrependNewInst`. The host signal is
+  therefore in Dynarmic's ARM translation path, after the SLES/OpenAL boundary; the new OpenSL model is
+  not the crashing component.
+- Build 7 records `LastTranslationSite` (pc, ARM/Thumb, IT) from [front_end.cpp](../../core/isa/front_end.cpp)
+  and the current guest thread pc/cpsr in the host crash line. No behavior changed.
+- **Verified:** build-7 CI run `40621247313` green on all four lanes; IPA build 7, commit `9e2ee4b`,
+  2,056,945 bytes, SHA-256 `7ae53736ba11d16c93ca08cc9839ed3c059dfde491bb713e9aed91bad2563f7d`.
+  Next log should name the translation PC/mode, which maps directly into the KitKat library.

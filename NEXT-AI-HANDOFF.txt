@@ -724,3 +724,14 @@ DATA HYGIENE:
 - Next log should contain either `threads: spawning host thread ...` or a `last host call:` value. Use it
   to fix the OpenAL/audio thread boundary; do not call the startup fixed until `creating main app` and a
   non-zero `frame N pixels:` sample appear.
+
+1x. 2026-10-28 (iOS S1q) — the remaining crash is Dynarmic's ARM translator
+---------------------------------------------------------------------------
+- Build-6 log: first attempt died after `output mix realized`; second reached `creating main app`,
+  `surfaceChanged`, `language: en`. Both host stacks are `TranslateOne -> A32::TranslateArm ->
+  arm_SUB_imm` / `arm_MOV_reg -> PrependNewInst`. The audio shim is no longer the failing layer.
+- Build 7 (`9e2ee4b`) records `translation pc` (with ARM/Thumb and IT) and `guest thread pc`/cpsr in the
+  host crash line. CI `40621247313` green; IPA 2,056,945 bytes, SHA-256 `7ae53736…563f7d`.
+- Map the next `translation pc` against the loaded module base (libdlgl usually 0x23e000, extent 0xd1000;
+  libandroidkitkat 0x30f000, extent 0x61000) and disassemble the exact ARM word. Do not disable Tier I
+  or change the audio model for this fault.
