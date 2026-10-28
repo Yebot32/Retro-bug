@@ -116,6 +116,15 @@ struct TranslatedBlock {
 /// as the CPSR.T bit.
 Dynarmic::A32::TranslationOptions Options();
 
+/// The location the last `TranslateOne` call was about to translate. Set before Dynarmic runs and
+/// read by the host's last-resort crash line; a translator fault would otherwise lose the guest PC.
+struct TranslationSite {
+  std::uint32_t pc = 0;
+  bool thumb = false;
+  std::uint8_t itstate = 0;
+};
+TranslationSite LastTranslationSite() noexcept;
+
 /// True when an exception the A32 front end raises names an instruction whose only architectural
 /// effect is a performance hint, so executing it as a no-op and continuing is what hardware does.
 ///

@@ -35,12 +35,14 @@
 #include "egl_shim.h"
 #include "ios_host.h"
 #include "rb/host/boot.h"
+#include "rb/isa/front_end.h"
 #include "rb/java/android_base.h"
 #include "rb/java/cocos2dx.h"
 #include "rb/java/dlgl.h"
 #include "rb/loader/apk_assets.h"
 #include "rb/java/table_java.h"
 #include "rb/loader/guest_elf.h"
+#include "rb/runtime/guest_thread.h"
 #include "rb/runtime/inbound.h"
 #include "text_render.h"
 
@@ -54,6 +56,12 @@ std::atomic<bool> g_crash_handlers_installed{false};
 void CrashWrite(const char* text) {
   const int fd = g_crash_fd.load(std::memory_order_relaxed);
   if (fd >= 0 && text != nullptr) (void)::write(fd, text, std::strlen(text));
+}
+
+void CrashHex(std::uint32_t value) {
+  char b[16];
+  std::snprintf(b, sizeof b, "0x%08x", value);
+  CrashWrite(b);
 }
 
 void CrashSignal(int sig) {
@@ -71,6 +79,17 @@ void CrashSignal(int sig) {
   const char* last = rb::platform::ios::LastHostCall();
   CrashWrite("last host call: ");
   CrashWrite(last != nullptr ? last : "none");
+  const rb::isa::TranslationSite site = rb::isa::LastTranslationSite();
+  CrashWrite("\ntranslation pc: ");
+  CrashHex(site.pc);
+  CrashWrite(site.thumb ? " thumb" : " arm");
+  CrashWrite(" it ");
+  CrashHex(site.itstate);
+  const rb::runtime::GuestThread* thread = rb::runtime::CurrentGuestThread();
+  CrashWrite("\nguest thread pc: ");
+  CrashHex(thread != nullptr ? thread->state.pc : 0u);
+  CrashWrite(thread != nullptr ? " cpsr " : " (unbound) cpsr ");
+  CrashHex(thread != nullptr ? thread->state.cpsr : 0u);
 #if defined(__APPLE__) && __has_include(<execinfo.h>)
   CrashWrite("\nhost frames:\n");
   void* frames[64] = {};
