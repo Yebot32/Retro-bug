@@ -922,6 +922,9 @@ std::string GuestProcess::Spawn(std::unique_ptr<GuestThread> t) {
   auto rec = std::make_unique<HostThread>();
   rec->guest = std::move(t);
   HostThread* raw = rec.get();
+  const std::size_t ordinal = threads_started_.load(std::memory_order_relaxed) + 1;
+  if (ordinal <= 8) Log("threads: spawning host thread " + std::to_string(ordinal) + " for guest tid " +
+                       std::to_string(raw->guest->tid) + " stack " + Hex(raw->guest->stack_lo));
   try {
     rec->host = std::thread([this, raw] { ThreadMain(raw); });
   } catch (const std::system_error& e) {
@@ -940,6 +943,8 @@ void GuestProcess::ThreadMain(HostThread* rec) {
     rec->done.store(true, std::memory_order_release);
     return;
   }
+  if (threads_started_.load(std::memory_order_relaxed) <= 8) Log("threads: guest tid " + std::to_string(t.tid) +
+                                                                 " is running on its host thread");
   exec::RunResult rr{};
   // Re-entered while the turn's budget (or the per-turn syscall cap) runs out: a guest thread runs until it
   // calls `exit`, stops with the process, or faults.

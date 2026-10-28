@@ -37,6 +37,10 @@ class ApkFile;
 
 namespace rb::platform::ios {
 
+/// The host slot currently executing (a stable string owned by its binding). Read from a signal
+/// handler for the last-resort crash line; no allocation, no lock.
+const char* LastHostCall() noexcept;
+
 class IosHost {
  public:
   static constexpr std::uint32_t kThunkSlotBase = 1024u;

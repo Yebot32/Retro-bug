@@ -4,6 +4,7 @@
 
 #include "ios_host.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -18,6 +19,14 @@
 #include "rb/loader/apk_assets.h"
 
 namespace rb::platform::ios {
+
+namespace {
+std::atomic<const char*> g_last_host_call{nullptr};
+}
+
+const char* LastHostCall() noexcept {
+  return g_last_host_call.load(std::memory_order_relaxed);
+}
 
 namespace {
 
@@ -576,6 +585,7 @@ std::optional<std::uint32_t> IosHost::Resolve(const std::string& name) {
   slots_.emplace(name, index);
   p_.abi().Bind(index,
                 [this, name, fn](exec::MachineState& s, std::string* why) {
+                  g_last_host_call.store(name.c_str(), std::memory_order_relaxed);
                   if (fn(s, why)) return true;
                   s.r[0] = 0;
                   if (refused_.insert(name).second && log_) log_("thunks: " + name + " refused: " + *why);

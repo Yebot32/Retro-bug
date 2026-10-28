@@ -16,6 +16,9 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#if defined(__APPLE__) && __has_include(<execinfo.h>)
+#include <execinfo.h>
+#endif
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -65,6 +68,15 @@ void CrashSignal(int sig) {
     default: CrashWrite("unknown"); break;
   }
   CrashWrite(" ===\n");
+  const char* last = rb::platform::ios::LastHostCall();
+  CrashWrite("last host call: ");
+  CrashWrite(last != nullptr ? last : "none");
+#if defined(__APPLE__) && __has_include(<execinfo.h>)
+  CrashWrite("\nhost frames:\n");
+  void* frames[64] = {};
+  const int count = backtrace(frames, 64);
+  if (count > 0) backtrace_symbols_fd(frames, count, g_crash_fd.load(std::memory_order_relaxed));
+#endif
   // Let the platform's crash reporter see the original fault too.
   std::signal(sig, SIG_DFL);
   std::raise(sig);
