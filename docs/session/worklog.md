@@ -887,3 +887,16 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
   `1ea2449abd1e8d0c923d9b9fe13748cb12217fe7351720a43683450a86a9eaf2`.
 - **Still device evidence only:** `I/tApp: creating main app`, `surfaceChanged`, then `frame N pixels:`
   with at least one non-zero channel. Audio buffers are deliberately not callbacks in this silent build.
+
+### 2026-10-28 — iOS S1p: build 5 reached the audio boundary, and the host fault is now traceable
+- The first build-5 device run (`retrobug (8).log`) reached `sles: player state PLAYING (silent)`, then
+  stopped with `=== RetroBug host crash: signal SIGSEGV ===` before `creating main app`; a second attempt
+  stopped earlier, after `sles: audio player realized`. This is the OpenAL context/audio-thread boundary,
+  not the old app-null or JNIEnv failures.
+- Build 6 adds a lock-free last-host-call breadcrumb in `IosHost::Resolve`, host `backtrace()` frames on a
+  real host signal, and capped guest-thread spawn/bind lines in `GuestProcess`. It changes no game
+  behavior; the next `retrobug.log` will identify whether the SIGSEGV is in the OpenAL feeder thread,
+  a host slot, or the host-thread setup.
+- **Verified:** build-6 CI run `40619908982` green on Linux/macOS/iOS compile/IPA; host tests remain
+  60/61/23. `build/RetroBug-unsigned.ipa` is build 6, commit `1a2dfe0`, 2,054,874 bytes, SHA-256
+  `6f56f5535c0a0e3644fde7840f8b8860e4e1fc6ecb0da6a5af147d9eb98930c5`.

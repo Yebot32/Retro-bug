@@ -710,3 +710,17 @@ DATA HYGIENE:
   host tests 60/61/23 for the changed suites.
 - Remaining evidence is device-only: `I/tApp: creating main app`, surfaceChanged, and a `frame N pixels:`
   line with a non-zero channel. Silent OpenSL deliberately cannot promise audio.
+
+1w. 2026-10-28 (iOS S1p) — build 5's host fault is now traceable
+---------------------------------------------------------------------------
+- `retrobug (8).log` (build 5): SLES reached slCreateEngine -> engine interface -> output mix -> player
+  -> callback -> enqueue -> PLAYING, then logged `host crash: signal SIGSEGV` before `creating main app`.
+  A second attempt stopped after `audio player realized`. The old app-null and null-JNIEnv bugs are gone.
+- Build 6 (`1a2dfe0`) adds `LastHostCall()` breadcrumbs in every `IosHost` host slot, host `backtrace()`
+  frames in the signal handler (Darwin `execinfo` when available), and capped guest-thread spawn/bind
+  lines. Those are diagnostic only; no game behavior changed.
+- Build-6 CI `40619908982` green on Linux/macOS/iOS compile/IPA; host suites 60/61/23. IPA 2,054,874
+  bytes, SHA-256 `6f56f5535c0a0e3644fde7840f8b8860e4e1fc6ecb0da6a5af147d9eb98930c5`.
+- Next log should contain either `threads: spawning host thread ...` or a `last host call:` value. Use it
+  to fix the OpenAL/audio thread boundary; do not call the startup fixed until `creating main app` and a
+  non-zero `frame N pixels:` sample appear.
