@@ -24,9 +24,11 @@ using VIFF = void (*)(void*, void*, int, float, float);
 
 }  // namespace
 
-DlglBootstrap::DlglBootstrap(rb::java::TableJava& java, std::string lib,
+DlglBootstrap::DlglBootstrap(rb::java::TableJava& java, std::uint32_t jni_env, std::string lib,
                              std::function<void(const std::string&)> log)
-    : java_(java), lib_(std::move(lib)), log_(std::move(log)) {}
+    : java_(java), jni_env_(jni_env), lib_(std::move(lib)), log_(std::move(log)) {}
+
+void* DlglBootstrap::Env() const { return reinterpret_cast<void*>(static_cast<std::uintptr_t>(jni_env_)); }
 
 void* DlglBootstrap::Native(const char* cls, const char* name, std::string* err) const {
   for (const auto& binding : java_.natives(cls)) {
@@ -49,12 +51,12 @@ bool DlglBootstrap::Start(const std::string& apk, int width, int height, std::st
   // DLGLSurface's constructor hands the AssetManager over before the renderer exists; then the renderer's
   // onSurfaceCreated/onSurfaceChanged call dlxInit and dlxSurfaceChanged(w, h, language) + glViewport.
   const auto manager = java_.NewInstance("android/content/res/AssetManager");
-  reinterpret_cast<VL>(asset_)(nullptr, nullptr, manager);
+  reinterpret_cast<VL>(asset_)(Env(), nullptr, manager);
   Drain("dlxAssetManager");
-  reinterpret_cast<V0>(init_)(nullptr, nullptr);
+  reinterpret_cast<V0>(init_)(Env(), nullptr);
   Drain("dlxInit");
   const auto language = java_.NewString(u"en");
-  reinterpret_cast<VIIL>(surface_)(nullptr, nullptr, width, height, language);
+  reinterpret_cast<VIIL>(surface_)(Env(), nullptr, width, height, language);
   Drain("dlxSurfaceChanged");
   if (java_.ExceptionCheck() && log_) log_("dlgl: pending " + java_.PendingClass() + " after surfaceChanged");
   using Viewport = void (*)(int, int, int, int);
@@ -71,22 +73,22 @@ bool DlglBootstrap::Render(std::string* err) {
     if (err != nullptr) *err = "dlgl has not started";
     return false;
   }
-  reinterpret_cast<V0>(draw_)(nullptr, nullptr);
+  reinterpret_cast<V0>(draw_)(Env(), nullptr);
   return true;
 }
 
 bool DlglBootstrap::Pause(std::string*) {
-  if (started_ && pause_ != nullptr) reinterpret_cast<V0>(pause_)(nullptr, nullptr);
+  if (started_ && pause_ != nullptr) reinterpret_cast<V0>(pause_)(Env(), nullptr);
   return true;
 }
 
 bool DlglBootstrap::Back(std::string*) {
-  if (started_ && back_ != nullptr) reinterpret_cast<V0>(back_)(nullptr, nullptr);
+  if (started_ && back_ != nullptr) reinterpret_cast<V0>(back_)(Env(), nullptr);
   return true;
 }
 
 void DlglBootstrap::Touch(int action, float x, float y) {
-  if (started_ && touch_ != nullptr) reinterpret_cast<VIFF>(touch_)(nullptr, nullptr, action, x, y);
+  if (started_ && touch_ != nullptr) reinterpret_cast<VIFF>(touch_)(Env(), nullptr, action, x, y);
 }
 
 void DlglBootstrap::Drain(const char* after) {

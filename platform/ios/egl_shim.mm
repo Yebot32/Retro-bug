@@ -15,6 +15,7 @@
 #import <OpenGLES/ES1/glext.h>
 #import <QuartzCore/QuartzCore.h>
 
+#include <cstdio>
 #include <cstring>
 #include <map>
 
@@ -216,6 +217,34 @@ bool EglShim::Present(std::string* err) {
   if (SwapBuffers(&g_display_marker, &g_surface_marker) != 0) return true;
   if (err != nullptr) *err = "eglSwapBuffers failed";
   return false;
+}
+
+void EglShim::SamplePixels(std::string* out) {
+  out->clear();
+  if (!drawable_ready_ || width_ <= 0 || height_ <= 0) return;
+  if (client_version_ == 1) {
+    glBindFramebufferOES(GL_FRAMEBUFFER_OES, framebuffer_);
+  } else {
+    glBindFramebuffer(0x8D40, framebuffer_);
+  }
+  char line[384];
+  std::size_t used = 0;
+  for (int gy = 1; gy <= 3; ++gy) {
+    for (int gx = 1; gx <= 3; ++gx) {
+      unsigned char rgba[4] = {};
+      const int x = (width_ * gx) / 4;
+      const int y = (height_ * gy) / 4;
+      glReadPixels(x, y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+      const int n = std::snprintf(line + used, sizeof line - used, "%s%d,%d=%02x%02x%02x%02x",
+                                  used == 0 ? "" : " ", x, y, rgba[0], rgba[1], rgba[2], rgba[3]);
+      if (n <= 0 || static_cast<std::size_t>(n) >= sizeof line - used) {
+        out->assign(line, used);
+        return;
+      }
+      used += static_cast<std::size_t>(n);
+    }
+  }
+  out->assign(line, used);
 }
 
 void EglShim::Detach() {
@@ -423,13 +452,7 @@ bool EglShim::EnsureDrawable(std::string* err) {
       glBindRenderbufferOES(GL_RENDERBUFFER_OES, depth_buffer_);
       glRenderbufferStorageOES(GL_RENDERBUFFER_OES, GL_DEPTH_COMPONENT16_OES, width_, height_);
       glFramebufferRenderbufferOES(GL_FRAMEBUFFER_OES, GL_DEPTH_ATTACHMENT_OES, GL_RENDERBUFFER_OES, depth_buffer_);
-      glBindRenderbufferOES(GL_RENDERBUFFER_OES, color_buffer_);
-      // The config promises a 16-bit depth buffer (eglGetConfigAttrib); without one the game's depth
-      // test is undefined. Then bind the colour buffer back: presentRenderbuffer presents the bound one.
-      glGenRenderbuffersOES(1, &depth_buffer_);
-      glBindRenderbufferOES(GL_RENDERBUFFER_OES, depth_buffer_);
-      glRenderbufferStorageOES(GL_RENDERBUFFER_OES, GL_DEPTH_COMPONENT16_OES, width_, height_);
-      glFramebufferRenderbufferOES(GL_FRAMEBUFFER_OES, GL_DEPTH_ATTACHMENT_OES, GL_RENDERBUFFER_OES, depth_buffer_);
+      // Bind the colour buffer back: presentRenderbuffer presents the bound one.
       glBindRenderbufferOES(GL_RENDERBUFFER_OES, color_buffer_);
       if (glCheckFramebufferStatusOES(GL_FRAMEBUFFER_OES) != GL_FRAMEBUFFER_COMPLETE_OES) {
         if (err != nullptr) *err = "the EAGL framebuffer is incomplete";
@@ -449,11 +472,6 @@ bool EglShim::EnsureDrawable(std::string* err) {
       glFramebufferRenderbuffer(0x8D40, 0x8CE0, 0x8D41, color_buffer_);  // FRAMEBUFFER, COLOR_ATTACHMENT0
       glGetRenderbufferParameteriv(0x8D41, 0x8D42, &width_);             // RENDERBUFFER_WIDTH
       glGetRenderbufferParameteriv(0x8D41, 0x8D43, &height_);            // RENDERBUFFER_HEIGHT
-      glGenRenderbuffers(1, &depth_buffer_);
-      glBindRenderbuffer(0x8D41, depth_buffer_);
-      glRenderbufferStorage(0x8D41, 0x81A5, width_, height_);              // DEPTH_COMPONENT16
-      glFramebufferRenderbuffer(0x8D40, 0x8D00, 0x8D41, depth_buffer_);    // DEPTH_ATTACHMENT
-      glBindRenderbuffer(0x8D41, color_buffer_);
       glGenRenderbuffers(1, &depth_buffer_);
       glBindRenderbuffer(0x8D41, depth_buffer_);
       glRenderbufferStorage(0x8D41, 0x81A5, width_, height_);              // DEPTH_COMPONENT16

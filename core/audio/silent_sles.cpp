@@ -380,6 +380,7 @@ struct SilentSles::Impl {
         switch (index) {
           case 0:  // SetPlayState
             itf->obj->play_state = s.r[1];
+            if (s.r[1] == 3) Say("playing", "sles: player state PLAYING (silent)");
             return true;
           case 1:  // GetPlayState
             if (!WriteOut(s.r[1], itf->obj->play_state)) s.r[0] = kParameterInvalid;
@@ -420,6 +421,7 @@ struct SilentSles::Impl {
             if (!WriteOut(s.r[1], itf->obj->queued)) s.r[0] = kParameterInvalid;
             return true;
           case 3:  // RegisterCallback
+            Say("bq-callback", "sles: buffer-queue callback registered (silent; not invoked)");
             return true;
           default:
             break;

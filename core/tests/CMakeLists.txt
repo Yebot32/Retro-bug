@@ -170,6 +170,12 @@ target_link_libraries(rb_host_io_tests PRIVATE rb_syscall rb_mem)
 add_executable(rb_silent_sles_tests silent_sles_test.cpp)
 target_link_libraries(rb_silent_sles_tests PRIVATE rb_audio rb_abi rb_mem)
 
+# S1n: the DLGE bootstrap's guest ABI. Fake natives record the JNIEnv pointer and call order, including
+# the GetStringUTFChars path that made a null env crash before KitKat could enter its first frame.
+add_executable(rb_dlgl_bootstrap_tests dlgl_bootstrap_test.cpp "${CMAKE_SOURCE_DIR}/platform/ios/dlgl_bootstrap.cpp")
+target_include_directories(rb_dlgl_bootstrap_tests PRIVATE "${CMAKE_SOURCE_DIR}/platform/ios")
+target_link_libraries(rb_dlgl_bootstrap_tests PRIVATE rb_java)
+
 # M4 Task 4: the OpenSL ES thunks against the device's own libOpenSLES (the module lives with the other Android
 # thunks; it depends on HandleTable/ThunkCaller and the OpenSL ES headers only, not on the launcher).
 add_executable(rb_sles_tests sles_test.cpp "${CMAKE_SOURCE_DIR}/android/jni/thunks_sles.cpp")

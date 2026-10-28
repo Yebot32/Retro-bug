@@ -69,6 +69,8 @@ class EglShim {
   bool BindDrawable(std::string* err);
   /// Presents the drawable (the shell calls it after the guest render entry; the guest never swaps).
   bool Present(std::string* err);
+  /// A 3x3 RGBA sample of the current drawable, for the log. `out` is empty on failure.
+  void SamplePixels(std::string* out);
 
   /// Drops the context and layer (the shim's destructor does this too). Called on the render thread.
   void Detach();

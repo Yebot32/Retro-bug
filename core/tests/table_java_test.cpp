@@ -207,6 +207,24 @@ void dlgl_profile_answers() {
   CHECK_CTX(r.StringArg(text).empty(), r.StringArg(text));
   CHECK(r.CallStatic("android/media/AudioTrack", "getMinBufferSize", "(III)I", {44100, 2, 2}) == 4096);
   CHECK(r.Cls("com/doubleleft/DLGLRenderer") != 0);
+
+  // The native tracker wrappers call these static String methods during KitKat's startup. A missing
+  // method leaves a pending NoSuchMethodError, which is worse than a no-op: the engine never clears it.
+  const auto event = r.java.NewString(u"Android_KitKat_app/kitkat_home/home_carregado");
+  for (const char* name : {"init", "trackEvent", "trackPageView"}) {
+    CHECK_CTX(r.StaticMethod("com/doubleleft/GATracker", name, "(Ljava/lang/String;)V") != 0, name);
+  }
+  CHECK(r.CallStatic("com/doubleleft/GATracker", "trackEvent", "(Ljava/lang/String;)V", {event}) == 0);
+  CHECK(!r.java.ExceptionCheck());
+  for (const char* name : {"init", "reportAchievement", "sendScore", "signIn", "signOut"}) {
+    CHECK_CTX(r.StaticMethod("com/doubleleft/GooglePlayServices", name, "(Ljava/lang/String;)V") != 0, name);
+  }
+  for (const char* name : {"openVideo", "resetScoreAlert", "setWallpaper"}) {
+    CHECK_CTX(
+        r.StaticMethod("com/doubleleft/androidkitkat/AndroidKitKatActivity", name, "(Ljava/lang/String;)V") != 0,
+        name);
+  }
+  CHECK(!r.java.ExceptionCheck());
 }
 
 void integers_behave() {

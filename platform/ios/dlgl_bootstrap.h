@@ -16,7 +16,9 @@ namespace rb::platform::ios {
 
 class DlglBootstrap {
  public:
-  DlglBootstrap(rb::java::TableJava& java, std::string lib,
+  /// `jni_env` is the guest JNIEnv* value (`Boot::jni()->env()`), not a host pointer: the natives
+  /// pass it straight to their JNI calls, starting with GetStringUTFChars in dlxSurfaceChanged.
+  DlglBootstrap(rb::java::TableJava& java, std::uint32_t jni_env, std::string lib,
                 std::function<void(const std::string&)> log);
 
   /// Resolves the registered natives and makes the Java layer's start-up calls. On the render thread,
@@ -32,10 +34,12 @@ class DlglBootstrap {
 
  private:
   void* Native(const char* cls, const char* name, std::string* err) const;
+  void* Env() const;
   /// Logs (and consumes) any GL error our calls left, naming the step. Diagnostics only.
   void Drain(const char* after);
 
   rb::java::TableJava& java_;
+  std::uint32_t jni_env_ = 0;
   std::string lib_;
   std::function<void(const std::string&)> log_;
   void* asset_ = nullptr;

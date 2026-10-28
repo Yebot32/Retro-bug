@@ -57,7 +57,7 @@ constexpr std::uint32_t kFeatureUnsupported = 12;
 enum : unsigned { kRealize = 0, kGetState = 2, kGetInterface = 3, kDestroy = 6 };
 enum : unsigned { kCreateAudioPlayer = 2, kCreateOutputMix = 7 };
 enum : unsigned { kSetPlayState = 0, kGetPlayState = 1 };
-enum : unsigned { kEnqueue = 0, kClear = 1, kBqGetState = 2 };
+enum : unsigned { kEnqueue = 0, kClear = 1, kBqGetState = 2, kBqRegisterCallback = 3 };
 
 struct Rig {
   std::unique_ptr<mem::GuestMemory> mem;
@@ -203,27 +203,37 @@ void openal_startup_contract_succeeds() {
   CHECK(mix != 0);
   if (mix != 0) CHECK(r.Method(mix, kRealize, {0}) == kSuccess);
 
-  CHECK(r.Method(engine_itf, kCreateAudioPlayer, {kScratch + 12, kScratch + 0x200, kScratch + 0x300, 0}) ==
+  // OpenAL creates the player with ANDROIDSIMPLEBUFFERQUEUE required and then queries the object as
+  // BUFFERQUEUE. Android answers both from the same player interface; so does this model.
+  r.Put(kScratch + 0x100, r.Iid("SL_IID_ANDROIDSIMPLEBUFFERQUEUE"));
+  r.Put(kScratch + 0x104, 1);
+  CHECK(r.Method(engine_itf, kCreateAudioPlayer,
+                 {kScratch + 12, kScratch + 0x200, kScratch + 0x300, 1, kScratch + 0x100, kScratch + 0x104}) ==
         kSuccess);
   const std::uint32_t player = r.U32(kScratch + 12);
   CHECK(player != 0);
   if (player == 0) return;
   CHECK(r.Method(player, kRealize, {0}) == kSuccess);
 
-  CHECK(r.Method(player, kGetInterface, {r.Iid("SL_IID_PLAY"), kScratch + 16}) == kSuccess);
   CHECK(r.Method(player, kGetInterface, {r.Iid("SL_IID_BUFFERQUEUE"), kScratch + 20}) == kSuccess);
+  const std::uint32_t bq = r.U32(kScratch + 20);
+  CHECK(bq != 0);
+  if (bq == 0) return;
+  CHECK(r.Method(bq, kBqRegisterCallback, {0x6000'0021u, kScratch}) == kSuccess);
+  CHECK(r.Method(bq, kEnqueue, {kScratch + 0x400, 256}) == kSuccess);
+  CHECK(r.Method(bq, kEnqueue, {kScratch + 0x500, 256}) == kSuccess);
+
+  CHECK(r.Method(player, kGetInterface, {r.Iid("SL_IID_PLAY"), kScratch + 16}) == kSuccess);
   CHECK(r.Method(player, kGetInterface, {r.Iid("SL_IID_ANDROIDSIMPLEBUFFERQUEUE"), kScratch + 24}) == kSuccess);
   const std::uint32_t play = r.U32(kScratch + 16);
-  const std::uint32_t bq = r.U32(kScratch + 20);
-  CHECK(play != 0 && bq != 0);
-  if (play == 0 || bq == 0) return;
+  CHECK(play != 0);
+  if (play == 0) return;
 
-  CHECK(r.Method(play, kSetPlayState, {2}) == kSuccess);  // SL_PLAYSTATE_PLAYING
+  CHECK(r.Method(play, kSetPlayState, {3}) == kSuccess);  // SL_PLAYSTATE_PLAYING
   CHECK(r.Method(play, kGetPlayState, {kScratch + 28}) == kSuccess);
-  CHECK(r.U32(kScratch + 28) == 2);
-  CHECK(r.Method(bq, kEnqueue, {kScratch + 0x400, 256}) == kSuccess);
+  CHECK(r.U32(kScratch + 28) == 3);
   CHECK(r.Method(bq, kBqGetState, {kScratch + 32}) == kSuccess);
-  CHECK(r.U32(kScratch + 32) == 1);
+  CHECK(r.U32(kScratch + 32) == 2);
   CHECK(r.Method(bq, kClear, {}) == kSuccess);
   CHECK(r.Method(bq, kBqGetState, {kScratch + 36}) == kSuccess);
   CHECK(r.U32(kScratch + 36) == 0);

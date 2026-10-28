@@ -287,8 +287,8 @@ bool RbIosSession::Boot(std::string* err) {
     return false;
   }
   if (dlgl_apk || lib == "libdlgl.so") {
-    dlgl = std::make_unique<rb::platform::ios::DlglBootstrap>(*java, lib,
-                                                              [self](const std::string& line) { self->Log(line); });
+    dlgl = std::make_unique<rb::platform::ios::DlglBootstrap>(
+        *java, boot->jni()->env(), lib, [self](const std::string& line) { self->Log(line); });
   } else {
     game = std::make_unique<rb::platform::ios::Cocos2dxBootstrap>(*boot, *java, lib);
   }
@@ -444,6 +444,12 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
         if (!rendered) {
           s->Fail(std::string{s->dlgl ? "dlxDraw" : "nativeRender"} + ": " + why);
           break;
+        }
+        const int next_frame = s->frames.load() + 1;
+        if (next_frame == 1 || next_frame == 10 || next_frame == 60 || next_frame == 300) {
+          std::string pixels;
+          egl.SamplePixels(&pixels);
+          s->Log("frame " + std::to_string(next_frame) + " pixels: " + pixels);
         }
         if (!egl.Present(&why)) {
           s->Fail("eglSwapBuffers: " + why);

@@ -35,6 +35,28 @@ void InstallDlgl(TableJava& j, const AndroidEnv& env) {
     j.DefineClass(cls, "java/lang/Object");
   }
 
+  // The engine tracks through static Java methods. KitKat's native wrappers pass one String argument;
+  // without these GetStaticMethodID fails and leaves a pending exception that the game never clears.
+  const std::string tracker = "com/doubleleft/GATracker";
+  NoOp(j, tracker, "init", "(Ljava/lang/String;)V");
+  NoOp(j, tracker, "trackEvent", "(Ljava/lang/String;)V");
+  NoOp(j, tracker, "trackPageView", "(Ljava/lang/String;)V");
+
+  // Google Play Games is optional on this host: answer as signed out and accept every later event.
+  const std::string games = "com/doubleleft/GooglePlayServices";
+  NoOp(j, games, "init", "(Ljava/lang/String;)V");
+  NoOp(j, games, "reportAchievement", "(Ljava/lang/String;)V");
+  NoOp(j, games, "sendScore", "(Ljava/lang/String;)V");
+  NoOp(j, games, "signIn", "(Ljava/lang/String;)V");
+  NoOp(j, games, "signOut", "(Ljava/lang/String;)V");
+
+  // The Activity methods the native extras screens call. They are OS actions (open a video, set a
+  // wallpaper, confirm a score reset), not part of gameplay; answer them without leaving the app.
+  const std::string activity = "com/doubleleft/androidkitkat/AndroidKitKatActivity";
+  NoOp(j, activity, "openVideo", "(Ljava/lang/String;)V");
+  NoOp(j, activity, "resetScoreAlert", "(Ljava/lang/String;)V");
+  NoOp(j, activity, "setWallpaper", "(Ljava/lang/String;)V");
+
   // LocalStorage: the engine's saves. Defaults until a real per-game store lands; a save is a no-op.
   const std::string storage = "com/doubleleft/LocalStorage";
   j.DefineMethod(storage, "loadFloat", "(Ljava/lang/String;)F", true,
