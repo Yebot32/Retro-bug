@@ -687,3 +687,26 @@ DATA HYGIENE:
   `afb90d5a581f151e9af3e2a997dfccb1536b8f8ae67b6cbbdf03779c0c6446b6`, CFBundleVersion 4.
 - Do not call the startup fixed until the device log reaches `I/tApp: creating main app`; if it still
   stops at slCreateEngine, read the new SLES milestone lines and host-crash marker first.
+
+1v. 2026-10-28 (iOS S1o) — DLGE's JNIEnv, Java profile, exact OpenSL, and measurable pixels
+---------------------------------------------------------------------------
+- Exact OpenSL sequence from libdlgl (all synchronous in JNI_OnLoad): engine Realize; GetInterface
+  (SL_IID_ENGINE); CreateOutputMix + Realize; CreateAudioPlayer with
+  SL_IID_ANDROIDSIMPLEBUFFERQUEUE required; player Realize; GetInterface(SL_IID_BUFFERQUEUE) (the
+  create/query alias); RegisterCallback; two Enqueue calls; GetInterface(SL_IID_PLAY);
+  SetPlayState(3=PLAYING). `rb_silent_sles_tests` now drives that exact order.
+- **DlglBootstrap's native calls used a null JNIEnv.** dlxSurfaceChanged calls GetStringUTFChars through
+  it; passing `Boot::jni()->env()` is mandatory, not cosmetic. `rb_dlgl_bootstrap_tests` (23 checks)
+  records the env pointer and call order through fake natives and asserts the real 0x111000-style value.
+- `LocalStorage` methods were registered before the class was defined, so all saves/loads silently
+  returned zero with a pending NoSuchMethodError. The class is now defined; GATracker,
+  GooglePlayServices and the Activity openVideo/resetScoreAlert/setWallpaper methods are no-ops with the
+  `(Ljava/lang/String;)V` signatures read from the DEX.
+- Coverage check: all 25 GLES1 imports + six AAsset imports resolve; the bootcheck has all 48
+  assets/default resources plus both libs and four rb32sys images.
+- Added drawable pixel probes at frames 1/10/60/300 and removed the duplicated EGL depth renderbuffer
+  allocation. Build 5 (commit `baf1e0b`) is 2,053,315 bytes, SHA-256
+  `1ea2449abd1e8d0c923d9b9fe13748cb12217fe7351720a43683450a86a9eaf2`; CI green on Linux/macOS/iOS/IPA,
+  host tests 60/61/23 for the changed suites.
+- Remaining evidence is device-only: `I/tApp: creating main app`, surfaceChanged, and a `frame N pixels:`
+  line with a non-zero channel. Silent OpenSL deliberately cannot promise audio.

@@ -863,3 +863,27 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
   Next device log should contain `sles: silent backend installed`, `slCreateEngine -> 0`,
   `CreateOutputMix`, `CreateAudioPlayer`, then `I/tApp: creating main app`, and the first
   `surfaceChanged`. If it stops earlier, the new SLES lines and host-crash marker name the layer.
+
+### 2026-10-28 — iOS S1o: the second half of the DLGE contract
+- The exact Android-side sequence was traced: engine Realize; GetInterface(SL_IID_ENGINE);
+  CreateOutputMix + Realize; CreateAudioPlayer with ANDROIDSIMPLEBUFFERQUEUE; player Realize;
+  GetInterface(BUFFERQUEUE) (the create/query alias); RegisterCallback; two Enqueues;
+  GetInterface(PLAY); SetPlayState(3). The shared silent model now has a test for that exact order.
+- **The DLGE bootstrap passed null as every native's `JNIEnv*`.** `dlxSurfaceChanged` uses it for
+  `GetStringUTFChars(language)`, so the first surface callback could never have run. It now receives
+  `Boot::jni()->env()`, and `rb_dlgl_bootstrap_tests` records the env and call order through fake natives.
+- The Java profile had a second startup bug: `LocalStorage`'s methods were registered before the class
+  existed, so every save/load was silently returning zero with a pending `NoSuchMethodError`. The class
+  is now defined first; GATracker, GooglePlayServices and the three Activity actions the natives call
+  have their `(String)V` methods.
+- All 25 GLES1 and six AAsset imports resolve through the iOS host table. The bootcheck APK contains all
+  48 `assets/default/` resources the engine opens, plus both guest libraries and the four bionic images.
+- Added early frame probes (frames 1/10/60/300) that log nine RGBA samples from the EAGL drawable before
+  present, so a black screen is distinguishable from no output. Removed a duplicated depth-renderbuffer
+  allocation in the EAGL framebuffer setup.
+- **Verified:** host suite `rb_table_java_tests` 60/60, `rb_silent_sles_tests` 61/61,
+  `rb_dlgl_bootstrap_tests` 23/23; Linux layering clean; macOS host, iOS arm64 compile and IPA green at
+  `baf1e0b`. `build/RetroBug-unsigned.ipa` is build 5, commit `baf1e0b`, 2,053,315 bytes, SHA-256
+  `1ea2449abd1e8d0c923d9b9fe13748cb12217fe7351720a43683450a86a9eaf2`.
+- **Still device evidence only:** `I/tApp: creating main app`, `surfaceChanged`, then `frame N pixels:`
+  with at least one non-zero channel. Audio buffers are deliberately not callbacks in this silent build.
