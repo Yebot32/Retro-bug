@@ -31,7 +31,8 @@ void InstallDlgl(TableJava& j, const AndroidEnv& env) {
   for (const char* cls : {"com/doubleleft/DLGLSurface", "com/doubleleft/DLGLRenderer",
                           "com/doubleleft/AdmobPlugin", "com/doubleleft/GATracker",
                           "com/doubleleft/GooglePlayServices", "com/doubleleft/androidkitkat/AndroidKitKatActivity",
-                          "android/media/AudioTrack", "android/content/SharedPreferences"}) {
+                          "com/doubleleft/LocalStorage", "android/media/AudioTrack",
+                          "android/content/SharedPreferences"}) {
     j.DefineClass(cls, "java/lang/Object");
   }
 

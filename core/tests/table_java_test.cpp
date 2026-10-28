@@ -202,6 +202,7 @@ void dlgl_profile_answers() {
   Rig r;
   const auto key = r.java.NewString(u"best");
   CHECK(r.CallStatic("com/doubleleft/LocalStorage", "loadFloat", "(Ljava/lang/String;)F", {key}) == 0);
+  CHECK_CTX(!r.java.ExceptionCheck(), r.java.PendingClass());
   const auto text = static_cast<TableJava::Ref>(
       r.CallStatic("com/doubleleft/LocalStorage", "loadString", "(Ljava/lang/String;)Ljava/lang/String;", {key}));
   CHECK_CTX(r.StringArg(text).empty(), r.StringArg(text));
