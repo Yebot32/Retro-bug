@@ -57,6 +57,13 @@
 /// and the definition in the generated table has external linkage.
 extern const rb::exec::AotImageInfo kAotFixtureImage;
 
+/// Defined by the generated `aot_fixture.S`: a pair of words in `.rodata` holding the emitted code
+/// size and block count. They are the `.S` half of the table/assembly pairing check.
+extern "C" {
+extern const std::uint32_t aot_fixture_code_bytes;
+extern const std::uint32_t aot_fixture_block_count;
+}
+
 namespace {
 
 using namespace rb;
@@ -244,6 +251,7 @@ void fib_matches_tier_one_for_every_n() {
               what + " = " + std::to_string(static_cast<std::int32_t>(sj.r[0])) + ", expected " +
                   std::to_string(Fib(n)));
     CHECK_CTX(sj.r[0] == si.r[0], what + " AOT r0 " + Hex(sj.r[0]) + " != Tier I " + Hex(si.r[0]));
+    CHECK(rj.instructions_executed > 0);
     // Every field the brief names, plus the rest of the MachineState the differential compares: the
     // two tiers have to agree on the whole value, not just the answer.
     const std::string diff = StateDiff(si, sj);
@@ -261,10 +269,236 @@ void fib_matches_tier_one_for_every_n() {
               rig.aot->fallback_count());
 }
 
+/// The `.S` and the table are one emission, not two files that happen to share a fingerprint. The
+/// generated table carries the code size and block count; the assembly repeats both in its header and
+/// in a `.rodata` word pair the table declares. This asserts both halves agree with each other.
+void table_and_assembly_are_one_emission() {
+  const exec::AotImageInfo& image = kAotFixtureImage;
+  CHECK(image.block_count == image.count);
+  CHECK(image.code_bytes > 0);
+  CHECK_CTX(aot_fixture_code_bytes == image.code_bytes,
+            "the .S says " + std::to_string(aot_fixture_code_bytes) + " code bytes, the table " +
+                std::to_string(image.code_bytes));
+  CHECK_CTX(aot_fixture_block_count == image.block_count,
+            "the .S says " + std::to_string(aot_fixture_block_count) + " blocks, the table " +
+                std::to_string(image.block_count));
+}
+
+/// A live IT state or FPSCR mode is part of a block's identity in Dynarmic's `LocationDescriptor`, but
+/// the AOT table is deliberately keyed on `(offset, thumb)` only. Every emitted block is for IT=0 and
+/// the default FPCR, so an entry carrying either other fact must not resolve into that code — it has to
+/// fall back and let Tier I, which keys blocks on the descriptor, predicate and round correctly.
+void non_default_descriptors_fall_back() {
+  Rig rig = Build(kAotFixtureImage);
+  if (!rig.ok) return;
+  const auto it = rig.mod->FindExport("Java_com_retrobug_fixture_MainActivity_it_probe");
+  CHECK_CTX(it.has_value(), "the fixture exports it_probe");
+  if (!it) return;
+  const std::uint32_t text_base = kAotFixtureImage.load_bias + kAotFixtureImage.text_vaddr;
+  // The point of this case is the descriptor check, not a missing block: the entry must resolve.
+  CHECK_CTX(rig.aot->image().Resolve(it->addr - text_base, it->thumb) != nullptr,
+            "it_probe's entry has no emitted block, so this case would not test the descriptor");
+  if (rig.aot->image().Resolve(it->addr - text_base, it->thumb) == nullptr) return;
+
+  const auto run_both = [&](const exec::MachineState& start, const char* what) {
+    exec::MachineState si = start;
+    exec::MachineState sj = start;
+    const std::size_t before = rig.aot->fallback_count();
+    const exec::RunResult ri = rig.interp->Run(si, 8'000'000);
+    const exec::RunResult rj = rig.aot->Run(sj, 8'000'000);
+    CHECK_CTX(ri.reason == exec::StopReason::Returned, std::string{what} + " (Tier I) did not return");
+    CHECK_CTX(rj.reason == exec::StopReason::Returned, std::string{what} + " (AOT) did not return");
+    CHECK_CTX(static_cast<std::int32_t>(si.r[0]) == 1008,
+              std::string{what} + ": Tier I answered " + std::to_string(static_cast<std::int32_t>(si.r[0])) +
+                  ", the predicated result is 1008");
+    CHECK_CTX(sj.r[0] == si.r[0], std::string{what} + ": AOT " + Hex(sj.r[0]) + " != Tier I " +
+                                          Hex(si.r[0]));
+    const std::string diff = StateDiff(si, sj);
+    CHECK_CTX(diff.empty(), std::string{what} + ": " + diff);
+    CHECK_CTX(rig.aot->fallback_count() > before,
+              std::string{what} + " entered AOT code instead of falling back");
+  };
+
+  // A single-leg `IT LT` on it_probe's first instruction: the `cmp` is predicated and skipped (Z=1
+  // makes LT false), then the function's own `ite gt` runs normally. 3 -> 8 -> 1008.
+  {
+    exec::MachineState start = EntryState(it->addr, 3, it->thumb);
+    start.r[3] = 7;
+    start.cpsr = exec::CpsrWithIt(start.cpsr, 0xb8) | (1u << 30);  // IT LT; Z set
+    start.itstate = 0xb8;
+    run_both(start, "it_probe with a live IT state");
+  }
+
+  // A nonzero FPSCR rounding mode is the other half of the descriptor: the block's FP immediates were
+  // emitted for round-to-nearest, so entering it under a different mode is the same refusal.
+  {
+    exec::MachineState start = EntryState(it->addr, 3, it->thumb);
+    start.r[3] = 7;
+    start.fpscr = 1u << 22;  // FPSCR.RMode = round toward +infinity
+    run_both(start, "it_probe with FPSCR.RMode set");
+  }
+}
+
+/// A table with a reached block removed must run the rest, hand the hole to Tier I, and count the
+/// fallback in the same guest-instruction unit as the AOT ticks. A second copy with every block but one
+/// unrelated one removed forces the whole run through the fallback, including its terminal exit — the
+/// path that used to return Tier I's `RunResult` and silently drop `executed_` and every earlier
+/// fallback.
+void a_missing_block_falls_back_and_is_counted() {
+  const exec::AotImageInfo& image = kAotFixtureImage;
+  Rig full = Build(image);
+  if (!full.ok) return;
+  const auto fib_full = full.mod->FindExport("Java_com_retrobug_fixture_MainActivity_fib");
+  CHECK_CTX(fib_full.has_value(), "the fixture exports fib");
+  if (!fib_full) return;
+  exec::MachineState sf = EntryState(fib_full->addr, 10, fib_full->thumb);
+  const exec::RunResult rf = full.aot->Run(sf, 8'000'000);
+  CHECK_CTX(rf.reason == exec::StopReason::Returned, "the complete-table reference run did not return");
+  CHECK_CTX(sf.r[0] == 55, "the complete-table reference run is not fib(10) = 55");
+
+  // One block removed: the entry block the dispatcher starts on. The rest of the image is untouched,
+  // so the run proves that a hole in the table is a fallback rather than a failure.
+  {
+    const std::uint32_t text_base = image.load_bias + image.text_vaddr;
+    const std::uint32_t fib_off = fib_full->addr - text_base;
+    std::vector<exec::AotBlock> blocks;
+    bool removed = false;
+    for (std::size_t i = 0; i < image.count; ++i) {
+      if (image.blocks[i].guest_off == fib_off &&
+          (image.blocks[i].flags & (fib_full->thumb ? exec::kAotThumb : exec::kAotArm)) != 0) {
+        removed = true;
+        continue;
+      }
+      blocks.push_back(image.blocks[i]);
+    }
+    CHECK_CTX(removed, "the fixture table contains the fib entry block this case removes");
+    if (!removed) return;
+    exec::AotImageInfo copy = image;
+    copy.blocks = blocks.data();
+    copy.count = blocks.size();
+    copy.block_count = static_cast<std::uint32_t>(blocks.size());
+
+    Rig rig = Build(copy);
+    if (!rig.ok) return;
+    const auto fib = rig.mod->FindExport("Java_com_retrobug_fixture_MainActivity_fib");
+    if (!fib) return;
+    exec::MachineState si = EntryState(fib->addr, 10, fib->thumb);
+    exec::MachineState sj = si;
+    const exec::RunResult ri = rig.interp->Run(si, 8'000'000);
+    const exec::RunResult rj = rig.aot->Run(sj, 8'000'000);
+    CHECK(ri.reason == exec::StopReason::Returned);
+    CHECK(rj.reason == exec::StopReason::Returned);
+    CHECK_CTX(rig.aot->fallback_count() > 0, "a removed reached block produced no fallback");
+    CHECK(sj.r[0] == 55);
+    CHECK(StateDiff(si, sj).empty());
+    CHECK(rj.instructions_executed > 0);
+  }
+
+  // Every fib block removed, one unrelated block kept so the image is still loadable: the whole
+  // program is a chain of dispatcher misses and its final exit is a fallback terminal.
+  {
+    std::size_t keep = 0;
+    for (std::size_t i = 1; i < image.count; ++i) {
+      if (image.blocks[i].guest_off > image.blocks[keep].guest_off) keep = i;
+    }
+    std::vector<exec::AotBlock> blocks{image.blocks[keep]};
+    exec::AotImageInfo copy = image;
+    copy.blocks = blocks.data();
+    copy.count = blocks.size();
+    copy.block_count = 1;
+
+    Rig rig = Build(copy);
+    if (!rig.ok) return;
+    const auto fib = rig.mod->FindExport("Java_com_retrobug_fixture_MainActivity_fib");
+    if (!fib) return;
+    exec::MachineState si = EntryState(fib->addr, 10, fib->thumb);
+    exec::MachineState sj = si;
+    const exec::RunResult ri = rig.interp->Run(si, 8'000'000);
+    const exec::RunResult rj = rig.aot->Run(sj, 8'000'000);
+    CHECK(ri.reason == exec::StopReason::Returned);
+    CHECK(rj.reason == exec::StopReason::Returned);
+    CHECK_CTX(rig.aot->fallback_count() > 0, "the all-miss run reported no fallbacks");
+    CHECK(sj.r[0] == 55);
+    CHECK(StateDiff(si, sj).empty());
+    // Both numbers are guest instructions. This run executes the same program, and each fallback
+    // counts one chunk where the complete table counts one per instruction, so it cannot exceed the
+    // reference. The old terminal path returned Tier I's IR-step count (thousands); the old map-halt
+    // path added 65,536 IR steps per fallback; both blow past this bound.
+    CHECK_CTX(rj.instructions_executed > 0, "the fallback-only run reported no work");
+    CHECK_CTX(rj.instructions_executed <= rf.instructions_executed,
+              "fallback-only run " + std::to_string(rj.instructions_executed) +
+                  " > complete-table run " + std::to_string(rf.instructions_executed));
+    CHECK_CTX(rj.instructions_executed >= rig.aot->fallback_count(),
+              "reported " + std::to_string(rj.instructions_executed) + " instructions for " +
+                  std::to_string(rig.aot->fallback_count()) + " fallbacks");
+    std::printf("# aot: fallback-only fib(10): %u instructions over %zu fallbacks (full table %u)\n",
+                rj.instructions_executed, rig.aot->fallback_count(), rf.instructions_executed);
+  }
+}
+
+/// The budget is in guest instructions and the fallback is part of it. A three-instruction budget must
+/// stop and leave a state the next call can resume; a guest loop with no emitted block must stop at the
+/// budget rather than spin inside the dispatcher's fallback.
+void the_budget_covers_aot_and_fallback_work() {
+  Rig rig = Build(kAotFixtureImage);
+  if (!rig.ok) return;
+  const auto fib = rig.mod->FindExport("Java_com_retrobug_fixture_MainActivity_fib");
+  CHECK_CTX(fib.has_value(), "the fixture exports fib");
+  if (!fib) return;
+
+  exec::MachineState state = EntryState(fib->addr, 10, fib->thumb);
+  const exec::RunResult small = rig.aot->Run(state, 3);
+  CHECK(small.reason == exec::StopReason::Budget);
+  CHECK(small.instructions_executed > 0);
+  // The Tier I/J invariant: a budget stop leaves a state that can be resumed, and doing so reaches the
+  // same answer the uninterrupted run does.
+  const exec::RunResult rest = rig.aot->Run(state, 8'000'000);
+  CHECK(rest.reason == exec::StopReason::Returned);
+  CHECK(state.r[0] == 55);
+
+  // `wide` is one of the fixture functions the emitter refuses (VFP/coprocessor blocks), so this is
+  // the refused-block path: no table entry exists anywhere in it.
+  const auto wide = rig.mod->FindExport("Java_com_retrobug_fixture_MainActivity_wide");
+  if (wide) {
+    const std::uint32_t text_base = kAotFixtureImage.load_bias + kAotFixtureImage.text_vaddr;
+    CHECK_CTX(rig.aot->image().Resolve(wide->addr - text_base, wide->thumb) == nullptr,
+              "wide's entry unexpectedly has an emitted block");
+  }
+
+  // A two-encoding loop in guest memory that the image cannot cover: `movs r0, #0; b .-4`. The `b`
+  // targets the `movs`, so every iteration re-enters the same block and pays for its IR operation.
+  // That matters: Tier I counts IR operations, and a bare `b .` block has none, so Tier I itself would
+  // spin inside one `Run` without consuming its step budget. With a body instruction, every dispatch
+  // misses and the only way out is the AOT budget.
+  constexpr exec::GuestAddr kPage = 0x0180'0000u;
+  std::string err;
+  if (!rig.mem->Map(kPage, mem::kGuestPage, mem::kRead | mem::kWrite | mem::kExec, &err)) {
+    CHECK_CTX(false, "could not map the spin-loop page: " + err);
+    return;
+  }
+  const std::uint32_t spin = 0xe7fd'2000u;  // little-endian: 0x2000 `movs r0, #0`, 0xe7fd `b .-4`
+  if (!rig.mem->Write(kPage, &spin, 4)) {
+    CHECK_CTX(false, "could not write the spin loop");
+    return;
+  }
+  const std::size_t before = rig.aot->fallback_count();
+  exec::MachineState loop = EntryState(kPage, 0, true);
+  const exec::RunResult r = rig.aot->Run(loop, 10);
+  CHECK_CTX(r.reason == exec::StopReason::Budget,
+            "the spin loop ended in reason " + std::to_string(static_cast<int>(r.reason)));
+  CHECK(r.instructions_executed > 0);
+  CHECK_CTX(rig.aot->fallback_count() > before, "the spin loop never reached the fallback");
+  CHECK_CTX(loop.pc == kPage, "the spin loop left pc at " + Hex(loop.pc));
+}
+
 }  // namespace
 
 int main() {
   fib_matches_tier_one_for_every_n();
+  table_and_assembly_are_one_emission();
+  non_default_descriptors_fall_back();
+  a_missing_block_falls_back_and_is_counted();
+  the_budget_covers_aot_and_fallback_work();
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;
 }

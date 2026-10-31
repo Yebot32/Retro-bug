@@ -83,7 +83,6 @@ target_link_libraries(rb_aot_tests PRIVATE rb_exec rb_loader)
 target_compile_definitions(rb_aot_tests PRIVATE RB_FIXTURE_PATH="/data/local/tmp/librb_fixture.so")
 if(RB_AARCH64_HOST)
   target_sources(rb_aot_tests PRIVATE aot_fixture.S aot_fixture_table.cpp)
-  target_compile_definitions(rb_aot_tests PRIVATE RB_AOT_NATIVE=1)
 endif()
 
 # C17's recorder is pure string work, so it needs neither the fixture nor a guest program — and that is

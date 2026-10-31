@@ -72,9 +72,9 @@ struct AotState {
   A32JitState jit;
   volatile std::uint32_t halt_reason = 0;
   AotExecutor* exec = nullptr;
-  /// Set by the dispatcher when the target has no emitted block. The executor reads it after the
-  /// prelude returns from run code, runs Tier I from `fallback_pc`, then resumes AOT.
-  std::uint32_t fallback_pc = 0;
+  /// Set by the dispatcher when the target has no emitted block, or when the live location descriptor
+  /// (IT state, FPSCR mode) differs from the one the block was emitted for. The executor reads it after
+  /// the prelude returns from run code, runs Tier I from the live PC, then resumes AOT.
   std::uint32_t fallback_pending = 0;
 };
 
@@ -99,6 +99,11 @@ struct AotImageInfo {
   std::uint32_t text_len = 0;
   std::uint32_t load_bias = 0;
   std::uint64_t fingerprint = 0;
+  /// Emitted machine-code size and block count. The same two numbers are printed in the `.S` header
+  /// and repeated by a word at the end of the emitted stream, so the test can prove the table and the
+  /// assembly came from one emission rather than trusting that a fingerprint match implies it.
+  std::uint32_t code_bytes = 0;
+  std::uint32_t block_count = 0;
   AotRunCode run_code = nullptr;
 };
 
@@ -195,7 +200,13 @@ class AotExecutor final : public Executor {
 
   void SyncIn(const MachineState& state);
   void SyncOut(MachineState& state);
-  [[nodiscard]] RunResult MapHalt(Dynarmic::HaltReason hr, unsigned executed);
+  /// The single exit from `Run`: folds the AOT and fallback counts into `r` and clears `live_`.
+  [[nodiscard]] RunResult Exit(RunResult r);
+  [[nodiscard]] RunResult MapHalt(Dynarmic::HaltReason hr);
+  enum class FallbackStatus { Progress, Stop };
+  /// One dispatch miss on Tier I, counted in guest instructions. `Stop` fills `out` with the reason
+  /// the run must end; `Progress` means one guest instruction ran and AOT may resume.
+  FallbackStatus RunFallback(RunResult* out);
   void SetPending(Pending p, std::string detail = {});
   void SetFault(std::string detail, GuestAddr addr, bool write);
   void Halt(Dynarmic::HaltReason hr);
@@ -217,7 +228,9 @@ class AotExecutor final : public Executor {
   MachineState* live_ = nullptr;
   unsigned budget_ = 0;
   unsigned executed_ = 0;
-  unsigned fallback_steps_ = 0;  ///< Tier I's IR-step count, reported with (not compared to) executed_
+  /// Guest instructions the Tier I fallback executed, in the same unit as `executed_` and added to it
+  /// for both the budget and the reported count.
+  unsigned fallback_steps_ = 0;
   std::size_t fallbacks_ = 0;
   Pending pending_ = Pending::None;
   std::string pending_detail_;

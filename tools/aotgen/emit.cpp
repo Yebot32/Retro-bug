@@ -59,6 +59,10 @@ namespace util = oaknut::util;
 /// executable allocation: it is written and then turned into text.
 constexpr std::size_t kCodeBytes = 64u << 20;
 
+/// A block is emitted here first so a relocation the AOT prelude cannot serve refuses that block, not
+/// the whole image. Same ceiling as the main stream: the tool never trusts a single block to be small.
+constexpr std::size_t kProbeBytes = kCodeBytes;
+
 /// The `IR::Terminal` variant's index for `Interpret` (see `ir/terminal.h` and front_end.cpp's table).
 constexpr std::size_t kTerminalInterpret = 1;
 
@@ -191,7 +195,15 @@ struct TextFixup {
   std::vector<std::string> lines;  ///< one 4-byte instruction, or ADRP+ADD (8 bytes)
 };
 
-enum class Refusal { None, Coprocessor, VectorFallback, Interpret, OutOfRange };
+enum class Refusal {
+  None,
+  Coprocessor,
+  VectorFallback,
+  Interpret,
+  OutOfRange,
+  LocationDescriptor,
+  UnsupportedRelocation,
+};
 
 const char* RefusalName(Refusal r) {
   switch (r) {
@@ -200,9 +212,13 @@ const char* RefusalName(Refusal r) {
     case Refusal::VectorFallback: return "vector-fp fallback";
     case Refusal::Interpret: return "untranslated encoding";
     case Refusal::OutOfRange: return "outside .text";
+    case Refusal::LocationDescriptor: return "non-default IT/FPSCR descriptor";
+    case Refusal::UnsupportedRelocation: return "unsupported relocation target";
   }
   return "?";
 }
+
+constexpr std::size_t kRefusalKinds = 7;
 
 struct BlockRecord {
   IR::LocationDescriptor desc{0};
@@ -210,6 +226,9 @@ struct BlockRecord {
   bool thumb = false;
   std::ptrdiff_t entry = 0;
   std::ptrdiff_t end = 0;
+  /// Assigned by `Write` from the `(off, thumb)` sort, not by emission order: a change in queue order
+  /// must not rename every block in the generated pair.
+  std::size_t symbol = 0;
   std::vector<Backend::Relocation> relocations;
   std::vector<std::pair<IR::LocationDescriptor, std::vector<Backend::BlockRelocation>>> block_rels;
 };
@@ -498,7 +517,6 @@ struct Emitter {
 
     oak::Label return_from_run_code;
     oak::Label ret_dispatch_label;
-    oak::Label ret_run_code_label;
     oak::Label get_ticks = FindLabel(Backend::LinkTarget::GetTicksRemaining);
     oak::Label add_ticks = FindLabel(Backend::LinkTarget::AddTicks);
 
@@ -636,6 +654,23 @@ struct Emitter {
       const A32::LocationDescriptor loc{desc};
       const std::uint32_t pc = loc.PC();
       const bool thumb = loc.TFlag();
+      if (loc.IT().Value() != 0 || loc.FPSCR().Value() != 0) {
+        /**
+         * The table is keyed on `(off, thumb)` only, so a block emitted for a non-default IT/FPSCR
+         * descriptor could be selected for an IT=0 dispatch — exactly the mismatch the runtime now
+         * refuses, but refusing it at run time would only turn a wrong block into a fallback. The
+         * honest statement is that this target has no emittable block: leave it on Tier I and do not
+         * poison the `(off, thumb)` refusal map, because an IT=0 descriptor at the same offset is a
+         * different block and is still emittable.
+         */
+        ++refused_counts[static_cast<int>(Refusal::LocationDescriptor)];
+        if (refused_log.size() < 32) {
+          refused_log.push_back("non-default IT/FPSCR entry (IT=" + Hex32(loc.IT().Value()) +
+                                " FPSCR=" + Hex32(loc.FPSCR().Value()) + ") at " + Hex32(pc));
+        }
+        (*by_desc)[desc.Value()] = static_cast<std::size_t>(-1);
+        continue;
+      }
       if (pc < callbacks.text_base() || pc - callbacks.text_base() >= map_.text_len) {
         const std::pair<std::uint32_t, std::uint8_t> key{pc - callbacks.text_base(), thumb ? kThumb : kArm};
         (*refused)[key] = Refusal::OutOfRange;
@@ -695,25 +730,57 @@ struct Emitter {
       rec.desc = desc;
       rec.off = off;
       rec.thumb = thumb;
+
+      /**
+       * Emit into a scratch stream first. A block that needs a relocation target the prelude does not
+       * emit — the 128-bit memory forms bake a host callback with no relocation record — used to abort
+       * the whole image, so one NEON pair anywhere in a game library meant no AOT image at all. It is a
+       * per-block property, so it refuses that block (counted and printed) and the rest of the image is
+       * still emitted. Copying the finished words is exact: a block's internal branches and literal
+       * pools are relative to its own entry, and both streams start at an 8-byte-aligned offset.
+       */
+      oak::CodeGenerator probe{reinterpret_cast<std::uint32_t*>(probe_.get())};
+      Backend::EmittedBlockInfo info = address_space->EmitForAot(block, probe);
+      if (info.size > kProbeBytes || probe.offset() != static_cast<std::ptrdiff_t>(info.size) ||
+          info.size % sizeof(std::uint32_t) != 0) {
+        *err = "emitted block size disagrees with EmitForAot";
+        return false;
+      }
+      bool unsupported_relocation = false;
+      for (const auto& r : info.relocations) {
+        if (IsSupportedTarget(r.target)) continue;
+        (*refused)[key] = Refusal::UnsupportedRelocation;
+        ++refused_counts[static_cast<int>(Refusal::UnsupportedRelocation)];
+        if (refused_log.size() < 32) {
+          refused_log.push_back(
+              std::string{"relocation target the AOT prelude does not emit (link target "} +
+              std::to_string(static_cast<int>(r.target)) + ") at " + Hex32(pc));
+        }
+        (*by_desc)[desc.Value()] = static_cast<std::size_t>(-1);
+        unsupported_relocation = true;
+        break;
+      }
+      if (unsupported_relocation) continue;
+      if (!info.fastmem_patch_info.empty()) {
+        *err = "a block recorded a fastmem patch despite the tool's null fastmem pointer";
+        return false;
+      }
+
+      code->align(8);
       rec.entry = code->offset();
-      Backend::EmittedBlockInfo info = address_space->EmitForAot(block, *code);
+      const std::uint32_t* words = reinterpret_cast<const std::uint32_t*>(probe_.get());
+      for (std::size_t i = 0; i < info.size / sizeof(std::uint32_t); ++i) code->dw(words[i]);
       rec.end = code->offset();
       if (rec.end - rec.entry != static_cast<std::ptrdiff_t>(info.size)) {
         *err = "emitted block size disagrees with EmitForAot";
         return false;
       }
-      if (!info.fastmem_patch_info.empty()) {
-        *err = "a block recorded a fastmem patch despite the tool's null fastmem pointer";
-        return false;
-      }
-      for (const auto& r : info.relocations) {
-        if (!IsSupportedTarget(r.target)) {
-          *err = std::string{"a block uses a relocation target the AOT prelude does not emit (link target "} +
-                 std::to_string(static_cast<int>(r.target)) + ")";
-          return false;
-        }
-        rec.relocations.push_back(r);
-      }
+      rec.relocations = info.relocations;
+
+      // `block_relocations` is a robin_map: its iteration order is not part of any contract. Sort the
+      // targets (and the recorded pairs) so a regeneration emits the same queue and the same bytes.
+      std::vector<IR::LocationDescriptor> targets;
+      targets.reserve(info.block_relocations.size());
       for (const auto& [target_desc, list] : info.block_relocations) {
         rec.block_rels.emplace_back(target_desc, list);
         const A32::LocationDescriptor t{target_desc};
@@ -721,8 +788,15 @@ struct Emitter {
             t.PC() - callbacks.text_base() >= map_.text_len) {
           continue;  // a host entry or the call sentinel: the dispatcher handles it
         }
-        queue->push_back(target_desc);
+        targets.push_back(target_desc);
       }
+      std::sort(targets.begin(), targets.end(), [](const IR::LocationDescriptor& a,
+                                                    const IR::LocationDescriptor& b) {
+        return a.Value() < b.Value();
+      });
+      for (const IR::LocationDescriptor& target : targets) queue->push_back(target);
+      std::sort(rec.block_rels.begin(), rec.block_rels.end(),
+                [](const auto& a, const auto& b) { return a.first.Value() < b.first.Value(); });
       by_key->emplace(key, blocks.size());
       by_desc->emplace(desc.Value(), blocks.size());
       blocks.push_back(std::move(rec));
@@ -733,13 +807,24 @@ struct Emitter {
   // ---------------------------------------------------------------- output
 
   bool Write(const std::string& out_prefix, std::uint64_t fingerprint, std::string* err) {
+    // Symbol numbers are a property of the block set, not of the order it was discovered in. Sorting by
+    // `(off, thumb)` is what makes two runs of the tool over one `.so` produce the same `.S`, the same
+    // table, and the same symbol names even when a robin_map's iteration order changes.
+    std::vector<std::size_t> order(blocks.size());
+    for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+      if (blocks[a].off != blocks[b].off) return blocks[a].off < blocks[b].off;
+      return blocks[a].thumb < blocks[b].thumb;
+    });
+    for (std::size_t rank = 0; rank < order.size(); ++rank) blocks[order[rank]].symbol = rank;
+
     // Build the permanent target names and the per-site fixups.
     std::map<std::ptrdiff_t, std::string> offset_label;
     offset_label[prelude.return_to_dispatcher] = prefix + "_ret_dispatch";
     offset_label[prelude.return_from_run_code] = prefix + "_ret_run_code";
     for (const auto& t : trampolines) offset_label[t.offset] = t.label_name;
-    for (std::size_t i = 0; i < blocks.size(); ++i) {
-      offset_label[blocks[i].entry] = prefix + "_block_" + Pad(i);
+    for (const BlockRecord& b : blocks) {
+      offset_label[b.entry] = prefix + "_block_" + Pad(b.symbol);
     }
 
     std::map<std::ptrdiff_t, std::vector<std::string>> label_lines;
@@ -833,6 +918,8 @@ struct Emitter {
         << Hex32(map_.text_vaddr) << ", load bias " << Hex32(load_bias_) << "\n";
     out << "// Regenerate: rb_aotgen --emit <lib.so> --out " << BaseName(out_prefix)
         << " --base " << Hex32(load_bias_) << "\n";
+    out << "// code size " << (blocks.empty() ? prelude_end : blocks.back().end) << " bytes, "
+        << blocks.size() << " blocks\n";
     out << "    .text\n    .p2align 4\n";
 
     const std::uint32_t* words = reinterpret_cast<const std::uint32_t*>(scratch_.get());
@@ -863,6 +950,19 @@ struct Emitter {
         at += 4;
       }
     }
+    code_bytes = total;
+    // The trailer is the `.S` half of the pairing check. It is data, not a label after the code:
+    // `-ffunction-sections` puts every `.type ...,%function` label in its own section, so a symbol
+    // distance would measure link order rather than the emitted size. The table carries the same two
+    // numbers, and rb_aot_tests asserts this pair agrees with it.
+    out << "\n// The table carries these two numbers; rb_aot_tests asserts they agree.\n";
+    out << "    .section .rodata\n    .p2align 2\n";
+    out << ".globl " << prefix << "_code_bytes\n";
+    out << prefix << "_code_bytes:\n";
+    out << "    .word " << total << "\n";
+    out << ".globl " << prefix << "_block_count\n";
+    out << prefix << "_block_count:\n";
+    out << "    .word " << blocks.size() << "\n";
     out << "    .section .note.GNU-stack,\"\",%progbits\n";
     if (!out) {
       *err = "write failed for " + out_prefix + ".S";
@@ -890,9 +990,11 @@ struct Emitter {
   A32::UserConfig conf_{};
   std::unique_ptr<Backend::A32AddressSpace> address_space;
   std::unique_ptr<std::uint8_t[]> scratch_{new std::uint8_t[kCodeBytes]};
+  std::unique_ptr<std::uint8_t[]> probe_{new std::uint8_t[kProbeBytes]};
   std::unique_ptr<oak::CodeGenerator> code;
   std::string prefix;
   std::string elf_path_;
+  std::ptrdiff_t code_bytes = 0;  ///< end of the last emitted block, set by `Write`
   std::vector<Trampoline> trampolines;
   std::vector<ExternalFixup> externals;
   Prelude prelude;
@@ -900,7 +1002,7 @@ struct Emitter {
   std::vector<BlockRecord> blocks;
   std::map<std::pair<std::uint32_t, std::uint8_t>, std::size_t> by_key;
   std::vector<std::string> refused_log;
-  std::array<int, 5> refused_counts{};
+  std::array<int, kRefusalKinds> refused_counts{};
 };
 
 }  // namespace
@@ -950,6 +1052,12 @@ bool EmitImage(const std::string& elf_path, const std::string& out_prefix, std::
     const IR::LocationDescriptor ir_desc = d;
     queue.push_back(ir_desc);
   }
+  // The code map is sorted by offset already, but the queue is a traversal input, not a map invariant:
+  // sort it explicitly so the block order (and every branch displacement) is regenerable.
+  std::sort(queue.begin(), queue.end(),
+            [](const IR::LocationDescriptor& a, const IR::LocationDescriptor& b) {
+              return a.Value() < b.Value();
+            });
 
   em.EmitPrelude();
 
@@ -971,14 +1079,17 @@ bool EmitImage(const std::string& elf_path, const std::string& out_prefix, std::
         << Hex32(map.text_vaddr) << ", load bias " << Hex32(load_bias) << "\n";
   table << "// Regenerate: rb_aotgen --emit <lib.so> --out " << BaseName(out_prefix)
         << " --base " << Hex32(load_bias) << "\n";
+  table << "// code size " << em.code_bytes << " bytes, " << em.blocks.size() << " blocks\n";
   table << "// The emitted .S must be assembled into the same binary as this table.\n";
   table << "// Do not edit; the fixture test's header carries the full regeneration command.\n";
   table << "#include \"rb/exec/aot.h\"\n\n";
   table << "extern \"C\" {\n";
   for (std::size_t i = 0; i < em.blocks.size(); ++i) {
-    table << "std::uint32_t " << em.prefix << "_block_" << Emitter::Pad(i)
+    table << "std::uint32_t " << em.prefix << "_block_" << Emitter::Pad(em.blocks[i].symbol)
           << "(rb::exec::AotState*);\n";
   }
+  table << "extern const std::uint32_t " << em.prefix << "_code_bytes;\n";
+  table << "extern const std::uint32_t " << em.prefix << "_block_count;\n";
   table << "Dynarmic::HaltReason " << em.prefix
         << "_run_code(void*, void*, volatile std::uint32_t*);\n";
   table << "}\n\n";
@@ -995,7 +1106,7 @@ bool EmitImage(const std::string& elf_path, const std::string& out_prefix, std::
   for (const std::size_t i : sorted) {
     const BlockRecord& b = em.blocks[i];
     table << "    {" << Hex32(b.off) << "u, rb::exec::" << (b.thumb ? "kAotThumb" : "kAotArm")
-          << ", &" << em.prefix << "_block_" << Emitter::Pad(i) << "},\n";
+          << ", &" << em.prefix << "_block_" << Emitter::Pad(b.symbol) << "},\n";
   }
   table << "};\n";
   table << "}  // namespace\n\n";
@@ -1007,18 +1118,21 @@ bool EmitImage(const std::string& elf_path, const std::string& out_prefix, std::
   table << "    " << Hex32(map.text_len) << "u,\n";
   table << "    " << Hex32(load_bias) << "u,\n";
   table << "    " << Hex64(Fnv1a64(elf)) << "ull,\n";
+  table << "    " << Hex32(static_cast<std::uint32_t>(em.code_bytes)) << "u,\n";
+  table << "    " << Hex32(static_cast<std::uint32_t>(em.blocks.size())) << "u,\n";
   table << "    &" << em.prefix << "_run_code,\n";
   table << "};\n";
   if (!table) return fail("write failed for " + out_prefix + "_table.cpp");
 
   std::printf(
       "aotgen: %s: emitted %zu blocks, refused %zu (coprocessor %d, vector-fp %d, untranslated %d, "
-      "outside-text %d), .text %u bytes, prelude %lld bytes, code %lld bytes\n",
+      "outside-text %d, location %d, relocation %d), .text %u bytes, prelude %lld bytes, code %lld bytes\n",
       map.soname.empty() ? BaseName(elf_path).c_str() : map.soname.c_str(), em.blocks.size(),
       static_cast<std::size_t>(em.refused_counts[1] + em.refused_counts[2] + em.refused_counts[3] +
-                               em.refused_counts[4]),
+                               em.refused_counts[4] + em.refused_counts[5] + em.refused_counts[6]),
       em.refused_counts[1], em.refused_counts[2], em.refused_counts[3], em.refused_counts[4],
-      map.text_len, static_cast<long long>(em.prelude_end),
+      em.refused_counts[5], em.refused_counts[6], map.text_len,
+      static_cast<long long>(em.prelude_end),
       static_cast<long long>(em.blocks.empty() ? em.prelude_end : em.blocks.back().end));
   for (const auto& line : em.refused_log) std::printf("aotgen: refused: %s\n", line.c_str());
   if (err != nullptr) err->clear();

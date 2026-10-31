@@ -95,6 +95,8 @@ bool AotImage::Load(const AotBlock* blocks, std::size_t n, const AotImageInfo* i
   if (blocks == nullptr || n == 0) return fail("AOT image has no blocks");
   if (info == nullptr) return fail("AOT image has no generated info");
   if (info->count != n) return fail("AOT image count does not match its block array");
+  if (info->block_count != n) return fail("AOT image block count does not match its block array");
+  if (info->code_bytes == 0) return fail("AOT image has no emitted code size");
   if (info->run_code == nullptr) return fail("AOT image has no prelude run_code entry");
   if (info->text_len == 0) return fail("AOT image has an empty .text range");
   const std::uint64_t text_base = static_cast<std::uint64_t>(info->text_vaddr) + info->load_bias;
@@ -206,6 +208,14 @@ void AotExecutor::SyncOut(MachineState& state) {
 }
 
 void AotExecutor::Halt(Dynarmic::HaltReason hr) {
+  /**
+   * Release is sufficient even though Dynarmic's own halt word is seq_cst. This word has exactly one
+   * producer (the guest thread's callback, running inside `run_code`) and one consumer (the prelude's
+   * `LDAR`/`LDAXR` on that same thread): release orders the guest-state writes before the flag, and
+   * the prelude's acquire load observes them. There is no second writer to put in a total order, so a
+   * seq_cst fence would add a barrier without adding a guarantee. The clear side is the prelude's
+   * LDAXR/STLXR loop, which is likewise single-threaded here.
+   */
   __atomic_fetch_or(&state_.halt_reason, static_cast<std::uint32_t>(hr), __ATOMIC_RELEASE);
 }
 
@@ -246,13 +256,80 @@ void* AotExecutor::Dispatch() {
   if (pc >= text_base_ && pc - text_base_ < image_.info().text_len) {
     entry = image_.Resolve(pc - text_base_, thumb);
   }
+  if (entry != nullptr) {
+    /**
+     * The generated table is keyed on `(guest_off, thumb)` only, so it cannot distinguish two blocks
+     * at one address translated for different IT/FPSCR descriptors. Every block is emitted for
+     * `A32::LocationDescriptor{pc}.SetTFlag(thumb)` — IT=0 and the default FPCR — because the emitter
+     * refuses any other descriptor at the target (see `EmitQueued`). A live descriptor that differs
+     * (entering mid-IT, or with a rounding/flush mode baked into the block's FP immediates) must not
+     * resolve into that code: it is the same case as a missing block, so it becomes a Tier I fallback
+     * rather than executing predicated instructions unconditionally.
+     */
+    const Dynarmic::A32::LocationDescriptor live{state_.jit.GetLocationDescriptor()};
+    const Dynarmic::A32::LocationDescriptor emitted =
+        Dynarmic::A32::LocationDescriptor{pc, Dynarmic::A32::PSR{}, Dynarmic::A32::FPSCR{}, false}
+            .SetTFlag(thumb);
+    if (live.CPSR().Value() != emitted.CPSR().Value() ||
+        live.FPSCR().Value() != emitted.FPSCR().Value()) {
+      entry = nullptr;
+    }
+  }
   if (entry == nullptr) {
-    state_.fallback_pc = pc;
     state_.fallback_pending = 1;
     Halt(Dynarmic::HaltReason::UserDefined1);
     return nullptr;
   }
   return reinterpret_cast<void*>(reinterpret_cast<std::uintptr_t>(entry));
+}
+
+RunResult AotExecutor::Exit(RunResult r) {
+  // One exit for every path: an AOT halt, a fallback terminal, or the budget. Tier I's terminal
+  // `RunResult` already carries its own IR-step count, which is a different unit; the AOT tier reports
+  // guest instructions, so it is replaced rather than added to.
+  r.instructions_executed = executed_ + fallback_steps_;
+  live_ = nullptr;
+  return r;
+}
+
+AotExecutor::FallbackStatus AotExecutor::RunFallback(RunResult* out) {
+  /**
+   * One dispatch miss, on Tier I, in the shape of `JitExecutor::InterpreterFallback`: a bounded chunk
+   * (`kFallbackChunkSteps` IR steps) is enough to finish at least one translation block, because Tier I
+   * only stops between blocks. Counting one guest instruction per chunk is the same approximation the
+   * JIT's hand-back makes when its chunk crosses more than one encoding; the load-bearing property is
+   * that every chunk is counted at all, so `max_instructions` is reachable.
+   *
+   * A chunk that produces no work is not retried: it is a budget stop with a named detail, which is
+   * what keeps a refused or unfetchable instruction from spinning here forever. A chunk that returns a
+   * real stop (returned, host call, syscall, fault, refusal) is propagated with the work it did added
+   * to the reported count by `Exit`.
+   */
+  if (live_ == nullptr) {
+    *out = RunResult{};
+    out->reason = StopReason::Budget;
+    out->detail = "the Tier I fallback was entered with no live state";
+    return FallbackStatus::Stop;
+  }
+  SyncOut(*live_);
+  constexpr unsigned kFallbackChunkSteps = 64;
+  const RunResult r = fallback_interp_->Run(*live_, kFallbackChunkSteps);
+  if (r.reason != StopReason::Budget) {
+    // The final chunk did work; count it as the one guest instruction this hand-back represents. A
+    // refusal that executed nothing (zero IR steps) stays zero, exactly as Tier I reports it.
+    if (r.instructions_executed != 0) ++fallback_steps_;
+    *out = r;
+    return FallbackStatus::Stop;
+  }
+  if (r.instructions_executed == 0) {
+    *out = RunResult{};
+    out->reason = StopReason::Budget;
+    out->detail = "the Tier I fallback made no progress at pc 0x" + Hex(live_->pc);
+    return FallbackStatus::Stop;
+  }
+  ++fallback_steps_;
+  SyncIn(*live_);
+  return FallbackStatus::Progress;
 }
 
 RunResult AotExecutor::Run(MachineState& state, unsigned max_instructions) {
@@ -285,7 +362,6 @@ RunResult AotExecutor::Run(MachineState& state, unsigned max_instructions) {
   pending_illegal_ = false;
   pending_illegal_pc_ = 0;
   state_.halt_reason = 0;
-  state_.fallback_pc = 0;
   state_.fallback_pending = 0;
 
   SyncIn(state);
@@ -302,8 +378,7 @@ RunResult AotExecutor::Run(MachineState& state, unsigned max_instructions) {
         state.r[15] = pending_pc_;
       }
       if (state_.fallback_pending == 0) {
-        live_ = nullptr;
-        return MapHalt(hr, executed_ + fallback_steps_);
+        return Exit(MapHalt(hr));
       }
       state_.fallback_pending = 0;
       ++fallbacks_;
@@ -317,32 +392,32 @@ RunResult AotExecutor::Run(MachineState& state, unsigned max_instructions) {
         state.pc = pending_pc_;
         state.r[15] = pending_pc_;
       }
-      live_ = nullptr;
-      return MapHalt(Dynarmic::HaltReason::UserDefined1, executed_ + fallback_steps_);
+      return Exit(MapHalt(Dynarmic::HaltReason::UserDefined1));
     }
 
-    if (executed_ >= budget_) {
-      live_ = nullptr;
+    // AOT and fallback work share one budget, in guest instructions. The AOT side increments it from
+    // the prelude's tick accounting; the fallback side counts each Tier I chunk it runs.
+    if (executed_ + fallback_steps_ >= budget_) {
       out.reason = StopReason::Budget;
-      out.instructions_executed = executed_ + fallback_steps_;
-      return out;
+      out.detail = "instruction budget exhausted";
+      return Exit(out);
     }
-    // The dispatcher's miss is executed on Tier I, then AOT resumes wherever Tier I stopped. The
-    // budget unit differs (guest instructions here, IR steps there), so the fallback gets a fixed
-    // chunk and its count is reported separately; a run with zero fallbacks never enters this path.
-    const RunResult r = fallback_interp_->Run(state, 1u << 16);
-    fallback_steps_ += r.instructions_executed;
-    if (r.reason != StopReason::Budget) {
-      live_ = nullptr;
-      return r;
+
+    RunResult fb{};
+    if (RunFallback(&fb) == FallbackStatus::Stop) {
+      return Exit(fb);
     }
-    SyncIn(state);
+    if (executed_ + fallback_steps_ >= budget_) {
+      out.reason = StopReason::Budget;
+      out.detail = "instruction budget exhausted";
+      return Exit(out);
+    }
+    // RunFallback already copied the post-Tier-I state back into `state_`; the next Dispatch reads it.
   }
 }
 
-RunResult AotExecutor::MapHalt(Dynarmic::HaltReason hr, unsigned executed) {
+RunResult AotExecutor::MapHalt(Dynarmic::HaltReason hr) {
   RunResult out{};
-  out.instructions_executed = executed;
   switch (pending_) {
     case Pending::None:
       if (HaltHas(hr, Dynarmic::HaltReason::MemoryAbort)) {
@@ -570,13 +645,14 @@ void AotExecutor::ExceptionRaised(std::uint32_t pc, std::uint32_t exception) {
 
 void AotExecutor::AddTicks(std::uint64_t ticks) {
   executed_ += static_cast<unsigned>(ticks);
-  if (executed_ >= budget_) {
+  if (executed_ + fallback_steps_ >= budget_) {
     Halt(Dynarmic::HaltReason::Step);
   }
 }
 
 std::uint64_t AotExecutor::GetTicksRemaining() {
-  return executed_ >= budget_ ? 0 : budget_ - executed_;
+  const unsigned done = executed_ + fallback_steps_;
+  return done >= budget_ ? 0 : budget_ - done;
 }
 
 // The prelude's trampolines load X0 with Xstate (an `AotState*`, which is also `&state->jit`) and
@@ -669,7 +745,7 @@ void* AotExecutor::Dispatch() { return nullptr; }
 void AotExecutor::SyncIn(const MachineState&) {}
 void AotExecutor::SyncOut(MachineState&) {}
 
-RunResult AotExecutor::MapHalt(Dynarmic::HaltReason, unsigned) {
+RunResult AotExecutor::MapHalt(Dynarmic::HaltReason) {
   RunResult out{};
   out.reason = StopReason::Internal;
   out.detail = err_;
