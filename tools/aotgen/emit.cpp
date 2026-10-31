@@ -223,18 +223,29 @@ struct Prelude {
   std::map<Backend::LinkTarget, std::string> label;
 };
 
-/// One trampoline the emitted blocks call. `tail` means the C function returns straight to the block's
-/// link register (`b`); the wrapped memory forms need to shuffle registers and return through `RET`.
+/// One trampoline the emitted blocks call. The tail forms (every callback whose arguments are already
+/// in X1/X2) branch to the C function with `b`, so its `ret` goes straight back to the block's link
+/// register; the wrapped memory forms need to shuffle registers and return through `RET`.
+///
+/// `label_name` is per trampoline, not derived from `symbol`: the callback-only and wrapped memory
+/// forms call the same C function but have different ABIs (value in X0 versus Xscratch0 with every
+/// other caller-save register preserved), so they are two trampolines that need two symbols.
 struct Trampoline {
   oaknut::Label label;
   std::ptrdiff_t offset = 0;
   std::string symbol;
+  std::string label_name;
   Backend::LinkTarget target;
 };
 
 /// Encode a PC-relative B/BL immediate from two offsets in the same section.
+///
+/// AArch64 branches are relative to the address of the branch instruction itself, not to the next
+/// instruction: `b` at offset 0 with imm 2 lands on offset 8 (verified with the NDK assembler). An
+/// extra `- 4` here would put every relocation four bytes early — into the middle of a trampoline's
+/// `mov`/`b` pair, one word past a block entry, or on the dispatcher's final `br`.
 std::uint32_t EncodeBranch(std::ptrdiff_t site, std::ptrdiff_t target, bool link) {
-  const std::ptrdiff_t delta = target - (site + 4);
+  const std::ptrdiff_t delta = target - site;
   if (delta % 4 != 0) return 0;
   const std::int64_t words = delta / 4;
   if (words < -(1 << 25) || words >= (1 << 25)) return 0;
@@ -357,12 +368,16 @@ struct Emitter {
 
   // ---------------------------------------------------------------- prelude
 
-  void EmitTailTrampoline(Backend::LinkTarget target, const std::string& symbol,
+  /// The tail form. The block (or the prelude) reaches this trampoline with `BL`; the branch to the
+  /// C function must be a tail branch, not a `BL`: a nested `BL` would overwrite the link register
+  /// the block is waiting on and the callback would return into the next trampoline.
+  void EmitCallTrampoline(Backend::LinkTarget target, const std::string& symbol,
                           std::vector<Trampoline>* trampolines) {
     code->align(8);
     Trampoline t;
     t.target = target;
     t.symbol = symbol;
+    t.label_name = symbol + "_tail_tramp";
     t.offset = code->offset();
     code->l(t.label);
     code->MOV(util::X0, Backend::Xstate);
@@ -371,24 +386,7 @@ struct Emitter {
     externals.push_back(ExternalFixup{at, "b " + symbol});
     trampolines->push_back(t);
     prelude.target[target] = t.offset;
-    prelude.label[target] = symbol + "_tramp";
-  }
-
-  void EmitCallTrampoline(Backend::LinkTarget target, const std::string& symbol,
-                          std::vector<Trampoline>* trampolines) {
-    code->align(8);
-    Trampoline t;
-    t.target = target;
-    t.symbol = symbol;
-    t.offset = code->offset();
-    code->l(t.label);
-    code->MOV(util::X0, Backend::Xstate);
-    const std::ptrdiff_t at = code->offset();
-    code->dw(0x9400'0000u);  // placeholder: replaced by "bl <symbol>"
-    externals.push_back(ExternalFixup{at, "bl " + symbol});
-    trampolines->push_back(t);
-    prelude.target[target] = t.offset;
-    prelude.label[target] = symbol + "_tramp";
+    prelude.label[target] = t.label_name;
   }
 
   void EmitWrappedReadTrampoline(Backend::LinkTarget target, const std::string& symbol,
@@ -397,6 +395,7 @@ struct Emitter {
     Trampoline t;
     t.target = target;
     t.symbol = symbol;
+    t.label_name = symbol + "_tramp";
     t.offset = code->offset();
     code->l(t.label);
     constexpr Backend::RegisterList save = Backend::ABI_CALLER_SAVE & ~Backend::ToRegList(Backend::Xscratch0);
@@ -411,7 +410,7 @@ struct Emitter {
     code->RET();
     trampolines->push_back(t);
     prelude.target[target] = t.offset;
-    prelude.label[target] = symbol + "_tramp";
+    prelude.label[target] = t.label_name;
   }
 
   void EmitWrappedWriteTrampoline(Backend::LinkTarget target, const std::string& symbol,
@@ -420,6 +419,7 @@ struct Emitter {
     Trampoline t;
     t.target = target;
     t.symbol = symbol;
+    t.label_name = symbol + "_tramp";
     t.offset = code->offset();
     code->l(t.label);
     constexpr Backend::RegisterList save = Backend::ABI_CALLER_SAVE;
@@ -434,7 +434,7 @@ struct Emitter {
     code->RET();
     trampolines->push_back(t);
     prelude.target[target] = t.offset;
-    prelude.label[target] = symbol + "_tramp";
+    prelude.label[target] = t.label_name;
   }
 
   void EmitPrelude() {
@@ -737,7 +737,7 @@ struct Emitter {
     std::map<std::ptrdiff_t, std::string> offset_label;
     offset_label[prelude.return_to_dispatcher] = prefix + "_ret_dispatch";
     offset_label[prelude.return_from_run_code] = prefix + "_ret_run_code";
-    for (const auto& t : trampolines) offset_label[t.offset] = t.symbol + "_tramp";
+    for (const auto& t : trampolines) offset_label[t.offset] = t.label_name;
     for (std::size_t i = 0; i < blocks.size(); ++i) {
       offset_label[blocks[i].entry] = prefix + "_block_" + Pad(i);
     }
@@ -836,7 +836,10 @@ struct Emitter {
     out << "    .text\n    .p2align 4\n";
 
     const std::uint32_t* words = reinterpret_cast<const std::uint32_t*>(scratch_.get());
-    const std::ptrdiff_t total = prelude_end;
+    // The prelude is emitted first, then every block. `prelude_end` is only the prelude's extent, so
+    // the stream must run to the last block's end; stopping at the prelude used to write a table full
+    // of block symbols that the `.S` never defined.
+    const std::ptrdiff_t total = blocks.empty() ? prelude_end : blocks.back().end;
     std::ptrdiff_t at = 0;
     while (at < total) {
       if (const auto l = label_lines.find(at); l != label_lines.end()) {
@@ -1010,12 +1013,13 @@ bool EmitImage(const std::string& elf_path, const std::string& out_prefix, std::
 
   std::printf(
       "aotgen: %s: emitted %zu blocks, refused %zu (coprocessor %d, vector-fp %d, untranslated %d, "
-      "outside-text %d), .text %u bytes, code %lld bytes\n",
+      "outside-text %d), .text %u bytes, prelude %lld bytes, code %lld bytes\n",
       map.soname.empty() ? BaseName(elf_path).c_str() : map.soname.c_str(), em.blocks.size(),
       static_cast<std::size_t>(em.refused_counts[1] + em.refused_counts[2] + em.refused_counts[3] +
                                em.refused_counts[4]),
       em.refused_counts[1], em.refused_counts[2], em.refused_counts[3], em.refused_counts[4],
-      map.text_len, static_cast<long long>(em.prelude_end));
+      map.text_len, static_cast<long long>(em.prelude_end),
+      static_cast<long long>(em.blocks.empty() ? em.prelude_end : em.blocks.back().end));
   for (const auto& line : em.refused_log) std::printf("aotgen: refused: %s\n", line.c_str());
   if (err != nullptr) err->clear();
   return true;
