@@ -15,7 +15,7 @@
 	<key>CFBundleShortVersionString</key>
 	<string>0.1</string>
 	<key>CFBundleVersion</key>
-	<string>20</string>
+	<string>21</string>
 	<key>RBGitCommit</key>
 	<string>$(RB_GIT_COMMIT)</string>
 	<key>LSRequiresIPhoneOS</key>
