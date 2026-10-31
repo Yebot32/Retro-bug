@@ -929,3 +929,39 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
   `8a5e1b51a4644833d16613ff2815270df4aad4e2073a4475de065eb7e6664208`.
 - Next device log: if the cache bound is the cause, the crash should disappear or move past
   `surfaceChanged`; the translation-site line remains in place for any different fault.
+
+### 2026-10-31 — iOS S1s: Blocky Roads' Java surface, and build 9
+- The two new device logs (`retrobug (10).log`, `(11).log`) are **build 6** (`=== RetroBug 0.1 (6) commit
+  1a2dfe0 ===`), not build 8: their KitKat crashes — `PrependNewInst` after `Pool::Alloc` — are the fault
+  the build-8 cache bound addresses, so KitKat has not yet run with that fix.
+- In the same logs Blocky Roads' `nativeInit` stops on a Java surface the profile did not provide:
+  `FindClass("com/utils/GameControllerInput")` misses, `hideLoadingWindow()V` misses on
+  `Cocos2dxActivity`, `FindClass("com/utils/FileHelper")` misses, and the following
+  `GetStaticMethodID(null class, …)` is the fatal host call.
+- The new profile [blockyroads.cpp](../../core/host/java/blockyroads.cpp) answers every class `libgame.so`
+  names, enumerated by pairing each class-name load with the method/signature strings loaded at its JNI
+  call sites: GameControllerInput, FileHelper, CCMotion, HttpGet, DeviceAndSystem, InappPurchase,
+  ShareInterface, GPlayService, GPLeaderboardEntry, DropboxInterface, DropboxFileItem, UnityAds, Admob.
+  FileHelper is a real store under the app's files directory, mirroring the Java class: reads answer the
+  catch-all's empty array, never null, and names with separators or `..` are refused. The other classes
+  answer their "no backend" values (no controller, no accelerometer, signed out, billing/ads/Dropbox
+  unavailable, no guest network).
+- The shared Cocos2d-x profile gained the 3.x statics the library looks up: Activity
+  `getAppVersion`/`getDisplayDensity`/`getApkExpansionFilename`/`deleteApkExpansionFile`/
+  `showLoadingWindow`/`hideLoadingWindow`/`isHpeExperience`/`isChromeOS`,
+  `Cocos2dxRenderer.setAnimationInterval`, the GLSurfaceView thread controls, `showDialogAndTerminate`, and
+  the byte-array `showEditTextDialog` overload (2.x's string form stays). A method miss in the trace now
+  names its class and signature, e.g. `Java: no method org/cocos2dx/lib/Cocos2dxHelper.showEditTextDialog(…)`.
+- **Verified:** `rb_table_java_tests` is 226 checks (from 60): a row table of every class/method/signature
+  the library names, the FileHelper round-trip and traversal refusal, the Activity answers, and a negative
+  control that proves a wrong signature fails by name. Linux lane `41173617692` green
+  (226/61/23 checks); full workflow `41174067978` green on Linux, macOS host, iOS arm64 compile and IPA.
+  The test caught two of this session's own rows with wrong receiver signatures before the build.
+- IPA build 9, commit `5eeab1f`, 2,077,870 bytes, SHA-256
+  `80835ff0916605a87f4fc3b5d7c2c2b58d217fb01b79aa835b3cf8711c1d9e9b`; its `Info.plist` decodes to
+  `CFBundleVersion 9`, `0.1`, `RBGitCommit 5eeab1f`, and its binary differs from the build-8 artifact.
+- **Next device log:** build 9 carries both device-untested fixes. KitKat: the cache bound should let
+  translation continue past the crash into `creating main app` → `surfaceChanged` → `frame N pixels:`.
+  Blocky Roads: `nativeInit` should complete now that its Java surface resolves, and the first
+  `nativeRender` frame should arrive. Any remaining Java miss prints class + signature, which is a row
+  to add; a crash prints translation pc/mode plus the last host call.
