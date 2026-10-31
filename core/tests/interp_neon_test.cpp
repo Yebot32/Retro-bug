@@ -79,7 +79,9 @@ Rig build() {
     fail("guest window creation failed", __LINE__, err);
     return rig;
   }
-  if (!rig.mem->Map(kCode, mem::kGuestPage, mem::kRead | mem::kWrite | mem::kExec, &err) ||
+  // Read+write, not exec: the interpreter decodes by reading the bytes, and macOS refuses PROT_EXEC on an
+  // out-of-line anonymous block (a page the window could not serve in place on a 16 KiB granule).
+  if (!rig.mem->Map(kCode, mem::kGuestPage, mem::kRead | mem::kWrite, &err) ||
       !rig.mem->Map(kStackTop - 0x4000, 0x4000, mem::kRead | mem::kWrite, &err)) {
     fail("could not map the code page or stack", __LINE__, err);
     return rig;
