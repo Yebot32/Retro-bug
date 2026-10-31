@@ -1061,3 +1061,28 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
   `1c98732b45338ce3dec9bf86bfb481ed50d477436020ea949bd6dafa557e82a2`.
 - **Next device log:** one short KitKat run is enough — the first `guest native dlxDraw()V stopped:` line
   carries the pc and the caller chain into the engine, which is where the null object comes from.
+
+### 2026-10-31 — iOS S1x: one run must answer everything
+- The one-log-at-a-time loop was costing device cycles for single fields. Build 14 prints the whole state at
+  once. On a guest fault: `=== guest fault report #N: …` followed by
+  - the faulting thread's `r0…r12 sp lr pc cpsr`;
+  - 2 KiB of its stack scanned into `libdlgl.so+0x…` return addresses (40 frames);
+  - 32 raw stack words, and 24 bytes around the pc for offline disassembly;
+  - the eight words behind every register that points into mapped memory;
+  - every guest thread's pc/lr/sp, wait kind, last syscall and stack (`StallReport`);
+  - every module with base/extent/data range, the **whole mapped address range list**, and threads that
+    stopped earlier;
+  - the platform suffix: EGL context version, a pending Java exception, and the **last 256 host calls**
+    with r0–r3 (`host call: glVertexPointer 3 0x1406 0x14 0xe0afda`).
+- Cadence: the first three occurrences of a fault key print in full, then one full report every five
+  seconds; the stall monitor prints the same report (no faulting thread) every five seconds while frames do
+  not advance — so a 100-second interpreted load names the code each thread is inside, and the next Blocky
+  log shows where its 111 seconds went.
+- Two defects in the reporting path itself were fixed on the way: `Inbound::Fail`'s registers/stack went to
+  stderr only (build 13), and the stall monitor read the render thread's `unique_ptr` boot pointer without
+  synchronisation — the process is now published through an atomic with release/acquire so the monitor's
+  reads (and the host table behind them) are ordered.
+- **Verified:** workflow `41183615682` green on Linux, macOS, iOS arm64 compile and IPA at `d1f56bb`.
+  `rb_guest_memory_tests` is 214 checks on Linux (the new `MappedRanges` case included). IPA build 14,
+  commit `d1f56bb`, 2,093,143 bytes, SHA-256
+  `968b1e160c870b12c00ebaa660e1daf9c823f277ef86ebe1b5e5167353dc4dde`.
