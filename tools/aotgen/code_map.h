@@ -21,7 +21,7 @@
 namespace rb::aotgen {
 
 /// One discovered start. `size` is the symbol's `st_size` when a source supplied one, otherwise 0; it is
-/// capped at 0xffff because the on-disk RBGM/RBCM row is four bytes.
+/// capped at 0xffff because RBCM v1's row stores it as a u16.
 struct CodeMapEntry {
   std::uint32_t off;
   std::uint16_t size;
