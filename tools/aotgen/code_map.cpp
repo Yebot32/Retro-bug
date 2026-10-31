@@ -613,6 +613,7 @@ CodeMap DiscoverCodeMap(const std::vector<std::uint8_t>& elf, const CodeMap* tra
   map.soname = ReadSoname(img, dynamic);
   map.text_off = img.text.offset;
   map.text_len = img.text.size;
+  map.text_vaddr = img.text.addr;
   map.entries.reserve(merged.size());
   for (const auto& [off, entry] : merged) {
     (void)off;

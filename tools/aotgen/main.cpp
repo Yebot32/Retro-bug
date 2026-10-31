@@ -12,6 +12,9 @@
 #include <vector>
 
 #include "code_map.h"
+#ifdef RB_AOTGEN_EMIT
+#include "emit.h"
+#endif
 
 namespace {
 
@@ -24,7 +27,13 @@ constexpr const char* kUsage =
     "usage: rb_aotgen <lib.so> [--trace <offsets.txt>]\n"
     "  Prints one line: starts N (export X, init Y, reloc Z, exidx E, veneer V).\n"
     "  --trace merges a provisional text trace: one '<offset> [thumb|arm]' per line, where offset is\n"
-    "  file-relative to .text (the same unit the code map stores). AOT task 4 will replace the format.\n";
+    "  file-relative to .text (the same unit the code map stores). AOT task 4 will replace the format.\n"
+#ifdef RB_AOTGEN_EMIT
+    "  --emit --out <prefix> [--base <hex>] <lib.so>\n"
+    "  Emits <prefix>.S and <prefix>_table.cpp for AOT (task 3). --base is the assumed load bias\n"
+    "  (guest address of the image's vaddr 0); it defaults to 0x10000 and must be 4 KiB-aligned.\n"
+#endif
+    ;
 
 std::vector<std::uint8_t> ReadFile(const std::string& path) {
   std::ifstream in(path, std::ios::binary | std::ios::ate);
@@ -105,6 +114,9 @@ void PrintSummary(const std::string& label, const CodeMap& map) {
 int main(int argc, char** argv) {
   std::string path;
   std::string trace_path;
+  std::string out_prefix;
+  std::uint32_t load_bias = 0x0001'0000u;
+  bool emit = false;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     if (arg == "--trace") {
@@ -113,6 +125,26 @@ int main(int argc, char** argv) {
         return 2;
       }
       trace_path = argv[++i];
+    } else if (arg == "--emit") {
+      emit = true;
+    } else if (arg == "--out") {
+      if (i + 1 >= argc) {
+        std::fprintf(stderr, "aotgen: --out needs a prefix\n");
+        return 2;
+      }
+      out_prefix = argv[++i];
+    } else if (arg == "--base") {
+      if (i + 1 >= argc) {
+        std::fprintf(stderr, "aotgen: --base needs a value\n");
+        return 2;
+      }
+      char* end = nullptr;
+      const unsigned long value = std::strtoul(argv[++i], &end, 0);
+      if (end == argv[i] || *end != '\0' || value > 0xffff'fffful || (value & 0xfffu) != 0) {
+        std::fprintf(stderr, "aotgen: --base must be a 4 KiB-aligned 32-bit value\n");
+        return 2;
+      }
+      load_bias = static_cast<std::uint32_t>(value);
     } else if (arg == "-h" || arg == "--help") {
       std::fputs(kUsage, stdout);
       return 0;
@@ -129,6 +161,24 @@ int main(int argc, char** argv) {
   if (path.empty()) {
     std::fputs(kUsage, stderr);
     return 2;
+  }
+
+  if (emit) {
+#ifdef RB_AOTGEN_EMIT
+    if (out_prefix.empty()) {
+      std::fprintf(stderr, "aotgen: --emit needs --out <prefix>\n%s", kUsage);
+      return 2;
+    }
+    std::string err;
+    if (!rb::aotgen::EmitImage(path, out_prefix, load_bias, &err)) {
+      std::fprintf(stderr, "aotgen: %s: %s\n", path.c_str(), err.c_str());
+      return 1;
+    }
+    return 0;
+#else
+    std::fprintf(stderr, "aotgen: this build has no emitter (only AArch64 hosts build it)\n");
+    return 2;
+#endif
   }
 
   const std::vector<std::uint8_t> bytes = ReadFile(path);

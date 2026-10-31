@@ -73,6 +73,19 @@ add_executable(rb_exec_tier_diff_tests exec_tier_diff_test.cpp)
 target_link_libraries(rb_exec_tier_diff_tests PRIVATE rb_exec rb_loader rb_abi rb_syscall)
 target_compile_definitions(rb_exec_tier_diff_tests PRIVATE RB_FIXTURE_PATH="/data/local/tmp/librb_fixture.so")
 
+# AOT task 3: the offline-emitted fixture `fib` through the AOT dispatcher, compared field for field
+# with Tier I on the same bytes. Device-only by construction (AArch64 code, armeabi-v7a fixture): the
+# source compiles to a skip on other hosts, and the generated `.S`/table are linked only where they can
+# be assembled. The two committed artifacts are produced by `rb_aotgen --emit`; the test's header has
+# the regeneration command and the table carries the fixture hash.
+add_executable(rb_aot_tests aot_test.cpp)
+target_link_libraries(rb_aot_tests PRIVATE rb_exec rb_loader)
+target_compile_definitions(rb_aot_tests PRIVATE RB_FIXTURE_PATH="/data/local/tmp/librb_fixture.so")
+if(RB_AARCH64_HOST)
+  target_sources(rb_aot_tests PRIVATE aot_fixture.S aot_fixture_table.cpp)
+  target_compile_definitions(rb_aot_tests PRIVATE RB_AOT_NATIVE=1)
+endif()
+
 # C17's recorder is pure string work, so it needs neither the fixture nor a guest program — and that is
 # part of the point: the component whose job is to say what a launch did must be testable without one.
 add_executable(rb_diag_tests diag_test.cpp)

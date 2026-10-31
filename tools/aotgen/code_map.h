@@ -31,8 +31,13 @@ struct CodeMapEntry {
 
 struct CodeMap {
   std::string soname;
+  /// File offset and length of `.text`. `entries[i].off` is relative to `text_vaddr`, which is the
+  /// section's link-time address; the emitter needs it to form the guest PCs Dynarmic translates at
+  /// (it is the one fact the discovery half did not previously publish, because discovery itself only
+  /// ever needed file-relative offsets).
   std::uint32_t text_off;
   std::uint32_t text_len;
+  std::uint32_t text_vaddr;
   std::vector<CodeMapEntry> entries;
 };
 
