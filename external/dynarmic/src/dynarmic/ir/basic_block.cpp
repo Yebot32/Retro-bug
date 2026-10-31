@@ -21,8 +21,16 @@
 
 namespace Dynarmic::IR {
 
+// RetroBug patch 0007: the initial instruction slab is 64 slots, not 4096.
+//
+// Tier I (`rb::exec::InterpExecutor`) caches whole IR::Block objects and keeps them for the life of the
+// executor, so at `sizeof(Inst)` == 104 B the old 4096-slot slab charged every cached block ~416 KiB
+// whether it held ten instructions or four thousand. That per-block cost is what held the block cache to
+// 128 entries, and a full cache is cleared wholesale, so an interpreted title re-translated its hottest
+// blocks constantly. 64 slots is ~6.7 KiB; Common::Pool allocates further slabs of the same 64 slots as a
+// long block grows, so a block larger than the slab is slower to build, never truncated.
 Block::Block(const LocationDescriptor& location)
-        : location{location}, end_location{location}, cond{Cond::AL}, instruction_alloc_pool{std::make_unique<Common::Pool>(sizeof(Inst), 4096)} {}
+        : location{location}, end_location{location}, cond{Cond::AL}, instruction_alloc_pool{std::make_unique<Common::Pool>(sizeof(Inst), 64)} {}
 
 Block::~Block() = default;
 

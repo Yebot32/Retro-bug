@@ -116,12 +116,21 @@ class InterpExecutor : public Executor {
   /// `GuestMemory::Write` refuses a read-only page outright). Invalidation from `arm_cacheflush` evicts
   /// every block whose start address falls in the flushed range.
   ///
-  /// Dynarmic's `IR::Block` allocates a fixed 4096-instruction pool for every block, whether the block
-  /// uses four slots or four thousand. A 8192-block cache therefore reserves gigabytes of host heap; on
-  /// iOS, alongside the guest window, that exhaustion surfaced as a crash inside `PrependNewInst` when
-  /// Dynarmic's unchecked pool allocation returned null. Keep the cache bounded to a device-safe budget;
-  /// hot loops still stay cached, and a full cache is cleared just as before.
-  static constexpr std::size_t kBlockCacheLimit = 128;
+  /// The size of this cache is a memory decision before it is a hit-rate one. Dynarmic's `IR::Block`
+  /// used to reserve a fixed 4096-instruction pool for every block, whether the block used four slots or
+  /// four thousand — 104 B per `IR::Inst`, ~416 KiB per cached block, which is what held this limit at
+  /// 128 (~54 MiB) and made a working set larger than that re-translate its hot blocks every time the
+  /// cache filled and was cleared. Patch `0007` in `patches/dynarmic` makes the initial slab 64
+  /// instructions (~6.7 KiB), and `Common::Pool` adds one more 64-instruction slab only for a block that
+  /// outgrows it, so a block costs ~6.7 KiB for the common case and ~6.7 KiB per further 64 instructions.
+  /// 2048 blocks is therefore ~13 MiB before any block outgrows its first slab and tens of MiB once long
+  /// blocks add theirs — a bounded, device-safe budget, not the gigabytes the old slab size implied.
+  /// The old hazard still governs the bound: the pool does not check `malloc`, and on iOS this much host
+  /// heap alongside the guest window once surfaced as a crash inside `PrependNewInst` when the allocation
+  /// returned null, so the cache stays bounded, hot loops stay cached, and a full cache is cleared
+  /// wholesale as before. None of this relaxes the rule above: code the guest can write is still
+  /// re-decoded on every entry, and a cache flush still evicts by range.
+  static constexpr std::size_t kBlockCacheLimit = 2048;
 
   /// Nothing is cached, so nothing can be stale — and that is a property of this tier, not a stub:
   /// running the same block after an invalidation call has to give the same answer, which the test

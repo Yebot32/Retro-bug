@@ -115,3 +115,28 @@ LDAEX/STLEX pairing; the doubleword form takes an explicit Rt2 register (`uuuu`)
 encoding's implicit `t + 1`. Retire together with 0001 and 0005 if upstream grows the set.
 
 **Retire when:** the pinned upstream grows these four rows (compare `thumb32.inc` at re-import).
+
+## 0007-ir-block-64-instruction-slab.patch
+
+**Why:** `IR::Block`'s constructor (`ir/basic_block.cpp:25`) hands its instruction pool a fixed slab of
+4096 slots, and `sizeof(IR::Inst)` is 104 B, so every block reserved 104 × 4096 = 425,984 B (~416 KiB)
+at construction whether it went on to hold ten instructions or four thousand. That number is not an
+upstream problem — the JIT emits one block and releases it, inside a code-cache budget — but Tier I
+(`rb::exec::InterpExecutor`) caches decoded `IR::Block`s for the life of the executor, so the cost is
+paid per *cached* block. It is the reason `kBlockCacheLimit` was 128: 128 × 416 KiB is ~54 MiB already,
+and the 8192 it replaced would have reserved ~3.2 GiB. A cache that small is cleared wholesale when
+full (`core/exec/interp.cpp:3215`), so an interpreted title whose working set exceeds 128 blocks
+re-translates its hot blocks continuously. This patch changes the one constant to 64 slots (~6.7 KiB)
+and nothing else. The growth path is untouched and already correct for a smaller initial slab: `Pool`
+keeps `initial_pool_size` as `slab_size`, and `Alloc` pushes the current slab onto `slabs` and calls
+`AllocateNewSlab` — the same `object_size × slab_size` bytes, malloc'd and freed normally — when
+`remaining` reaches zero (`common/memory_pool.cpp:12-42`), so a block longer than 64 instructions pays
+additional 64-instruction slabs rather than failing or being truncated. The only cost is a few more
+mallocs per long block at translation time. With it, 2048 cached blocks cost ~13 MiB before any block
+outgrows one slab, which is what lets `kBlockCacheLimit` rise from 128 to 2048
+(`core/include/rb/exec/interp.h`).
+
+**Retire when:** upstream sizes the initial slab per block or grows the pool geometrically (making the
+constant's value a non-issue), or when Tier I stops keeping whole `IR::Block`s alive across entries and
+the per-block reservation is no longer multiplied by a cache (compare `basic_block.cpp`'s `Block`
+constructor at re-import).
