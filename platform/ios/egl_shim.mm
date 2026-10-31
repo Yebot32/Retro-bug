@@ -89,6 +89,21 @@ int g_config_marker = 0;
 int g_surface_marker = 0;
 int g_pbuffer_marker = 0;
 
+std::function<void(const std::string&)>& LogSink() {
+  static std::function<void(const std::string&)> sink;
+  return sink;
+}
+
+void LogLine(const std::string& line) {
+  if (LogSink()) LogSink()(line);
+}
+
+std::string ContextText(const void* context) {
+  char buf[24];
+  std::snprintf(buf, sizeof buf, "0x%llx", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(context)));
+  return buf;
+}
+
 int ConfigVersion(const std::int32_t* attribs) {
   int version = 1;
   if (attribs == nullptr) return version;
@@ -202,6 +217,8 @@ EglShim& EglShim::Instance() {
 EglShim::EglShim() = default;
 
 EglShim::~EglShim() { Detach(); }
+
+void EglShim::SetLog(std::function<void(const std::string&)> log) { LogSink() = std::move(log); }
 
 bool EglShim::Begin(std::string* err) {
   if (context_ == nullptr) {
@@ -366,7 +383,10 @@ void* EglShim::CreateContext(void* display, void* config, void* share, const std
   }
   const int version = ContextVersion(attribs, client_version_);
   if (context_ != nullptr) {
-    if (version == client_version_) return context_;
+    if (version == client_version_) {
+      LogLine("egl: createContext -> GLES" + std::to_string(version) + " context reused");
+      return context_;
+    }
     [EAGLContext setCurrentContext:nil];
     CFRelease(static_cast<CFTypeRef>(context_));
     context_ = nullptr;
@@ -377,6 +397,7 @@ void* EglShim::CreateContext(void* display, void* config, void* share, const std
     error_ = kBadAlloc;
     return nullptr;
   }
+  LogLine("egl: createContext -> GLES" + std::to_string(version) + " context created");
   client_version_ = version;
   context_ = const_cast<void*>(CFBridgingRetain(ctx));
   return context_;
@@ -510,6 +531,10 @@ std::uint32_t EglShim::MakeCurrent(void* display, void* draw, void* read, void* 
   }
   if (context == nullptr && draw == nullptr) {  // the guest is releasing the current context
     [EAGLContext setCurrentContext:nil];
+    if (last_made_current_ != nullptr) {
+      last_made_current_ = nullptr;
+      LogLine("egl: makeCurrent -> released");
+    }
     return 1;
   }
   if (context == nullptr || draw == nullptr) {
@@ -523,6 +548,11 @@ std::uint32_t EglShim::MakeCurrent(void* display, void* draw, void* read, void* 
   }
   std::string err;
   if (!EnsureDrawable(&err)) return 0;
+  // Logged when it changes, not per frame: the interesting event is a second context becoming current.
+  if (last_made_current_ != context_) {
+    last_made_current_ = context_;
+    LogLine("egl: makeCurrent -> GLES" + std::to_string(client_version_) + " context " + ContextText(context_));
+  }
   return 1;
 }
 

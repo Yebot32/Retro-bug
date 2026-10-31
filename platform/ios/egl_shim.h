@@ -10,6 +10,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
 
 namespace rb::platform::ios {
@@ -72,6 +73,14 @@ class EglShim {
   /// A 3x3 RGBA sample of the current drawable, for the log. `out` is empty on failure.
   void SamplePixels(std::string* out);
 
+  /// The version of the context the shim holds (1 or 2), or 0 when it holds none. The crash line prints
+  /// it: a GLES1 call made with an ES2 context current is a different fault from the same call with the
+  /// right context.
+  int context_version() const { return context_ != nullptr ? client_version_ : 0; }
+
+  /// Where context-creation and context-switch lines go (the app log). Not a hot path.
+  static void SetLog(std::function<void(const std::string&)> log);
+
   /// Drops the context and layer (the shim's destructor does this too). Called on the render thread.
   void Detach();
 
@@ -80,6 +89,7 @@ class EglShim {
 
   void* layer_ = nullptr;
   void* context_ = nullptr;  ///< EAGLContext*, retained
+  void* last_made_current_ = nullptr;  ///< the context the last logged make-current named
   int client_version_ = 1;
   int width_ = 0, height_ = 0;
   std::uint32_t framebuffer_ = 0, color_buffer_ = 0, depth_buffer_ = 0;

@@ -22,10 +22,27 @@ namespace rb::platform::ios {
 
 namespace {
 std::atomic<const char*> g_last_host_call{nullptr};
+std::atomic<const IosHost*> g_crash_host{nullptr};
 }
 
 const char* LastHostCall() noexcept {
   return g_last_host_call.load(std::memory_order_relaxed);
+}
+
+void DumpRecentHostCalls(void (*emit)(const char*)) {
+  if (emit == nullptr) return;
+  const IosHost* host = g_crash_host.load(std::memory_order_acquire);
+  if (host == nullptr) return;
+  const std::uint32_t written = host->recent_calls_written();
+  const std::uint32_t count = written < IosHost::kRecentCalls ? written : IosHost::kRecentCalls;
+  char line[160];
+  for (std::uint32_t i = 0; i < count; ++i) {
+    const std::uint32_t slot = (written - count + i) % IosHost::kRecentCalls;
+    const RecentHostCall& call = host->recent_calls()[slot];
+    std::snprintf(line, sizeof line, "  %s 0x%08x 0x%08x 0x%08x 0x%08x\n",
+                  call.name != nullptr ? call.name : "?", call.arg[0], call.arg[1], call.arg[2], call.arg[3]);
+    emit(line);
+  }
 }
 
 namespace {
@@ -69,7 +86,10 @@ struct IosHost::DirState {
   std::uint32_t buffer = 0;
 };
 
- IosHost::~IosHost() = default;
+ IosHost::~IosHost() {
+  EglShim::SetLog(nullptr);
+  g_crash_host.store(nullptr, std::memory_order_release);
+}
 
 void* IosHost::HostSymbol(const std::string& name) {
   if (void* shim = EglShim::Symbol(name)) return shim;
@@ -79,6 +99,12 @@ void* IosHost::HostSymbol(const std::string& name) {
 IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
                        std::function<void(const std::string&)> log)
     : p_(process), boot_(&boot), log_(std::move(log)) {
+  // The crash handler reads the call ring through this pointer; the host outlives every call it binds.
+  g_crash_host.store(this, std::memory_order_release);
+  // Context-version lines go to the app log; the sink lives as long as this host.
+  EglShim::SetLog([this](const std::string& line) {
+    if (log_) log_(line);
+  });
   // glGetString/glGetStringi return a host string: copied into guest memory, as a device's driver's is not.
   AddSpecial("glGetString", [this](exec::MachineState& s, std::string* why) {
     using Fn = const unsigned char* (*)(unsigned);
@@ -153,7 +179,7 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
       if (choose) {
         using Fn = std::uint32_t (*)(void*, const std::int32_t*, void**, std::int32_t, std::int32_t*);
         const auto f = reinterpret_cast<Fn>(HostSymbol(which));
-        const void* a = attribs == 0 ? nullptr : p_.memory().Host(attribs);
+        const void* a = attribs == 0 ? nullptr : p_.memory().HostForAccess(attribs);
         ok = f != nullptr ? f(dpy, static_cast<const std::int32_t*>(a), out != 0 ? host.data() : nullptr,
                               static_cast<std::int32_t>(host.size()), &n)
                           : 0u;
@@ -185,12 +211,12 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
     for (std::uint32_t i = 0; i < count; ++i) {
       std::uint32_t at = 0;
       if (!p_.memory().Read(strings + 4u * i, &at, 4) ||
-          (ptrs[i] = static_cast<const char*>(p_.memory().Host(at))) == nullptr) {
+          (ptrs[i] = static_cast<const char*>(p_.memory().HostForAccess(at))) == nullptr) {
         *why = "glShaderSource: string " + std::to_string(i) + " is not guest memory";
         return false;
       }
     }
-    const void* lens = lengths == 0 ? nullptr : p_.memory().Host(lengths);
+    const void* lens = lengths == 0 ? nullptr : p_.memory().HostForAccess(lengths);
     using Fn = void (*)(unsigned, int, const char* const*, const int*);
     const auto f = reinterpret_cast<Fn>(HostSymbol("glShaderSource"));
     if (f == nullptr) {
@@ -240,7 +266,7 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
   });
   AddSpecial("glGetIntegerv", [this](exec::MachineState& s, std::string* why) {
     const std::uint32_t pname = s.r[0];
-    int* out = s.r[1] == 0 ? nullptr : static_cast<int*>(p_.memory().Host(s.r[1]));
+    int* out = s.r[1] == 0 ? nullptr : static_cast<int*>(p_.memory().HostForAccess(s.r[1]));
     if (out == nullptr) {
       *why = "glGetIntegerv: the out pointer is not guest memory";
       return false;
@@ -348,7 +374,7 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
       return false;
     }
     const std::uint32_t count = s.r[2];
-    void* buffer = count == 0 ? nullptr : p_.memory().Host(s.r[1]);
+    void* buffer = count == 0 ? nullptr : p_.memory().HostForAccess(s.r[1]);
     if (count != 0 && buffer == nullptr) {
       *why = "AAsset_read: the buffer " + Hex(s.r[1]) + " is not guest memory";
       return false;
@@ -586,6 +612,9 @@ std::optional<std::uint32_t> IosHost::Resolve(const std::string& name) {
   p_.abi().Bind(index,
                 [this, name, fn](exec::MachineState& s, std::string* why) {
                   g_last_host_call.store(name.c_str(), std::memory_order_relaxed);
+                  // Recorded before the call runs, so a fault inside the host callee lists the call itself.
+                  const std::uint32_t at = recent_next_.fetch_add(1, std::memory_order_relaxed);
+                  recent_[at % kRecentCalls] = RecentHostCall{name.c_str(), {s.r[0], s.r[1], s.r[2], s.r[3]}};
                   if (fn(s, why)) return true;
                   s.r[0] = 0;
                   if (refused_.insert(name).second && log_) log_("thunks: " + name + " refused: " + *why);

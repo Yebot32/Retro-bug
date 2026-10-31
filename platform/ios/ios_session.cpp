@@ -91,6 +91,10 @@ void CrashSignal(int sig) {
   CrashHex(thread != nullptr ? thread->state.pc : 0u);
   CrashWrite(thread != nullptr ? " cpsr " : " (unbound) cpsr ");
   CrashHex(thread != nullptr ? thread->state.cpsr : 0u);
+  CrashWrite(" egl context version ");
+  CrashHex(static_cast<std::uint32_t>(rb::platform::ios::EglShim::Instance().context_version()));
+  CrashWrite("\nrecent host calls (oldest first):\n");
+  rb::platform::ios::DumpRecentHostCalls(CrashWrite);
 #if defined(__APPLE__) && __has_include(<execinfo.h>)
   CrashWrite("\nhost frames:\n");
   void* frames[64] = {};

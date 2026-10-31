@@ -10,6 +10,8 @@
 // of configs, a name's *guest* address for eglGetProcAddress) are hand-written here.
 #pragma once
 
+#include <array>
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -41,6 +43,18 @@ namespace rb::platform::ios {
 /// handler for the last-resort crash line; no allocation, no lock.
 const char* LastHostCall() noexcept;
 
+/// One entry of the host-call ring: the bound name (a stable string, the binding's own) and the four
+/// register arguments the guest passed. Read from the crash handler, so it is plain data.
+struct RecentHostCall {
+  const char* name = nullptr;
+  std::uint32_t arg[4] = {};
+};
+
+/// Writes the app's host-call ring, oldest first, through `emit` — allocation-free, for a signal handler.
+/// A crash inside a host call shows the calls that led to it, which is the only evidence a driver fault
+/// leaves: the stack is the driver's, not the guest's.
+void DumpRecentHostCalls(void (*emit)(const char*));
+
 class IosHost {
  public:
   static constexpr std::uint32_t kThunkSlotBase = 1024u;
@@ -69,6 +83,11 @@ class IosHost {
   /// The APK whose assets the guest's AAsset* calls read. Call before the guest's libraries load.
   bool OpenApk(const std::string& path, std::string* err);
 
+  /// The ring `DumpRecentHostCalls` reads. `written` is monotonic; slot = n % kRecentCalls.
+  static constexpr std::uint32_t kRecentCalls = 256;
+  const std::array<RecentHostCall, kRecentCalls>& recent_calls() const { return recent_; }
+  std::uint32_t recent_calls_written() const { return recent_next_.load(std::memory_order_relaxed); }
+
  private:
   static void* HostSymbol(const std::string& name);
 
@@ -81,6 +100,8 @@ class IosHost {
   std::map<std::string, std::uint32_t> slots_;
   std::map<std::string, std::uint32_t> strings_;
   std::set<std::string> refused_;  ///< names already reported once (a refusal is a log line, not a flood)
+  std::array<RecentHostCall, kRecentCalls> recent_{};
+  std::atomic<std::uint32_t> recent_next_{0};  ///< relaxed: the crash reader accepts a torn tail
 
   void EmitLog(int priority, const std::string& tag, const std::string& text);
   std::unique_ptr<rb::loader::ApkArchive> archive_;
