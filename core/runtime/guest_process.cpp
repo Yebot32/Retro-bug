@@ -265,6 +265,7 @@ void GuestProcess::Log(const std::string& line) const {
 
 exec::Executor& GuestProcess::engine(int tier) {
   if (tier == 2 && jit_ != nullptr) return *jit_;
+  if (tier == 1 && aot_ != nullptr && aot_usable_) return *aot_;
   return *interp_;
 }
 
@@ -462,6 +463,18 @@ std::unique_ptr<GuestProcess> GuestProcess::Create(const GuestProcessOptions& op
     p->jit_ = std::make_unique<exec::JitExecutor>(m, kReturnAddress, p->abi_.get());
     if (options.ctor_tier == 2 && !p->jit_->ok()) return fail("Tier J is unavailable: " + p->jit_->error());
   }
+  if (options.aot != nullptr) {
+    p->aot_ = std::make_unique<exec::AotExecutor>(m, kReturnAddress, *options.aot, p->abi_.get());
+    if (!p->aot_->ok()) {
+      p->Log("aot: the profile was refused (" + p->aot_->error() + "); using Tier I");
+      p->aot_.reset();
+    } else {
+      p->aot_usable_ = true;
+      p->Log("aot: profile " + std::string(options.aot->name ? options.aot->name : "?") + " loaded (" +
+             std::to_string(p->aot_->library_count()) + " librar" +
+             (p->aot_->library_count() == 1 ? "y" : "ies") + ")");
+    }
+  }
   p->abi_->set_executor(p->engine(options.ctor_tier));
   GuestProcess* self = p.get();
   p->monitor_->set_invalidator([self](GuestAddr from, GuestAddr to) {
@@ -578,6 +591,20 @@ std::string GuestProcess::TrapName(GuestAddr pc) const {
 loader::GuestModule* GuestProcess::LoadOne(const std::vector<std::uint8_t>& image, const std::string& soname,
                                            bool scope, std::string* err) {
   loader::LoadOptions opts;
+  // A profiled library's emitted blocks bake guest PCs for one load bias, so the loader is asked for
+  // that address; the check below proves it was honoured. A profile that does not name this module
+  // (libstdc++, say) loads wherever there is room and stays on Tier I.
+  const exec::AotLibrary* aot_library = nullptr;
+  if (opts_.aot != nullptr && opts_.aot->libraries != nullptr) {
+    for (std::size_t i = 0; i < opts_.aot->count; ++i) {
+      const exec::AotLibrary& candidate = opts_.aot->libraries[i];
+      if (candidate.soname != nullptr && candidate.image != nullptr && soname == candidate.soname) {
+        aot_library = &candidate;
+        opts.hint = candidate.image->load_bias;
+        break;
+      }
+    }
+  }
   // A real libc carries TLS relocations this loader cannot apply; the scope tolerates them (they stay
   // recorded in `unsupported_relocs`). An app does not: a refused relocation fails its load by name.
   opts.tolerate_unresolved_relocs = scope;
@@ -608,6 +635,19 @@ loader::GuestModule* GuestProcess::LoadOne(const std::vector<std::uint8_t>& imag
   for (const std::string& one : mod->unsupported_relocs) tolerated += (tolerated.empty() ? "" : ", ") + one;
   Log("load: " + soname + " at " + Hex(mod->base) + " extent " + Hex(mod->extent) +
       (tolerated.empty() ? std::string{} : "; relocations tolerated, not applied: " + tolerated));
+  if (aot_library != nullptr && aot_usable_) {
+    // The hint is a preference: if something already occupies the range the loader scans upward and
+    // the image lands elsewhere, which would make every baked PC in its blocks wrong. Prove the
+    // module covers the profile's text window; otherwise AOT is off for the rest of the process.
+    const exec::AotImageInfo& wanted = *aot_library->image;
+    const std::uint64_t text_base = static_cast<std::uint64_t>(wanted.load_bias) + wanted.text_vaddr;
+    const std::uint64_t module_end = static_cast<std::uint64_t>(mod->base) + mod->extent;
+    if (text_base < mod->base || text_base + wanted.text_len > module_end) {
+      aot_usable_ = false;
+      Log("aot: " + soname + " loaded at 0x" + Hex(mod->base) + " instead of its profile bias 0x" +
+          Hex(wanted.load_bias) + "; using Tier I for this process");
+    }
+  }
   modules_.push_back(std::make_unique<loader::GuestModule>(std::move(*mod)));
   return modules_.back().get();
 }
@@ -1159,8 +1199,8 @@ std::vector<std::string> GuestProcess::ProfileReport() {
 }
 
 std::string GuestProcess::CacheStats() {
-  // `engine(1)` is the interpreter by construction (JIT is tier 2), so this needs no RTTI.
-  auto& tier = static_cast<exec::InterpExecutor&>(engine(1));
+  // The interpreter itself, not `engine(1)`: with an AOT profile that tier answers the AOT executor.
+  auto& tier = *interp_;
   return "tier1: translations " + std::to_string(tier.translations()) + ", blocks cached " +
          std::to_string(tier.cached_blocks());
 }

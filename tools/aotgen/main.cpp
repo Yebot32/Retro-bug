@@ -3,9 +3,11 @@
 // `rb_aotgen` — the offline side of AOT translation. AOT task 2 is the discovery half: read an ARM
 // shared object and say which guest `.text` offsets are starts worth translating. The emitter (AOT task
 // 3) adds subcommands behind `RB_AOTGEN_EMIT`; this file deliberately links no engine and no Dynarmic.
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <string>
 #include <unordered_set>
@@ -14,6 +16,11 @@
 #include "code_map.h"
 #ifdef RB_AOTGEN_EMIT
 #include "emit.h"
+#include "sha256.h"
+#endif
+#if !defined(_WIN32)
+#include <sys/wait.h>
+#include <unistd.h>
 #endif
 
 namespace {
@@ -43,6 +50,11 @@ constexpr const char* kUsage =
     "  --emit --out <prefix> [--base <hex>] <lib.so>\n"
     "  Emits <prefix>.S and <prefix>_table.cpp for AOT (task 3). --base is the assumed load bias\n"
     "  (guest address of the image's vaddr 0); it defaults to 0x10000 and must be 4 KiB-aligned.\n"
+    "  --profile <dir> --out <prefix> [--trace <file>] [--base <hex>]\n"
+    "  Emits one image per *.so in <dir>, plus <prefix>_profile.cpp and <prefix>_profile.json. Each\n"
+    "  library gets a 32 MiB slot from --base (default 0x10000000) in sorted order; the runtime must\n"
+    "  map it there. A library whose translation aborts the process (a Dynarmic front-end assertion on\n"
+    "  an encoding decoded from data) is skipped by name and stays on Tier I.\n"
 #endif
     ;
 
@@ -161,12 +173,224 @@ void PrintSummary(const std::string& label, const CodeMap& map) {
       "aotgen: %s starts %zu (export %zu, init %zu, reloc %zu, exidx %zu, veneer %zu, trace %zu)\n",
       label.c_str(), map.entries.size(),
       rb::aotgen::CountSource(map, rb::aotgen::kFromExport),
-      rb::aotgen::CountSource(map, rb::aotgen::kFromInit),
-      rb::aotgen::CountSource(map, rb::aotgen::kFromReloc),
+      rb::aotgen::CountSource(map, rb::aotgen::kFromInit),      rb::aotgen::CountSource(map, rb::aotgen::kFromReloc),
       rb::aotgen::CountSource(map, rb::aotgen::kFromExidx),
       rb::aotgen::CountSource(map, rb::aotgen::kFromVeneer),
       rb::aotgen::CountSource(map, rb::aotgen::kFromTrace));
 }
+
+#ifdef RB_AOTGEN_EMIT
+std::string Hex32(std::uint32_t value) {
+  char buffer[11];
+  std::snprintf(buffer, sizeof buffer, "0x%08x", value);
+  return buffer;
+}
+
+/// Convert a recorded trace into this image's starts (guest PCs -> `.text`-relative offsets).
+bool BuildTraceFor(const std::string& lib_path, std::uint32_t load_bias, const std::string& trace_path,
+                   CodeMap* trace, std::string* err) {
+  if (trace_path.empty()) return true;
+  const std::vector<std::uint8_t> bytes = ReadFile(lib_path);
+  if (bytes.empty()) {
+    *err = "cannot read " + lib_path;
+    return false;
+  }
+  CodeMap image{};
+  std::string base_err;
+  image = rb::aotgen::DiscoverCodeMap(bytes, nullptr, &base_err);
+  if (!base_err.empty()) {
+    *err = lib_path + ": " + base_err;
+    return false;
+  }
+  TraceStats stats;
+  return ParseTrace(trace_path, image, load_bias, trace, &stats, err);
+}
+
+struct ProfileEntry {
+  std::string soname;
+  std::string prefix;   ///< the per-library output prefix (its .S and table use it)
+  std::string symbol;   ///< the image symbol the table defines
+  std::uint32_t bias = 0;
+  std::uint32_t text_vaddr = 0;
+  std::uint32_t text_len = 0;
+  std::uint64_t fingerprint = 0;
+  std::size_t blocks = 0;
+  std::size_t refused = 0;
+  std::size_t code_bytes = 0;
+  std::string sha256;
+};
+
+std::string Sanitize(const std::string& name) {
+  std::string s = name;
+  for (char& c : s) {
+    const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+    if (!ok) c = '_';
+  }
+  return s;
+}
+
+/// Emit one library in a child process. The front end can assert on an encoding decoded from data
+/// (a start the discovery named but the bytes are a literal pool); an assert kills the process, and a
+/// profile build must survive one library to keep the others. The child writes its facts to a file the
+/// parent reads; a crash is a skipped library, reported by name, not a failed profile.
+bool EmitOne(const std::string& lib_path, const ProfileEntry& entry, const std::string& trace_path,
+             ProfileEntry* out) {
+#if defined(_WIN32)
+  (void)lib_path;
+  (void)entry;
+  (void)trace_path;
+  (void)out;
+  std::fprintf(stderr, "aotgen: --profile needs a POSIX host (child-process isolation)\n");
+  return false;
+#else
+  const std::string facts_path = entry.prefix + ".facts";
+  std::remove(facts_path.c_str());
+  std::fflush(stdout);
+  std::fflush(stderr);
+  const pid_t pid = fork();
+  if (pid == 0) {
+    CodeMap trace{};
+    std::string err;
+    if (!BuildTraceFor(lib_path, entry.bias, trace_path, &trace, &err)) {
+      std::fprintf(stderr, "aotgen: %s: %s\n", entry.soname.c_str(), err.c_str());
+      std::fflush(stderr);
+      _exit(2);
+    }
+    rb::aotgen::EmitFacts facts;
+    if (!rb::aotgen::EmitImage(lib_path, entry.prefix, entry.bias, trace_path.empty() ? nullptr : &trace,
+                               &facts, &err)) {
+      std::fprintf(stderr, "aotgen: %s: %s\n", entry.soname.c_str(), err.c_str());
+      std::fflush(stderr);
+      _exit(1);
+    }
+    std::ofstream facts_out(facts_path, std::ios::binary);
+    facts_out << facts.text_vaddr << " " << facts.text_len << " " << facts.fingerprint << " "
+              << facts.blocks << " " << facts.refused << " " << facts.code_bytes << " " << facts.symbol
+              << "\n";
+    facts_out.close();
+    std::fflush(stdout);
+    std::fflush(stderr);
+    _exit(facts_out ? 0 : 3);
+  }
+  if (pid < 0) {
+    std::fprintf(stderr, "aotgen: cannot fork for %s\n", entry.soname.c_str());
+    return false;
+  }
+  int status = 0;
+  if (waitpid(pid, &status, 0) != pid) {
+    std::fprintf(stderr, "aotgen: waitpid failed for %s\n", entry.soname.c_str());
+    return false;
+  }
+  if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+    if (WIFSIGNALED(status)) {
+      std::fprintf(stderr,
+                   "aotgen: %s: translation aborted (signal %d: a front-end assertion on an encoding "
+                   "decoded from data); library skipped, it stays on Tier I\n",
+                   entry.soname.c_str(), WTERMSIG(status));
+    }
+    return false;
+  }
+  std::ifstream facts_in(facts_path);
+  if (!facts_in) return false;
+  *out = entry;
+  facts_in >> out->text_vaddr >> out->text_len >> out->fingerprint >> out->blocks >> out->refused >>
+      out->code_bytes >> out->symbol;
+  std::remove(facts_path.c_str());
+  return facts_in.good() || facts_in.eof();
+#endif
+}
+
+int RunProfile(const std::string& dir, const std::string& out_prefix, const std::string& trace_path,
+               std::uint32_t base) {
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  std::vector<std::string> libs;
+  for (const auto& item : fs::directory_iterator(dir, ec)) {
+    if (!item.is_regular_file()) continue;
+    const std::string name = item.path().filename().string();
+    if (name.size() > 3 && name.compare(name.size() - 3, 3, ".so") == 0) libs.push_back(name);
+  }
+  if (ec) {
+    std::fprintf(stderr, "aotgen: cannot read %s: %s\n", dir.c_str(), ec.message().c_str());
+    return 1;
+  }
+  std::sort(libs.begin(), libs.end());
+  if (libs.empty()) {
+    std::fprintf(stderr, "aotgen: %s has no *.so files\n", dir.c_str());
+    return 1;
+  }
+
+  std::vector<ProfileEntry> emitted;
+  for (std::size_t i = 0; i < libs.size(); ++i) {
+    ProfileEntry entry;
+    entry.soname = libs[i];
+    entry.prefix = out_prefix + "_" + Sanitize(libs[i].substr(0, libs[i].size() - 3));
+    entry.symbol = rb::aotgen::ImageSymbol(entry.prefix);
+    entry.bias = base + static_cast<std::uint32_t>(i) * 0x0200'0000u;
+    const std::string lib_path = (fs::path(dir) / libs[i]).string();
+    const std::vector<std::uint8_t> bytes = ReadFile(lib_path);
+    if (bytes.empty()) {
+      std::fprintf(stderr, "aotgen: cannot read %s\n", lib_path.c_str());
+      continue;
+    }
+    entry.sha256 = rb::aotgen::Sha256Hex(rb::aotgen::Sha256(bytes));
+    ProfileEntry facts;
+    if (!EmitOne(lib_path, entry, trace_path, &facts)) continue;
+    emitted.push_back(facts);
+    std::printf("aotgen: profile %s: %zu blocks, %zu refused, %zu code bytes at base 0x%x\n",
+                entry.soname.c_str(), facts.blocks, facts.refused, facts.code_bytes, entry.bias);
+  }
+  if (emitted.empty()) {
+    std::fprintf(stderr, "aotgen: no library in %s could be translated\n", dir.c_str());
+    return 1;
+  }
+
+  const std::string json_path = out_prefix + "_profile.json";
+  std::ofstream json(json_path, std::ios::binary);
+  if (!json) {
+    std::fprintf(stderr, "aotgen: cannot write %s\n", json_path.c_str());
+    return 1;
+  }
+  json << "{\n  \"format\": 1,\n  \"name\": \"" << Sanitize(fs::path(out_prefix).filename().string())
+       << "\",\n  \"libraries\": [\n";
+  for (std::size_t i = 0; i < emitted.size(); ++i) {
+    const ProfileEntry& e = emitted[i];
+    json << "    {\"soname\": \"" << e.soname << "\", \"sha256\": \"" << e.sha256
+         << "\", \"load_bias\": " << e.bias << ", \"text_vaddr\": " << e.text_vaddr
+         << ", \"text_len\": " << e.text_len << ", \"blocks\": " << e.blocks
+         << ", \"refused\": " << e.refused << ", \"code_bytes\": " << e.code_bytes
+         << ", \"symbol\": \"" << e.symbol << "\"}" << (i + 1 == emitted.size() ? "\n" : ",\n");
+  }
+  json << "  ]\n}\n";
+  json.close();
+
+  const std::string cpp_path = out_prefix + "_profile.cpp";
+  std::ofstream cpp(cpp_path, std::ios::binary);
+  if (!cpp) {
+    std::fprintf(stderr, "aotgen: cannot write %s\n", cpp_path.c_str());
+    return 1;
+  }
+  cpp << "// Generated by rb_aotgen --profile (AOT task 5) from " << dir << "\n";
+  cpp << "// Load biases: " << Hex32(base) << " + 32 MiB per library, sorted by name.\n";
+  cpp << "// The runtime must map each module at its image's load_bias; a mismatch disables AOT.\n";
+  cpp << "#include \"rb/exec/aot.h\"\n\n";
+  for (const ProfileEntry& e : emitted) {
+    cpp << "extern const rb::exec::AotImageInfo " << e.symbol << ";\n";
+  }
+  cpp << "\nnamespace {\nconst rb::exec::AotLibrary kAotProfileLibraries[] = {\n";
+  for (const ProfileEntry& e : emitted) {
+    cpp << "    {\"" << e.soname << "\", \"" << e.sha256 << "\", &" << e.symbol << "},\n";
+  }
+  cpp << "};\n}  // namespace\n\n";
+  cpp << "extern \"C\" const rb::exec::AotProfile rb_aot_builtin_profile = {\""
+      << Sanitize(fs::path(out_prefix).filename().string()) << "\", kAotProfileLibraries, "
+      << emitted.size() << "};\n";
+  cpp.close();
+  std::printf("aotgen: profile wrote %s and %s (%zu libraries)\n", json_path.c_str(), cpp_path.c_str(),
+              emitted.size());
+  return 0;
+}
+#endif  // RB_AOTGEN_EMIT
 
 }  // namespace
 
@@ -174,11 +398,21 @@ int main(int argc, char** argv) {
   std::string path;
   std::string trace_path;
   std::string out_prefix;
+  std::string profile_dir;
   std::uint32_t load_bias = 0x0001'0000u;
+  bool base_given = false;
+  bool profile = false;
   bool emit = false;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
-    if (arg == "--trace") {
+    if (arg == "--profile") {
+      if (i + 1 >= argc) {
+        std::fprintf(stderr, "aotgen: --profile needs a directory\n");
+        return 2;
+      }
+      profile_dir = argv[++i];
+      profile = true;
+    } else if (arg == "--trace") {
       if (i + 1 >= argc) {
         std::fprintf(stderr, "aotgen: --trace needs a file\n");
         return 2;
@@ -210,6 +444,7 @@ int main(int argc, char** argv) {
         return 2;
       }
       load_bias = static_cast<std::uint32_t>(value);
+      base_given = true;
     } else if (arg == "-h" || arg == "--help") {
       std::fputs(kUsage, stdout);
       return 0;
@@ -223,6 +458,21 @@ int main(int argc, char** argv) {
       return 2;
     }
   }
+  if (profile) {
+#ifdef RB_AOTGEN_EMIT
+    if (!path.empty() || out_prefix.empty()) {
+      std::fprintf(stderr, "aotgen: --profile takes a directory and --out <prefix>\n%s", kUsage);
+      return 2;
+    }
+    // A profile must not land on the low addresses a boot uses for its scope; 256 MiB up with 32 MiB
+    // slots leaves every image far from libc's, the stack's and the trap window's placements.
+    const std::uint32_t base = base_given ? load_bias : 0x1000'0000u;
+    return RunProfile(profile_dir, out_prefix, trace_path, base);
+#else
+    std::fprintf(stderr, "aotgen: this build has no emitter (only AArch64 hosts build it)\n");
+    return 2;
+#endif
+  }
   if (path.empty()) {
     std::fputs(kUsage, stderr);
     return 2;
@@ -234,8 +484,14 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "aotgen: --emit needs --out <prefix>\n%s", kUsage);
       return 2;
     }
+    CodeMap emit_trace{};
     std::string err;
-    if (!rb::aotgen::EmitImage(path, out_prefix, load_bias, &err)) {
+    if (!BuildTraceFor(path, load_bias, trace_path, &emit_trace, &err)) {
+      std::fprintf(stderr, "aotgen: %s: %s\n", path.c_str(), err.c_str());
+      return 1;
+    }
+    if (!rb::aotgen::EmitImage(path, out_prefix, load_bias, trace_path.empty() ? nullptr : &emit_trace,
+                               nullptr, &err)) {
       std::fprintf(stderr, "aotgen: %s: %s\n", path.c_str(), err.c_str());
       return 1;
     }

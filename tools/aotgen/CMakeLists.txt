@@ -14,7 +14,7 @@ add_executable(rb_aotgen_tests code_map_test.cpp code_map.cpp)
 # host* here even though CMake calls the configuration cross-compiling, which is why the top-level
 # CMakeLists adds this directory for `ANDROID` as well.
 if(RB_AARCH64_HOST)
-  target_sources(rb_aotgen PRIVATE emit.cpp)
+  target_sources(rb_aotgen PRIVATE emit.cpp sha256.cpp)
   target_compile_definitions(rb_aotgen PRIVATE RB_AOTGEN_EMIT=1)
   target_link_libraries(rb_aotgen PRIVATE dynarmic merry::oaknut merry::mcl fmt::fmt tsl::robin_map)
   if(DEFINED RB_COMPAT_INCLUDE_DIR)

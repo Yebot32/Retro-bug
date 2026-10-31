@@ -152,14 +152,59 @@ AotExecutor::AotExecutor(mem::GuestMemory& memory, GuestAddr return_address,
                          const AotImageInfo& info, const HostDispatch* dispatch)
     : memory_(memory), return_address_(return_address), dispatch_(dispatch) {
 #if defined(__aarch64__)
-  if (!image_.Load(info.blocks, info.count, &info, &err_)) return;
-  text_base_ = info.load_bias + info.text_vaddr;
+  if (!AddImage(info, &err_)) return;
   state_.exec = this;
   fallback_interp_ = std::make_unique<InterpExecutor>(memory_, return_address_, dispatch_);
 #else
   (void)info;
   err_ = "AOT execution requires an AArch64 host";
 #endif
+}
+
+AotExecutor::AotExecutor(mem::GuestMemory& memory, GuestAddr return_address,
+                         const AotProfile& profile, const HostDispatch* dispatch)
+    : memory_(memory), return_address_(return_address), dispatch_(dispatch) {
+#if defined(__aarch64__)
+  if (profile.count == 0 || profile.libraries == nullptr) {
+    err_ = "the AOT profile has no libraries";
+    return;
+  }
+  for (std::size_t i = 0; i < profile.count; ++i) {
+    const AotLibrary& library = profile.libraries[i];
+    if (library.image == nullptr) {
+      err_ = std::string("the AOT profile's ") + (library.soname ? library.soname : "?") +
+             " has no image";
+      return;
+    }
+    if (!AddImage(*library.image, &err_)) return;
+  }
+  state_.exec = this;
+  fallback_interp_ = std::make_unique<InterpExecutor>(memory_, return_address_, dispatch_);
+#else
+  (void)profile;
+  err_ = "AOT execution requires an AArch64 host";
+#endif
+}
+
+bool AotExecutor::AddImage(const AotImageInfo& info, std::string* err) {
+  Library library;
+  if (!library.image.Load(info.blocks, info.count, &info, err)) return false;
+  library.text_base = info.load_bias + info.text_vaddr;
+  library.info = &info;
+  for (const Library& other : libraries_) {
+    const std::uint64_t a0 = library.text_base;
+    const std::uint64_t a1 = a0 + info.text_len;
+    const std::uint64_t b0 = other.text_base;
+    const std::uint64_t b1 = b0 + other.info->text_len;
+    if (a0 < b1 && b0 < a1) {
+      if (err != nullptr) *err = "two AOT images overlap in guest memory";
+      return false;
+    }
+  }
+  libraries_.push_back(std::move(library));
+  std::sort(libraries_.begin(), libraries_.end(),
+            [](const Library& a, const Library& b) { return a.text_base < b.text_base; });
+  return true;
 }
 
 AotExecutor::~AotExecutor() = default;
@@ -252,9 +297,30 @@ void* AotExecutor::Dispatch() {
     Halt(Dynarmic::HaltReason::UserDefined1);
     return nullptr;
   }
+  // The image that owns `pc`, if any. The vector is sorted by text base; the profile's images do not
+  // overlap (AddImage rejects that), so one range check decides membership.
+  std::size_t image_index = libraries_.size();
+  {
+    std::size_t lo = 0;
+    std::size_t hi = libraries_.size();
+    while (lo < hi) {
+      const std::size_t mid = lo + (hi - lo) / 2;
+      if (libraries_[mid].text_base <= pc) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    if (lo != 0) {
+      const std::size_t candidate = lo - 1;
+      if (pc - libraries_[candidate].text_base < libraries_[candidate].info->text_len) {
+        image_index = candidate;
+      }
+    }
+  }
   AotCode entry = nullptr;
-  if (pc >= text_base_ && pc - text_base_ < image_.info().text_len) {
-    entry = image_.Resolve(pc - text_base_, thumb);
+  if (image_index != libraries_.size()) {
+    entry = libraries_[image_index].image.Resolve(pc - libraries_[image_index].text_base, thumb);
   }
   if (entry != nullptr) {
     /**
@@ -277,6 +343,19 @@ void* AotExecutor::Dispatch() {
   }
   if (entry == nullptr) {
     state_.fallback_pending = 1;
+    Halt(Dynarmic::HaltReason::UserDefined1);
+    return nullptr;
+  }
+  if (image_index != current_) {
+    /**
+     * Entering another library's block from this image's prelude would run inside the wrong stack
+     * frame: every prelude pushes its own `StackLayout` and its `return_from_run_code` pops it. The
+     * right sequence is the one a fresh `Run` uses — return to C++, then call the target image's
+     * `run_code` — so this image's prelude exits and `Run` re-enters with the recorded entry.
+     */
+    current_ = image_index;
+    state_.switch_image = libraries_[image_index].info;
+    state_.switch_entry = reinterpret_cast<void*>(reinterpret_cast<std::uintptr_t>(entry));
     Halt(Dynarmic::HaltReason::UserDefined1);
     return nullptr;
   }
@@ -367,21 +446,34 @@ RunResult AotExecutor::Run(MachineState& state, unsigned max_instructions) {
   pending_illegal_pc_ = 0;
   state_.halt_reason = 0;
   state_.fallback_pending = 0;
+  state_.switch_image = nullptr;
+  state_.switch_entry = nullptr;
 
   SyncIn(state);
 
   for (;;) {
     state_.halt_reason = 0;
+    const AotImageInfo* running = nullptr;
     void* entry = Dispatch();
     if (entry != nullptr) {
-      const Dynarmic::HaltReason hr =
-          image_.info().run_code(entry, &state_.jit, &state_.halt_reason);
+      running = libraries_[current_].info;
+    } else if (state_.switch_entry != nullptr) {
+      // A block in another translated library was reached: this image's prelude returned, and the
+      // target image's prelude gets a fresh frame, exactly as a new `Run` would give it.
+      running = state_.switch_image;
+      entry = state_.switch_entry;
+      state_.switch_image = nullptr;
+      state_.switch_entry = nullptr;
+    }
+    if (entry != nullptr) {
+      const Dynarmic::HaltReason hr = running->run_code(entry, &state_.jit, &state_.halt_reason);
       SyncOut(state);
       if (pending_pc_ != 0 && pending_ != Pending::Syscall && pending_ != Pending::None) {
         state.pc = pending_pc_;
         state.r[15] = pending_pc_;
       }
       if (state_.fallback_pending == 0) {
+        if (state_.switch_entry != nullptr) continue;
         return Exit(MapHalt(hr));
       }
       state_.fallback_pending = 0;

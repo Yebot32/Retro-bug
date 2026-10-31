@@ -38,6 +38,7 @@
 
 #include "rb/abi/abi.h"
 #include "rb/abi/jni_env.h"
+#include "rb/exec/aot.h"
 #include "rb/exec/interp.h"
 #include "rb/exec/jit.h"
 #include "rb/loader/guest_elf.h"
@@ -68,6 +69,10 @@ struct GuestProcessOptions {
   /// Build the JIT object. False on a host that forbids executable memory (iOS): the AArch64 backend
   /// allocates a 64 MiB code cache when constructed, and `engine(2)` then answers the interpreter.
   bool enable_jit = true;
+  /// A per-game AOT profile (AOT task 5). When present and every module mapped at its image's bias,
+  /// `engine(1)` answers this profile's AotExecutor instead of the interpreter; a library in the APK
+  /// that the profile does not name keeps running on Tier I through the executor's fallback.
+  const exec::AotProfile* aot = nullptr;
 };
 
 /// The static-TLS / thread layout of one bionic build, as `VerifyBionicLayout` derived and asserted it.
@@ -301,6 +306,11 @@ class GuestProcess {
   std::unique_ptr<abi::JniEnv> jni_;
   std::unique_ptr<exec::InterpExecutor> interp_;
   std::unique_ptr<exec::JitExecutor> jit_;
+  /// The AOT profile's engine. `aot_usable_` turns false if a profiled library fails to map at the
+  /// bias its emitted blocks baked; `engine(1)` then answers the interpreter for the rest of the
+  /// process, which is the same result as the profile not matching, just discovered later.
+  std::unique_ptr<exec::AotExecutor> aot_;
+  bool aot_usable_ = false;
   std::vector<std::unique_ptr<loader::GuestModule>> modules_;  ///< load order: scope, then apps
   loader::GuestModule* libc_ = nullptr;
   bool scope_loaded_ = false;

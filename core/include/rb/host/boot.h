@@ -78,6 +78,10 @@ struct BootConfig {
   /// Build the JIT object. False on iOS: the backend allocates executable memory, which the platform
   /// forbids; the boot still runs, on Tier I.
   bool enable_jit = true;
+  /// A per-game AOT profile (AOT task 5), compiled into a per-game app. When set and every profiled
+  /// library maps at its bias, constructors and guest entry points run on the AOT executor; anything
+  /// the profile does not cover stays on Tier I. Null: the tier `ctor_tier` names decides.
+  const rb::exec::AotProfile* aot = nullptr;
 };
 
 struct BootResult {

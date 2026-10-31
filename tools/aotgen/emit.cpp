@@ -676,6 +676,11 @@ struct Emitter {
         continue;
       }
 
+      // A front-end assertion aborts the whole tool, so the block being translated when it happens
+      // has to be nameable. Off by default; a diagnostic for the case where a library kills the tool.
+      if (std::getenv("RB_AOTGEN_TRACE_BLOCKS") != nullptr) {
+        std::fprintf(stderr, "aotgen: translate pc=%08x thumb=%d\n", pc, thumb ? 1 : 0);
+      }
       IR::Block block = address_space->GenerateIR(desc);
       const A32::LocationDescriptor end_loc{block.EndLocation()};
       const std::uint32_t end = end_loc.PC();
@@ -1002,7 +1007,7 @@ struct Emitter {
 }  // namespace
 
 bool EmitImage(const std::string& elf_path, const std::string& out_prefix, std::uint32_t load_bias,
-               std::string* err) {
+               const CodeMap* trace, EmitFacts* facts, std::string* err) {
   const auto fail = [&](const std::string& msg) {
     if (err != nullptr) *err = msg;
     return false;
@@ -1017,7 +1022,7 @@ bool EmitImage(const std::string& elf_path, const std::string& out_prefix, std::
 
   CodeMap map{};
   std::string map_err;
-  map = DiscoverCodeMap(elf, nullptr, &map_err);
+  map = DiscoverCodeMap(elf, trace, &map_err);
   if (!map_err.empty()) return fail(map_err);
   if (map.entries.empty()) return fail("the code map has no starts");
 
@@ -1129,8 +1134,23 @@ bool EmitImage(const std::string& elf_path, const std::string& out_prefix, std::
       static_cast<long long>(em.prelude_end),
       static_cast<long long>(em.blocks.empty() ? em.prelude_end : em.blocks.back().end));
   for (const auto& line : em.refused_log) std::printf("aotgen: refused: %s\n", line.c_str());
+  if (facts != nullptr) {
+    facts->text_vaddr = map.text_vaddr;
+    facts->text_len = map.text_len;
+    facts->fingerprint = Fnv1a64(elf);
+    facts->blocks = em.blocks.size();
+    facts->refused = static_cast<std::size_t>(em.refused_counts[1] + em.refused_counts[2] +
+                                              em.refused_counts[3] + em.refused_counts[4] +
+                                              em.refused_counts[5] + em.refused_counts[6]);
+    facts->code_bytes = em.code_bytes;
+    facts->symbol = table_name;
+  }
   if (err != nullptr) err->clear();
   return true;
+}
+
+std::string ImageSymbol(const std::string& out_prefix) {
+  return TableName(out_prefix);
 }
 
 }  // namespace rb::aotgen

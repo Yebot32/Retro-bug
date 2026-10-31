@@ -36,6 +36,7 @@ namespace rb::exec {
 using A32JitState = Dynarmic::Backend::Arm64::A32JitState;
 
 struct AotState;
+struct AotImageInfo;
 class AotExecutor;
 
 /// One translated guest block: the code-map offset it starts at, the ISA, and its entry point.
@@ -76,6 +77,11 @@ struct AotState {
   /// (IT state, FPSCR mode) differs from the one the block was emitted for. The executor reads it after
   /// the prelude returns from run code, runs Tier I from the live PC, then resumes AOT.
   std::uint32_t fallback_pending = 0;
+  /// Set by the dispatcher when the next block lives in another translated library. The current
+  /// prelude must return to C++ (its stack layout belongs to its own image); `Run` then enters the
+  /// target image's prelude at `switch_entry`. Dispatcher bookkeeping only — the prelude never reads it.
+  const AotImageInfo* switch_image = nullptr;
+  void* switch_entry = nullptr;
 };
 
 /// The hand-off from a generated prelude back into C++: the AArch64 ARM64 AAPCS signature of
@@ -105,6 +111,23 @@ struct AotImageInfo {
   std::uint32_t code_bytes = 0;
   std::uint32_t block_count = 0;
   AotRunCode run_code = nullptr;
+};
+
+/// One translated library in a per-game profile (AOT task 5): its name inside the APK and the image the
+/// generated table defines. The runtime must map the module at the image's `load_bias`.
+struct AotLibrary {
+  const char* soname = nullptr;
+  /// The exact `.so` bytes the image was translated from, 64 lower-case hex characters. The runtime
+  /// hashes the imported APK's entry and uses the profile only on a full match.
+  const char* sha256 = nullptr;
+  const AotImageInfo* image = nullptr;
+};
+
+/// What a per-game IPA carries: the profile name for the log line, and its translated libraries.
+struct AotProfile {
+  const char* name = nullptr;
+  const AotLibrary* libraries = nullptr;
+  std::size_t count = 0;
 };
 
 /**
@@ -148,6 +171,10 @@ class AotExecutor final : public Executor {
  public:
   AotExecutor(mem::GuestMemory& memory, GuestAddr return_address, const AotImageInfo& info,
               const HostDispatch* dispatch = nullptr);
+  /// A per-game profile (AOT task 5): every translated library the boot may enter. Blocks in one image
+  /// may jump to another's; the dispatcher returns to C++ and `Run` re-enters that image's prelude.
+  AotExecutor(mem::GuestMemory& memory, GuestAddr return_address, const AotProfile& profile,
+              const HostDispatch* dispatch = nullptr);
   ~AotExecutor() override;
 
   RunResult Run(MachineState& state, unsigned max_instructions) override;
@@ -159,10 +186,12 @@ class AotExecutor final : public Executor {
 
   /// Fallback hand-backs since construction. Zero for a fully covered run; the fixture asserts it.
   [[nodiscard]] std::size_t fallback_count() const { return fallbacks_; }
-  [[nodiscard]] const AotImage& image() const { return image_; }
+  /// The first translated library (the fixture carries exactly one).
+  [[nodiscard]] const AotImage& image() const { return libraries_.front().image; }
+  [[nodiscard]] std::size_t library_count() const { return libraries_.size(); }
   [[nodiscard]] AotState& state() { return state_; }
-  /// Guest address the code map's offset 0 corresponds to (`load_bias + text_vaddr`).
-  [[nodiscard]] std::uint32_t text_base() const { return text_base_; }
+  /// Guest address the first library's code-map offset 0 corresponds to (`load_bias + text_vaddr`).
+  [[nodiscard]] std::uint32_t text_base() const { return libraries_.front().text_base; }
 
   // ---------------------------------------------------------------- callbacks the prelude calls
   //
@@ -200,6 +229,8 @@ class AotExecutor final : public Executor {
 
   void SyncIn(const MachineState& state);
   void SyncOut(MachineState& state);
+  /// Load one generated image into `libraries_`, rejecting overlaps and malformed tables.
+  bool AddImage(const AotImageInfo& info, std::string* err);
   /// The single exit from `Run`: folds the AOT and fallback counts into `r` and clears `live_`.
   [[nodiscard]] RunResult Exit(RunResult r);
   [[nodiscard]] RunResult MapHalt(Dynarmic::HaltReason hr);
@@ -216,9 +247,16 @@ class AotExecutor final : public Executor {
   mem::GuestMemory& memory_;
   GuestAddr return_address_;
   const HostDispatch* dispatch_;
-  AotImage image_;
+  /// Every translated library, sorted by guest text base for `Dispatch`'s lookup. `current_` is the
+  /// image whose prelude frame is on the stack.
+  struct Library {
+    AotImage image;
+    std::uint32_t text_base = 0;
+    const AotImageInfo* info = nullptr;
+  };
+  std::vector<Library> libraries_;
+  std::size_t current_ = 0;
   AotState state_{};
-  std::uint32_t text_base_ = 0;
   /// One core. The monitor is still required: Dynarmic's trampolines call it unconditionally, and
   /// AOT's exclusive callbacks use the same ReadAndMark/DoExclusiveOperation pairing.
   Dynarmic::ExclusiveMonitor monitor_{1};
