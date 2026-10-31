@@ -145,18 +145,19 @@ constructor at re-import).
 
 **Why:** RetroBug's AOT path has a host tool translate a guest's code ahead of time, offline, so the
 device never interprets or JITs it. The tool needs the JIT's own translation and emission pipeline — a
-copy would drift — but that pipeline is unreachable from outside: `AddressSpace::GenerateIR` is public
-yet virtual over a descriptor, `AddressSpace::Emit`/`Link` are protected, and `EmitArm64` needs the
-address space's code cache and block maps, none of which an offline emitter may touch. This patch adds
-exactly two public entry points and no logic: `AddressSpace::EmitForAot(IR::Block&, oaknut::CodeGenerator&)`
+copy would drift — but the emission half is unreachable from outside: `AddressSpace::Emit`/`Link` are
+protected, and `EmitArm64` needs the address space's code cache and block maps, none of which an offline
+emitter may touch. IR generation needs nothing: `AddressSpace::GenerateIR` is a public pure virtual over
+a descriptor, is unchanged by this patch, and is what the tool calls, so it gets the exact
+`A32::Translate` plus optimisation pipeline rather than a re-derivation. This patch adds exactly one
+public entry point and no logic: `AddressSpace::EmitForAot(IR::Block&, oaknut::CodeGenerator&)`
 calls `EmitArm64` with the same `GetEmitConfig()` the JIT builds (`a32_address_space.cpp`), writing into
-a caller-owned code generator and returning the `EmittedBlockInfo` relocations for the caller to link;
-`A32AddressSpace::GenerateIRForAot(descriptor)` exposes the existing `GenerateIR`, so the tool gets the
-exact `A32::Translate` plus optimisation pipeline rather than a re-derivation. Nothing in `Emit`, `Link`,
-`EmitPrelude`, or the emitters changes, so every byte the JIT emits is unchanged. The tool refuses blocks
-that bake a host address: the coprocessor callbacks and the vector-FP fallback emit absolute `MOV`s
-(`emit_arm64_a32_coprocessor.cpp`, `emit_arm64_vector_floating_point.cpp:271`) with no relocation record,
-and those blocks stay on Tier I rather than being made relocatable here.
+a caller-owned code generator and returning the `EmittedBlockInfo` relocations for the caller to link.
+Nothing in `Emit`, `Link`, `EmitPrelude`, or the emitters changes, so every byte the JIT emits is
+unchanged. The tool refuses blocks that bake a host address: the coprocessor callbacks and the vector-FP
+fallback emit absolute `MOV`s (`emit_arm64_a32_coprocessor.cpp`,
+`emit_arm64_vector_floating_point.cpp:271`) with no relocation record, and those blocks stay on Tier I
+rather than being made relocatable here.
 
 **Retire when:** upstream exposes an offline emission API — IR generation and block emission into a
 caller-owned buffer, with relocation records, reachable without an `AddressSpace` code cache or its block

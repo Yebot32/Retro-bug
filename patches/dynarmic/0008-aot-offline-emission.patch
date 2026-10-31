@@ -1,17 +1,3 @@
-diff --git a/src/dynarmic/backend/arm64/a32_address_space.h b/src/dynarmic/backend/arm64/a32_address_space.h
-index 3b9e9fb..c1ea01e 100644
---- a/src/dynarmic/backend/arm64/a32_address_space.h
-+++ b/src/dynarmic/backend/arm64/a32_address_space.h
-@@ -19,6 +19,9 @@ public:
- 
-     IR::Block GenerateIR(IR::LocationDescriptor) const override;
- 
-+    /// AOT (RetroBug patch 0008): the same IR the JIT would compile for `descriptor`.
-+    IR::Block GenerateIRForAot(IR::LocationDescriptor descriptor) const { return GenerateIR(descriptor); }
-+
-     void InvalidateCacheRanges(const boost::icl::interval_set<u32>& ranges);
- 
- protected:
 diff --git a/src/dynarmic/backend/arm64/address_space.cpp b/src/dynarmic/backend/arm64/address_space.cpp
 index 2c7ae77..ea893ae 100644
 --- a/src/dynarmic/backend/arm64/address_space.cpp
