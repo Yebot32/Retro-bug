@@ -53,6 +53,12 @@ struct Rig {
   bool ok = false;
 };
 
+std::string Hex64(std::uint64_t v) {
+  char buf[24];
+  std::snprintf(buf, sizeof buf, "0x%016llx", static_cast<unsigned long long>(v));
+  return buf;
+}
+
 unsigned HostPageShift() {
   const long ps = sysconf(_SC_PAGESIZE);
   unsigned shift = mem::kGuestPageShift;
@@ -83,13 +89,13 @@ Rig build() {
   return rig;
 }
 
-/// Runs `program` from the code page with the caller's register state and returns the outcome.
+/// Runs `program` from the code page with the caller's register state — including the D registers the case
+/// prepared — and returns the outcome.
 exec::RunResult Run(Rig& rig, const std::uint8_t* program, std::size_t len, exec::MachineState& state) {
   if (!rig.mem->Write(kCode, program, len)) {
     fail("could not write the program", __LINE__);
     return exec::RunResult{};
   }
-  state = exec::MachineState{};
   state.mode = isa::Mode::Thumb;
   state.pc = kCode;
   state.r[15] = kCode;
@@ -111,7 +117,7 @@ void vshl_i32_shifts_each_lane_left() {
   const exec::RunResult rr = Run(rig, program, sizeof program, in);
   CHECK_CTX(rr.reason == exec::StopReason::Returned, rr.detail);
   CHECK_CTX(in.d[16] == 0x0000'0002'0000'0002ull,
-            "each 32-bit lane shifted left by one, the top bit dropped");
+            "d16 = " + Hex64(in.d[16]) + ": each 32-bit lane shifted left by one, the top bit dropped");
 }
 
 /// The shift count is a constant in the encoding: `vshl.i32 d16, d2, #0x1f` (clang: 0xefff0512) keeps only
@@ -124,7 +130,7 @@ void vshl_i32_shift_amount_masks_the_lane() {
   in.d[2] = 0x0000'0003'0000'0001ull;
   const exec::RunResult rr = Run(rig, program, sizeof program, in);
   CHECK_CTX(rr.reason == exec::StopReason::Returned, rr.detail);
-  CHECK_CTX(in.d[16] == 0x8000'0000'8000'0000ull, "lane 0 bit 0 to bit 31, lane 1 bit 0 to bit 31");
+  CHECK_CTX(in.d[16] == 0x8000'0000'8000'0000ull, "d16 = " + Hex64(in.d[16]) + ": each lane's bit 0 to bit 31");
 }
 
 /// The 16-bit form over a Q register: `vshl.i16 q3, q1, #0x3` (clang: 0xef936552) shifts all eight lanes,
@@ -138,8 +144,8 @@ void vshl_i16_shifts_both_halves_of_the_quad() {
   in.d[3] = 0x8001'8002'8003'8004ull;  // top bits fall out of the lane
   const exec::RunResult rr = Run(rig, program, sizeof program, in);
   CHECK_CTX(rr.reason == exec::StopReason::Returned, rr.detail);
-  CHECK_CTX(in.d[6] == 0x0008'0010'0018'0020ull, "q3's low half");
-  CHECK_CTX(in.d[7] == 0x0008'0010'0018'0020ull, "q3's high half");
+  CHECK_CTX(in.d[6] == 0x0008'0010'0018'0020ull, "d6 = " + Hex64(in.d[6]) + ": q3's low half");
+  CHECK_CTX(in.d[7] == 0x0008'0010'0018'0020ull, "d7 = " + Hex64(in.d[7]) + ": q3's high half");
 }
 
 }  // namespace
