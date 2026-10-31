@@ -40,7 +40,7 @@ jobs:
       - name: Build and run the host lanes
         run: |
           set -euo pipefail
-          cmake --build build/host --target rb_platform_tests rb_zip_tests rb_apk_assets_tests rb_table_java_tests rb_silent_sles_tests rb_dlgl_bootstrap_tests rb_guest_memory_tests rb_thunk_tests rb_interp_neon_tests rb_interp_bench -j 4
+          cmake --build build/host --target rb_platform_tests rb_zip_tests rb_apk_assets_tests rb_table_java_tests rb_silent_sles_tests rb_dlgl_bootstrap_tests rb_guest_memory_tests rb_thunk_tests rb_interp_neon_tests rb_interp_bench rb_aotgen_tests -j 4
           ./build/host/core/tests/rb_platform_tests
           ./build/host/core/tests/rb_zip_tests
           ./build/host/core/tests/rb_apk_assets_tests
@@ -50,6 +50,9 @@ jobs:
           ./build/host/core/tests/rb_guest_memory_tests
           ./build/host/core/tests/rb_thunk_tests
           ./build/host/core/tests/rb_interp_neon_tests
+          # The code-map reader: the corpus half skips on a runner that has no game bytes, but the
+          # synthetic refusals and the trace merge still run, so a regression fails the lane.
+          ./build/host/tools/aotgen/rb_aotgen_tests
           # Informational: prints the Tier I rate and always exits 0 on a correct result.
           ./build/host/core/tests/rb_interp_bench
 
@@ -71,7 +74,7 @@ jobs:
       - name: Build and run the platform seam test
         run: |
           set -euo pipefail
-          cmake --build build/host --target rb_platform_tests rb_zip_tests rb_apk_assets_tests rb_table_java_tests rb_silent_sles_tests rb_dlgl_bootstrap_tests rb_host_boot_tests rb_guest_memory_tests rb_thunk_tests rb_interp_neon_tests rb_interp_bench -j 4
+          cmake --build build/host --target rb_platform_tests rb_zip_tests rb_apk_assets_tests rb_table_java_tests rb_silent_sles_tests rb_dlgl_bootstrap_tests rb_host_boot_tests rb_guest_memory_tests rb_thunk_tests rb_interp_neon_tests rb_interp_bench rb_aotgen_tests -j 4
           ./build/host/core/tests/rb_platform_tests
           ./build/host/core/tests/rb_zip_tests
           ./build/host/core/tests/rb_apk_assets_tests
@@ -81,6 +84,9 @@ jobs:
           ./build/host/core/tests/rb_guest_memory_tests
           ./build/host/core/tests/rb_thunk_tests
           ./build/host/core/tests/rb_interp_neon_tests
+          # The code-map reader: the corpus half skips on a runner that has no game bytes, but the
+          # synthetic refusals and the trace merge still run, so a regression fails the lane.
+          ./build/host/tools/aotgen/rb_aotgen_tests
           # Informational: prints the Tier I rate and always exits 0 on a correct result.
           ./build/host/core/tests/rb_interp_bench
           # The boot lane needs the tablet's libc and the gate's fixtures, which a CI runner does not have:
