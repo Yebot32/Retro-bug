@@ -102,3 +102,40 @@ Two research passes (2026-10-31) over the two real targets — `libdlgl.so` (Kit
 - No runtime JIT is required or assumed; the JIT toggle stays but is not part of this path.
 - Reuse over rewrite: `core/`'s loader/relocations/IFUNC/syscall monitor/thread engine and Dynarmic's A32
   front end are the decoder; only the AArch64 emission and dispatch are new.
+
+## As built (2026-10-31)
+
+The plan's tasks 1–5 are implemented; this section records where the implementation differs from the
+sketch above and what the measurements changed.
+
+- **Emission API.** Patch `0008-aot-offline-emission.patch` adds only
+  `AddressSpace::EmitForAot(IR::Block&, oaknut::CodeGenerator&)`; IR generation was already public. The
+  coprocessor callback and the vector-FP fallback helpers bake host addresses with no relocation record,
+  so the tool refuses those blocks instead of making the sites relocatable. The JIT's emitted bytes are
+  untouched.
+- **Code map.** Static discovery plus a recorded trace. The tool keys everything by `.text`-relative
+  offsets; a trace file stores guest PCs, so the tool needs the bias the traced run used (`--trace-base`)
+  when that differs from the emission bias.
+- **Profile shape.** A profile is a directory of one `.S` + `_table.cpp` per library plus a generated
+  `_profile.cpp` that defines `rb_aot_builtin_profile` (library name, SHA-256, image). It is compiled into
+  the app; nothing is parsed from the APK at run time. The tool assigns each library a 32 MiB slot from
+  `--base` (default `0x10000000`) and refuses a library whose PT_LOAD span exceeds the slot or a profile
+  that would pass the 512 MiB window. Each library is translated in a child process: a front-end assertion
+  on an encoding decoded from data (libstdc++ hits `SetRegister(PC)`) skips that library, not the profile.
+- **Runtime.** `AotExecutor` spans the whole profile. A branch into another image returns to C++ (each
+  prelude owns its stack frame) and `Run` re-enters that image's prelude; a switch is consumed exactly
+  once. The loader records the exact bias it chose, and AOT is used only when it equals the profile's;
+  otherwise the process runs Tier I and says which module moved. IFUNC resolvers run on the interpreter
+  while a module's bias is unverified.
+- **Measured KitKat profile** (six libraries on the tablet): 74,800 blocks / 14.4 MB of code; libdlgl
+  34,846, libandroidkitkat 19,615, libc 18,590 (13% of libc's starts refused: mostly mid-IT entries),
+  libm 812, libz 937; libstdc++ skipped. Emission is deterministic and takes about a second per library
+  on the tablet.
+- **iOS.** The app hashes each profiled library from the imported APK (scope libraries from
+  `assets/rb32sys/`, others from `assets/rb32/`) and uses the profile only on a full match; the engine
+  report distinguishes AOT from Tier I from Tier J. The IPA workflow checks out a profile ref
+  (`aot_profile_ref`) so the APK itself never leaves the owner's machine.
+- **Still open.** The M1 measurement needs the owner's profile ref (Task 5 Step 3). The Tier I fallback's
+  budget is counted per Tier I block rather than per guest encoding; a fallback-heavy run can exceed
+  `max_instructions` by the blocks a chunk covers. Mid-IT starts (13% of libc) stay on Tier I; the trace
+  should shrink that set.

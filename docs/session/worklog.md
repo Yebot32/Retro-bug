@@ -1244,3 +1244,19 @@ assembled into the app like any other source.
   Tier I IPA. A device boot harness outside the platform host was attempted and dropped: it cannot answer
   OpenSL IIDs or the asset manager without the launcher's host layer, so the measurement belongs on the
   launcher (Android) or the M1 (iOS).
+- **Build 21** (commit `ec7d26d`, `6b00f41` is the engine underneath), 2,213,008 bytes, SHA-256
+  `69c5d3acfc812db88967030d7ef8bd4459466d29031cb0a9a853ddd2ae64bf7e`. Workflow `41228171961`: the
+  **iOS IPA job compiled and packaged** (so `ios_session.cpp`'s profile code compiles under Xcode), and the
+  Linux host lane passed. The macOS-host and iOS-compile jobs were cancelled by the run's minute budget;
+  the IPA job covers the same compile. Installed on the iPad it should log
+  `aot: this app carries no profile — Tier I` and behave exactly like build 20.
+- **Blocky Roads profile (Task 6 evidence):** libgame 74,904 blocks / 17.8 MB of code (8,422 refused:
+  5,719 mid-IT, 2,697 coprocessor), libc 18,590, libm 812, libz 937; libstdc++ skipped. No
+  unsupported-relocation refusal, so the veneer and TBB/TBH paths emitted. The cacheflush check and the
+  M1/launcher measurement still need a real Blocky run.
+- **To build the AOT IPA:** generate the profile (on a machine with the game's extracted libraries;
+  the phone works: `rb_aotgen --profile <libs-dir> --out aot_kitkat [--trace ... --trace-base ...]`),
+  push the output directory to a ref such as `aot/kitkat`, then dispatch `host-and-ios.yml` with
+  `aot_profile_ref=aot/kitkat` and `aot_profile_path=aot_kitkat`. The workflow checks that ref out beside
+  the repo and passes `RB_AOT_PROFILE_DIR`; the APK itself is never uploaded. The expected log is
+  `aot: profile ... matches (5 libraries)` followed by `engine: guest code runs on AOT`.

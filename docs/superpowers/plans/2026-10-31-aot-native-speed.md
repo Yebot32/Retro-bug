@@ -377,6 +377,14 @@ class AotImage {                      // one per translated .so
 
 ### Task 6: Blocky Roads, veneers and the last 1 %
 
+**As built (2026-10-31):** the veneer scan ships in Task 2, the emitter refuses coprocessor/FP-fallback
+blocks per block, and the profile generator now runs on the real Blocky set: libgame 74,904 blocks /
+17.8 MB of code (8,422 refused: 5,719 mid-IT entries, 2,697 coprocessor), plus libc/libm/libz; libstdc++
+skipped by the child-process isolation. No unsupported-relocation refusal was reported, so veneers and
+TBB/TBH jump tables emitted. What remains is the device measurement and the cacheflush check, both of
+which need a Blocky run through the launcher or the IPA.
+
+
 **Files:**
 - Modify: `tools/aotgen/emit.cpp` (veneer targets, TBB/TBH jump tables, `.plt` stubs)
 - Modify: `tools/aotgen/code_map.cpp` (scan `add r12, pc` veneers into the map)
