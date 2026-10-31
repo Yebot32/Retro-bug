@@ -24,6 +24,11 @@ struct LibraryView: View {
     @State private var playing: ImportedGame?
     @State private var libName = ""
     @State private var notice = ""
+    /// Whether this build can map executable memory (the JIT's own permission, probed by the engine).
+    @State private var jitAvailable = rb_ios_jit_available() != 0
+    /// The user's choice, persisted. On by default: the game uses the JIT when the probe passes, and the
+    /// switch only ever takes it away — a build without executable memory stays on the interpreter.
+    @AppStorage("useJIT") private var useJIT = true
 
     private var gamesDir: URL {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -59,6 +64,24 @@ struct LibraryView: View {
                     TextField("auto (largest library)", text: $libName)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
+                }
+                Section {
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(jitAvailable ? Color.green : Color.red)
+                            .frame(width: 10, height: 10)
+                        Text(jitAvailable ? "JIT available" : "No JIT — Tier I interpreter")
+                            .font(.subheadline)
+                        Spacer()
+                    }
+                    Toggle("Use JIT when available", isOn: $useJIT)
+                        .disabled(!jitAvailable)
+                } header: {
+                    Text("Performance")
+                } footer: {
+                    Text("Applies to the next game you start. JIT is never forced: if the game cannot have "
+                         + "executable memory, it runs on the Tier I interpreter and the dot stays red.")
+                        .font(.caption)
                 }
                 if !notice.isEmpty {
                     Section("Last action") {
@@ -105,7 +128,15 @@ struct LibraryView: View {
             }
         }
         .navigationViewStyle(.stack)
-        .onAppear(perform: prepare)
+        .onAppear {
+            prepare()
+            jitAvailable = rb_ios_jit_available() != 0
+            rb_ios_set_jit_enabled(useJIT ? 1 : 0)
+        }
+        .onChange(of: useJIT) { enabled in
+            rb_ios_set_jit_enabled(enabled ? 1 : 0)
+            AppLog.write("jit: user switched JIT \(enabled ? "on" : "off") (available=\(jitAvailable ? 1 : 0))")
+        }
         .onOpenURL { url in
             AppLog.write("openURL: \(url.path)")
             importURL(url)

@@ -14,6 +14,21 @@ extern "C" {
 
 typedef struct RbIosSession RbIosSession;
 
+/// 1 when this process can map executable memory, i.e. a JIT can run: probed once (an R|X mapping of the
+/// shape the code cache needs) and cached. 0 is the indicator's red state, and every session then runs on
+/// Tier I. The probe is deliberately the same permission the code cache exercises, not a guess from the OS
+/// version: a sideloaded build with a JIT entitlement passes it, a stock one does not.
+int rb_ios_jit_available(void);
+
+/// Whether the next session may use Tier J when `rb_ios_jit_available` says it can. Default 1: use it when
+/// available. The app persists the user's choice; a session never forces JIT — no executable memory means
+/// Tier I, and a Tier J boot that fails retries on Tier I with the reason in the log.
+void rb_ios_set_jit_enabled(int enabled);
+
+/// 1 when this session actually booted on Tier J, 0 when it is on Tier I (or has not booted yet). The app
+/// shows the tier the running game really got, not just what was requested.
+int rb_ios_session_jit(RbIosSession* s);
+
 /// Creates a session for `lib_name` in `apk_path`. The boot happens on the render thread when rb_ios_start
 /// is called (so the UI never blocks on it); failures arrive through rb_ios_last_error and the log file.
 /// `data_dir` is the app's writable directory (the game's files/ and cache/ live under it). `log_path`,

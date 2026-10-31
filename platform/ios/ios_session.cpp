@@ -54,6 +54,30 @@ namespace {
 std::atomic<int> g_crash_fd{-1};
 std::atomic<bool> g_crash_handlers_installed{false};
 
+/// Executable memory: -1 unprobed, 0 refused, 1 available. The probe is the permission the JIT's code cache
+/// actually needs (an anonymous R|X mapping — oaknut's iOS path), so a device that only *claims* to allow
+/// JIT still reads red.
+std::atomic<int> g_jit_available{-1};
+/// The user's choice: use Tier J when the probe says it can. Default yes; the toggle in the app persists it.
+std::atomic<bool> g_jit_enabled{true};
+
+bool ProbeExecutableMemory() {
+  constexpr std::size_t kLen = 1u << 20;
+  void* const p = ::mmap(nullptr, kLen, PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_ANON, -1, 0);
+  if (p == MAP_FAILED) return false;
+  ::munmap(p, kLen);
+  return true;
+}
+
+bool JitAvailable() {
+  int v = g_jit_available.load(std::memory_order_relaxed);
+  if (v < 0) {
+    v = ProbeExecutableMemory() ? 1 : 0;
+    g_jit_available.store(v, std::memory_order_relaxed);
+  }
+  return v == 1;
+}
+
 void CrashWrite(const char* text) {
   const int fd = g_crash_fd.load(std::memory_order_relaxed);
   if (fd >= 0 && text != nullptr) (void)::write(fd, text, std::strlen(text));
@@ -147,6 +171,7 @@ struct RbIosSession {
   std::unique_ptr<rb::platform::ios::DlglBootstrap> dlgl;  ///< KitKat Challenge's DLGE engine, when that is the lib
   bool dlgl_apk = false;  ///< the APK ships assets/rb32/libdlgl.so: boot the whole DLGE Java load order
   bool booted = false;  ///< render thread only
+  bool running_jit = false;  ///< the tier this session actually booted on (Tier J when true)
 
   std::thread render;
   /// Logs a stall when the frame counter stops advancing while the session says it is running: the render
@@ -290,8 +315,10 @@ bool RbIosSession::Boot(std::string* err) {
 
   rb::host::BootConfig cfg;
   if (window_bytes != 0) cfg.window_bytes = window_bytes;
-  cfg.ctor_tier = 1;      // iOS runs guest code on Tier I only
-  cfg.enable_jit = false;  // and never builds the JIT object: iOS forbids executable memory
+  // Overridden per attempt below: Tier J when this process can map executable memory and the user has not
+  // switched it off, Tier I otherwise.
+  cfg.ctor_tier = 1;
+  cfg.enable_jit = false;
   cfg.monitor = false;
   cfg.log = [self](const std::string& line) { self->Log(line); };
   cfg.make_java = [self, env](std::string*) -> std::unique_ptr<rb::abi::HostJava> {
@@ -330,24 +357,42 @@ bool RbIosSession::Boot(std::string* err) {
     if (!self->host->OpenApk(self->apk, &why)) self->Log("assets: " + why);
   };
 
-  boot = std::make_unique<rb::host::Boot>(std::move(cfg));
-  const rb::host::BootResult result = boot->BootJavaLibraries(apk, lib);
-  if (!result.ok) {
-    *err = result.report.empty() ? std::string{"the boot failed"} : result.report;
-    // A failed boot leaves a half-initialised process; dropping it lets the next play start clean.
+  // Tier selection: Tier J when the process can map executable memory and the user has not turned it off,
+  // Tier I otherwise. Never forced — no executable memory means Tier I, and a Tier J boot that fails
+  // retries on Tier I with the reason in the log, so the game starts either way.
+  const bool jit_wanted = g_jit_enabled.load(std::memory_order_relaxed) && JitAvailable();
+  self->Log(jit_wanted ? "jit: executable memory available — trying Tier J"
+                       : (g_jit_enabled.load(std::memory_order_relaxed)
+                              ? "jit: no executable memory on this build — Tier I"
+                              : "jit: switched off in the app — Tier I"));
+  std::string boot_error;
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    const bool jit = jit_wanted && attempt == 0;
+    rb::host::BootConfig attempt_cfg = cfg;
+    attempt_cfg.ctor_tier = jit ? 2 : 1;
+    attempt_cfg.enable_jit = jit;
+    boot = std::make_unique<rb::host::Boot>(std::move(attempt_cfg));
+    const rb::host::BootResult result = boot->BootJavaLibraries(apk, lib);
+    if (result.ok && java != nullptr) {
+      running_jit = jit;
+      break;
+    }
+    boot_error = !result.ok ? (result.report.empty() ? std::string{"the boot failed"} : result.report)
+                            : std::string{"the Java shim was never created"};
+    // A failed boot leaves a half-initialised process; dropping it lets the retry (or the next play) start
+    // clean.
     process.store(nullptr, std::memory_order_release);
     boot.reset();
     host.reset();
     java = nullptr;
+    if (!jit) break;
+    self->Log("jit: Tier J could not start (" + boot_error + "); retrying on Tier I");
+  }
+  if (boot == nullptr) {
+    *err = boot_error.empty() ? std::string{"the boot failed"} : boot_error;
     return false;
   }
-  if (java == nullptr) {
-    *err = "the Java shim was never created";
-    process.store(nullptr, std::memory_order_release);
-    boot.reset();
-    host.reset();
-    return false;
-  }
+  self->Log(std::string{"jit: guest code runs on Tier "} + (running_jit ? "J (JIT)" : "I (interpreter)"));
   process.store(boot->process(), std::memory_order_release);
   // A sampling profile of guest execution: one sample per slice boundary, cheap enough to leave on, and the
   // only way to name where an interpreted title spends its minutes on a host with no JIT.
@@ -652,3 +697,11 @@ extern "C" int rb_ios_log_tail(RbIosSession* s, char* out, int out_len) {
   CopyOut(text, out, out_len);
   return static_cast<int>(std::strlen(out));
 }
+
+extern "C" int rb_ios_jit_available(void) { return JitAvailable() ? 1 : 0; }
+
+extern "C" void rb_ios_set_jit_enabled(int enabled) {
+  g_jit_enabled.store(enabled != 0, std::memory_order_relaxed);
+}
+
+extern "C" int rb_ios_session_jit(RbIosSession* s) { return s != nullptr && s->running_jit ? 1 : 0; }
