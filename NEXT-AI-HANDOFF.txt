@@ -735,3 +735,14 @@ DATA HYGIENE:
 - Map the next `translation pc` against the loaded module base (libdlgl usually 0x23e000, extent 0xd1000;
   libandroidkitkat 0x30f000, extent 0x61000) and disassemble the exact ARM word. Do not disable Tier I
   or change the audio model for this fault.
+
+1y. 2026-10-28 (iOS S1r) — the ARM fault is the Tier I IR pool, bounded in build 8
+---------------------------------------------------------------------------
+- Source-level confirmation: `PrependNewInst +44` is the return from `Pool::Alloc`. Every `IR::Block`
+  eagerly allocates 104 × 4096 = 416 KiB; the old 8192-block Tier I cache could reserve ~3.2 GiB.
+  `Pool::AllocateNewSlab` never checks malloc, so a failed allocation makes the next placement-new write
+  through null. Android Tier J releases each IR block and bounds its code cache to 64 MiB.
+- Build 8 caps `InterpExecutor::kBlockCacheLimit` at 128 (~54 MiB worst case). This is the first-frame
+  fix candidate; a later Dynarmic patch can reduce the 4096 initial slab and restore a larger cache.
+- Build-8 CI `41171450697` green; IPA 2,056,945 bytes, commit `3a5a30b`, SHA-256
+  `8a5e1b51…4208`. The translation-site diagnostics from build 7 remain in the crash line.

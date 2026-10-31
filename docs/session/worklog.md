@@ -912,3 +912,20 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
 - **Verified:** build-7 CI run `40621247313` green on all four lanes; IPA build 7, commit `9e2ee4b`,
   2,056,945 bytes, SHA-256 `7ae53736ba11d16c93ca08cc9839ed3c059dfde491bb713e9aed91bad2563f7d`.
   Next log should name the translation PC/mode, which maps directly into the KitKat library.
+
+### 2026-10-28 — iOS S1r: the ARM crash is the Tier I IR pool, and the fix is bounded
+- The build-7 stack was decoded and reproduced against the vendored source: `PrependNewInst +44` is the
+  return from `Pool::Alloc`, not the list insertion. `IR::Block` eagerly allocates
+  `sizeof(Inst) * 4096` (104 × 4096 = 416 KiB) for every translated block. Tier I retained up to 8192
+  blocks, so the cache could reserve about **3.2 GiB**; `Pool::AllocateNewSlab` does not check malloc,
+  and the next placement-new at null is the SIGSEGV. Android Tier J avoids it because it emits and
+  releases each IR block, bounded by its 64 MiB code cache.
+- Bound `InterpExecutor::kBlockCacheLimit` from 8192 to 128 in [interp.h](../../core/include/rb/exec/interp.h).
+  At 416 KiB per block that is about 54 MiB worst case; hot blocks remain cached and invalidation is
+  unchanged. This is the actual first-frame fix candidate; a future Dynarmic patch can shrink the initial
+  slab to 64 if the larger cache is needed for speed.
+- **Verified:** build-8 CI run `41171450697` green on Linux/macOS/iOS compile/IPA; IPA build 8, commit
+  `3a5a30b`, 2,056,945 bytes (same build layout), SHA-256
+  `8a5e1b51a4644833d16613ff2815270df4aad4e2073a4475de065eb7e6664208`.
+- Next device log: if the cache bound is the cause, the crash should disappear or move past
+  `surfaceChanged`; the translation-site line remains in place for any different fault.
