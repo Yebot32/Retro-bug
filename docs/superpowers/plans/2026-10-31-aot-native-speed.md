@@ -338,28 +338,39 @@ class AotImage {                      // one per translated .so
 ### Task 5: KitKat per-game IPA and the first measurement
 
 **Files:**
-- Create: `tools/aotgen/game_profile.{h,cpp}` (manifest: APK library hashes + code map + entry table name)
-- Modify: `platform/ios/ios_session.cpp` (load a profile, verify hashes, choose AOT vs Tier I)
-- Modify: `platform/ios/rb_ios.h` (report which engine the session booted: `rb_ios_session_engine`)
-- Modify: `tools/build_ios_ipa.sh` (accept `RB_AOT_PROFILE=<dir>` and build the per-game app)
-- Modify: `.github/workflows/host-and-ios.yml` (a `workflow_dispatch` input for the profile artifact)
+- Modify: `tools/aotgen/main.cpp` + `emit.{h,cpp}` + `sha256.{h,cpp}` (`--profile <libs-dir> --out <prefix>`)
+- Modify: `core/include/rb/exec/aot.h`, `core/exec/aot.cpp` (AotProfile/AotLibrary, multi-image dispatch)
+- Modify: `core/include/rb/runtime/guest_process.h`, `core/runtime/guest_process.cpp` (profile option, bias
+  hints, the module-covers-text check that turns AOT off), `core/host/boot.{h,cpp}` (pass-through)
+- Create: `core/crypto/sha256.{h,cpp}` + `core/tests/sha256_test.cpp` (the app-side digest)
+- Modify: `platform/ios/ios_session.cpp` (hash-match the imported APK, try AOT before Tier I, report the
+  engine), `platform/ios/rb_ios.h` (`rb_ios_session_engine`: 0 Tier I, 1 AOT, 2 JIT), `platform/ios/CMakeLists.txt`
+  (`RB_AOT_PROFILE_DIR`), `tools/build_ios_ipa.sh` (`RB_AOT_PROFILE=<dir>`), `.github/workflows/host-and-ios.yml`
+  (a `workflow_dispatch` profile-artifact input)
 - Docs: worklog entry with the M1 numbers
 
 **Interfaces:**
-- Consumes: Tasks 2–4 (`CodeMap`, `AotImage`, trace merge).
-- Produces: a `GameProfile` JSON (`{name, librb: [{name, sha256, code_map}], entry_table}`) that the session
-  loads from the app bundle; `rb_ios_session_engine()` returns 0 = Tier I, 1 = AOT, 2 = JIT.
+- Consumes: Tasks 2–4 (`CodeMap`, trace merge, `AotImage`).
+- Produces: `rb_aotgen --profile`, which writes one image per `*.so` in a directory plus `_profile.cpp` (the
+  compiled `rb_aot_builtin_profile`, carrying each library name, SHA-256 and image) and a JSON manifest for
+  humans; `AotProfile`/`AotLibrary` in `rb::exec`; `rb_ios_session_engine()`.
 
-- [ ] **Step 1:** `rb_aotgen --profile=kitkat --apk=<bootcheck.apk> --trace=<trace>` writes
-  `build/aot/kitkat/{aot_kitkat.S, aot_kitkat_table.cpp, profile.json}` and prints translated
-  blocks/functions and the text size. Test: the tool refuses an APK whose libraries do not match the trace's
-  sonames, with a named error.
-- [ ] **Step 2:** `ios_session` loads `profile.json` from the bundle, hashes the imported APK's
-  `lib/**/*.so`, and only uses `AotImage` on a full match; log
-  `aot: profile kitkat matches (3 libraries, N blocks)` or `aot: no profile for this APK — Tier I`.
-- [ ] **Step 3:** Build `RetroBug-kitkat.ipa` via the workflow with the profile; install on the M1; run
-  KitKat to the menu. Acceptance: `librbengine` log shows `aot:` lines, the LodePNG minutes drop to seconds,
-  and the menu appears. Record wall-clock load time against build 20's >100 s.
+- [ ] **Step 1:** `rb_aotgen --profile build/aot-src/kitkat --out build/aot/kitkat/aot_kitkat --trace kitkat.rbcm`
+  emits one `.S` + `_table.cpp` per library (32 MiB bias slots from `--base`, default `0x10000000`) and the
+  profile table. Each translation runs in a child process: a Dynarmic front-end assertion on an encoding
+  decoded from data (libstdc++ hits `SetRegister(PC)`) skips that library by name and keeps the others — a
+  hard crash otherwise. Measured on the KitKat set: libdlgl 34,846 blocks / 7.04 MB, libandroidkitkat 19,615 /
+  3.81 MB, libc 18,590 / 3.65 MB (2,507 refused: 1,967 mid-IT entries, 527 coprocessor), libm 812, libz 937;
+  libstdc++ skipped. Two consecutive emissions are byte-identical.
+- [ ] **Step 2:** The session hashes each profiled library from the imported APK (`assets/rb32/`,
+  `assets/rb32sys/`, `lib/armeabi*/`) and uses the profile only on a full match; the loader is asked for each
+  image's bias and AOT turns itself off if a module did not land there. Log
+  `aot: profile kitkat matches (N libraries)` or `aot: no AOT for this APK (why) — Tier I`, then
+  `engine: guest code runs on AOT/Tier J/Tier I`. The APK is never uploaded: the profile artifact is built on
+  the owner's machine and attached to the workflow run.
+- [ ] **Step 3 (owner-gated):** Build the IPA with the profile artifact; install on the M1; run KitKat to the
+  menu. Acceptance: the log shows the `aot:` match line and the engine line says AOT, and the LodePNG minutes
+  drop (build 20: >100 s). Record wall-clock against build 20.
 - [ ] **Step 4:** Commit the workflow input, the profile plumbing, and the worklog numbers.
 
 ---

@@ -14,6 +14,11 @@ target_link_libraries(rb_mem PUBLIC rb_platform)
 # the self-audit checks, and the auditor is dependency-free by design so the arrow can only ever point
 # this way.
 target_link_libraries(rb_mem PUBLIC rb_diag)
+# The profile manifest's digest (AOT task 5): the build tool hashes each library it translated and the
+# app re-hashes the imported APK's entry. One implementation, FIPS vectors in sha256_test.cpp.
+add_library(rb_crypto STATIC crypto/sha256.cpp)
+target_link_libraries(rb_crypto PUBLIC rb_platform)
+
 add_library(rb_loader STATIC loader/guest_elf.cpp loader/zip.cpp loader/apk_assets.cpp)
 target_link_libraries(rb_loader PUBLIC rb_platform)
 # The zip reader inflates the APK's deflated entries. The NDK's and Apple's SDKs both ship zlib; Android

@@ -250,3 +250,8 @@ target_link_libraries(rb_table_java_tests PRIVATE rb_java)
 # S1: the APK byte-stream view the iOS AAsset thunks read through. No guest, no device.
 add_executable(rb_apk_assets_tests apk_assets_test.cpp)
 target_link_libraries(rb_apk_assets_tests PRIVATE rb_loader)
+
+
+# SHA-256 (AOT task 5): FIPS vectors, fixture-free, so it runs on every host lane and the device.
+add_executable(rb_sha256_tests sha256_test.cpp)
+target_link_libraries(rb_sha256_tests PRIVATE rb_crypto)

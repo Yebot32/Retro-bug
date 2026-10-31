@@ -34,8 +34,10 @@
 #include "dlgl_bootstrap.h"
 #include "egl_shim.h"
 #include "ios_host.h"
+#include "rb/crypto/sha256.h"
 #include "rb/host/boot.h"
 #include "rb/isa/front_end.h"
+#include "rb/loader/zip.h"
 #include "rb/java/android_base.h"
 #include "rb/java/blockyroads.h"
 #include "rb/java/cocos2dx.h"
@@ -46,6 +48,12 @@
 #include "rb/runtime/guest_thread.h"
 #include "rb/runtime/inbound.h"
 #include "text_render.h"
+
+// Defined by the generated profile table when the app is built with RB_AOT_PROFILE=1. Declared at file
+// scope (C linkage) so both helpers below and the boot path can name it.
+#if defined(RB_AOT_PROFILE)
+extern "C" const rb::exec::AotProfile rb_aot_builtin_profile;
+#endif
 
 namespace {
 
@@ -78,6 +86,54 @@ bool JitAvailable() {
   }
   return v == 1;
 }
+
+/// The profile is useful only for the exact bytes it was translated from: a different game build would
+/// run code translated for another layout. Matching is all-or-nothing, and a miss names the library.
+#if defined(RB_AOT_PROFILE)
+/// Every profiled library must be present in the APK under one of the paths the runtime loads it from,
+/// and byte-identical to what the tool translated. A miss names the library and the two digests' heads:
+/// a different game build is the expected cause, and a silent fallback would hide it.
+bool MatchAotProfile(const std::string& apk, std::string* why) {
+  std::string zip_err;
+  auto zip = rb::loader::ZipReader::OpenFile(apk, &zip_err);
+  if (!zip) {
+    *why = "cannot read the APK: " + zip_err;
+    return false;
+  }
+  const rb::exec::AotProfile& profile = rb_aot_builtin_profile;
+  for (std::size_t i = 0; i < profile.count; ++i) {
+    const rb::exec::AotLibrary& library = profile.libraries[i];
+    if (library.soname == nullptr || library.sha256 == nullptr) {
+      *why = "the profile entry " + std::to_string(i) + " is malformed";
+      return false;
+    }
+    std::string path;
+    for (const char* prefix : {"assets/rb32/", "assets/rb32sys/", "lib/armeabi-v7a/", "lib/armeabi/"}) {
+      if (zip->Has(prefix + std::string{library.soname})) {
+        path = prefix + std::string{library.soname};
+        break;
+      }
+    }
+    if (path.empty()) {
+      *why = std::string{"the APK carries no "} + library.soname;
+      return false;
+    }
+    std::string read_err;
+    const auto bytes = zip->Read(path, &read_err);
+    if (!bytes) {
+      *why = path + ": " + read_err;
+      return false;
+    }
+    const std::string digest = rb::crypto::Sha256Hex(rb::crypto::Sha256(*bytes));
+    if (digest != library.sha256) {
+      *why = std::string{library.soname} + " is not the translated build (" + digest.substr(0, 12) +
+             " != " + std::string{library.sha256}.substr(0, 12) + ")";
+      return false;
+    }
+  }
+  return true;
+}
+#endif
 
 void CrashWrite(const char* text) {
   const int fd = g_crash_fd.load(std::memory_order_relaxed);
@@ -172,7 +228,8 @@ struct RbIosSession {
   std::unique_ptr<rb::platform::ios::DlglBootstrap> dlgl;  ///< KitKat Challenge's DLGE engine, when that is the lib
   bool dlgl_apk = false;  ///< the APK ships assets/rb32/libdlgl.so: boot the whole DLGE Java load order
   bool booted = false;  ///< render thread only
-  bool running_jit = false;  ///< the tier this session actually booted on (Tier J when true)
+  /// The engine this session actually booted on: 0 Tier I, 1 AOT (offline-translated), 2 Tier J.
+  int engine = 0;
 
   std::thread render;
   /// Logs a stall when the frame counter stops advancing while the session says it is running: the render
@@ -366,16 +423,41 @@ bool RbIosSession::Boot(std::string* err) {
                        : (g_jit_enabled.load(std::memory_order_relaxed)
                               ? "jit: no executable memory on this build — Tier I"
                               : "jit: switched off in the app — Tier I"));
+    // The AOT profile is compiled into this app; it runs only when every profiled library's digest matches
+  // the imported APK, so an APK from another build keeps the interpreter.
+  bool aot_matched = false;
+#if defined(RB_AOT_PROFILE)
+  {
+    std::string why;
+    aot_matched = MatchAotProfile(apk, &why);
+    self->Log(aot_matched ? std::string{"aot: profile "} + (rb_aot_builtin_profile.name ? rb_aot_builtin_profile.name : "?") +
+                                " matches (" + std::to_string(rb_aot_builtin_profile.count) + " libraries)"
+                          : "aot: no AOT for this APK (" + why + ") — Tier I");
+  }
+#else
+  self->Log("aot: this app carries no profile — Tier I");
+#endif
+
   std::string boot_error;
-  for (int attempt = 0; attempt < 2; ++attempt) {
-    const bool jit = jit_wanted && attempt == 0;
+  enum class Engine { Jit, Aot, TierI };
+  std::vector<Engine> attempts;
+  if (jit_wanted) attempts.push_back(Engine::Jit);
+#if defined(RB_AOT_PROFILE)
+  if (aot_matched) attempts.push_back(Engine::Aot);
+#endif
+  attempts.push_back(Engine::TierI);
+  for (std::size_t attempt = 0; attempt < attempts.size(); ++attempt) {
+    const Engine mode = attempts[attempt];
     rb::host::BootConfig attempt_cfg = cfg;
-    attempt_cfg.ctor_tier = jit ? 2 : 1;
-    attempt_cfg.enable_jit = jit;
+    attempt_cfg.ctor_tier = mode == Engine::Jit ? 2 : 1;
+    attempt_cfg.enable_jit = mode == Engine::Jit;
+#if defined(RB_AOT_PROFILE)
+    attempt_cfg.aot = mode == Engine::Aot ? &rb_aot_builtin_profile : nullptr;
+#endif
     boot = std::make_unique<rb::host::Boot>(std::move(attempt_cfg));
     const rb::host::BootResult result = boot->BootJavaLibraries(apk, lib);
     if (result.ok && java != nullptr) {
-      running_jit = jit;
+      self->engine = mode == Engine::Jit ? 2 : (mode == Engine::Aot ? 1 : 0);
       break;
     }
     boot_error = !result.ok ? (result.report.empty() ? std::string{"the boot failed"} : result.report)
@@ -386,14 +468,18 @@ bool RbIosSession::Boot(std::string* err) {
     boot.reset();
     host.reset();
     java = nullptr;
-    if (!jit) break;
-    self->Log("jit: Tier J could not start (" + boot_error + "); retrying on Tier I");
+    if (attempt + 1 == attempts.size()) break;
+    self->Log(std::string{"engine: the "} + (mode == Engine::Jit ? "Tier J" : (mode == Engine::Aot ? "AOT" : "Tier I")) +
+                         " boot failed (" + boot_error + "); retrying on " +
+                         (attempts[attempt + 1] == Engine::Aot ? "AOT" : "Tier I"));
   }
   if (boot == nullptr) {
     *err = boot_error.empty() ? std::string{"the boot failed"} : boot_error;
     return false;
   }
-  self->Log(std::string{"jit: guest code runs on Tier "} + (running_jit ? "J (JIT)" : "I (interpreter)"));
+  self->Log(std::string{"engine: guest code runs on "} + (self->engine == 2 ? "Tier J (JIT)"
+                                                    : self->engine == 1 ? "AOT (offline-translated AArch64)"
+                                                                        : "Tier I (interpreter)"));
   process.store(boot->process(), std::memory_order_release);
   // A sampling profile of guest execution: one sample per slice boundary, cheap enough to leave on, and the
   // only way to name where an interpreted title spends its minutes on a host with no JIT.
@@ -705,4 +791,5 @@ extern "C" void rb_ios_set_jit_enabled(int enabled) {
   g_jit_enabled.store(enabled != 0, std::memory_order_relaxed);
 }
 
-extern "C" int rb_ios_session_jit(RbIosSession* s) { return s != nullptr && s->running_jit ? 1 : 0; }
+extern "C" int rb_ios_session_jit(RbIosSession* s) { return s != nullptr && s->engine == 2 ? 1 : 0; }
+extern "C" int rb_ios_session_engine(RbIosSession* s) { return s != nullptr ? s->engine : 0; }

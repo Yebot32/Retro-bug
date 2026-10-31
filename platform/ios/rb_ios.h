@@ -28,6 +28,8 @@ void rb_ios_set_jit_enabled(int enabled);
 /// 1 when this session actually booted on Tier J, 0 when it is on Tier I (or has not booted yet). The app
 /// shows the tier the running game really got, not just what was requested.
 int rb_ios_session_jit(RbIosSession* s);
+/// The engine a session actually booted on: 0 = Tier I, 1 = AOT (offline-translated), 2 = Tier J.
+int rb_ios_session_engine(RbIosSession* s);
 
 /// Creates a session for `lib_name` in `apk_path`. The boot happens on the render thread when rb_ios_start
 /// is called (so the UI never blocks on it); failures arrive through rb_ios_last_error and the log file.

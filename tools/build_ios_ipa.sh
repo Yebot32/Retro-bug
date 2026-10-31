@@ -5,6 +5,7 @@
 # is then signed by AltStore/SideStore/a personal team. No Apple developer account is needed here.
 #
 # Usage: tools/build_ios_ipa.sh            # RB_IOS_BUILD=<dir> redirects the CMake build dir
+#        RB_AOT_PROFILE=<dir> tools/build_ios_ipa.sh   # per-game AOT profile (rb_aotgen --profile output)
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD="${RB_IOS_BUILD:-$ROOT/build/ios}"
@@ -13,11 +14,17 @@ command -v xcodebuild >/dev/null || { echo "no xcodebuild (macOS required)" >&2;
 command -v xcodegen >/dev/null || { echo "no xcodegen: brew install xcodegen" >&2; exit 1; }
 command -v cmake >/dev/null || { echo "no cmake" >&2; exit 1; }
 
+PROFILE_ARG=""
+if [ -n "${RB_AOT_PROFILE:-}" ]; then
+  PROFILE_ARG="-DRB_AOT_PROFILE_DIR=$(cd "$RB_AOT_PROFILE" && pwd)"
+fi
 if [ ! -f "$BUILD/CMakeCache.txt" ]; then
   cmake -S "$ROOT" -B "$BUILD" \
     -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 \
     -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 -DCMAKE_OSX_SYSROOT=iphoneos \
-    -DCMAKE_BUILD_TYPE=Release -DRB_BUILD_TESTS=OFF
+    -DCMAKE_BUILD_TYPE=Release -DRB_BUILD_TESTS=OFF $PROFILE_ARG
+elif [ -n "$PROFILE_ARG" ]; then
+  cmake -S "$ROOT" -B "$BUILD" $PROFILE_ARG >/dev/null
 fi
 cmake --build "$BUILD" --target rb_engine_ios -j "$(sysctl -n hw.ncpu)"
 

@@ -1200,3 +1200,47 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
 - **Next (no JIT, no product change):** adopt the note's own lesson first — a pre-decoded, direct-threaded
   handler chain in place of the per-op IR switch (iSH measured 3–5x over switch dispatch; iCube rejected an
   IR engine as 1.7x slower). AOT-per-game remains the separate, larger arc and changes how games are built.
+
+### 2026-10-31 — AOT tasks 1–5: offline translation, profiles, and the iOS hook
+The no-JIT plan in [`docs/superpowers/plans/2026-10-31-aot-native-speed.md`](../superpowers/plans/2026-10-31-aot-native-speed.md)
+is implemented through its iOS integration. Nothing here runs codegen on a device: the emitted code is
+assembled into the app like any other source.
+
+- **Patch 0008 (`patches/dynarmic/`).** `AddressSpace::EmitForAot` translates one IR block into a
+  caller-owned `oaknut::CodeGenerator` with the JIT's own `EmitConfig`, touching no code cache or block
+  map; `GenerateIR` was already public, so nothing else was needed. Byte-for-byte additive: every byte the
+  JIT emits is unchanged. The two places the A32 emitter bakes a host address (coprocessor callbacks,
+  vector-FP fallback helpers) have no relocation record, so the tool refuses blocks that use them.
+- **`rb_aotgen` discovery.** Self-contained ELF32 reader; measured libgame 18,565 starts (export 14,047,
+  init 53, reloc 1,232, exidx 14,694, veneer 1,633) and libdlgl 2,897 (1,835 / 22 / 875 / 2,201 / 6).
+  Malformed input is bounded (names, tables, dynamic walk), and the test now discriminates the fixes.
+- **Offline emitter + runtime.** `--emit` writes `.S` + a sorted block table; `AotExecutor` runs them with
+  Dynarmic's prelude ABI, mirrors `JitExecutor`'s state and halt contracts, charges the Tier I fallback
+  against the same budget, and falls back rather than entering a block under another IT/FPSCR descriptor.
+  The fixture's `fib(0..20)` matches Tier I field for field (178 checks, zero fallbacks); a fallback-only
+  image, a budget stop, an IT-state entry and an FPSCR.RMode entry all have discriminating tests. The
+  committed fixture pair is byte-identical to a fresh emission, and emissions are deterministic.
+- **Indirect-target trace.** `RB_CODEMAP` (or Android's `debug.retrobug.codemap`) records block starts from
+  both tiers; the tool merges them. A fixture run contributed 4 new starts over the static map (6 records,
+  2 already known), and Tier J recorded 7 over fib(10).
+- **Per-game profiles.** `rb_aotgen --profile <libs-dir> --out <prefix>` emits one image per library (32 MiB
+  bias slots), hashes each input, and writes the compiled `rb_aot_builtin_profile` plus a JSON manifest.
+  Each library is translated in a child process: libstdc++ hits a Dynarmic front-end assertion
+  (`SetRegister(PC)` on an encoding decoded from data) and is skipped by name while the rest continue.
+  Measured on the KitKat set: libdlgl 34,846 blocks / 7.04 MB, libandroidkitkat 19,615 / 3.81 MB, libc
+  18,590 / 3.65 MB (2,507 refused: 1,967 mid-IT, 527 coprocessor), libm 812, libz 937. `AotExecutor` now
+  spans a whole profile (a branch into another library's image returns to C++ and enters that image's
+  prelude); `GuestProcess` hints the loader at each bias and turns AOT off, naming the module, if one lands
+  elsewhere.
+- **iOS.** `ios_session` hashes each profiled library from the imported APK and runs AOT only on a full
+  match, trying Tier J (when enabled) → AOT → Tier I; `rb_ios_session_engine()` reports 0/1/2. The profile
+  is compiled into `librbengine.a` (`RB_AOT_PROFILE_DIR`, exposed as `RB_AOT_PROFILE`), never committed, and
+  the IPA workflow takes it as an artifact input. SHA-256 is checked against the FIPS vectors on the device.
+- **Gates on SM-X710:** `rb_exec_interp_tests` 1112/0, `rb_exec_tier_diff_tests` 1039/0, `rb_aot_tests`
+  178/0, `rb_aotgen_tests` 79/0 + 48/0, `rb_code_map_trace_tests` 60/0, `rb_host_boot_tests` 47/0,
+  `rb_sha256_tests` 5/0.
+- **Open, owner-gated:** the IPA itself. The APK and its translated profile never leave the owner's
+  machines, so the artifact is uploaded to a `workflow_dispatch` run; without it the app builds as a plain
+  Tier I IPA. A device boot harness outside the platform host was attempted and dropped: it cannot answer
+  OpenSL IIDs or the asset manager without the launcher's host layer, so the measurement belongs on the
+  launcher (Android) or the M1 (iOS).
