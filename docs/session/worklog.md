@@ -965,3 +965,39 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
   Blocky Roads: `nativeInit` should complete now that its Java surface resolves, and the first
   `nativeRender` frame should arrive. Any remaining Java miss prints class + signature, which is a row
   to add; a crash prints translation pc/mode plus the last host call.
+
+### 2026-10-31 — iOS S1t: build 9 reaches the first GL draw; build 10 fixes host access
+- Build 9 is the first build where the Tier I cache bound lets KitKat translate again: both runs pass
+  `creating main app`, `surfaceChanged 2160, 1620`, `creating app`, the GATracker call, the `preload`
+  group (`default/images/preloading.png`, 6,676 bytes) and `[Main] onLoadComplete: preload`. The old
+  `PrependNewInst` fault is gone.
+- KitKat then faults at the **first real draw**: `last host call: glDrawArrays`, translation pc a PLT
+  stub in libdlgl, host frames `ThunkCaller::Call` → `GLEngine` (+101316, +749520, +576132) with a null
+  frame in the driver. The `assets/ww/...` misses before it are alternate paths the engine probes; the
+  `default/...` path it falls back to loads.
+- Blocky Roads' `nativeInit` now completes (no Java misses, no stop) and the asset manager answers. It
+  stops at Horde3D: `glShaderSource refused: string 0 is not guest memory` → `h3dInit Failed`, then
+  `glBindAttribLocation refused: pointer 0xe0afda` and `glGetUniformLocation refused: 0xdfe6b2`.
+- Those pointers are valid: `0xe0afda` is libgame.so's base `0xc05000` plus vaddr `0x205fda`, the rodata
+  string `"aPosition"`. On a 16 KiB host page, a module placed at a 4 KiB-aligned base has file-backed
+  granules whose in-place mmap offset cannot be real-page aligned, so the pages are served out of line —
+  and `GuestMemory::Host` is the fastmem query, which refuses them by design. Every host callee that
+  dereferenced a guest pointer used it.
+- Build 10 adds `GuestMemory::HostForAccess` (the backing block for in-place and out-of-line pages) and
+  uses it where a host call reads or writes guest memory: the thunk `p`/`o` arguments, the iOS and
+  Android GL specials, asset reads, file-syscall buffers, OpenSL address locators and the JNI shadow
+  sync. `Host`/`IsFastmem` keep their meaning for Tier J.
+- The crash log now carries a 256-entry ring of host calls (name and r0–r3, written before the call) and
+  the EGL context version; context creation and make-current changes are logged. KitKat's driver fault
+  has no guest stack, so this ring is the evidence that names the state it died on.
+- **Verified:** the Linux and macOS lanes now run `rb_guest_memory_tests` and `rb_thunk_tests` (the
+  suites that exercise the accessor): Linux 206 and 43 checks, macOS 121 (6 memfd skips) and 35. The
+  first macOS run of the thunk suite crashed in its first case — `Window()` hard-coded a 4 KiB
+  `AddressModel`, which `Create` refuses on a 16 KiB host, and the test dereferenced the null window;
+  fixed to follow `sysconf(_SC_PAGESIZE)`. Full workflow `41176629818` green on Linux, macOS, iOS arm64
+  compile and IPA at `c85f9e7`.
+- IPA build 10, commit `c85f9e7`, 2,079,871 bytes, SHA-256
+  `09b6312524a0a0a45cdc6a5c9e6834212fd63ebba9ad0a53d891cfc184903ae0`.
+- **Next device log:** Blocky should get past shader compilation and Horde3D init now that its rodata
+  pointers reach the driver; KitKat is expected to still fault in the driver, but the ring will print
+  the GL calls leading to it with their arguments and the crash line names the EGL context version.
