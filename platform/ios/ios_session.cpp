@@ -58,8 +58,9 @@ std::atomic<bool> g_crash_handlers_installed{false};
 /// actually needs (an anonymous R|X mapping — oaknut's iOS path), so a device that only *claims* to allow
 /// JIT still reads red.
 std::atomic<int> g_jit_available{-1};
-/// The user's choice: use Tier J when the probe says it can. Default yes; the toggle in the app persists it.
-std::atomic<bool> g_jit_enabled{true};
+/// The user's choice: use Tier J when the probe says it can. Default no — the interpreter is the shipping
+/// path and JIT is opt-in; the toggle in the app persists it.
+std::atomic<bool> g_jit_enabled{false};
 
 bool ProbeExecutableMemory() {
   constexpr std::size_t kLen = 1u << 20;

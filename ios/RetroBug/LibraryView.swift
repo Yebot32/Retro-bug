@@ -26,9 +26,9 @@ struct LibraryView: View {
     @State private var notice = ""
     /// Whether this build can map executable memory (the JIT's own permission, probed by the engine).
     @State private var jitAvailable = rb_ios_jit_available() != 0
-    /// The user's choice, persisted. On by default: the game uses the JIT when the probe passes, and the
-    /// switch only ever takes it away — a build without executable memory stays on the interpreter.
-    @AppStorage("useJIT") private var useJIT = true
+    /// The user's choice, persisted. Off by default: the owner prefers the interpreter path, and the switch
+    /// exists only for a build that has executable memory. The dot still reports availability either way.
+    @AppStorage("useJIT") private var useJIT = false
 
     private var gamesDir: URL {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
