@@ -126,7 +126,11 @@ struct TlsSegment {
 struct GuestModule {
   std::string path;
   std::string soname;
-  std::uint32_t base = 0;      ///< Guest address the image was placed at.
+  std::uint32_t base = 0;      ///< Guest address the image was placed at (its lowest mapped byte).
+  /// Guest address image-vaddr 0 maps to (the load bias): `base == load_bias + lo`, where lo is the
+  /// lowest PT_LOAD vaddr, so the two are equal only for images whose first segment starts at 0. The AOT
+  /// profile records emitted PCs against this bias, so the runtime compares it exactly.
+  std::uint32_t load_bias = 0;
   std::uint32_t extent = 0;    ///< Guest bytes covered, rounded to guest pages.
   /// The first writable PT_LOAD's guest address. This is the fact `data_start`/`__data_start` names:
   /// a linker-script data symbol, not a function. Boehm and Mono use it to bound the data segment, and

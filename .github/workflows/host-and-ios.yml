@@ -21,13 +21,16 @@ on:
       - '*.txt'
   workflow_dispatch:
     inputs:
-      aot_profile_artifact:
+      aot_profile_ref:
         description: >-
-          Optional Actions artifact name holding a directory of rb_aotgen --profile output
-          (.S, _table.cpp, _profile.cpp). Downloaded and compiled into the app; empty means a
-          Tier I IPA. The game APK itself is never uploaded.
+          Optional git ref (branch/tag) carrying a per-game AOT profile directory. The IPA job checks it
+          out and compiles it in; the game APK itself is never uploaded. Empty means a Tier I IPA.
         required: false
         default: ""
+      aot_profile_path:
+        description: Path of the profile directory inside that ref (rb_aotgen --profile output).
+        required: false
+        default: "aot/kitkat"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -61,8 +64,8 @@ jobs:
           # The code-map reader: the corpus half skips on a runner that has no game bytes, but the
           # synthetic refusals and the trace merge still run, so a regression fails the lane.
           ./build/host/tools/aotgen/rb_aotgen_tests
-          # Informational: prints the Tier I rate and always exits 0 on a correct result.
           ./build/host/core/tests/rb_sha256_tests
+          # Informational: prints the Tier I rate and always exits 0 on a correct result.
           ./build/host/core/tests/rb_interp_bench
 
       - name: Layering gate
@@ -144,19 +147,19 @@ jobs:
 
       # Configures and builds the engine archive, generates the Xcode project and packages Payload/*.app.
       # Signing is off: the artifact is for AltStore/SideStore/a personal team to sign.
-      # A per-game AOT profile arrives as a workflow artifact: the owner generates it from their own
-      # extracted libraries (`rb_aotgen --profile <libs-dir> --out aot_<game>`), and the APK itself is
-      # never uploaded. The artifact must contain the flat output directory.
-      - name: Fetch the AOT profile (optional)
-        if: inputs.aot_profile_artifact != ''
-        uses: actions/download-artifact@v4
+      # A per-game AOT profile lives on its own ref (`aot/<game>`), generated from the owner's own
+      # extracted libraries with `rb_aotgen --profile`; it is derived translation, never the APK. The
+      # ref is checked out beside the repo and compiled into the engine archive.
+      - name: Check out the AOT profile (optional)
+        if: inputs.aot_profile_ref != ''
+        uses: actions/checkout@v4
         with:
-          name: ${{ inputs.aot_profile_artifact }}
-          path: build/aot/profile
+          ref: ${{ inputs.aot_profile_ref }}
+          path: aot-profile-src
 
       - name: Build the unsigned IPA
         env:
-          RB_AOT_PROFILE: ${{ inputs.aot_profile_artifact != '' && 'build/aot/profile' || '' }}
+          RB_AOT_PROFILE: ${{ inputs.aot_profile_ref != '' && format('aot-profile-src/{0}', inputs.aot_profile_path) || '' }}
         run: bash tools/build_ios_ipa.sh
 
       - uses: actions/upload-artifact@v4

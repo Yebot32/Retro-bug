@@ -1,8 +1,9 @@
 // RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
 //
-// FIPS 180-4 SHA-256, one translation unit, no dependencies. Checked against the standard vectors in
-// `rb_aotgen_profile_tests`; the app's own copy in core/crypto/sha256.cpp is checked the same way, and
-// the two must agree on a library (the profile is only useful if build and run hash the same bytes).
+// FIPS 180-4 SHA-256, one translation unit, no dependencies. The vectors live in
+// core/tests/sha256_test.cpp and run on every host lane and the device. The build tool keeps its own
+// copy (tools/aotgen/sha256.cpp) because it links nothing from core; the two must agree on the same
+// bytes or the profile can never match, which the cross-check vector in that test pins.
 
 #include "rb/crypto/sha256.h"
 

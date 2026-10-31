@@ -306,6 +306,7 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
   GuestModule mod;
   mod.path = path;
   mod.base = base + lo;  // where the image's lowest mapped byte actually sits
+  mod.load_bias = base;  // image vaddr V lives at load_bias + V
   mod.extent = span;     // so [mod.base, mod.base + mod.extent) is exactly the mapped range
 
   /// Every segment mapped below is undone if the load does not reach the end. Without this, a

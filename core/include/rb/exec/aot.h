@@ -113,6 +113,11 @@ struct AotImageInfo {
   AotRunCode run_code = nullptr;
 };
 
+/// The guest-address stride one profile reserves per library (the tool's bias step). The runtime requires
+/// each module's whole mapped extent to sit inside its slot, so a module the loader moved cannot pass the
+/// bias check or have its other segments silently overlap the next image.
+inline constexpr std::uint32_t kAotSlotBytes = 0x0200'0000u;
+
 /// One translated library in a per-game profile (AOT task 5): its name inside the APK and the image the
 /// generated table defines. The runtime must map the module at the image's `load_bias`.
 struct AotLibrary {
@@ -186,12 +191,18 @@ class AotExecutor final : public Executor {
 
   /// Fallback hand-backs since construction. Zero for a fully covered run; the fixture asserts it.
   [[nodiscard]] std::size_t fallback_count() const { return fallbacks_; }
-  /// The first translated library (the fixture carries exactly one).
-  [[nodiscard]] const AotImage& image() const { return libraries_.front().image; }
+  /// The first translated library (the fixture carries exactly one). Empty for a failed load, so a
+  /// caller that ignored `ok()` gets an empty image rather than undefined behaviour.
+  [[nodiscard]] const AotImage& image() const {
+    static const AotImage empty;
+    return libraries_.empty() ? empty : libraries_.front().image;
+  }
   [[nodiscard]] std::size_t library_count() const { return libraries_.size(); }
   [[nodiscard]] AotState& state() { return state_; }
   /// Guest address the first library's code-map offset 0 corresponds to (`load_bias + text_vaddr`).
-  [[nodiscard]] std::uint32_t text_base() const { return libraries_.front().text_base; }
+  [[nodiscard]] std::uint32_t text_base() const {
+    return libraries_.empty() ? 0 : libraries_.front().text_base;
+  }
 
   // ---------------------------------------------------------------- callbacks the prelude calls
   //

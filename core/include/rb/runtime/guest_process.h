@@ -165,6 +165,10 @@ class GuestProcess {
   runtime::GuestThread& main_guest_thread() { return abi_->main_thread(); }
   /// 1 = Tier I, 2 = Tier J (anything else is Tier I).
   exec::Executor& engine(int tier);
+  /// True while a profile is loaded and every profiled module has been found at its bias. False means
+  /// engine(1) answers the interpreter even though a profile was supplied — the caller's engine report
+  /// must say Tier I, not AOT.
+  [[nodiscard]] bool aot_active() const { return aot_ != nullptr && aot_usable_; }
   const loader::GuestModule* libc() const { return libc_; }
 
   const BionicLayout& layout() const { return layout_; }

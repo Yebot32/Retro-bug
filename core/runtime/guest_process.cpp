@@ -626,7 +626,11 @@ loader::GuestModule* GuestProcess::LoadOne(const std::vector<std::uint8_t>& imag
     };
   }
   std::string e;
+  // Guest code that runs *during* the load — an IFUNC resolver — must not execute AOT blocks for a
+  // module whose bias has not been verified yet; the verification happens after this call returns.
+  abi_->set_executor(*interp_);
   auto mod = loader::LoadFromBytes(*mem_, image, soname, opts, &e);
+  abi_->set_executor(engine(opts_.ctor_tier));
   if (!mod) {
     if (err) *err = soname + " did not load: " + e;
     return nullptr;
@@ -636,15 +640,18 @@ loader::GuestModule* GuestProcess::LoadOne(const std::vector<std::uint8_t>& imag
   Log("load: " + soname + " at " + Hex(mod->base) + " extent " + Hex(mod->extent) +
       (tolerated.empty() ? std::string{} : "; relocations tolerated, not applied: " + tolerated));
   if (aot_library != nullptr && aot_usable_) {
-    // The hint is a preference: if something already occupies the range the loader scans upward and
-    // the image lands elsewhere, which would make every baked PC in its blocks wrong. Prove the
-    // module covers the profile's text window; otherwise AOT is off for the rest of the process.
+    // The hint is a preference: if something already occupies the range the loader scans upward and the
+    // image lands elsewhere, which would make every baked PC in its blocks wrong. The loader records the
+    // exact bias it chose (`base == load_bias + lo`), so equality is the only proof that the image is
+    // where the emitter assumed; a containment test would accept a shifted module and run the wrong
+    // blocks. The whole mapped extent must also stay inside the profile's slot.
     const exec::AotImageInfo& wanted = *aot_library->image;
-    const std::uint64_t text_base = static_cast<std::uint64_t>(wanted.load_bias) + wanted.text_vaddr;
-    const std::uint64_t module_end = static_cast<std::uint64_t>(mod->base) + mod->extent;
-    if (text_base < mod->base || text_base + wanted.text_len > module_end) {
+    const std::uint64_t span_end = static_cast<std::uint64_t>(mod->base) + mod->extent;
+    const std::uint64_t slot_end =
+        static_cast<std::uint64_t>(wanted.load_bias) + exec::kAotSlotBytes;
+    if (mod->load_bias != wanted.load_bias || span_end > slot_end) {
       aot_usable_ = false;
-      Log("aot: " + soname + " loaded at 0x" + Hex(mod->base) + " instead of its profile bias 0x" +
+      Log("aot: " + soname + " loaded at bias 0x" + Hex(mod->load_bias) + " instead of its profile's 0x" +
           Hex(wanted.load_bias) + "; using Tier I for this process");
     }
   }

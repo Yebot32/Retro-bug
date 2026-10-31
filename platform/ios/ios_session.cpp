@@ -101,21 +101,35 @@ bool MatchAotProfile(const std::string& apk, std::string* why) {
     return false;
   }
   const rb::exec::AotProfile& profile = rb_aot_builtin_profile;
+  if (profile.count == 0 || profile.libraries == nullptr) {
+    *why = "the compiled profile is empty";
+    return false;
+  }
   for (std::size_t i = 0; i < profile.count; ++i) {
     const rb::exec::AotLibrary& library = profile.libraries[i];
     if (library.soname == nullptr || library.sha256 == nullptr) {
       *why = "the profile entry " + std::to_string(i) + " is malformed";
       return false;
     }
-    std::string path;
-    for (const char* prefix : {"assets/rb32/", "assets/rb32sys/", "lib/armeabi-v7a/", "lib/armeabi/"}) {
-      if (zip->Has(prefix + std::string{library.soname})) {
-        path = prefix + std::string{library.soname};
-        break;
-      }
+    // The boot reads the scope libraries (libc/libm/libz/libstdc++) from assets/rb32sys and everything
+    // else from assets/rb32. Hashing a different copy than the loader reads would defeat the whole
+    // check, so the paths follow the loader's precedence exactly.
+    const std::string name{library.soname};
+    const bool scope = name == "libc.so" || name == "libm.so" || name == "libz.so" ||
+                       name == "libstdc++.so";
+    const std::string path = std::string{scope ? "assets/rb32sys/" : "assets/rb32/"} + name;
+    if (!zip->Has(path)) {
+      *why = std::string{"the APK carries no "} + path;
+      return false;
     }
     if (path.empty()) {
       *why = std::string{"the APK carries no "} + library.soname;
+      return false;
+    }
+    // A crafted import can claim a multi-gigabyte entry; refuse before allocating it.
+    const auto size = zip->UncompressedSize(path);
+    if (!size || *size > (256u << 20)) {
+      *why = path + " is missing or implausibly large";
       return false;
     }
     std::string read_err;
@@ -229,7 +243,8 @@ struct RbIosSession {
   bool dlgl_apk = false;  ///< the APK ships assets/rb32/libdlgl.so: boot the whole DLGE Java load order
   bool booted = false;  ///< render thread only
   /// The engine this session actually booted on: 0 Tier I, 1 AOT (offline-translated), 2 Tier J.
-  int engine = 0;
+  /// Written on the render thread, read by the UI through rb_ios_session_engine.
+  std::atomic<int> engine{0};
 
   std::thread render;
   /// Logs a stall when the frame counter stops advancing while the session says it is running: the render
@@ -425,8 +440,8 @@ bool RbIosSession::Boot(std::string* err) {
                               : "jit: switched off in the app — Tier I"));
     // The AOT profile is compiled into this app; it runs only when every profiled library's digest matches
   // the imported APK, so an APK from another build keeps the interpreter.
-  bool aot_matched = false;
 #if defined(RB_AOT_PROFILE)
+  bool aot_matched = false;
   {
     std::string why;
     aot_matched = MatchAotProfile(apk, &why);
@@ -457,7 +472,12 @@ bool RbIosSession::Boot(std::string* err) {
     boot = std::make_unique<rb::host::Boot>(std::move(attempt_cfg));
     const rb::host::BootResult result = boot->BootJavaLibraries(apk, lib);
     if (result.ok && java != nullptr) {
-      self->engine = mode == Engine::Jit ? 2 : (mode == Engine::Aot ? 1 : 0);
+      const bool aot_really = mode == Engine::Aot && boot->process() != nullptr &&
+                              boot->process()->aot_active();
+      self->engine = mode == Engine::Jit ? 2 : (aot_really ? 1 : 0);
+      if (mode == Engine::Aot && !aot_really) {
+        self->Log("aot: the profile was refused at load — running Tier I");
+      }
       break;
     }
     boot_error = !result.ok ? (result.report.empty() ? std::string{"the boot failed"} : result.report)
@@ -477,9 +497,12 @@ bool RbIosSession::Boot(std::string* err) {
     *err = boot_error.empty() ? std::string{"the boot failed"} : boot_error;
     return false;
   }
-  self->Log(std::string{"engine: guest code runs on "} + (self->engine == 2 ? "Tier J (JIT)"
-                                                    : self->engine == 1 ? "AOT (offline-translated AArch64)"
-                                                                        : "Tier I (interpreter)"));
+  {
+    const int engine = self->engine.load(std::memory_order_relaxed);
+    self->Log(std::string{"engine: guest code runs on "} + (engine == 2 ? "Tier J (JIT)"
+                                                      : engine == 1 ? "AOT (offline-translated AArch64)"
+                                                                    : "Tier I (interpreter)"));
+  }
   process.store(boot->process(), std::memory_order_release);
   // A sampling profile of guest execution: one sample per slice boundary, cheap enough to leave on, and the
   // only way to name where an interpreted title spends its minutes on a host with no JIT.
@@ -791,5 +814,9 @@ extern "C" void rb_ios_set_jit_enabled(int enabled) {
   g_jit_enabled.store(enabled != 0, std::memory_order_relaxed);
 }
 
-extern "C" int rb_ios_session_jit(RbIosSession* s) { return s != nullptr && s->engine == 2 ? 1 : 0; }
-extern "C" int rb_ios_session_engine(RbIosSession* s) { return s != nullptr ? s->engine : 0; }
+extern "C" int rb_ios_session_jit(RbIosSession* s) {
+  return s != nullptr && s->engine.load(std::memory_order_relaxed) == 2 ? 1 : 0;
+}
+extern "C" int rb_ios_session_engine(RbIosSession* s) {
+  return s != nullptr ? s->engine.load(std::memory_order_relaxed) : 0;
+}

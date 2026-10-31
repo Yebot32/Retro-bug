@@ -47,6 +47,8 @@ constexpr const char* kUsage =
     "  --base is the load bias those guest PCs were recorded at (default 0x10000); a trace from a\n"
     "  different placement maps no starts and the command says how many fell outside .text.\n"
 #ifdef RB_AOTGEN_EMIT
+    "  --trace-base is the load bias the trace's PCs were recorded at; it defaults to --base, so a\n"
+    "  Tier I trace (recorded near the loader's own placement) needs it named explicitly.\n"
     "  --emit --out <prefix> [--base <hex>] <lib.so>\n"
     "  Emits <prefix>.S and <prefix>_table.cpp for AOT (task 3). --base is the assumed load bias\n"
     "  (guest address of the image's vaddr 0); it defaults to 0x10000 and must be 4 KiB-aligned.\n"
@@ -186,8 +188,10 @@ std::string Hex32(std::uint32_t value) {
   return buffer;
 }
 
-/// Convert a recorded trace into this image's starts (guest PCs -> `.text`-relative offsets).
-bool BuildTraceFor(const std::string& lib_path, std::uint32_t load_bias, const std::string& trace_path,
+/// Convert a recorded trace into this image's starts (guest PCs -> `text`-relative offsets).
+/// `recorded_bias` is the load bias the run recorded its PCs at, which is not the bias this profile
+/// emits at: a Tier I trace names the addresses the loader actually chose. Defaults to the emitted bias.
+bool BuildTraceFor(const std::string& lib_path, std::uint32_t recorded_bias, const std::string& trace_path,
                    CodeMap* trace, std::string* err) {
   if (trace_path.empty()) return true;
   const std::vector<std::uint8_t> bytes = ReadFile(lib_path);
@@ -203,7 +207,63 @@ bool BuildTraceFor(const std::string& lib_path, std::uint32_t load_bias, const s
     return false;
   }
   TraceStats stats;
-  return ParseTrace(trace_path, image, load_bias, trace, &stats, err);
+  if (!ParseTrace(trace_path, image, recorded_bias, trace, &stats, err)) return false;
+  std::printf("aotgen: trace %s at base 0x%x: %zu records, %zu unique, %zu mapped, %zu outside%s\n",
+              trace_path.c_str(), recorded_bias, stats.records, stats.unique, stats.mapped,
+              stats.outside, stats.truncated ? " (truncated tail)" : "");
+  if (stats.mapped == 0 && stats.records != 0) {
+    std::fprintf(stderr,
+                 "aotgen: warning: no recorded start fell inside this image at base 0x%x — pass\n"
+                 "        --trace-base with the bias the traced run used (its `load:` lines name it)\n",
+                 recorded_bias);
+  }
+  return true;
+}
+
+/// The image's lowest and highest PT_LOAD vaddr, page-rounded: the span that must fit one bias slot.
+bool LoadSpan(const std::vector<std::uint8_t>& elf, std::uint32_t* lo, std::uint32_t* hi,
+              std::string* err) {
+  const auto le16 = [](const std::uint8_t* p) {
+    return static_cast<std::uint32_t>(p[0]) | (static_cast<std::uint32_t>(p[1]) << 8);
+  };
+  const auto le32 = [](const std::uint8_t* p) {
+    return static_cast<std::uint32_t>(p[0]) | (static_cast<std::uint32_t>(p[1]) << 8) |
+           (static_cast<std::uint32_t>(p[2]) << 16) | (static_cast<std::uint32_t>(p[3]) << 24);
+  };
+  if (elf.size() < 52 || elf[0] != 0x7f || elf[1] != 'E' || elf[2] != 'L' || elf[3] != 'F') {
+    *err = "not an ELF image";
+    return false;
+  }
+  if (elf[4] != 1) {
+    *err = "not a 32-bit ELF image";
+    return false;
+  }
+  const std::uint32_t phoff = le32(elf.data() + 28);
+  const std::uint32_t phentsize = le16(elf.data() + 42);
+  const std::uint32_t phnum = le16(elf.data() + 44);
+  if (phentsize < 32 || static_cast<std::uint64_t>(phoff) + static_cast<std::uint64_t>(phentsize) * phnum >
+                            elf.size()) {
+    *err = "truncated program header table";
+    return false;
+  }
+  std::uint64_t low = 0x1'0000'0000ull;
+  std::uint64_t high = 0;
+  const std::uint64_t kPageMask = ~static_cast<std::uint64_t>(0xfff);
+  for (std::uint32_t i = 0; i < phnum; ++i) {
+    const std::uint8_t* ph = elf.data() + phoff + i * phentsize;
+    if (le32(ph) != 1) continue;  // PT_LOAD
+    const std::uint64_t vaddr = le32(ph + 8);
+    const std::uint64_t memsz = le32(ph + 20);
+    low = std::min(low, vaddr & kPageMask);
+    high = std::max(high, (vaddr + memsz + 0xfff) & kPageMask);
+  }
+  if (high <= low) {
+    *err = "the image has no PT_LOAD segments";
+    return false;
+  }
+  *lo = static_cast<std::uint32_t>(low);
+  *hi = static_cast<std::uint32_t>(high);
+  return true;
 }
 
 struct ProfileEntry {
@@ -234,11 +294,12 @@ std::string Sanitize(const std::string& name) {
 /// profile build must survive one library to keep the others. The child writes its facts to a file the
 /// parent reads; a crash is a skipped library, reported by name, not a failed profile.
 bool EmitOne(const std::string& lib_path, const ProfileEntry& entry, const std::string& trace_path,
-             ProfileEntry* out) {
+             std::uint32_t recorded_bias, ProfileEntry* out) {
 #if defined(_WIN32)
   (void)lib_path;
   (void)entry;
   (void)trace_path;
+  (void)recorded_bias;
   (void)out;
   std::fprintf(stderr, "aotgen: --profile needs a POSIX host (child-process isolation)\n");
   return false;
@@ -251,7 +312,7 @@ bool EmitOne(const std::string& lib_path, const ProfileEntry& entry, const std::
   if (pid == 0) {
     CodeMap trace{};
     std::string err;
-    if (!BuildTraceFor(lib_path, entry.bias, trace_path, &trace, &err)) {
+    if (!BuildTraceFor(lib_path, recorded_bias, trace_path, &trace, &err)) {
       std::fprintf(stderr, "aotgen: %s: %s\n", entry.soname.c_str(), err.c_str());
       std::fflush(stderr);
       _exit(2);
@@ -301,8 +362,17 @@ bool EmitOne(const std::string& lib_path, const ProfileEntry& entry, const std::
 }
 
 int RunProfile(const std::string& dir, const std::string& out_prefix, const std::string& trace_path,
-               std::uint32_t base) {
+               std::uint32_t base, bool trace_base_given, std::uint32_t trace_base) {
   namespace fs = std::filesystem;
+  // A failed run must not leave an earlier run's profile for CMake to compile; the JSON and table are
+  // rewritten only after every library emitted.
+  std::remove((out_prefix + "_profile.cpp").c_str());
+  std::remove((out_prefix + "_profile.json").c_str());
+  // Keep this in step with rb::exec::kAotSlotBytes and with the smallest window the iOS app can reserve
+  // (512 MiB). A profile that would run past the window is refused here, by name, instead of making
+  // every later load fail.
+  constexpr std::uint64_t kSlot = 0x0200'0000ull;
+  constexpr std::uint64_t kWindow = 0x2000'0000ull;
   std::error_code ec;
   std::vector<std::string> libs;
   for (const auto& item : fs::directory_iterator(dir, ec)) {
@@ -326,16 +396,37 @@ int RunProfile(const std::string& dir, const std::string& out_prefix, const std:
     entry.soname = libs[i];
     entry.prefix = out_prefix + "_" + Sanitize(libs[i].substr(0, libs[i].size() - 3));
     entry.symbol = rb::aotgen::ImageSymbol(entry.prefix);
-    entry.bias = base + static_cast<std::uint32_t>(i) * 0x0200'0000u;
+    const std::uint64_t bias64 = static_cast<std::uint64_t>(base) + i * kSlot;
+    if (bias64 + kSlot > kWindow) {
+      std::fprintf(stderr,
+                   "aotgen: %s would be placed past the 512 MiB window (slot %zu at 0x%llx); use a "
+                   "smaller --base or fewer libraries\n",
+                   libs[i].c_str(), i, static_cast<unsigned long long>(bias64));
+      return 1;
+    }
+    entry.bias = static_cast<std::uint32_t>(bias64);
     const std::string lib_path = (fs::path(dir) / libs[i]).string();
     const std::vector<std::uint8_t> bytes = ReadFile(lib_path);
     if (bytes.empty()) {
       std::fprintf(stderr, "aotgen: cannot read %s\n", lib_path.c_str());
       continue;
     }
+    std::uint32_t lo = 0, hi = 0;
+    std::string span_err;
+    if (!LoadSpan(bytes, &lo, &hi, &span_err)) {
+      std::fprintf(stderr, "aotgen: %s: %s\n", libs[i].c_str(), span_err.c_str());
+      continue;
+    }
+    if (static_cast<std::uint64_t>(hi) - lo > kSlot) {
+      std::fprintf(stderr,
+                   "aotgen: %s loads 0x%x bytes (vaddr 0x%x..0x%x), larger than the 32 MiB slot\n",
+                   libs[i].c_str(), hi - lo, lo, hi);
+      continue;
+    }
     entry.sha256 = rb::aotgen::Sha256Hex(rb::aotgen::Sha256(bytes));
+    const std::uint32_t recorded_bias = trace_base_given ? trace_base : entry.bias;
     ProfileEntry facts;
-    if (!EmitOne(lib_path, entry, trace_path, &facts)) continue;
+    if (!EmitOne(lib_path, entry, trace_path, recorded_bias, &facts)) continue;
     emitted.push_back(facts);
     std::printf("aotgen: profile %s: %zu blocks, %zu refused, %zu code bytes at base 0x%x\n",
                 entry.soname.c_str(), facts.blocks, facts.refused, facts.code_bytes, entry.bias);
@@ -401,6 +492,8 @@ int main(int argc, char** argv) {
   std::string profile_dir;
   std::uint32_t load_bias = 0x0001'0000u;
   bool base_given = false;
+  std::uint32_t trace_base = 0;
+  bool trace_base_given = false;
   bool profile = false;
   bool emit = false;
   for (int i = 1; i < argc; ++i) {
@@ -412,6 +505,19 @@ int main(int argc, char** argv) {
       }
       profile_dir = argv[++i];
       profile = true;
+    } else if (arg == "--trace-base") {
+      if (i + 1 >= argc) {
+        std::fprintf(stderr, "aotgen: --trace-base needs a value\n");
+        return 2;
+      }
+      char* end = nullptr;
+      const unsigned long value = std::strtoul(argv[++i], &end, 0);
+      if (end == argv[i] || *end != '\0' || value > 0xffff'fffful || (value & 0xfffu) != 0) {
+        std::fprintf(stderr, "aotgen: --trace-base must be a 4 KiB-aligned 32-bit value\n");
+        return 2;
+      }
+      trace_base = static_cast<std::uint32_t>(value);
+      trace_base_given = true;
     } else if (arg == "--trace") {
       if (i + 1 >= argc) {
         std::fprintf(stderr, "aotgen: --trace needs a file\n");
@@ -467,7 +573,7 @@ int main(int argc, char** argv) {
     // A profile must not land on the low addresses a boot uses for its scope; 256 MiB up with 32 MiB
     // slots leaves every image far from libc's, the stack's and the trap window's placements.
     const std::uint32_t base = base_given ? load_bias : 0x1000'0000u;
-    return RunProfile(profile_dir, out_prefix, trace_path, base);
+    return RunProfile(profile_dir, out_prefix, trace_path, base, trace_base_given, trace_base);
 #else
     std::fprintf(stderr, "aotgen: this build has no emitter (only AArch64 hosts build it)\n");
     return 2;
@@ -486,7 +592,7 @@ int main(int argc, char** argv) {
     }
     CodeMap emit_trace{};
     std::string err;
-    if (!BuildTraceFor(path, load_bias, trace_path, &emit_trace, &err)) {
+    if (!BuildTraceFor(path, trace_base_given ? trace_base : load_bias, trace_path, &emit_trace, &err)) {
       std::fprintf(stderr, "aotgen: %s: %s\n", path.c_str(), err.c_str());
       return 1;
     }

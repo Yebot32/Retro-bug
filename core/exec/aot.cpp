@@ -189,13 +189,23 @@ AotExecutor::AotExecutor(mem::GuestMemory& memory, GuestAddr return_address,
 bool AotExecutor::AddImage(const AotImageInfo& info, std::string* err) {
   Library library;
   if (!library.image.Load(info.blocks, info.count, &info, err)) return false;
+  if ((info.load_bias & 0xfffu) != 0) {
+    if (err != nullptr) *err = "an AOT image's load bias is not page-aligned";
+    return false;
+  }
+  if (static_cast<std::uint64_t>(info.text_vaddr) + info.text_len > kAotSlotBytes) {
+    if (err != nullptr) *err = "an AOT image's text does not fit its profile slot";
+    return false;
+  }
   library.text_base = info.load_bias + info.text_vaddr;
   library.info = &info;
   for (const Library& other : libraries_) {
     const std::uint64_t a0 = library.text_base;
-    const std::uint64_t a1 = a0 + info.text_len;
     const std::uint64_t b0 = other.text_base;
-    const std::uint64_t b1 = b0 + other.info->text_len;
+    // Slots, not text spans: the loader may place a module's other segments past its .text, so reserving
+    // the whole stride is what keeps two images from sharing guest pages.
+    const std::uint64_t a1 = static_cast<std::uint64_t>(info.load_bias) + kAotSlotBytes;
+    const std::uint64_t b1 = static_cast<std::uint64_t>(other.info->load_bias) + kAotSlotBytes;
     if (a0 < b1 && b0 < a1) {
       if (err != nullptr) *err = "two AOT images overlap in guest memory";
       return false;
@@ -454,16 +464,16 @@ RunResult AotExecutor::Run(MachineState& state, unsigned max_instructions) {
   for (;;) {
     state_.halt_reason = 0;
     const AotImageInfo* running = nullptr;
-    void* entry = Dispatch();
+    // A pending switch is consumed exactly once, before any new dispatch. Re-entering the target image
+    // and then dispatching again would resolve the same entry and leave the stale switch live, so the
+    // next halt (a syscall, a host call, a return) would be dropped and the block re-entered forever.
+    void* entry = state_.switch_entry;
     if (entry != nullptr) {
-      running = libraries_[current_].info;
-    } else if (state_.switch_entry != nullptr) {
-      // A block in another translated library was reached: this image's prelude returned, and the
-      // target image's prelude gets a fresh frame, exactly as a new `Run` would give it.
       running = state_.switch_image;
-      entry = state_.switch_entry;
       state_.switch_image = nullptr;
       state_.switch_entry = nullptr;
+    } else if ((entry = Dispatch()) != nullptr) {
+      running = libraries_[current_].info;
     }
     if (entry != nullptr) {
       const Dynarmic::HaltReason hr = running->run_code(entry, &state_.jit, &state_.halt_reason);
@@ -473,7 +483,6 @@ RunResult AotExecutor::Run(MachineState& state, unsigned max_instructions) {
         state.r[15] = pending_pc_;
       }
       if (state_.fallback_pending == 0) {
-        if (state_.switch_entry != nullptr) continue;
         return Exit(MapHalt(hr));
       }
       state_.fallback_pending = 0;

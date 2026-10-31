@@ -14,7 +14,7 @@ command -v xcodebuild >/dev/null || { echo "no xcodebuild (macOS required)" >&2;
 command -v xcodegen >/dev/null || { echo "no xcodegen: brew install xcodegen" >&2; exit 1; }
 command -v cmake >/dev/null || { echo "no cmake" >&2; exit 1; }
 
-PROFILE_ARG=""
+PROFILE_ARG="-DRB_AOT_PROFILE_DIR="
 if [ -n "${RB_AOT_PROFILE:-}" ]; then
   PROFILE_ARG="-DRB_AOT_PROFILE_DIR=$(cd "$RB_AOT_PROFILE" && pwd)"
 fi
@@ -23,7 +23,9 @@ if [ ! -f "$BUILD/CMakeCache.txt" ]; then
     -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 \
     -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 -DCMAKE_OSX_SYSROOT=iphoneos \
     -DCMAKE_BUILD_TYPE=Release -DRB_BUILD_TESTS=OFF $PROFILE_ARG
-elif [ -n "$PROFILE_ARG" ]; then
+else
+  # Always re-state the flag: a cache left over from a profiled build would otherwise keep compiling
+  # that profile into what the operator believes is a plain Tier I IPA.
   cmake -S "$ROOT" -B "$BUILD" $PROFILE_ARG >/dev/null
 fi
 cmake --build "$BUILD" --target rb_engine_ios -j "$(sysctl -n hw.ncpu)"
