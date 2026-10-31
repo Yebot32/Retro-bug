@@ -37,6 +37,7 @@
 #include "rb/host/boot.h"
 #include "rb/isa/front_end.h"
 #include "rb/java/android_base.h"
+#include "rb/java/blockyroads.h"
 #include "rb/java/cocos2dx.h"
 #include "rb/java/dlgl.h"
 #include "rb/loader/apk_assets.h"
@@ -287,6 +288,7 @@ bool RbIosSession::Boot(std::string* err) {
     rb::java::InstallAndroidBase(*java, env);
     rb::java::InstallCocos2dx(*java, env);
     rb::java::InstallDlgl(*java, env);
+    rb::java::InstallBlockyroads(*java, env);
     self->java = java.get();
     java->set_trace([self](const std::string& line) { self->Log(line); });
     return java;

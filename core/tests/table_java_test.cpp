@@ -16,6 +16,7 @@
 
 #include "rb/abi/host_java.h"
 #include "rb/java/android_base.h"
+#include "rb/java/blockyroads.h"
 #include "rb/java/cocos2dx.h"
 #include "rb/java/dlgl.h"
 #include "rb/java/table_java.h"
@@ -53,9 +54,10 @@ struct Rig {
   std::vector<std::string> logs;
   AndroidEnv env;
 
-  Rig() {
+  /// `files_dir` overrides the profile's writable path for the FileHelper store tests.
+  explicit Rig(const char* files_dir = nullptr) {
     env.package_name = "com.test.game";
-    env.files_dir = "/data/com.test.game/files";
+    env.files_dir = files_dir != nullptr ? files_dir : "/data/com.test.game/files";
     env.cache_dir = "/data/com.test.game/cache";
     env.model = "iPad";
     env.manufacturer = "Apple";
@@ -67,6 +69,7 @@ struct Rig {
     rb::java::InstallAndroidBase(java, env);
     rb::java::InstallCocos2dx(java, env);
     rb::java::InstallDlgl(java, env);
+    rb::java::InstallBlockyroads(java, env);
   }
 
   TableJava::Ref Cls(const char* name) { return java.FindClass(name); }
@@ -228,6 +231,263 @@ void dlgl_profile_answers() {
   CHECK(!r.java.ExceptionCheck());
 }
 
+/// Every row `libgame.so` looks up, as the library names them: the class, method and signature strings were
+/// read out of its code (the class-name load followed by the method/signature loads at each JNI call site).
+struct JavaRow {
+  const char* cls;
+  const char* name;
+  const char* sig;
+  bool is_static;
+};
+
+bool RowResolves(Rig& r, const JavaRow& row) {
+  const TableJava::Ref cls = r.Cls(row.cls);
+  return cls != 0 && r.java.GetMethodID(cls, row.name, row.sig, row.is_static) != 0;
+}
+
+void blocky_native_surface_resolves() {
+  Rig r;
+  static const JavaRow rows[] = {
+      // The Cocos2d-x 3.x statics the engine's platform layer calls.
+      {"org/cocos2dx/lib/Cocos2dxActivity", "getAppVersion", "()Ljava/lang/String;", true},
+      {"org/cocos2dx/lib/Cocos2dxActivity", "getDisplayDensity", "()F", true},
+      {"org/cocos2dx/lib/Cocos2dxActivity", "getApkExpansionFilename", "(I)Ljava/lang/String;", true},
+      {"org/cocos2dx/lib/Cocos2dxActivity", "deleteApkExpansionFile", "(I)V", true},
+      {"org/cocos2dx/lib/Cocos2dxActivity", "showLoadingWindow", "(Ljava/lang/String;)V", true},
+      {"org/cocos2dx/lib/Cocos2dxActivity", "hideLoadingWindow", "()V", true},
+      {"org/cocos2dx/lib/Cocos2dxActivity", "isHpeExperience", "()Z", true},
+      {"org/cocos2dx/lib/Cocos2dxActivity", "isChromeOS", "()Z", true},
+      {"org/cocos2dx/lib/Cocos2dxRenderer", "setAnimationInterval", "(D)V", true},
+      {"org/cocos2dx/lib/Cocos2dxGLSurfaceView", "openIMEKeyboard", "()V", true},
+      {"org/cocos2dx/lib/Cocos2dxGLSurfaceView", "closeIMEKeyboard", "()V", true},
+      {"org/cocos2dx/lib/Cocos2dxGLSurfaceView", "pauseGLThread", "()V", true},
+      {"org/cocos2dx/lib/Cocos2dxGLSurfaceView", "setPauseGLThreadOnActivityPause", "(Z)V", true},
+      {"org/cocos2dx/lib/Cocos2dxBitmap", "getFontSizeAccordingHeight", "(I)I", true},
+      {"org/cocos2dx/lib/Cocos2dxBitmap", "getStringWithEllipsis", "(Ljava/lang/String;FF)Ljava/lang/String;", true},
+      {"org/cocos2dx/lib/Cocos2dxHelper", "showDialog", "(Ljava/lang/String;Ljava/lang/String;)V", true},
+      {"org/cocos2dx/lib/Cocos2dxHelper", "showDialogAndTerminate", "(Ljava/lang/String;Ljava/lang/String;)V", true},
+      {"org/cocos2dx/lib/Cocos2dxHelper", "showEditTextDialog", "([B[BIIII)V", true},
+      {"org/cocos2dx/lib/Cocos2dxHelper", "terminateProcess", "()V", true},
+      {"org/cocos2dx/lib/Cocos2dxHelper", "getCocos2dxPackageName", "()Ljava/lang/String;", true},
+      {"org/cocos2dx/lib/Cocos2dxHelper", "getCocos2dxWritablePath", "()Ljava/lang/String;", true},
+      {"org/cocos2dx/lib/Cocos2dxHelper", "getCurrentLanguage", "()Ljava/lang/String;", true},
+      {"org/cocos2dx/lib/Cocos2dxHelper", "enableAccelerometer", "()V", true},
+      {"org/cocos2dx/lib/Cocos2dxHelper", "setAccelerometerInterval", "(F)V", true},
+      {"org/cocos2dx/lib/Cocos2dxHelper", "disableAccelerometer", "()V", true},
+      {"org/cocos2dx/lib/Cocos2dxHelper", "getDPI", "()I", true},
+      {"org/cocos2dx/lib/Cocos2dxHelper", "getBoolForKey", "(Ljava/lang/String;Z)Z", true},
+      {"org/cocos2dx/lib/Cocos2dxHelper", "getIntegerForKey", "(Ljava/lang/String;I)I", true},
+      {"org/cocos2dx/lib/Cocos2dxHelper", "getFloatForKey", "(Ljava/lang/String;F)F", true},
+      {"org/cocos2dx/lib/Cocos2dxHelper", "getDoubleForKey", "(Ljava/lang/String;D)D", true},
+      {"org/cocos2dx/lib/Cocos2dxHelper", "getStringForKey", "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+       true},
+      {"org/cocos2dx/lib/Cocos2dxHelper", "setBoolForKey", "(Ljava/lang/String;Z)V", true},
+      {"org/cocos2dx/lib/Cocos2dxHelper", "setIntegerForKey", "(Ljava/lang/String;I)V", true},
+      {"org/cocos2dx/lib/Cocos2dxHelper", "setFloatForKey", "(Ljava/lang/String;F)V", true},
+      {"org/cocos2dx/lib/Cocos2dxHelper", "setDoubleForKey", "(Ljava/lang/String;D)V", true},
+      {"org/cocos2dx/lib/Cocos2dxHelper", "setStringForKey", "(Ljava/lang/String;Ljava/lang/String;)V", true},
+
+      // Blocky Roads' own classes: the singleton accessor each native wrapper caches first.
+      {"com/utils/GameControllerInput", "getInstance", "()Lcom/utils/GameControllerInput;", true},
+      {"com/utils/FileHelper", "getInstance", "()Lcom/utils/FileHelper;", true},
+      {"com/utils/CCMotion", "getInstance", "()Lcom/utils/CCMotion;", true},
+      {"com/utils/HttpGet", "getInstance", "()Lcom/utils/HttpGet;", true},
+      {"com/utils/DeviceAndSystem", "getInstance", "()Lcom/utils/DeviceAndSystem;", true},
+      {"com/utils/InappPurchase", "getInstance", "()Lcom/utils/InappPurchase;", true},
+      {"com/utils/ShareInterface", "getInstance", "()Lcom/utils/ShareInterface;", true},
+      {"com/utils/GPlayService", "getInstance", "()Lcom/utils/GPlayService;", true},
+      {"com/utils/DropboxInterface", "getInstance", "()Lcom/utils/DropboxInterface;", true},
+      {"com/utils/UnityAds", "getInstance", "()Lcom/utils/UnityAds;", true},
+      {"com/utils/Admob", "getInstance", "()Lcom/utils/Admob;", true},
+
+      // The instance surface behind those accessors.
+      {"com/utils/GameControllerInput", "init", "()V", false},
+      {"com/utils/GameControllerInput", "destroy", "()V", false},
+      {"com/utils/GameControllerInput", "updateDevices", "()V", false},
+      {"com/utils/GameControllerInput", "setContext", "(Landroid/content/Context;)V", false},
+      {"com/utils/GameControllerInput", "dispatchGenericMotionEvent", "(Landroid/view/MotionEvent;)V", false},
+      {"com/utils/GameControllerInput", "dispatchKeyEvent", "(Landroid/view/KeyEvent;)Z", false},
+      {"com/utils/GameControllerInput", "getController", "(I)Lcom/utils/GameController;", false},
+      {"com/utils/FileHelper", "readPersistentData", "(Ljava/lang/String;)[B", false},
+      {"com/utils/FileHelper", "writePersistentData", "(Ljava/lang/String;[B)Z", false},
+      {"com/utils/FileHelper", "erasePersistentData", "(Ljava/lang/String;)V", false},
+      {"com/utils/FileHelper", "getAssets", "()Landroid/content/res/AssetManager;", false},
+      {"com/utils/FileHelper", "getSaveDir", "()Ljava/lang/String;", false},
+      {"com/utils/FileHelper", "getCacheDir", "()Ljava/lang/String;", false},
+      {"com/utils/FileHelper", "setContext", "(Landroid/content/Context;)V", false},
+      {"com/utils/CCMotion", "isAccelerometerAvailable", "()Z", false},
+      {"com/utils/CCMotion", "startAccelerometerUpdate", "(F)V", false},
+      {"com/utils/CCMotion", "stopAccelerometerUpdate", "()V", false},
+      {"com/utils/CCMotion", "getAccelerationData", "()[F", false},
+      {"com/utils/HttpGet", "download", "(ILjava/lang/String;[B)V", false},
+      {"com/utils/DeviceAndSystem", "OpenURL", "(Ljava/lang/String;)Z", false},
+      {"com/utils/DeviceAndSystem", "isActiveNetworkConnection", "()Z", false},
+      {"com/utils/DeviceAndSystem", "SetAutoPowerSave", "(Z)V", false},
+      {"com/utils/DeviceAndSystem", "GetDeviceID", "()Ljava/lang/String;", false},
+      {"com/utils/DeviceAndSystem", "getOS", "()Ljava/lang/String;", false},
+      {"com/utils/DeviceAndSystem", "getClipBoardText", "()Ljava/lang/String;", false},
+      {"com/utils/DeviceAndSystem", "getLocalIp4Address", "()Ljava/lang/String;", false},
+      {"com/utils/DeviceAndSystem", "getLocalIp6Address", "()Ljava/lang/String;", false},
+      {"com/utils/DeviceAndSystem", "SetHighPerformanceWifiMode", "(Z)V", false},
+      {"com/utils/DeviceAndSystem", "getCountryCode", "()Ljava/lang/String;", false},
+      {"com/utils/DeviceAndSystem", "HasVibrator", "()Z", false},
+      {"com/utils/DeviceAndSystem", "Vibrate", "()V", false},
+      {"com/utils/DeviceAndSystem", "cancelLocalNotifications", "(Ljava/lang/String;)V", false},
+      {"com/utils/DeviceAndSystem", "addLocalNotification",
+       "(Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;)V", false},
+      {"com/utils/InappPurchase", "isGoogleIAPEnabled", "()Z", false},
+      {"com/utils/InappPurchase", "startPurchase", "(Ljava/lang/String;)V", false},
+      {"com/utils/InappPurchase", "restorePurchases", "()V", false},
+      {"com/utils/InappPurchase", "addProduct", "(Ljava/lang/String;I)V", false},
+      {"com/utils/InappPurchase", "requestProductPrices", "()V", false},
+      {"com/utils/InappPurchase", "requestProductPurchases", "(Z)V", false},
+      {"com/utils/InappPurchase", "getProductPrice", "(Ljava/lang/String;)Ljava/lang/String;", false},
+      {"com/utils/InappPurchase", "getProductPurchaseTime", "(Ljava/lang/String;)J", false},
+      {"com/utils/InappPurchase", "setNativeInit", "()V", false},
+      {"com/utils/ShareInterface", "Send", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V", false},
+      {"com/utils/ShareInterface", "SendEmail", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[B)V", false},
+      {"com/utils/ShareInterface", "IsAvailable", "()Z", false},
+      {"com/utils/GPlayService", "showAchievements", "()V", false},
+      {"com/utils/GPlayService", "unlockAchievement", "(Ljava/lang/String;)V", false},
+      {"com/utils/GPlayService", "setAchievementCounter", "(Ljava/lang/String;I)V", false},
+      {"com/utils/GPlayService", "showSignIn", "()V", false},
+      {"com/utils/GPlayService", "showLeaderboards", "()V", false},
+      {"com/utils/GPlayService", "setHighScore", "(Ljava/lang/String;I)V", false},
+      {"com/utils/GPlayService", "getLeaderboardScores", "(Ljava/lang/String;II)Z", false},
+      {"com/utils/GPlayService", "getLoggedInPlayerName", "()Ljava/lang/String;", false},
+      {"com/utils/GPlayService", "getLoggedInPlayerID", "()Ljava/lang/String;", false},
+      {"com/utils/GPlayService", "setNativeInit", "()V", false},
+      {"com/utils/GPlayService", "cloudSaveData", "(Ljava/lang/String;Ljava/lang/String;I[B)V", false},
+      {"com/utils/GPlayService", "cloudLoadData", "(Ljava/lang/String;I)V", false},
+      {"com/utils/DropboxInterface", "listFiles", "(Ljava/lang/String;II)V", false},
+      {"com/utils/DropboxInterface", "uploadFile", "(Ljava/lang/String;[B)V", false},
+      {"com/utils/DropboxInterface", "shareFile", "(Ljava/lang/String;)Ljava/lang/String;", false},
+      {"com/utils/DropboxInterface", "getUserDisplayName", "()Ljava/lang/String;", false},
+      {"com/utils/DropboxInterface", "getUserGivenName", "()Ljava/lang/String;", false},
+      {"com/utils/DropboxInterface", "linkAccount", "()I", false},
+      {"com/utils/DropboxInterface", "isFileExists", "(Ljava/lang/String;)V", false},
+      {"com/utils/DropboxInterface", "getDPURL", "(Ljava/lang/String;)V", false},
+      {"com/utils/DropboxInterface", "logout", "()V", false},
+      {"com/utils/DropboxInterface", "download", "(Ljava/lang/String;)V", false},
+      {"com/utils/DropboxInterface", "initParams", "(Ljava/lang/String;Ljava/lang/String;)V", false},
+      {"com/utils/DropboxInterface", "hasLinkedAcc", "()Z", false},
+      {"com/utils/DropboxFileItem", "getFileName", "()Ljava/lang/String;", false},
+      {"com/utils/DropboxFileItem", "getData", "()[B", false},
+      {"com/utils/DropboxFileItem", "getPDate", "()J", false},
+      {"com/utils/UnityAds", "showInterstitial", "()Z", false},
+      {"com/utils/UnityAds", "showRewardedAd", "()V", false},
+      {"com/utils/UnityAds", "hasCachedRewardedAd", "()Z", false},
+      {"com/utils/Admob", "SetBannerPosition", "(I)V", false},
+      {"com/utils/Admob", "SetBannerVisible", "(Z)V", false},
+      {"com/utils/Admob", "ShowInterstitial", "()Z", false},
+      {"com/utils/Admob", "CacheInterstitial", "()V", false},
+      {"com/utils/Admob", "ShowRewarded", "()V", false},
+      {"com/utils/Admob", "HasCachedRewarded", "()Z", false},
+      {"com/utils/Admob", "CacheRewarded", "()V", false},
+  };
+  for (const JavaRow& row : rows) {
+    CHECK_CTX(RowResolves(r, row), std::string(row.cls) + "." + row.name + row.sig);
+    r.java.ExceptionClear();  // one miss must not mask the rest of the table
+  }
+
+  // The leaderboard reader walks the entry's fields by name.
+  const TableJava::Ref entry = r.Cls("com/utils/GPLeaderboardEntry");
+  CHECK(entry != 0);
+  CHECK(r.java.GetFieldID(entry, "mPlayerID", "Ljava/lang/String;", false) != 0);
+  CHECK(r.java.GetFieldID(entry, "mPlayerName", "Ljava/lang/String;", false) != 0);
+  CHECK(r.java.GetFieldID(entry, "mRank", "I", false) != 0);
+  CHECK(r.java.GetFieldID(entry, "mScore", "I", false) != 0);
+  CHECK(r.java.GetFieldID(entry, "mFormattedScore", "Ljava/lang/String;", false) != 0);
+
+  // CCControllerDispatcher's actual sequence: class, getInstance, then init on the returned object.
+  const auto pad = static_cast<TableJava::Ref>(
+      r.CallStatic("com/utils/GameControllerInput", "getInstance", "()Lcom/utils/GameControllerInput;"));
+  CHECK_CTX(pad != 0, "GameControllerInput.getInstance");
+  CHECK(r.CallVirtual(pad, "init", "()V") == 0);
+  CHECK(r.CallVirtual(pad, "dispatchKeyEvent", "(Landroid/view/KeyEvent;)Z", {0}) == 0);
+
+  const auto motion =
+      static_cast<TableJava::Ref>(r.CallStatic("com/utils/CCMotion", "getInstance", "()Lcom/utils/CCMotion;"));
+  CHECK(r.CallVirtual(motion, "isAccelerometerAvailable", "()Z") == 0);
+  const auto accel = static_cast<TableJava::Ref>(r.CallVirtual(motion, "getAccelerationData", "()[F"));
+  CHECK_CTX(accel != 0 && r.java.GetArrayLength(accel) == 3, "getAccelerationData is three floats");
+
+  const auto system = static_cast<TableJava::Ref>(
+      r.CallStatic("com/utils/DeviceAndSystem", "getInstance", "()Lcom/utils/DeviceAndSystem;"));
+  CHECK_CTX(r.CallVirtual(system, "isActiveNetworkConnection", "()Z") == 0, "no guest network stack");
+  CHECK(r.CallVirtual(system, "OpenURL", "(Ljava/lang/String;)Z", {r.java.NewString(u"https://example.com")}) == 0);
+  CHECK_CTX(!r.StringArg(static_cast<TableJava::Ref>(r.CallVirtual(system, "GetDeviceID", "()Ljava/lang/String;")))
+                 .empty(),
+            "GetDeviceID");
+
+  const auto iap =
+      static_cast<TableJava::Ref>(r.CallStatic("com/utils/InappPurchase", "getInstance", "()Lcom/utils/InappPurchase;"));
+  CHECK_CTX(r.CallVirtual(iap, "isGoogleIAPEnabled", "()Z") == 0, "billing disabled");
+
+  // The Activity answers: no expansion file, real density, and the loading window call is accepted.
+  CHECK(r.CallStatic("org/cocos2dx/lib/Cocos2dxActivity", "getApkExpansionFilename", "(I)Ljava/lang/String;",
+                     {0}) == 0);
+  CHECK(r.CallStatic("org/cocos2dx/lib/Cocos2dxActivity", "hideLoadingWindow", "()V") == 0);
+  const auto density = static_cast<std::uint32_t>(
+      r.CallStatic("org/cocos2dx/lib/Cocos2dxActivity", "getDisplayDensity", "()F"));
+  float density_value = 0.0f;
+  std::memcpy(&density_value, &density, sizeof density_value);
+  CHECK_CTX(density_value == 2.0f, std::to_string(density_value));
+  CHECK(!r.java.ExceptionCheck());
+}
+
+void file_helper_store_round_trips() {
+  Rig r("/tmp");
+  const std::string name = "rb_table_java_filehelper_test.bin";
+  const std::string path = "/tmp/" + name;
+  std::remove(path.c_str());
+  const auto helper =
+      static_cast<TableJava::Ref>(r.CallStatic("com/utils/FileHelper", "getInstance", "()Lcom/utils/FileHelper;"));
+  CHECK_CTX(helper != 0, "FileHelper.getInstance");
+  const TableJava::Ref jname = r.java.NewString(U(name));
+  const std::vector<std::uint8_t> payload{0x52, 0x42, 0x01, 0x00, 0xff};
+  const TableJava::Ref array = r.java.NewArray('B', static_cast<std::int32_t>(payload.size()), 0, 0);
+  CHECK(r.java.SetArrayRegion('B', array, 0, static_cast<std::int32_t>(payload.size()), payload.data()));
+  CHECK_CTX(r.CallVirtual(helper, "writePersistentData", "(Ljava/lang/String;[B)Z", {jname, array}) == 1, "write");
+  const auto read = static_cast<TableJava::Ref>(
+      r.CallVirtual(helper, "readPersistentData", "(Ljava/lang/String;)[B", {jname}));
+  CHECK_CTX(read != 0, "read returns the array");
+  CHECK_CTX(read != 0 && r.java.GetArrayLength(read) == 5, std::to_string(r.java.GetArrayLength(read)));
+  std::uint8_t got[8] = {};
+  CHECK(read != 0 && r.java.GetArrayRegion('B', read, 0, 5, got));
+  CHECK_CTX(std::memcmp(got, payload.data(), payload.size()) == 0, "payload bytes");
+  CHECK(r.CallVirtual(helper, "erasePersistentData", "(Ljava/lang/String;)V", {jname}) == 0);
+  CHECK_CTX(static_cast<TableJava::Ref>(
+                 r.CallVirtual(helper, "readPersistentData", "(Ljava/lang/String;)[B", {jname})) == 0,
+            "erased save answers null");
+  const TableJava::Ref escape = r.java.NewString(u"../escape");
+  CHECK_CTX(r.CallVirtual(helper, "writePersistentData", "(Ljava/lang/String;[B)Z", {escape, array}) == 0,
+            "a traversal name is refused");
+  const auto save = static_cast<TableJava::Ref>(r.CallVirtual(helper, "getSaveDir", "()Ljava/lang/String;"));
+  CHECK_CTX(r.StringArg(save) == "/tmp", r.StringArg(save));
+  CHECK(!r.java.ExceptionCheck());
+  std::remove(path.c_str());
+}
+
+void a_missing_row_is_named() {
+  Rig r;
+  std::vector<std::string> trace;
+  r.java.set_trace([&trace](const std::string& line) { trace.push_back(line); });
+  const TableJava::Ref helper = r.Cls("org/cocos2dx/lib/Cocos2dxHelper");
+  // A row that does not exist must fail; proving the lookup can fail is what makes the table above mean
+  // something. The failure names the class and the signature, which is the line the device log prints.
+  CHECK(r.java.GetMethodID(helper, "showEditTextDialog", "(Ljava/lang/String;II)V", true) == 0);
+  CHECK_CTX(r.java.PendingClass() == "java/lang/NoSuchMethodError", r.java.PendingClass());
+  CHECK_CTX(!trace.empty() && trace.back().find("org/cocos2dx/lib/Cocos2dxHelper.showEditTextDialog") !=
+                                   std::string::npos,
+            trace.empty() ? std::string{"no trace"} : trace.back());
+  r.java.ExceptionClear();
+  // Both Cocos2d-x generations' signatures are rows: 2.x strings and 3.x byte arrays.
+  CHECK(r.StaticMethod("org/cocos2dx/lib/Cocos2dxHelper", "showEditTextDialog", "([B[BIIII)V") != 0);
+  CHECK(r.StaticMethod("org/cocos2dx/lib/Cocos2dxHelper", "showEditTextDialog",
+                       "(Ljava/lang/String;Ljava/lang/String;IIII)V") != 0);
+}
+
 void integers_behave() {
   Rig r;
   const auto parsed = r.CallStatic("java/lang/Integer", "parseInt", "(Ljava/lang/String;)I", {r.java.NewString(u"-123")});
@@ -253,6 +513,9 @@ int main() {
   integers_behave();
   cocos2dx_helper_answers();
   dlgl_profile_answers();
+  blocky_native_surface_resolves();
+  file_helper_store_round_trips();
+  a_missing_row_is_named();
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;
 }

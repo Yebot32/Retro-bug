@@ -292,9 +292,14 @@ void TableJava::DeleteWeakGlobalRef(Ref r) { DeleteLocalRef(r); }
 
 TableJava::Id TableJava::GetMethodID(Ref cls, const std::string& name, const std::string& sig, bool is_static) {
   std::lock_guard<std::mutex> lk(mu_);
-  const int m = FindMethodLocked(Obj(cls), name, sig, is_static);
+  const int c = Obj(cls);
+  const int m = FindMethodLocked(c, name, sig, is_static);
   if (m == 0) {
-    if (trace_) trace_("Java: no method " + name + sig);
+    if (trace_) {
+      // The class is part of the row: a bare method name does not say which of a title's classes is short.
+      const Class* k = ClassOfObj(c);
+      trace_("Java: no method " + (k != nullptr ? k->name : std::string{"<null class>"}) + "." + name + sig);
+    }
     ThrowLocked("java/lang/NoSuchMethodError", name + sig);
   }
   return static_cast<Id>(m);
@@ -310,7 +315,10 @@ TableJava::Id TableJava::GetFieldID(Ref cls, const std::string& name, const std:
     const Class* k = ClassOfObj(c);
     c = k ? k->super : 0;
   }
-  if (trace_) trace_("Java: no field " + name + sig);
+  if (trace_) {
+    const Class* k = ClassOfObj(Obj(cls));
+    trace_("Java: no field " + (k != nullptr ? k->name : std::string{"<null class>"}) + "." + name + sig);
+  }
   ThrowLocked("java/lang/NoSuchFieldError", name);
   return 0;
 }

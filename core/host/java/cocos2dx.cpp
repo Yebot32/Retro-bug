@@ -31,6 +31,18 @@ void NoOp(TableJava& j, const std::string& cls, const std::string& name, const s
                  [](TableJava&, int, const std::vector<std::uint64_t>&) { return static_cast<std::uint64_t>(0); });
 }
 
+/// A jfloat result is the value's IEEE-754 bits, not a numeric widening: the bridge hands the low 32 bits to
+/// the guest as the register the Java method would have returned.
+std::uint64_t FloatBits(float value) {
+  std::uint32_t bits = 0;
+  std::memcpy(&bits, &value, sizeof bits);
+  return bits;
+}
+
+/// The density the Java layer reports is the screen's logical-density scale; on this host that is the
+/// window scale the render loop is already using.
+constexpr float kDisplayDensity = 2.0f;
+
 }  // namespace
 
 void InstallCocos2dx(TableJava& j, const AndroidEnv& env) {
@@ -119,7 +131,33 @@ void InstallCocos2dx(TableJava& j, const AndroidEnv& env) {
                  [](TableJava&, int, const std::vector<std::uint64_t>& a) { return a[0]; });
   NoOp(j, cls, "runOnUiThread", "(Ljava/lang/Runnable;)V");
   NoOp(j, cls, "showDialog", "(Ljava/lang/String;Ljava/lang/String;)V");
+  NoOp(j, cls, "showDialogAndTerminate", "(Ljava/lang/String;Ljava/lang/String;)V");
+  // 2.x passes the text and hint as strings; 3.x as byte arrays. Titles of both generations share this
+  // profile, so both signatures are rows.
   NoOp(j, cls, "showEditTextDialog", "(Ljava/lang/String;Ljava/lang/String;IIII)V");
+  NoOp(j, cls, "showEditTextDialog", "([B[BIIII)V");
+
+  // The Activity statics the engine's platform layer calls: APK expansion, the loading window, and OS
+  // detection. There is no expansion file to mount and no Java loading window to show here.
+  const std::string activity = "org/cocos2dx/lib/Cocos2dxActivity";
+  StaticString(j, activity, "getAppVersion", "()Ljava/lang/String;", [] { return std::string{"0.1"}; });
+  j.DefineMethod(activity, "getDisplayDensity", "()F", true,
+                 [](TableJava&, int, const std::vector<std::uint64_t>&) { return FloatBits(kDisplayDensity); });
+  j.DefineMethod(activity, "getApkExpansionFilename", "(I)Ljava/lang/String;", true,
+                 [](TableJava&, int, const std::vector<std::uint64_t>&) { return static_cast<std::uint64_t>(0); });
+  NoOp(j, activity, "deleteApkExpansionFile", "(I)V");
+  NoOp(j, activity, "showLoadingWindow", "(Ljava/lang/String;)V");
+  NoOp(j, activity, "hideLoadingWindow", "()V");
+  for (const char* name : {"isHpeExperience", "isChromeOS"}) {
+    j.DefineMethod(activity, name, "()Z", true,
+                   [](TableJava&, int, const std::vector<std::uint64_t>&) { return static_cast<std::uint64_t>(0); });
+  }
+
+  // The renderer and surface-view statics the engine calls from its platform layer. This host drives the
+  // frame loop and the GL thread itself, so the calls are answered without acting.
+  NoOp(j, "org/cocos2dx/lib/Cocos2dxRenderer", "setAnimationInterval", "(D)V");
+  NoOp(j, "org/cocos2dx/lib/Cocos2dxGLSurfaceView", "pauseGLThread", "()V");
+  NoOp(j, "org/cocos2dx/lib/Cocos2dxGLSurfaceView", "setPauseGLThreadOnActivityPause", "(Z)V");
 }
 
 }  // namespace rb::java
