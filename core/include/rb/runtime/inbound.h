@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -64,6 +65,11 @@ class Inbound {
   /// it; the runtime installs `_exit`, which is what the same call does on a device).
   void set_on_exit(std::function<void(int status)> f) { on_exit_ = std::move(f); }
 
+  /// Where a failed dispatch is reported. The fault still becomes a pending java.lang.Error for a Java caller,
+  /// but a host whose Java is a table has no caller to read it: without this line the registers and stack of a
+  /// native that faults — the only evidence of where the guest died — go to stderr, which the app does not keep.
+  void set_log(std::function<void(const std::string&)> log) { log_ = std::move(log); }
+
   /// The process's Inbound the trampolines reach (the most recently constructed live one).
   static Inbound* current();
 
@@ -78,6 +84,9 @@ class Inbound {
   abi::ForwardingJni& fwd_;
   abi::HostJava& java_;
   int tier_;
+  std::function<void(const std::string&)> log_;
+  std::mutex fail_mu_;
+  std::map<std::string, unsigned> fail_counts_;  ///< per native: first three logged, then every 300th
   std::function<void(int)> on_exit_;
   std::mutex mu_;  ///< leaf: serializes BindPool
   /// Fixed-size, so a trampoline reading entry k never races a later BindPool growing it: an entry is complete

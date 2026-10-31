@@ -110,6 +110,7 @@ bool Boot::BootBridge(std::string* out) {
   rb::abi::ForwardingJni::SetGuestTidResolver(
       [](std::int32_t guest_tid) { return rb::runtime::HostTidOfGuest(guest_tid); });
   inbound_ = std::make_unique<rb::runtime::Inbound>(p, *jni_, *java_, cfg_.ctor_tier);
+  inbound_->set_log([this](const std::string& line) { Say(line); });
   jni_->set_native_binder([this](rb::exec::GuestAddr fn, const std::string& name, const std::string& sig,
                                  std::string* e) -> void* { return BindNative(fn, name, sig, e); });
   inbound_->set_on_exit([this](int status) {

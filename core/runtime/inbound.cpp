@@ -146,6 +146,20 @@ void* Inbound::BindPool(const InboundTarget& t, std::string* err) {
 void Inbound::Fail(const InboundTarget& t, const std::string& why) {
   const std::string message = "RetroBug: guest native " + t.name + " stopped: " + why;
   std::fprintf(stderr, "%s\n", message.c_str());
+  if (log_) {
+    unsigned count = 0;
+    {
+      std::lock_guard<std::mutex> lk(fail_mu_);
+      count = ++fail_counts_[t.name];
+    }
+    // A native that faults every frame must not bury the frames: the first three carry the registers and
+    // stack, the rest only say the failure is still happening.
+    if (count <= 3) {
+      log_(message);
+    } else if (count % 300 == 0) {
+      log_("RetroBug: guest native " + t.name + " still failing — " + std::to_string(count) + " time(s)");
+    }
+  }
   const abi::HostRef cls = java_.FindClass("java/lang/Error");
   if (cls == 0) return;
   java_.ThrowNew(cls, message);
