@@ -115,7 +115,13 @@ class InterpExecutor : public Executor {
   /// what keeps self-modifying code correct without a write observer (the loader maps text read+exec, and
   /// `GuestMemory::Write` refuses a read-only page outright). Invalidation from `arm_cacheflush` evicts
   /// every block whose start address falls in the flushed range.
-  static constexpr std::size_t kBlockCacheLimit = 8192;
+  ///
+  /// Dynarmic's `IR::Block` allocates a fixed 4096-instruction pool for every block, whether the block
+  /// uses four slots or four thousand. A 8192-block cache therefore reserves gigabytes of host heap; on
+  /// iOS, alongside the guest window, that exhaustion surfaced as a crash inside `PrependNewInst` when
+  /// Dynarmic's unchecked pool allocation returned null. Keep the cache bounded to a device-safe budget;
+  /// hot loops still stay cached, and a full cache is cleared just as before.
+  static constexpr std::size_t kBlockCacheLimit = 128;
 
   /// Nothing is cached, so nothing can be stale — and that is a property of this tier, not a stub:
   /// running the same block after an invalidation call has to give the same answer, which the test
