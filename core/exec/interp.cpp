@@ -823,6 +823,15 @@ class BlockRunner {
     // and the two-tier differential caught exactly that as a one-byte disagreement at the return
     // sentinel.
     end_it_ = Dynarmic::A32::LocationDescriptor{block.ir.EndLocation()}.IT().Value();
+    // One dense slot per instruction, sized once per block execution (a block is tens of instructions,
+    // and the alternative — a hash insertion and a hash lookup for every operand — was the dominant cost
+    // of this interpreter).
+    const std::size_t slots = block.ir.size() + 1;
+    temps_.assign(slots, V{});
+    temps_set_.assign(slots, std::uint8_t{0});
+    produced_.assign(slots, std::optional<Flags>{});
+    carry_.assign(slots, std::optional<bool>{});
+    ge_.assign(slots, std::optional<std::uint32_t>{});
     for (const auto& inst : block.ir) {
       if (!Step(&inst)) return false;
       ++steps;
@@ -877,6 +886,10 @@ class BlockRunner {
     return false;
   }
 
+  /// The dense slot an instruction's result lives in, or 0 when the block was never named (a numbering
+  /// bug in `isa::TranslateOne`, not a guest state).
+  [[nodiscard]] static unsigned SlotOf(const Inst* inst) { return inst != nullptr ? inst->GetName() : 0; }
+
   [[nodiscard]] bool Read(const Value& v, V& out) {
     if (v.IsImmediate()) {
       std::uint64_t bits = 0;
@@ -893,13 +906,14 @@ class BlockRunner {
                     Hex(static_cast<std::uint64_t>(v.GetType())) + ")";
       return false;
     }
-    const auto it = temps_.find(v.GetInst());
-    if (it == temps_.end()) {
+    const unsigned slot = SlotOf(v.GetInst());
+    if (slot == 0 || slot >= temps_.size() || temps_set_[slot] == 0) {
       stop.reason = StopReason::Internal;
-      stop.detail = "IR temporary read before it was written";
+      stop.detail = slot == 0 ? "IR temporary produced by an unnamed instruction (the block was not numbered)"
+                              : "IR temporary read before it was written";
       return false;
     }
-    out = it->second;
+    out = temps_[slot];
     return true;
   }
 
@@ -947,8 +961,8 @@ class BlockRunner {
       out = Flags{};  // the empty NZCV marker contributes no bits of its own
       return true;
     }
-    if (const auto it = produced_.find(arg.GetInst()); it != produced_.end()) {
-      out = it->second;
+    if (const Flags* produced = Produced(arg.GetInst())) {
+      out = *produced;
       return true;
     }
     V value{};
@@ -965,8 +979,8 @@ class BlockRunner {
       out = ImmediateAsU64(arg, bits) ? Flags::from_cpsr(static_cast<std::uint32_t>(bits)) : Flags{};
       return true;
     }
-    if (const auto it = produced_.find(arg.GetInst()); it != produced_.end()) {
-      out = it->second;
+    if (const Flags* produced = Produced(arg.GetInst())) {
+      out = *produced;
       return true;
     }
     V value{};
@@ -975,7 +989,34 @@ class BlockRunner {
     return true;
   }
 
-  void Put(const Inst* inst, V value) { temps_[inst] = value; }
+  /// The flags an instruction recorded, or nullptr when it recorded none — the dense index behind the
+  /// map this file used to hash for every `GetNZCVFromOp`.
+  [[nodiscard]] const Flags* Produced(const Inst* inst) const {
+    const unsigned slot = SlotOf(inst);
+    if (slot == 0 || slot >= produced_.size() || !produced_[slot]) return nullptr;
+    return &*produced_[slot];
+  }
+  [[nodiscard]] const bool* Carried(const Inst* inst) const {
+    const unsigned slot = SlotOf(inst);
+    if (slot == 0 || slot >= carry_.size() || !carry_[slot]) return nullptr;
+    return &*carry_[slot];
+  }
+  [[nodiscard]] const std::uint32_t* GeOf(const Inst* inst) const {
+    const unsigned slot = SlotOf(inst);
+    if (slot == 0 || slot >= ge_.size() || !ge_[slot]) return nullptr;
+    return &*ge_[slot];
+  }
+
+  void Put(const Inst* inst, V value) {
+    const unsigned slot = SlotOf(inst);
+    // Every Put follows the block's own instruction, which TranslateOne numbered; a zero here would mean
+    // the numbering pass was skipped, and silently dropping the value would surface as a wrong answer
+    // somewhere else. Sizing guarantees the upper bound.
+    if (slot != 0 && slot < temps_.size()) {
+      temps_[slot] = value;
+      temps_set_[slot] = 1;
+    }
+  }
 
   void WriteReg(Reg reg, std::uint32_t value);
   /// A write to the program counter. `interwork` is the `BX` rule — bit 0 of the value selects the ISA —
@@ -1039,7 +1080,10 @@ class BlockRunner {
   /// Records the flags this instruction's flag-form would have left, for whichever pseudo-operation
   /// names it. Recorded whether or not one exists: it is a property of the instruction, and the
   /// consumer — not the producer — decides which bits it reads.
-  void NoteFlags(const Inst* inst, const Flags& f) { produced_[inst] = f; }
+  void NoteFlags(const Inst* inst, const Flags& f) {
+    const unsigned slot = SlotOf(inst);
+    if (slot != 0 && slot < produced_.size()) produced_[slot] = f;
+  }
 
   mem::GuestMemory& memory_;
   MachineState& state_;
@@ -1047,18 +1091,22 @@ class BlockRunner {
   /// Passed in, not a member of this class: the exclusive reservation has to outlive a block, and this
   /// object deliberately does not (see the comment on the class).
   ExclusiveState& excl_;
-  std::unordered_map<const Inst*, V> temps_;
-  std::unordered_map<const Inst*, Flags> produced_;
+  /// Value slots, indexed by the instruction's dense ordinal (`Inst::GetName`, assigned one per block in
+  /// `isa::TranslateOne`). These were `std::unordered_map<const Inst*, …>` — a hash per operand read and
+  /// per result write — which made operand access, not the operation itself, the interpreter's cost.
+  std::vector<V> temps_;
+  std::vector<std::uint8_t> temps_set_;
+  std::vector<std::optional<Flags>> produced_;
   /// Shifter carries, kept apart from `produced_` because their N/Z reach CPSR by a different route
   /// (`TST`) than their C does (`GetCarryFromOp`), and merging them would make Tier I disagree with
   /// the back end about what a `GetNZCVFromOp` on a shift means.
-  std::unordered_map<const Inst*, bool> carry_;
+  std::vector<std::optional<bool>> carry_;
   /// The GE word a packed add/subtract produced, in dynarmic's expanded one-lane-per-bit form, keyed by
   /// the instruction that produced it — the same shape as `carry_` and for the same reason: the IR names
   /// the *producer* in `GetGEFromOp`, so the value has to be recorded where a producer can leave it and
   /// read where a consumer asks. Held apart from `produced_` because it is not a flag: it survives an
   /// unrelated `ADDS` in between, and `MRS rD, CPSR` reads it out of CPSR's own bits.
-  std::unordered_map<const Inst*, std::uint32_t> ge_;
+  std::vector<std::optional<std::uint32_t>> ge_;
   bool check_bit = false;
   /// An SVC noted by `A32CallSupervisor`, waiting to be surfaced at the block's `CheckHalt` terminal —
   /// see the two places that read it. Pending rather than immediate so the PC is already past the
@@ -1477,8 +1525,8 @@ bool BlockRunner::Step(const Inst* inst) {
       if (!HasArgs(inst, 1)) return false;
       const Value arg = inst->GetArg(0);
       if (arg.IsImmediate()) return Fail(inst, "a GE pseudo-operation on an immediate has no producer");
-      const auto it = ge_.find(arg.GetInst());
-      if (it == ge_.end()) {
+      const std::uint32_t* ge = GeOf(arg.GetInst());
+      if (ge == nullptr) {
         // Refusing rather than answering 0: the back end asserts the producer defined the value
         // (`emit_arm64.cpp:80-84`), so a missing producer means this file computed the op without
         // recording its GE, which is a bug in the row above and not a state the guest can be in. Zero
@@ -1486,7 +1534,7 @@ bool BlockRunner::Step(const Inst* inst) {
         return Fail(inst, "no GE recorded for " +
                               std::string{Dynarmic::IR::GetNameOf(arg.GetInst()->GetOpcode())});
       }
-      Put(inst, V{it->second, 0});
+      Put(inst, V{*ge, 0});
       return true;
     }
 
@@ -1549,7 +1597,8 @@ bool BlockRunner::Step(const Inst* inst) {
       if (!W32(inst, 0, a) || !W32(inst, 1, b)) return false;
       const unsigned width = PackedLaneWidth(op);
       Put(inst, V{LaneAddSub(a, b, width, IsPackedSub(op)), 0});
-      ge_[inst] = GeOfPackedAddSub(op, a, b, width);
+      const unsigned slot = SlotOf(inst);
+      if (slot != 0 && slot < ge_.size()) ge_[slot] = GeOfPackedAddSub(op, a, b, width);
       return true;
     }
     case Opcode::PackedSaturatedAddU8:
@@ -1591,8 +1640,8 @@ bool BlockRunner::Step(const Inst* inst) {
       if (!HasArgs(inst, 1)) return false;
       const Value arg = inst->GetArg(0);
       if (!arg.IsImmediate()) {
-        if (const auto c = carry_.find(arg.GetInst()); c != carry_.end()) {
-          Put(inst, V{c->second ? 1u : 0u, 0});
+        if (const bool* c = Carried(arg.GetInst())) {
+          Put(inst, V{*c ? 1u : 0u, 0});
           return true;
         }
       }
@@ -1615,7 +1664,7 @@ bool BlockRunner::Step(const Inst* inst) {
       Flags f{};
       if (!FlagsFromOp(arg, f)) return false;
       if (Probe()) {
-        const bool attached = !arg.IsImmediate() && produced_.count(arg.GetInst()) != 0;
+        const bool attached = !arg.IsImmediate() && Produced(arg.GetInst()) != nullptr;
         std::fprintf(stderr, "  [%s] %s -> n%d z%d c%d v%d\n",
                      Dynarmic::IR::GetNameOf(op).c_str(),
                      attached ? "producer-flags" : "TST", f.n, f.z, f.c, f.v);
@@ -2193,7 +2242,10 @@ bool BlockRunner::Step(const Inst* inst) {
       }
 
       Put(inst, V{result, 0});
-      carry_[inst] = carry;
+      {
+        const unsigned slot = SlotOf(inst);
+        if (slot != 0 && slot < carry_.size()) carry_[slot] = carry;
+      }
       NoteFlags(inst, Tst(result, 32));  // N and Z from the result; C is published separately, V clear
       return true;
     }

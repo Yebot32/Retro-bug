@@ -145,6 +145,13 @@ std::optional<TranslatedBlock> TranslateOne(const mem::GuestMemory& memory,
   TranslatedBlock block{Dynarmic::A32::Translate(location, &reader, Options())};
   block.ops.reserve(block.ir.size());
   for (const auto& inst : block.ir) block.ops.push_back(Dynarmic::IR::GetNameOf(inst.GetOpcode()));
+  // A dense ordinal per instruction (1..N). Tier I's value slots are indexed by it: the interpreter used
+  // a hash map keyed by instruction pointer for every operand read and every result write, and this field
+  // is already the dense index those maps were hashing for. Dynarmic's JIT fills the same field from its
+  // naming pass; the front-end path used here never runs that pass, so without this every block would run
+  // unnamed.
+  unsigned ordinal = 1;
+  for (auto& inst : block.ir) inst.SetName(ordinal++);
   block.terminal = TerminalName(block.ir.GetTerminal());
   block.entry = location.PC();
   block.mode = thumb ? Mode::Thumb : Mode::Arm;
