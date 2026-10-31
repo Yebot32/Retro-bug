@@ -108,6 +108,16 @@ struct SynthImage {
   }
 };
 
+/// How `Synth` ends the name table. `name_shstrtab` false leaves `.shstrtab`'s own header at index 0 --
+/// the leading NUL -- instead of appending its name, and `declared_size` overrides `sh_size` (0 means
+/// "the table's bytes"). Together they can end the table immediately after a chosen name, leaving that
+/// name's NUL outside the declared bytes, which is the shape that tells a capped reader from the old
+/// "read the rest of the table" fallback.
+struct SynthStrTab {
+  bool name_shstrtab = true;
+  std::uint32_t declared_size = 0;
+};
+
 SynthSection TextSection(std::uint32_t length, std::uint32_t addr = 0x1000) {
   SynthSection text;
   text.name = ".text";
@@ -121,8 +131,8 @@ SynthSection TextSection(std::uint32_t length, std::uint32_t addr = 0x1000) {
 /// offsets, a name table built from `sections`, then the table itself. There are no program headers, so
 /// every vaddr -> file mapping has to go through the section table — the same path a stripped image
 /// takes. Section header `i + 1` describes `sections[i]`; the returned offsets let a test patch one
-/// header field afterwards.
-SynthImage Synth(const std::vector<SynthSection>& sections) {
+/// header field afterwards. `strtab` only changes how the name table is terminated and declared.
+SynthImage Synth(const std::vector<SynthSection>& sections, const SynthStrTab& strtab = {}) {
   std::string names(1, '\0');
   std::vector<std::uint32_t> name_at;
   for (const SynthSection& s : sections) {
@@ -130,9 +140,12 @@ SynthImage Synth(const std::vector<SynthSection>& sections) {
     names += s.name;
     if (s.terminate_name) names.push_back('\0');
   }
-  const std::uint32_t shstr_name = static_cast<std::uint32_t>(names.size());
-  names += ".shstrtab";
-  names.push_back('\0');
+  const std::uint32_t shstr_name =
+      strtab.name_shstrtab ? static_cast<std::uint32_t>(names.size()) : 0;
+  if (strtab.name_shstrtab) {
+    names += ".shstrtab";
+    names.push_back('\0');
+  }
 
   std::vector<std::uint8_t> bytes = Header(1, 1, 40, 3);
   std::vector<std::uint32_t> offset(sections.size(), 0);
@@ -165,7 +178,9 @@ SynthImage Synth(const std::vector<SynthSection>& sections) {
   Put32(&bytes, shstr_at + 0, shstr_name);
   Put32(&bytes, shstr_at + 4, 3);  // SHT_STRTAB
   Put32(&bytes, shstr_at + 16, shstr_offset);
-  Put32(&bytes, shstr_at + 20, static_cast<std::uint32_t>(names.size()));
+  Put32(&bytes, shstr_at + 20, strtab.declared_size != 0
+                                   ? strtab.declared_size
+                                   : static_cast<std::uint32_t>(names.size()));
 
   Put32(&bytes, 32, shoff);
   Put16(&bytes, 46, 40);
@@ -234,16 +249,58 @@ void NameTableRefusals() {
   Put32(&bad_table.bytes, bad_table.Header(bad_table.shnum - 1) + 20, 0xffff);
   ExpectRefusal(bad_table.bytes, "truncated section-name table", "section-name table past EOF");
 
-  // A name with no terminator yields an empty name, not "the rest of the table": that reading is what
-  // turns one crafted header into an allocation the size of the whole name table, once per section. The
-  // follower is longer than the reader's cap, so no NUL is in reach of `.text`'s name.
+  // A name whose NUL falls outside the table's declared bytes yields an empty name, not "the rest of the
+  // table": that fallback is what turns one crafted header into an allocation the size of the whole name
+  // table, once per section. The table ends right after `.text` and does not even name itself, so the
+  // pre-fix reader found exactly ".text" in the remaining bytes and parsed this image successfully; the
+  // refusal is therefore this case's whole point.
   std::vector<SynthSection> unterminated;
   unterminated.push_back(TextSection(64));
   unterminated.back().terminate_name = false;
-  SynthSection long_name;
-  long_name.name = std::string(300, 'x');
-  unterminated.push_back(long_name);
-  ExpectRefusal(Synth(unterminated).bytes, "missing .text", "unterminated section name yields no name");
+  SynthStrTab ending_after_text;
+  ending_after_text.name_shstrtab = false;
+  ending_after_text.declared_size = 1 + 5;  // the leading NUL and ".text", no terminator
+  ExpectRefusal(Synth(unterminated, ending_after_text).bytes, "missing .text",
+                "unterminated section name yields no name");
+
+  // An over-long name is damaged even when it is terminated: the reader only looks at the first 256
+  // bytes, so a `.text` name whose NUL sits beyond that is no name at all rather than a string the
+  // lookup can match.
+  std::vector<SynthSection> overlong;
+  overlong.push_back(TextSection(64));
+  overlong.back().name = ".text" + std::string(251, 'x');  // 256 bytes before its NUL
+  ExpectRefusal(Synth(overlong).bytes, "missing .text",
+                "section name past the 255-byte cap yields no name");
+}
+
+/// An image shaped like `DynamicWalk`'s positive case: `.init_array` at vaddr 0x2000 holds one Thumb
+/// constructor, and `words` is the whole `.dynamic` body, DT_NULL included. Used for the states where
+/// the size tag cannot supply a count and `.init_array`'s header has to.
+void ExpectInitFromSection(std::initializer_list<std::uint32_t> words, const std::string& what) {
+  std::vector<SynthSection> sections;
+  sections.push_back(TextSection(64));
+  SynthSection array;
+  array.name = ".init_array";
+  array.flags = 0x3;
+  array.addr = 0x2000;
+  array.data = Words({0x1001});  // .text + 1: a Thumb constructor
+  sections.push_back(array);
+  SynthSection dynamic;
+  dynamic.name = ".dynamic";
+  dynamic.flags = 0x3;
+  dynamic.data = Words(words);
+  sections.push_back(dynamic);
+
+  std::string err;
+  const CodeMap map = DiscoverCodeMap(Synth(sections).bytes, nullptr, &err);
+  Check(err.empty(), what + " parses: " + err);
+  if (err.empty()) {
+    Check(map.entries.size() == 1 && map.entries[0].off == 0 &&
+              (map.entries[0].sources & kFromInit) != 0,
+          what + " still finds the .init_array constructor");
+    Check(map.entries.size() == 1 && map.entries[0].flags == kThumb,
+          what + " keeps the constructor's Thumb bit");
+  }
 }
 
 void DynamicWalk() {
@@ -274,6 +331,13 @@ void DynamicWalk() {
     Check(CountSource(map, kFromInit) == 1 && map.entries[0].flags == kThumb,
           "the fallback constructor keeps its Thumb bit");
   }
+
+  // The two states where the size tag cannot supply a count at all: DT_INIT_ARRAY without
+  // DT_INIT_ARRAYSZ, and DT_INIT_ARRAYSZ == 0. Both map the tag's table but leave zero entries, so
+  // `.init_array`'s header supplies the count; without the `count != 0` check the reader accepts a
+  // zero-length table and silently drops the constructor.
+  ExpectInitFromSection({25, 0x2000, 0, 0}, "DT_INIT_ARRAY without DT_INIT_ARRAYSZ");
+  ExpectInitFromSection({25, 0x2000, 27, 0, 0, 0}, "DT_INIT_ARRAYSZ of zero");
 
   // The same damaged size with nothing to fall back to: the tag points into `.text` (so it maps) and
   // there is no `.init_array` header, which is a table the file really does not hold.
