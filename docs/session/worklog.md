@@ -1184,3 +1184,19 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
 - **Verified:** workflow `41200595797` green on Linux, macOS, iOS arm64 compile and IPA (the Swift target
   compiled too). IPA build 19, commit `f7f6d1b`, 2,187,001 bytes, SHA-256
   `58e6699ebbbc5a884f3b2481a492c17f71d98be5791d9d7020b2544e3ec285c5`.
+
+### 2026-10-31 — iOS S2c: interpreter by default; the AOT note is rediscovered
+- The owner changed course on JIT: the switch now starts **off** and the engine's own default matches, so a
+  JIT is built only when the user turns it on and the probe passes. The red/green dot still reports
+  availability. IPA build 20, commit `4645001`, 2,187,036 bytes, SHA-256
+  `d19a2e104b26c4f06dba168f5770826a672d05d1aed34e267b953830d02d5b44`; workflow `41203224126` green.
+- He also remembered the no-JIT fast path written down in [`docs/ios-notes.txt`](../ios-notes.txt) §4:
+  **"The key idea for Android-on-iOS: AHEAD-OF-TIME translation (no JIT needed)"** — statically translate
+  each 32-bit ARM `.so` to AArch64 on the PC, compile the result into the IPA as ordinary signed code, and
+  keep a fast fallback interpreter for what the static pass misses. The same note records why it is parked:
+  its premise is that the game's native code is **known at build time** (a per-game IPA), and the multi-week
+  parts are block discovery (symbols, relocations, exidx, recorded indirect targets), the static backend,
+  and the fallback engine; §3 also warns that RetroBug's current Tier I is the "naive kind" of interpreter.
+- **Next (no JIT, no product change):** adopt the note's own lesson first — a pre-decoded, direct-threaded
+  handler chain in place of the per-op IR switch (iSH measured 3–5x over switch dispatch; iCube rejected an
+  IR engine as 1.7x slower). AOT-per-game remains the separate, larger arc and changes how games are built.
