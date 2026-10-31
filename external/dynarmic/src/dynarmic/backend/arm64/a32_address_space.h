@@ -19,6 +19,9 @@ public:
 
     IR::Block GenerateIR(IR::LocationDescriptor) const override;
 
+    /// AOT (RetroBug patch 0008): the same IR the JIT would compile for `descriptor`.
+    IR::Block GenerateIRForAot(IR::LocationDescriptor descriptor) const { return GenerateIR(descriptor); }
+
     void InvalidateCacheRanges(const boost::icl::interval_set<u32>& ranges);
 
 protected:

@@ -1,0 +1,45 @@
+diff --git a/src/dynarmic/backend/arm64/a32_address_space.h b/src/dynarmic/backend/arm64/a32_address_space.h
+index 3b9e9fb..c1ea01e 100644
+--- a/src/dynarmic/backend/arm64/a32_address_space.h
++++ b/src/dynarmic/backend/arm64/a32_address_space.h
+@@ -19,6 +19,9 @@ public:
+ 
+     IR::Block GenerateIR(IR::LocationDescriptor) const override;
+ 
++    /// AOT (RetroBug patch 0008): the same IR the JIT would compile for `descriptor`.
++    IR::Block GenerateIRForAot(IR::LocationDescriptor descriptor) const { return GenerateIR(descriptor); }
++
+     void InvalidateCacheRanges(const boost::icl::interval_set<u32>& ranges);
+ 
+ protected:
+diff --git a/src/dynarmic/backend/arm64/address_space.cpp b/src/dynarmic/backend/arm64/address_space.cpp
+index 2c7ae77..ea893ae 100644
+--- a/src/dynarmic/backend/arm64/address_space.cpp
++++ b/src/dynarmic/backend/arm64/address_space.cpp
+@@ -131,6 +131,10 @@ EmittedBlockInfo AddressSpace::Emit(IR::Block block) {
+     return block_info;
+ }
+ 
++EmittedBlockInfo AddressSpace::EmitForAot(IR::Block& ir_block, oaknut::CodeGenerator& code) {
++    return EmitArm64(code, std::move(ir_block), GetEmitConfig(), fastmem_manager);
++}
++
+ void AddressSpace::Link(EmittedBlockInfo& block_info) {
+     using namespace oaknut;
+     using namespace oaknut::util;
+diff --git a/src/dynarmic/backend/arm64/address_space.h b/src/dynarmic/backend/arm64/address_space.h
+index 835566b..23e58c5 100644
+--- a/src/dynarmic/backend/arm64/address_space.h
++++ b/src/dynarmic/backend/arm64/address_space.h
+@@ -45,6 +45,11 @@ public:
+ 
+     void DumpDisassembly() const;
+ 
++    /// AOT (RetroBug patch 0008): translate one block into `code` without touching the code cache, and
++    /// return its size and relocation records. The caller owns the buffer and the linking step; the JIT
++    /// path is unchanged and still uses Emit()/Link() below.
++    EmittedBlockInfo EmitForAot(IR::Block& ir_block, oaknut::CodeGenerator& code);
++
+ protected:
+     virtual EmitConfig GetEmitConfig() = 0;
+     virtual void RegisterNewBasicBlock(const IR::Block& block, const EmittedBlockInfo& block_info) = 0;

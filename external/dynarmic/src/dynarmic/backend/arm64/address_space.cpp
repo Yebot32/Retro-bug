@@ -131,6 +131,10 @@ EmittedBlockInfo AddressSpace::Emit(IR::Block block) {
     return block_info;
 }
 
+EmittedBlockInfo AddressSpace::EmitForAot(IR::Block& ir_block, oaknut::CodeGenerator& code) {
+    return EmitArm64(code, std::move(ir_block), GetEmitConfig(), fastmem_manager);
+}
+
 void AddressSpace::Link(EmittedBlockInfo& block_info) {
     using namespace oaknut;
     using namespace oaknut::util;
