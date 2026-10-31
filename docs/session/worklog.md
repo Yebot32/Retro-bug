@@ -1043,3 +1043,21 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
   `77789184ea002db11a25a65f64bda88e6fe9dfee3a227d56b69f63e9b8cbe3e5`.
 - **Next device log:** the KitKat fault line will carry `pc 0x…` and a `libdlgl.so+0x…` caller chain, which
   maps into the engine's code; the spawn sampling says whether a thread is created per frame.
+
+### 2026-10-31 — iOS S1w: a native's fault was only written to stderr on iOS
+- KitKat's white screen is a fault **inside `dlxDraw`**, not in the render loop: the loop keeps calling the
+  game's draw, the guest call faults at `0x29` (a read from a null object at offset 0x29) and returns early,
+  so the frame presents white. The fault repeats once per frame because every frame calls `dlxDraw` again.
+- The evidence existed all along and was thrown away: `Inbound::Fail` writes "guest native dlxDraw()
+  stopped: …" plus the faulting registers and module-mapped stack words, then throws a pending
+  `java.lang.Error`. On Android a real Java caller reads that error; on iOS the Java is a table with no
+  caller, and the line went to **stderr**, which the app does not capture. That is why 3,088 device log
+  lines named only `si_addr`.
+- Build 13 gives `Inbound` the boot's log sink. The first three failures of a native print the full
+  message — reason, pc/lr/sp, r0–r12 and `StackWords` (`libdlgl.so+0x…` chain) — and later ones are
+  counted per native, so the per-frame fault stays readable.
+- **Verified:** workflow `41182728525` green on Linux, macOS, iOS arm64 compile and IPA at `148f302`.
+  IPA build 13, commit `148f302`, 2,083,612 bytes, SHA-256
+  `1c98732b45338ce3dec9bf86bfb481ed50d477436020ea949bd6dafa557e82a2`.
+- **Next device log:** one short KitKat run is enough — the first `guest native dlxDraw()V stopped:` line
+  carries the pc and the caller chain into the engine, which is where the null object comes from.
