@@ -1001,3 +1001,22 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
 - **Next device log:** Blocky should get past shader compilation and Horde3D init now that its rodata
   pointers reach the driver; KitKat is expected to still fault in the driver, but the ring will print
   the GL calls leading to it with their arguments and the crash line names the EGL context version.
+
+### 2026-10-31 — iOS S1u: KitKat draws its LOADING screen on the iPad
+- Build 10's device log is the first with a **rendered frame**: `frame 1 pixels: … 1080,810=a3c439ff …` —
+  the Android-green robot at the centre of the LOADING screen, matching the screenshot. The KitKat run
+  before it had `egl: createContext -> GLES1 context created`, the full boot, `surfaceChanged`, and the
+  preload group, then rendered and went on to load the `default` group (all 24 sounds, textures6.json,
+  textures6.png 2,121,891 bytes). The build-9 driver fault at `glDrawArrays` is gone; the out-of-line
+  access fix is confirmed by the thing that matters, pixels on screen.
+- Blocky Roads in the same log created a **GLES2** context, completed `nativeInit`, and shows no
+  `glShaderSource`/`glBindAttribLocation` refusals — its rodata pointers now reach the driver. It opened
+  `assets/data.xpk` (31,189,769 bytes) and the log ends there; the run was cut short (the user switched
+  titles), not crashed: no crash header, no host fault.
+- Both sessions end mid-load, so the log cannot say whether the load is slow or the process died. Build 11
+  adds a 5 s monitor (`stall: still frame N`, suppressed while the app is paused), a `render: frame N spent
+  T ms` line past 2 s, and a frame heartbeat every 300 frames after the sampled ones. KitKat decodes a
+  2.1 MB atlas on Tier I, which is expected to take a while; the next log says whether it finishes.
+- **Verified:** workflow `41178428090` green on Linux, macOS, iOS arm64 compile and IPA at `1873c2f`.
+  IPA build 11, commit `1873c2f`, 2,080,719 bytes, SHA-256
+  `b52bd428fc26eda1df3acce0e55ad0da984a2f1a0d46d94a111f29b728734062`.
