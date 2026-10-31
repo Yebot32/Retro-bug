@@ -70,9 +70,9 @@ relocatable with a payload-bearing relocation.
   absolute `MOV Xscratch0, fn` that has no relocation record). Write down the exact `EmitConfig` field
   values the address space uses — the AOT harness must use the same ones.
 
-- [ ] **Step 2: Expose IR generation and the emission entry point.** In `address_space.h`, add next to the
-  protected `Emit`/`block_infos`, and in `a32_address_space.h` a public IR generator (the tool must use the
-  JIT's exact translation and optimisation pipeline, not a copy of it):
+- [ ] **Step 2: Expose the emission entry point.** `AddressSpace::GenerateIR` is already public
+  (`address_space.h:30`), so the tool calls it directly; the patch adds only `EmitForAot`. In
+  `address_space.h`, next to the protected `Emit`/`block_infos`:
 
 ```cpp
 public:
@@ -80,10 +80,6 @@ public:
     /// return its size and relocation records. The caller owns the buffer and the linking step; the JIT
     /// path is unchanged and still uses Emit()/Link() below.
     EmittedBlockInfo EmitForAot(IR::Block& ir_block, oaknut::CodeGenerator& code);
-
-// A32AddressSpace, public:
-    /// AOT (RetroBug patch 0008): the same IR the JIT would compile for `descriptor`.
-    IR::Block GenerateIRForAot(IR::LocationDescriptor descriptor) const { return GenerateIR(descriptor); }
 ```
 
   and in `address_space.cpp` (definition beside `Emit`; `IR::Block` is passed by value to `EmitArm64`, so
