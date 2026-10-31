@@ -32,7 +32,6 @@ constexpr std::uint32_t kPtDynamic = 2;
 constexpr std::uint32_t kPtArmExidx = 0x7000'0001;
 
 constexpr std::uint32_t kShtNobits = 8;
-constexpr std::uint32_t kShtArmExidx = 0x7000'0001;
 
 constexpr std::uint32_t kSttFunc = 2;
 constexpr std::uint16_t kShnUndef = 0;

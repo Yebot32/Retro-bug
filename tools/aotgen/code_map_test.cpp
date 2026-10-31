@@ -184,7 +184,10 @@ int main(int argc, char** argv) {
   const std::vector<std::uint8_t> game = ReadFile(game_path);
   if (game.empty()) {
     std::printf("# no libgame.so — skipped\n");
-    return 0;
+    // The synthetic refusals above are the only checks that ran; a failure there must still fail the
+    // lane rather than being hidden by the missing corpus.
+    std::printf("%d checks, %d failures\n", checks, failures);
+    return failures == 0 ? 0 : 1;
   }
   LibGame(game);
 

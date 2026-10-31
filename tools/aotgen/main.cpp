@@ -137,7 +137,7 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  CodeMap trace;
+  CodeMap trace{};
   if (!trace_path.empty()) {
     std::string trace_err;
     if (!ParseTrace(trace_path, &trace, &trace_err)) {
