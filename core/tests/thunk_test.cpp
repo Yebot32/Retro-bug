@@ -284,15 +284,24 @@ void a_bad_signature_is_refused_by_name() {
 
 }  // namespace
 
+/// Prints before each case so a crash names its own test (stdout is lost to the crash on macOS; stderr is
+/// flushed per line).
+#define RUN(fn)                            \
+  do {                                     \
+    std::fprintf(stderr, "%s\n", #fn);     \
+    std::fflush(stderr);                   \
+    fn();                                  \
+  } while (0)
+
 int main() {
-  ints_beyond_the_registers();
-  doubles_and_int64_are_aligned();
-  float_and_double_results_come_back_softfp();
-  unsigned_is_zero_extended_signed_is_sign_extended();
-  pointers_are_translated_and_checked();
-  out_of_line_pointer_args_are_dereferenceable();
-  host_pointers_become_handles();
-  a_bad_signature_is_refused_by_name();
+  RUN(ints_beyond_the_registers);
+  RUN(doubles_and_int64_are_aligned);
+  RUN(float_and_double_results_come_back_softfp);
+  RUN(unsigned_is_zero_extended_signed_is_sign_extended);
+  RUN(pointers_are_translated_and_checked);
+  RUN(out_of_line_pointer_args_are_dereferenceable);
+  RUN(host_pointers_become_handles);
+  RUN(a_bad_signature_is_refused_by_name);
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;
 }
