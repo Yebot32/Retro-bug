@@ -61,6 +61,16 @@ add_subdirectory(external/dynarmic EXCLUDE_FROM_ALL)
 add_subdirectory(platform)
 add_subdirectory(core)
 
+# The AOT code-map discovery tool: pure ELF parsing, so it builds on every host and has no engine
+# dependency (tools/aotgen/CMakeLists.txt). It is excluded from the iOS cross build, where a host
+# tool has nothing to inspect — but Android is a test *host* for this project (the binaries run on the
+# device exactly as core/tests do), even though CMake calls that configuration cross-compiling. The
+# `OR ANDROID` is that distinction, not a convenience: without it the measurement lane in
+# docs/superpowers/plans/2026-10-31-aot-native-speed.md could not build rb_aotgen_tests.
+if(NOT CMAKE_CROSSCOMPILING OR ANDROID)
+  add_subdirectory(tools/aotgen)
+endif()
+
 if(RB_BUILD_TESTS)
   add_subdirectory(core/tests)
 endif()
