@@ -31,6 +31,10 @@ xcodebuild -project "$ROOT/ios/RetroBug.xcodeproj" -scheme RetroBug -configurati
 
 APP="$BUILD/dd/Build/Products/Release-iphoneos/RetroBug.app"
 [ -d "$APP" ] || { echo "no app at $APP" >&2; exit 1; }
+# TEMPORARY diagnostic: which profile rows the archive and the linked app carry. Remove with the fix.
+echo "archive exitApp: $(strings -a "$BUILD/ios-engine/librbengine.a" 2>/dev/null | grep -c "^exitApp$")"
+echo "app exitApp: $(strings -a "$APP/RetroBug" 2>/dev/null | grep -c "^exitApp$")"
+echo "archive VSHL: $(strings -a "$BUILD/ios-engine/librbengine.a" 2>/dev/null | grep -c "unrecognised lane width in VectorLogicalShiftLeft")"
 mkdir -p "$BUILD/ipa/Payload"
 rm -rf "$BUILD/ipa/Payload/RetroBug.app"
 cp -R "$APP" "$BUILD/ipa/Payload/"
