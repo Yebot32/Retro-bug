@@ -1506,7 +1506,7 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
       if (from_file) {
         // A private copy of the file's bytes from offset pgoff * 4096 (mmap2's unit): what MAP_PRIVATE reads; a
         // MAP_SHARED writer's stores are not written back (named in the detail).
-        void* host = memory_->Host(at);
+        void* host = memory_->HostForAccess(at);
         const off_t off = static_cast<off_t>(f.arg[5]) * 4096;
         const ssize_t got = host == nullptr ? -1 : ::pread(fd, host, len, off);
         if (got < 0) {

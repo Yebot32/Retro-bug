@@ -593,7 +593,7 @@ struct Sles::Impl {
         const std::uint32_t p = U32(gloc + 4), n = U32(gloc + 8);
         if (n == 0 || !host.mem->IsMapped(p) || !host.mem->IsMapped(p + n - 1)) return SL_RESULT_PARAMETER_INVALID;
         d->loc.addr.locatorType = type;
-        d->loc.addr.pAddress = host.mem->Host(p);
+        d->loc.addr.pAddress = host.mem->HostForAccess(p);
         d->loc.addr.length = n;
         break;
       }

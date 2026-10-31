@@ -1128,7 +1128,7 @@ void ForwardingJni::SyncShadows() {
   for (auto& [host_ptr, sh] : shadows_) {
     if (sh.snap.empty()) continue;
     auto* host = static_cast<std::uint8_t*>(host_ptr);
-    auto* guest = static_cast<std::uint8_t*>(memory_.Host(sh.guest));
+    auto* guest = static_cast<std::uint8_t*>(memory_.HostForAccess(sh.guest));
     if (guest == nullptr) continue;
     for (std::size_t at = 0; at < sh.snap.size(); at += kBlock) {
       const std::size_t n = std::min(kBlock, sh.snap.size() - at);

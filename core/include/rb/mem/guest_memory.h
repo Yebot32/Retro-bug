@@ -90,6 +90,14 @@ class GuestMemory {
   /// through Read/Write. Translation-unit hot paths cache this per block and re-check on fault.
   void* Host(std::uint32_t at) const;
 
+  /// A host address a host callee may dereference for the bytes at `at`, or nullptr when the page is not
+  /// mapped. Unlike `Host`, a page served out of line — a file-backed module page whose granule cannot be
+  /// mapped in place on this host's real page size — is answered from its backing block: a GL driver handed
+  /// a shader string or a client vertex array needs the bytes, not the fastmem property. The pointer is only
+  /// as stable as the guest page it names; a later protection change or unmap can move it, exactly as the
+  /// page's own contents can change under the callee.
+  void* HostForAccess(std::uint32_t at) const;
+
   /// Reverse mapping for host→guest pointer crossings (AD-5/AD-6). False if the pointer is not
   /// guest memory at all — including RetroBug's own allocations, which is the property that keeps
   /// a stray host pointer from being mistaken for a guest one.

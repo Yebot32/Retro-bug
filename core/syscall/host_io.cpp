@@ -50,8 +50,10 @@ constexpr int kAtFdcwd = -100;
 /// The host's -errno for a host call that returned -1, else its result.
 long R(long r) { return r < 0 ? -errno : r; }
 
-/// The host address of guest `at`; nullptr for 0 or for an address the window does not map.
-void* H(mem::GuestMemory& m, std::uint32_t at) { return at == 0 ? nullptr : m.Host(at); }
+/// The host address of guest `at` for a host call to read or write; nullptr for 0 or an unmapped page.
+/// Out-of-line pages are served from their backing block — `write(fd, rodata, n)` and `read(fd, buf, n)`
+/// are byte transfers, not fastmem queries.
+void* H(mem::GuestMemory& m, std::uint32_t at) { return at == 0 ? nullptr : m.HostForAccess(at); }
 
 /// A guest NUL-terminated path, or false (EFAULT / ENAMETOOLONG in `*err`).
 bool Path(mem::GuestMemory& m, std::uint32_t at, std::string* out, long* err) {

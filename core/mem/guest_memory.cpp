@@ -662,6 +662,13 @@ void* GuestMemory::Host(std::uint32_t at) const {
   return static_cast<char*>(p.backing) + (at & (kGuestPage - 1));
 }
 
+void* GuestMemory::HostForAccess(std::uint32_t at) const {
+  if (!Contains(at)) return nullptr;
+  const Page& p = pages_[PageIndex(at)];
+  if (!p.backing) return nullptr;
+  return static_cast<char*>(p.backing) + (at & (kGuestPage - 1));
+}
+
 bool GuestMemory::Translate(const void* host, std::uint32_t* out) const {
   const auto addr = reinterpret_cast<std::uintptr_t>(host);
   const auto base = reinterpret_cast<std::uintptr_t>(window_base_);

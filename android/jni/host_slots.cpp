@@ -497,12 +497,12 @@ void HostSlots::enable_thunks() {
     for (std::uint32_t i = 0; i < count; ++i) {
       std::uint32_t at = 0;
       if (!p_.memory().Read(strings + 4u * i, &at, 4) ||
-          (ptrs[i] = static_cast<const char*>(p_.memory().Host(at))) == nullptr) {
+          (ptrs[i] = static_cast<const char*>(p_.memory().HostForAccess(at))) == nullptr) {
         *why = "glShaderSource: string " + std::to_string(i) + " is not guest memory";
         return false;
       }
     }
-    const void* lens = lengths == 0 ? nullptr : p_.memory().Host(lengths);
+    const void* lens = lengths == 0 ? nullptr : p_.memory().HostForAccess(lengths);
     using Fn = void (*)(unsigned, int, const char* const*, const int*);
     const auto f = reinterpret_cast<Fn>(HostSymbol("libGLESv2.so", "glShaderSource"));
     if (f == nullptr) {
@@ -547,7 +547,7 @@ void HostSlots::enable_thunks() {
       if (choose) {
         using Fn = unsigned (*)(void*, const int*, void**, int, int*);
         const auto f = reinterpret_cast<Fn>(HostSymbol("libEGL.so", which));
-        const void* a = attribs == 0 ? nullptr : p_.memory().Host(attribs);
+        const void* a = attribs == 0 ? nullptr : p_.memory().HostForAccess(attribs);
         ok = f != nullptr ? f(dpy, static_cast<const int*>(a), out != 0 ? host.data() : nullptr,
                              static_cast<int>(host.size()), &n)
                           : 0u;

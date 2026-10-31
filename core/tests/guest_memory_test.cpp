@@ -618,6 +618,51 @@ void a_file_in_a_granule_with_unmapped_leading_pages_reads_its_own_offset() {
   ::close(fd0);
 }
 
+// ------------------------------------------------------- pointer crossings
+
+/// A host callee that dereferences guest memory — a GL driver handed a shader string, a vertex array or an
+/// output buffer — needs the bytes, not the fastmem property. A file-backed page whose granule cannot be
+/// served in place (the file's bytes do not reach back to the granule base) is out of line on every host;
+/// `Host` refuses it by design, and `HostForAccess` must answer its backing block.
+void host_for_access_answers_out_of_line_pages() {
+  auto gm = make(14);
+  if (!gm) return;
+  std::string err;
+  int fd = -1;
+#if defined(SYS_memfd_create)
+  fd = static_cast<int>(syscall(SYS_memfd_create, "rb-access", 0u));
+#endif
+  if (fd < 0) {
+    ++skipped;
+    std::printf("SKIP   host access to an out-of-line page (no memfd: %s)\n", std::strerror(errno));
+    return;
+  }
+  const unsigned char content[8] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
+  CHECK(::pwrite(fd, content, sizeof content, 0) == static_cast<ssize_t>(sizeof content));
+  // Guest 0x1000 is granule 0's second page with file offset 0: backing the granule up to its base would
+  // need file offset -0x1000, so the page is served out of line.
+  CHECK(gm->MapFile(0x1000, kGuestPage, kRead, fd, 0, false, &err));
+  ::close(fd);
+  CHECK(gm->IsMapped(0x1000));
+  CHECK(!gm->IsFastmem(0x1000));
+  CHECK(gm->Host(0x1000) == nullptr);  // the fastmem query still refuses it
+  const void* p = gm->HostForAccess(0x1000);
+  CHECK(p != nullptr);
+  CHECK_CTX(p != nullptr && static_cast<const unsigned char*>(p)[0] == 0x11, "first byte");
+  CHECK_CTX(p != nullptr && static_cast<const unsigned char*>(p)[7] == 0x88, "last byte");
+  CHECK(gm->HostForAccess(0x1004) == static_cast<const char*>(p) + 4);  // the intra-page offset is included
+  CHECK(gm->HostForAccess(0x9000) == nullptr);                          // never mapped
+
+  // The in-place form answers the same address from both queries.
+  CHECK(gm->Map(0x4000, kGuestPage, kRead | kWrite, &err));
+  CHECK(gm->IsFastmem(0x4000));
+  CHECK(gm->Host(0x4000) != nullptr && gm->HostForAccess(0x4000) == gm->Host(0x4000));
+
+  CHECK(gm->Unmap(0x1000, kGuestPage, &err));
+  CHECK(gm->HostForAccess(0x1000) == nullptr);
+  CHECK(gm->HostForAccess(0x1004) == nullptr);
+}
+
 // ------------------------------------------------------- refusals
 
 void zero_length_and_permissionless_requests_are_refused() {
@@ -684,6 +729,7 @@ int main() {
   RUN(two_files_in_one_granule_read_their_own_bytes);
   RUN(shared_file_mapping_succeeds_and_stays_shared);
   RUN(a_file_in_a_granule_with_unmapped_leading_pages_reads_its_own_offset);
+  RUN(host_for_access_answers_out_of_line_pages);
   RUN(zero_length_and_permissionless_requests_are_refused);
 
   std::printf("%d checks, %d failures, %d skipped (host page shift %u)\n", checks, failures, skipped,

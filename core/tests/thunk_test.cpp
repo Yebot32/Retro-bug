@@ -4,6 +4,10 @@
 // builds the guest's registers and stacked words by hand, as a guest caller leaves them at a host slot, calls a
 // real host function through `ThunkCaller::Call` with a signature string, and checks what the host function
 // received and what the guest gets back in r0/r1.
+#include <sys/syscall.h>
+#include <unistd.h>
+
+#include <cerrno>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -195,6 +199,39 @@ void pointers_are_translated_and_checked() {
   CHECK(seen.p[0] == m->Host(0x20000));
 }
 
+/// A host callee that reads guest bytes (a GL driver handed a shader string or a vertex array) must accept a
+/// page the memory model serves out of line: `Host` refuses that page by design, and the thunk layer used to
+/// refuse it too — the shape a 16 KiB host page gives every file-backed module page at a 4 KiB-aligned base.
+void out_of_line_pointer_args_are_dereferenceable() {
+  auto m = Window();
+  abi::HandleTable h;
+  std::string e;
+  int fd = -1;
+#if defined(SYS_memfd_create)
+  fd = static_cast<int>(syscall(SYS_memfd_create, "rb-thunk", 0u));
+#endif
+  if (fd < 0) {
+    std::printf("# no memfd (%s): out-of-line pointer argument not exercised\n", std::strerror(errno));
+    return;
+  }
+  const char text[] = "offscreen";
+  CHECK(::pwrite(fd, text, sizeof text, 0) == static_cast<ssize_t>(sizeof text));
+  // Guest 0x1000 with file offset 0 cannot be served in place: the granule base would need a negative file
+  // offset, so the page goes out of line on every host.
+  CHECK(m->MapFile(0x1000, mem::kGuestPage, mem::kRead, fd, 0, false, &e));
+  ::close(fd);
+  CHECK(m->IsMapped(0x1000));
+  CHECK(m->Host(0x1000) == nullptr);
+  exec::MachineState s = State(*m, {0x1000});
+  CHECK_CTX(abi::ThunkCaller::Call("i:p", reinterpret_cast<void*>(&strlen_of), s, *m, h, &e), e);
+  CHECK_CTX(s.r[0] == 8u, std::to_string(s.r[0]));
+  // The offset-or-pointer form resolves it the same way (or it would be passed as a buffer offset).
+  exec::MachineState o = State(*m, {0x1000});
+  seen = {};
+  CHECK_CTX(abi::ThunkCaller::Call("v:o", reinterpret_cast<void*>(&record_ptr), o, *m, h, &e), e);
+  CHECK(seen.p[0] != nullptr && std::strcmp(static_cast<const char*>(seen.p[0]), "offscreen") == 0);
+}
+
 void host_pointers_become_handles() {
   auto m = Window();
   abi::HandleTable h;
@@ -240,6 +277,7 @@ int main() {
   float_and_double_results_come_back_softfp();
   unsigned_is_zero_extended_signed_is_sign_extended();
   pointers_are_translated_and_checked();
+  out_of_line_pointer_args_are_dereferenceable();
   host_pointers_become_handles();
   a_bad_signature_is_refused_by_name();
   std::printf("%d checks, %d failures\n", checks, failures);

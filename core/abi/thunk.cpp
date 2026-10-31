@@ -116,13 +116,15 @@ bool ThunkCaller::Call(const char* spec, void* fn, exec::MachineState& s, const 
       case 'i': ints[ni] = static_cast<U>(static_cast<std::int64_t>(static_cast<std::int32_t>(w))); break;
       case 'u': ints[ni] = w; break;
       case 'p': {
-        void* host = w == 0 ? nullptr : mem.Host(w);
+        void* host = w == 0 ? nullptr : mem.HostForAccess(w);
         if (w != 0 && host == nullptr) return refuse("pointer argument " + Hex(w) + " is not guest memory");
         ints[ni] = reinterpret_cast<U>(host);
         break;
       }
       case 'o': {
-        void* host = w == 0 ? nullptr : mem.Host(w);
+        // A buffer bound in GLES1 makes the pointer an offset, not an address: anything the guest memory
+        // model can resolve is a pointer; anything else is left as the number the driver reads as one.
+        void* host = w == 0 ? nullptr : mem.HostForAccess(w);
         ints[ni] = host != nullptr ? reinterpret_cast<U>(host) : U{w};
         break;
       }
