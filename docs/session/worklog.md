@@ -1020,3 +1020,26 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
 - **Verified:** workflow `41178428090` green on Linux, macOS, iOS arm64 compile and IPA at `1873c2f`.
   IPA build 11, commit `1873c2f`, 2,080,719 bytes, SHA-256
   `b52bd428fc26eda1df3acce0e55ad0da984a2f1a0d46d94a111f29b728734062`.
+
+### 2026-10-31 — iOS S1v: both titles render; KitKat's menu stalls on a dying guest thread
+- Build 11 ran both titles for minutes without a host crash. **Blocky Roads drew its first real frame**:
+  `render: frame 1 spent 111143 ms in the guest`, then nine samples with distinct colours
+  (`4c1908`, `5d375c`, `f25f34`, `18252b`, `072025`, `01daf9`, `402e6c`, `df5c28`, `cd8d36`) — content,
+  not a clear colour. The 111 s is its 31 MB `data.xpk` parse under the interpreter.
+- **KitKat** rendered the LOADING screen (frame 1), then spent 100,970 ms in its second frame loading the
+  `default` group (24 sounds, `textures6.json`, a 2.1 MB atlas). It never logged
+  `[Resources] load complete - group: default`; from the moment that frame returned it renders **white**
+  at ~30 fps (frames 300–3000 sampled pure `ffffffff`) and logs **one guest SIGSEGV at `0x29` per frame**
+  — 3,088 lines in four minutes, no handler installed, so each one kills its thread. The host is healthy;
+  the guest is retrying something that faults every frame.
+- Neither title crashed; the user closed both. The stall monitor and slow-frame line added in build 11 did
+  exactly their job: they turned "looks frozen" into "100 s inside one guest call" and "still frame N".
+- Build 12 names the fault: the first occurrence of a (signal, address, pc) key logs the pc, ARM/Thumb
+  mode, guest tid and the faulting thread's stack words as module+offset, and repeats are counted (first
+  three, then every 300th) instead of printed. Thread spawns are sampled past the first eight instead of
+  capped, so a per-frame thread loop is visible.
+- **Verified:** workflow `41181395759` green on Linux, macOS, iOS arm64 compile and IPA at `940b57d`.
+  IPA build 12, commit `940b57d`, 2,082,652 bytes, SHA-256
+  `77789184ea002db11a25a65f64bda88e6fe9dfee3a227d56b69f63e9b8cbe3e5`.
+- **Next device log:** the KitKat fault line will carry `pc 0x…` and a `libdlgl.so+0x…` caller chain, which
+  maps into the engine's code; the spawn sampling says whether a thread is created per frame.
