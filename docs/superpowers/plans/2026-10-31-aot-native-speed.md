@@ -42,7 +42,7 @@ coverage, emission separability, packaging constraints). `docs/ios-notes.txt` §
 
 **Files:**
 - Modify: `external/dynarmic/src/dynarmic/backend/arm64/address_space.h`
-- Modify: `external/dynarmic/src/dynarmic/backend/arm64/emit_arm64_a32_coprocessor.cpp`
+- Modify: `external/dynarmic/src/dynarmic/backend/arm64/address_space.cpp`
 - Create: `patches/dynarmic/0008-aot-offline-emission.patch`
 - Modify: `patches/dynarmic/README.md`
 
@@ -94,14 +94,15 @@ EmittedBlockInfo AddressSpace::EmitForAot(IR::Block& ir_block, oaknut::CodeGener
 - [ ] **Step 3: Confirm the position-dependent sites are the two the ruling names.** `git grep -n
   "bit_cast<u64>\|reinterpret_cast<u64>" external/dynarmic/src/dynarmic/backend/arm64/emit_arm64*.cpp`,
   ignoring `a64_*` (the A32 front end never reaches it), `address_space`/prelude (not block emission) and
-  `emit_arm64_memory.cpp` (`FastmemPatchInfo.call_pc`, only with a page table, which the tool disables).
-  The result must be only the coprocessor and vector-FP fallback lines quoted in the ruling above; if
-  anything else appears, stop and report before proceeding — the tool's refusal list depends on it.
+  `emit_arm64_memory.cpp` (`FastmemPatchInfo.call_pc` — emitted whenever `conf.fastmem_pointer` is set,
+  independent of the page table, so the tool disables fastmem too). The result must be only the coprocessor
+  and vector-FP fallback lines quoted in the ruling above; if anything else appears, stop and report
+  before proceeding — the tool's refusal list depends on it.
 
 - [ ] **Step 4: Record the patch.**
 
 ```bash
-git -C external/dynarmic diff > patches/dynarmic/0008-aot-offline-emission.patch
+git -C external/dynarmic diff --relative > patches/dynarmic/0008-aot-offline-emission.patch
 git apply --check --reverse --directory=external/dynarmic patches/dynarmic/0008-aot-offline-emission.patch
 ```
 
@@ -265,13 +266,20 @@ class AotImage {                      // one per translated .so
 
 - [ ] **Step 3: Emit blocks from the tool.** In `tools/aotgen/emit.cpp`, for each `CodeMap` entry decode
   from its guest offset with `Dynarmic::A32::Translate(...)` + a `CodeReader` over the ELF's text bytes
-  (copy `core/isa/front_end.cpp`'s reader), call `EmitForAot`, append the bytes to one oaknut
-  `CodeGenerator` stream, and record:
+  (copy `core/isa/front_end.cpp`'s reader), call `A32AddressSpace::GenerateIR(descriptor)` then
+  `EmitForAot`, append the bytes to one oaknut `CodeGenerator` stream, and record:
   - the block's code offset for the entry table;
   - every `Relocation`: to the prelude (callback trampolines), to the dispatcher (block exits), and to the
     literal pool — emit symbolic fixups (`MOVW/MOVT` pairs) rather than numbers;
   - `BlockRelocation`s (cross-block `B`/`ADRL`) as links to the target block's entry once it is emitted;
     missing targets get a dispatcher stub.
+  **The tool's `A32::UserConfig` must not be the runtime's:** set `page_table = nullptr`,
+  `fastmem_pointer = std::nullopt` and `very_verbose_debugging_output = false` (with fastmem on, the memory
+  emitter records `FastmemPatchInfo.call_pc`, an absolute host address; with a page table on, blocks get
+  inline page-table accesses that a zero `Xpagetable` cannot serve). Keep the runtime's
+  `check_halt_on_memory_access`, `enable_cycle_counting` and little-endian settings so the block ABI and
+  tick accounting match. `EmitForAot` consumes the `IR::Block` (it moves from it), so read the block's
+  `Location()`/`EndLocation()` before emitting.
   Output `aot_<game>.S` (the code + tables) and `aot_<game>_table.cpp` (the `AotBlock[]` with guest
   offsets, flags and symbol names). The emitted `.S` is assembled by clang as part of the normal build.
 
