@@ -49,6 +49,10 @@ constexpr std::uint32_t kRArmRelative = 23;
 
 constexpr std::uint32_t kExidxCantUnwind = 1;
 
+/// No real section name comes close to this; the cap exists so a table whose strings never end cannot
+/// make one lookup allocate more than a name-sized string (see `SectionName`).
+constexpr std::size_t kMaxSectionName = 255;
+
 struct Section {
   std::string name;
   std::uint32_t type = 0;
@@ -158,10 +162,17 @@ std::string SectionName(const Image& img, const Section& shstr, std::uint32_t na
   const std::uint64_t end = static_cast<std::uint64_t>(shstr.offset) + shstr.size;
   if (begin >= end || end > img.bytes->size()) return {};
   const auto* base = img.bytes->data() + begin;
-  const std::size_t room = static_cast<std::size_t>(end - begin);
+  // A name is a NUL-terminated string and nothing else: without a terminator the table is damaged, so
+  // the answer is empty rather than "the rest of the table". That distinction is load-bearing — this
+  // reader is called once per section, so returning the remainder would allocate `shstr.size` bytes per
+  // header, and a crafted image with 65,535 headers is hundreds of GB. The window is also capped at the
+  // length no real section name reaches, so one overlong string cannot allocate the same way.
+  const std::size_t room =
+      std::min<std::size_t>(static_cast<std::size_t>(end - begin), kMaxSectionName + 1);
   const void* nul = std::memchr(base, '\0', room);
-  const std::size_t length = nul == nullptr ? room : static_cast<const std::uint8_t*>(nul) - base;
-  return std::string(reinterpret_cast<const char*>(base), length);
+  if (nul == nullptr) return {};
+  return std::string(reinterpret_cast<const char*>(base),
+                     static_cast<const std::uint8_t*>(nul) - base);
 }
 
 bool ParseImage(const std::vector<std::uint8_t>& elf, Image* img, std::string* err) {
@@ -212,7 +223,9 @@ bool ParseImage(const std::vector<std::uint8_t>& elf, Image* img, std::string* e
     Read32(*img, shoff + 24, &shstrndx);
   }
 
-  img->sections.reserve(shnum);
+  // No reserve(shnum): the count is a field from the file — up to 65,535, or 2^32 through extended
+  // numbering — and a `Section` carries a string, so reserving it pays up front for a table the check
+  // above only proved *fits*. Growth is geometric and costs nothing on the images this tool sees.
   for (std::uint32_t i = 0; i < shnum; ++i) {
     const std::uint64_t base = static_cast<std::uint64_t>(shoff) + i * shentsize;
     const auto* p = elf.data() + base;
@@ -287,7 +300,9 @@ bool ReadDynamic(const Image& img, Dynamic* dyn, std::string* err) {
   }
   if (size == 0) return true;
   if (!InBounds(img, offset, size)) return Fail(err, "truncated .dynamic");
-  for (std::uint32_t i = 0; i + 8 <= size; i += 8) {
+  // u64 induction: `size` is a field from the file, so `i + 8` in u32 would wrap near 4 GB and the
+  // reads past the last entry would be unchecked by the loop condition.
+  for (std::uint64_t i = 0; i + 8 <= size; i += 8) {
     std::uint32_t tag = 0;
     std::uint32_t value = 0;
     Read32(img, static_cast<std::uint64_t>(offset) + i, &tag);
@@ -308,6 +323,16 @@ bool AddressInText(const Image& img, std::uint32_t address) {
              static_cast<std::uint64_t>(img.text.addr) + img.text.size;
 }
 
+/// `size` ends up in the on-disk row's u16. A start that claims to run past the section is clipped: the
+/// emitter decodes inside `.text`, so a larger size would only invite a read past the buffer. Both a
+/// symbol's `st_size` and a trace's size go through here so the cap cannot be forgotten on one path.
+void WidenSize(const Image& img, std::uint32_t off, std::uint32_t size, CodeMapEntry* entry) {
+  if (size == 0) return;
+  const std::uint32_t capped =
+      std::min({size, static_cast<std::uint32_t>(0xffff), img.text.size - off});
+  if (capped > entry->size) entry->size = static_cast<std::uint16_t>(capped);
+}
+
 /// Merge one discovery. `arch_known` distinguishes "the caller saw a Thumb bit" from `.ARM.exidx`,
 /// whose prel31 target has no such bit: an exidx-only start defaults to Thumb (every function in these
 /// two corpora that exidx names but dynsym does not is Thumb), but it never overwrites an explicit ARM.
@@ -323,13 +348,7 @@ void AddStart(const Image& img, Merged* merged, std::uint32_t address, std::uint
   } else if ((entry.flags & (kThumb | kArm)) == 0) {
     entry.flags = kThumb;
   }
-  if (size != 0) {
-    // `size` is the on-disk row's u16. A symbol that claims to run past the section is clipped: the
-    // emitter decodes inside `.text`, so a larger size would only invite a read past the buffer.
-    const std::uint32_t capped =
-        std::min({size, static_cast<std::uint32_t>(0xffff), img.text.size - off});
-    if (capped > entry.size) entry.size = static_cast<std::uint16_t>(capped);
-  }
+  WidenSize(img, off, size, &entry);
 }
 
 bool AddSymbols(const Image& img, Merged* merged, std::string* err) {
@@ -360,36 +379,43 @@ bool AddSymbols(const Image& img, Merged* merged, std::string* err) {
   return true;
 }
 
+/// A constructor table is only walkable when it is non-empty *and* the file holds all of it. Every other
+/// state — no `DT_INIT_ARRAY`, no `DT_INIT_ARRAYSZ`, a size tag the file contradicts — is damage the
+/// section header can still describe, so the caller falls back rather than aborting.
+bool InitTableFits(const Image& img, std::uint32_t offset, std::uint32_t count) {
+  return count != 0 && InBounds(img, offset, static_cast<std::uint64_t>(count) * 4);
+}
+
 bool AddInit(const Image& img, const Dynamic& dyn, Merged* merged, std::string* err) {
   if (dyn.init != 0) AddStart(img, merged, dyn.init, kFromInit, true, (dyn.init & 1u) != 0, 0);
 
   std::uint32_t array_offset = 0;
   std::uint32_t count = 0;
   if (dyn.init_array != 0) {
-    const std::optional<std::uint32_t> mapped = FileOffset(img, dyn.init_array);
-    if (mapped.has_value()) {
+    if (const std::optional<std::uint32_t> mapped = FileOffset(img, dyn.init_array);
+        mapped.has_value()) {
       array_offset = *mapped;
       count = dyn.init_array_size / 4;
     }
   }
-  if (array_offset == 0) {
-    // A malformed or missing DT_INIT_ARRAYSZ is common in old packed images; the section header still
-    // names the same table, so use it rather than silently dropping every constructor.
+  if (!InitTableFits(img, array_offset, count)) {
+    // A missing or zero DT_INIT_ARRAYSZ, and a size that runs past the file, are both common in old
+    // packed images; the section header names the same table, so use it rather than silently dropping
+    // every constructor (or refusing the image over a tag the section survives).
     if (const Section* array = FindSection(img, ".init_array"); array != nullptr) {
       array_offset = array->offset;
       count = array->size / 4;
     }
   }
-  if (array_offset != 0 && count != 0) {
-    if (!InBounds(img, array_offset, static_cast<std::uint64_t>(count) * 4)) {
-      return Fail(err, "truncated .init_array");
-    }
-    for (std::uint32_t i = 0; i < count; ++i) {
-      std::uint32_t value = 0;
-      if (!Read32(img, static_cast<std::uint64_t>(array_offset) + i * 4, &value)) break;
-      if (value == 0) continue;
-      AddStart(img, merged, value, kFromInit, true, (value & 1u) != 0, 0);
-    }
+  if (count == 0) return true;
+  if (!InBounds(img, array_offset, static_cast<std::uint64_t>(count) * 4)) {
+    return Fail(err, "truncated .init_array");
+  }
+  for (std::uint32_t i = 0; i < count; ++i) {
+    std::uint32_t value = 0;
+    if (!Read32(img, static_cast<std::uint64_t>(array_offset) + i * 4, &value)) break;
+    if (value == 0) continue;
+    AddStart(img, merged, value, kFromInit, true, (value & 1u) != 0, 0);
   }
   return true;
 }
@@ -491,11 +517,13 @@ bool AddExidx(const Image& img, Merged* merged, std::string* err) {
 /// not symbols and not separate exidx entries, but a call can land on them, so they are starts too.
 void AddVeneers(const Image& img, Merged* merged) {
   const std::uint8_t* text = img.bytes->data() + img.text.offset;
-  const std::uint32_t length = img.text.size;
+  // u64 induction, as in the dynamic walk: `.text` is a u32 from the file, so `i + 12` in u32 would
+  // wrap on an image that claims ~4 GB of code and read past the buffer instead of stopping.
+  const std::uint64_t length = img.text.size;
 
   // Thumb: movw r12,#lo; movt r12,#hi; add r12,pc; bx r12 (12 bytes). The immediate is deliberately
   // not decoded — the stub's *own* address is the start; its target is usually a .plt slot outside .text.
-  for (std::uint32_t i = 0; i + 12 <= length; i += 2) {
+  for (std::uint64_t i = 0; i + 12 <= length; i += 2) {
     const std::uint16_t h0 = Le16(text + i);
     const std::uint16_t h1 = Le16(text + i + 2);
     const std::uint16_t h2 = Le16(text + i + 4);
@@ -503,36 +531,48 @@ void AddVeneers(const Image& img, Merged* merged) {
     if ((h0 & 0xfbf0u) != 0xf240u || ((h1 >> 8) & 0x0fu) != 12u) continue;
     if ((h2 & 0xfbf0u) != 0xf2c0u || ((h3 >> 8) & 0x0fu) != 12u) continue;
     if (Le16(text + i + 8) != 0x44fcu || Le16(text + i + 10) != 0x4760u) continue;
-    AddStart(img, merged, img.text.addr + i, kFromVeneer, true, true, 0);
+    AddStart(img, merged, img.text.addr + static_cast<std::uint32_t>(i), kFromVeneer, true, true, 0);
   }
 
   // ARM: ldr r12,[pc,#8]; add r12,pc,r12; <one word>; bx r12; .word (20 bytes). The third word is the
   // usual `sub r0,r0,#8` stack adjustment and differs between call sites, so it is not constrained.
-  for (std::uint32_t i = 0; i + 20 <= length; i += 4) {
+  for (std::uint64_t i = 0; i + 20 <= length; i += 4) {
     if (Le32(text + i) != 0xe59fc008u || Le32(text + i + 4) != 0xe08fc00cu) continue;
     if (Le32(text + i + 12) != 0xe12fff1cu) continue;
-    AddStart(img, merged, img.text.addr + i, kFromVeneer, true, false, 0);
+    AddStart(img, merged, img.text.addr + static_cast<std::uint32_t>(i), kFromVeneer, true, false, 0);
   }
 
   // The four-word variant: ldr r12,[pc,#4]; add r12,pc,r12; bx r12; .word. Both end-of-text stubs in
   // libdlgl are this shape, which is why the scan is separate rather than a shorter copy of the loop.
-  for (std::uint32_t i = 0; i + 16 <= length; i += 4) {
+  for (std::uint64_t i = 0; i + 16 <= length; i += 4) {
     if (Le32(text + i) != 0xe59fc004u || Le32(text + i + 4) != 0xe08fc00cu) continue;
     if (Le32(text + i + 8) != 0xe12fff1cu) continue;
-    AddStart(img, merged, img.text.addr + i, kFromVeneer, true, false, 0);
+    AddStart(img, merged, img.text.addr + static_cast<std::uint32_t>(i), kFromVeneer, true, false, 0);
   }
 }
 
+/// A trace is written by a different producer (AOT task 4), so the map's invariants are re-established
+/// here rather than trusted: `off` is a text-relative (even) file offset inside `.text`, `flags` carries
+/// exactly one ISA bit, and `size` obeys the same 0xffff / end-of-`.text` clamp as a symbol.
 void MergeTrace(const Image& img, const CodeMap* trace, Merged* merged) {
   if (trace == nullptr) return;
   for (const CodeMapEntry& source : trace->entries) {
-    if (source.off >= img.text.size) continue;
-    CodeMapEntry& entry = (*merged)[source.off];
-    entry.off = source.off;
+    // The Thumb bit never survives into the map's unit: `off` is `(vaddr & ~1) - text_vaddr`. A producer
+    // that left the bit in is masked rather than dropped, since the start it names is still real.
+    const std::uint32_t off = source.off & ~1u;
+    if (off >= img.text.size) continue;
+    CodeMapEntry& entry = (*merged)[off];
+    entry.off = off;
     entry.sources |= kFromTrace;
-    if (source.size > entry.size) entry.size = source.size;
+    WidenSize(img, off, source.size, &entry);
     const std::uint8_t arch = source.flags & (kThumb | kArm);
-    if (arch == kThumb || arch == kArm) entry.flags = arch;
+    if (arch == kThumb || arch == kArm) {
+      entry.flags = arch;
+    } else if ((entry.flags & (kThumb | kArm)) == 0) {
+      // Same default as an exidx-only start: a trace without an ISA still names a Thumb start, and every
+      // entry must carry exactly one ISA bit.
+      entry.flags = kThumb;
+    }
   }
 }
 
