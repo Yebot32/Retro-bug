@@ -146,6 +146,10 @@ struct RbIosSession {
   bool booted = false;  ///< render thread only
 
   std::thread render;
+  /// Logs a stall when the frame counter stops advancing while the session says it is running: the render
+  /// thread can be inside one long guest call (a texture atlas decode, a 31 MB pack parse), and without
+  /// this line a slow load and a dead process look the same in the log.
+  std::thread monitor;
   std::atomic<bool> running{false};
   std::atomic<bool> want_run{true};  ///< false while the app is in the background
   std::atomic<int> frames{0};
@@ -393,6 +397,7 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
   }
   // A previous thread may have exited on an error without anyone joining it; assigning over a joinable
   // std::thread terminates the process.
+  if (s->monitor.joinable()) s->monitor.join();
   if (s->render.joinable()) s->render.join();
   {
     std::lock_guard<std::mutex> lk(s->mu);
@@ -407,6 +412,20 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
   s->width = width;
   s->height = height;
   s->running.store(true);
+
+  s->monitor = std::thread([s] {
+    int last = -1;
+    while (s->running.load()) {
+      for (int i = 0; i < 20 && s->running.load(); ++i) {  // leaves within 250 ms of a stop
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+      }
+      if (!s->running.load()) break;
+      if (!s->want_run.load()) continue;  // paused by the app, not stalled
+      const int now = s->frames.load();
+      if (now == last) s->Log("stall: still frame " + std::to_string(now) + " after 5 s");
+      last = now;
+    }
+  });
 
   s->render = std::thread([s, layer] {
     rb::platform::ios::EglShim& egl = rb::platform::ios::EglShim::Instance();
@@ -477,12 +496,21 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
             default: s->game->TouchCancel(t.id, t.x, t.y); break;
           }
         }
+        const auto render_start = std::chrono::steady_clock::now();
         const bool rendered = s->dlgl ? s->dlgl->Render(&why) : s->game->Render(&why);
+        const auto render_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::steady_clock::now() - render_start).count();
         if (!rendered) {
           s->Fail(std::string{s->dlgl ? "dlxDraw" : "nativeRender"} + ": " + why);
           break;
         }
         const int next_frame = s->frames.load() + 1;
+        if (render_ms >= 2000) {
+          // A synchronous load inside the guest render call: the line names how long it took, so a long
+          // first frame is distinguishable from a stall the monitor reports while it is still running.
+          s->Log("render: frame " + std::to_string(next_frame) + " spent " + std::to_string(render_ms) +
+                 " ms in the guest");
+        }
         if (next_frame == 1 || next_frame == 10 || next_frame == 60 || next_frame == 300) {
           std::string pixels;
           egl.SamplePixels(&pixels);
@@ -493,6 +521,9 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
           break;
         }
         ++s->frames;
+        // A cheap heartbeat past the sampled frames: it dates the log during a long run without a pixel
+        // readback every time (~1 line per 10 s at 30 fps).
+        if (next_frame > 300 && next_frame % 300 == 0) s->Log("frame " + std::to_string(next_frame));
         // No sleep: the engine paces itself (Cocos's onDrawFrame interval, DLGE's own frame timing); a
         // second 16 ms here would halve the frame rate. The swap is the present.
         std::this_thread::yield();
@@ -511,6 +542,7 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
 extern "C" void rb_ios_stop(RbIosSession* s) {
   if (s == nullptr) return;
   s->running.store(false);
+  if (s->monitor.joinable()) s->monitor.join();
   if (s->render.joinable()) s->render.join();
 }
 
