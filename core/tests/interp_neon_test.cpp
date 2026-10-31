@@ -125,7 +125,7 @@ void vshl_i32_shifts_each_lane_left() {
 void vshl_i32_shift_amount_masks_the_lane() {
   Rig rig = build();
   if (!rig.ok) return;
-  const std::uint8_t program[] = {0xef, 0xff, 0x12, 0x05, 0x70, 0x47};
+  const std::uint8_t program[] = {0xff, 0xef, 0x12, 0x05, 0x70, 0x47};
   exec::MachineState in{};
   in.d[2] = 0x0000'0003'0000'0001ull;
   const exec::RunResult rr = Run(rig, program, sizeof program, in);
