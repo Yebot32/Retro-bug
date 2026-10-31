@@ -1166,3 +1166,21 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
   times slower than translated native code, which is what Tier J is on Android. The lever left is
   throughput: 3.6x so far from dense value slots, next a pre-decoded operand/micro-op layer if the profile
   says the interpreter loop (not the guest algorithm) dominates, plus cheaper host-call round trips.
+
+### 2026-10-31 — iOS S2b: an optional JIT, with a red/green indicator
+- The library now carries a **JIT indicator**: green when this build can map executable memory, red when it
+  cannot. The probe is the exact permission the code cache needs — an anonymous `PROT_READ|PROT_EXEC` map,
+  which is what oaknut's iOS path allocates — so a build that merely claims JIT support still reads red.
+- A persisted switch ("Use JIT when available", on by default) decides whether games use it. The session
+  tries Tier J first when the probe passes and the switch is on; if the JIT cannot start, the reason is
+  logged and the boot **retries on Tier I**, so a game always starts. JIT is never forced, and switching it
+  off is a one-way opt-out (`rb_ios_set_jit_enabled`), read at the next session.
+- New C surface: `rb_ios_jit_available()` (probe, cached), `rb_ios_set_jit_enabled()`,
+  `rb_ios_session_jit()` (the tier a session actually booted on). The log names the tier too:
+  `jit: guest code runs on Tier J (JIT)` or `… Tier I (interpreter)`, plus the reason when J was refused.
+- Note for diagnostics: Dynarmic's arm64 back end installs a **Mach exception port** for `EXC_BAD_ACCESS`
+  when a JIT is constructed, so on a JIT session a host bad-access fault is the driver's to report rather
+  than the app's `signal` handler. Tier I sessions keep the full crash log.
+- **Verified:** workflow `41200595797` green on Linux, macOS, iOS arm64 compile and IPA (the Swift target
+  compiled too). IPA build 19, commit `f7f6d1b`, 2,187,001 bytes, SHA-256
+  `58e6699ebbbc5a884f3b2481a492c17f71d98be5791d9d7020b2544e3ec285c5`.
