@@ -224,8 +224,15 @@ std::uint64_t Inbound::Dispatch(const InboundTarget& t, const CapturedArgs& a) {
       on_exit_(static_cast<int>(p_.abi().exit_status()));
     }
     // Where the guest was: without it a fault inside a game's library names no instruction to look at.
-    Fail(t, std::string{ReasonText(rr.reason)} + (rr.detail.empty() ? "" : ": " + rr.detail) +
-                (rr.reason == exec::StopReason::Exited ? "" : Registers(p_, last) + StackWords(p_, last)));
+    const std::string why =
+        std::string{ReasonText(rr.reason)} + (rr.detail.empty() ? "" : ": " + rr.detail) +
+        (rr.reason == exec::StopReason::Exited ? "" : Registers(p_, last) + StackWords(p_, last));
+    if (rr.reason != exec::StopReason::Exited) {
+      // The full report besides the one line: every thread, the module map and the platform's ring.
+      p_.LogFaultReport("native:" + t.name + ":" + ReasonText(rr.reason),
+                        rb::runtime::CurrentGuestThread(), why);
+    }
+    Fail(t, why);
     return 0;
   }
   fwd_.SyncShadows();  // the guest's writes to a shadowed direct buffer reach Java before it reads them

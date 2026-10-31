@@ -663,6 +663,24 @@ void host_for_access_answers_out_of_line_pages() {
   CHECK(gm->HostForAccess(0x1004) == nullptr);
 }
 
+/// The fault report's memory map: contiguous mapped pages coalesce into one run, a hole splits runs, and an
+/// unmap shrinks the map — the line a reader checks a faulting pointer against.
+void mapped_ranges_coalesce() {
+  auto gm = make(12);
+  if (!gm) return;
+  std::string err;
+  CHECK(gm->Map(0x1000, 0x2000, kRead | kWrite, &err));
+  CHECK(gm->Map(0x4000, kGuestPage, kRead, &err));
+  auto r = gm->MappedRanges();
+  CHECK_CTX(r.size() == 2, std::to_string(r.size()));
+  CHECK(r.size() == 2 && r[0].first == 0x1000 && r[0].second == 0x3000);
+  CHECK(r.size() == 2 && r[1].first == 0x4000 && r[1].second == 0x5000);
+  CHECK(gm->Unmap(0x1000, 0x2000, &err));
+  r = gm->MappedRanges();
+  CHECK_CTX(r.size() == 1, std::to_string(r.size()));
+  CHECK(!r.empty() && r[0].first == 0x4000 && r[0].second == 0x5000);
+}
+
 // ------------------------------------------------------- refusals
 
 void zero_length_and_permissionless_requests_are_refused() {
@@ -730,6 +748,7 @@ int main() {
   RUN(shared_file_mapping_succeeds_and_stays_shared);
   RUN(a_file_in_a_granule_with_unmapped_leading_pages_reads_its_own_offset);
   RUN(host_for_access_answers_out_of_line_pages);
+  RUN(mapped_ranges_coalesce);
   RUN(zero_length_and_permissionless_requests_are_refused);
 
   std::printf("%d checks, %d failures, %d skipped (host page shift %u)\n", checks, failures, skipped,

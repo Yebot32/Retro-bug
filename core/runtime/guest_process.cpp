@@ -1018,19 +1018,90 @@ void GuestProcess::LogUnhandledFault(const char* sig_name, std::uint32_t addr, c
   const bool thumb = (thread.state.cpsr & (1u << 5)) != 0;  // CPSR.T: the pc names a Thumb encoding
   char key[96];
   std::snprintf(key, sizeof key, "%s:%08x:%08x", sig_name, addr, pc);
+  Log("signals: " + std::string{sig_name} + " at " + Hex(addr) + " not delivered — no handler; pc " + Hex(pc) +
+      (thumb ? " thumb" : " arm") + " tid " + std::to_string(thread.tid));
+  LogFaultReport(key, &thread,
+                 std::string{sig_name} + " at " + Hex(addr) + ", pc " + Hex(pc) + (thumb ? " thumb" : " arm") +
+                     ", tid " + std::to_string(thread.tid) + ", no handler");
+}
+
+void GuestProcess::LogFaultReport(const std::string& key, const GuestThread* faulted, const std::string& why) {
   unsigned count = 0;
+  bool full = false;
   {
     std::lock_guard<std::mutex> lk(fault_mu_);
     count = ++fault_counts_[key];
+    const auto now = std::chrono::steady_clock::now();
+    if (count <= 3 || fault_report_at_.time_since_epoch().count() == 0 ||
+        now - fault_report_at_ >= std::chrono::seconds(5)) {
+      full = true;
+      fault_report_at_ = now;
+    }
   }
-  if (count == 1) {
-    Log("signals: " + std::string{sig_name} + " at " + Hex(addr) + " not delivered — no handler; pc " + Hex(pc) +
-        (thumb ? " thumb" : " arm") + " tid " + std::to_string(thread.tid) + " stack: " +
-        StackWords(thread.state.r[13], 512, 10));
-  } else if (count <= 3 || count % 300 == 0) {
-    Log("signals: " + std::string{sig_name} + " at " + Hex(addr) + " (pc " + Hex(pc) + ") still faulting — " +
-        std::to_string(count) + " time(s)");
+  if (!full) return;
+
+  Log("=== guest fault report #" + std::to_string(count) + ": " + why);
+  if (faulted != nullptr) {
+    std::string regs = "fault thread tid " + std::to_string(faulted->tid) + ":";
+    for (unsigned i = 0; i < 13; ++i) regs += " r" + std::to_string(i) + "=" + Hex(faulted->state.r[i]);
+    regs += " sp=" + Hex(faulted->state.r[13]) + " lr=" + Hex(faulted->state.r[14]) +
+            " pc=" + Hex(faulted->state.pc) + " cpsr=" + Hex(faulted->state.cpsr);
+    Log(regs);
+    // 2 KiB of stack, 40 module-shaped words: the call chain that reached the fault, not just its site.
+    const std::string chain = StackWords(faulted->state.r[13], 2048, 40);
+    Log("fault stack: " + (chain.empty() ? std::string{"(no module-shaped words)"} : chain));
+    // The bytes around the pc, so the instruction decodes offline against the module's own symbols.
+    const std::uint32_t from = faulted->state.pc >= 8 ? faulted->state.pc - 8 : 0;
+    std::uint8_t bytes[24] = {};
+    if (mem_->Read(from, bytes, sizeof bytes)) {
+      std::string hex;
+      for (unsigned i = 0; i < sizeof bytes; ++i) {
+        char b[4];
+        std::snprintf(b, sizeof b, "%02x", bytes[i]);
+        hex += b;
+      }
+      Log("fault pc bytes from " + Hex(from) + ": " + hex);
+    }
+    // The top of the guest stack as raw words: arguments and locals a stack scan at module addresses skips.
+    std::uint32_t raw[32] = {};
+    if (mem_->Read(faulted->state.r[13], raw, sizeof raw)) {
+      std::string line = "fault sp words:";
+      for (unsigned k = 0; k < 32; ++k) line += " " + Hex(raw[k]);
+      Log(line);
+    }
+    // A pointer the engine dereferenced is usually in a register; show the words at each mapped one.
+    for (unsigned i = 0; i < 13; ++i) {
+      const std::uint32_t v = faulted->state.r[i];
+      if (v == 0 || !mem_->IsMapped(v)) continue;
+      std::uint32_t words[8] = {};
+      if (!mem_->Read(v, words, sizeof words)) continue;
+      std::string line = "  r" + std::to_string(i) + " " + Hex(v) + " ->";
+      for (unsigned k = 0; k < 8; ++k) line += " " + Hex(words[k]);
+      Log(line);
+    }
   }
+  for (const std::string& line : StallReport()) Log("thread: " + line);
+  for (const auto& m : modules_) {
+    if (m == nullptr) continue;
+    Log("module: " + (m->soname.empty() ? m->path : m->soname) + " base " + Hex(m->base) + " extent " +
+        Hex(m->extent) + " data " + Hex(m->data_start) + ".." + Hex(m->data_end));
+  }
+  {
+    const auto ranges = mem_->MappedRanges();
+    std::string line = "mapped ranges:";
+    for (const auto& [start, end] : ranges) {
+      line += " " + Hex(start) + "-" + Hex(end);
+    }
+    Log(line);
+  }
+  {
+    std::lock_guard<std::mutex> lk(threads_mu_);
+    for (const std::string& line : thread_faults_) Log("stopped earlier: " + line);
+  }
+  if (fault_suffix_) {
+    for (const std::string& line : fault_suffix_()) Log(line);
+  }
+  Log("=== end of guest fault report");
 }
 
 std::string GuestProcess::StackWords(GuestAddr sp, std::size_t bytes, std::size_t max_frames) const {

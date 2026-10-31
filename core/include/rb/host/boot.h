@@ -70,6 +70,9 @@ struct BootConfig {
   std::function<std::string()> frame_stats;
   /// A guest native called exit(). The default logs the line and exits the process.
   std::function<void(int status)> on_guest_exit;
+  /// Extra lines for a guest fault report: the platform's host-call ring, GL/EGL and pending-exception state.
+  /// Called on the faulting guest thread with the GGL held; a report path, not control flow.
+  std::function<std::vector<std::string>()> fault_state;
   /// Start the liveness supervisor (a stall dump every 10 s with no guest instruction retired).
   bool monitor = true;
   /// Build the JIT object. False on iOS: the backend allocates executable memory, which the platform

@@ -201,11 +201,20 @@ class GuestProcess {
   /// Names the module-shaped words in the first `bytes` above `sp` (a scan, not an unwind), at most
   /// `max_frames`. The stall report uses it, and a SIGABRT delivery logs it to name an abort's caller.
   [[nodiscard]] std::string StackWords(GuestAddr sp, std::size_t bytes, std::size_t max_frames = 12) const;
-  /// A guest fault with no handler installed. The first occurrence of a (signal, address, pc) key names where
-  /// it happened — pc, mode, tid — and scans the faulting thread's stack for module-shaped words, because the
-  /// pc alone does not say who called into it. Repeats are counted rather than printed: a title that faults
-  /// once per frame otherwise buries the log (3,088 lines in four minutes) with the one line that matters.
+  /// A guest fault with no handler installed. Names the fault and, through `LogFaultReport`, prints the full
+  /// state a fault needs to be understood without a second run.
   void LogUnhandledFault(const char* sig_name, std::uint32_t addr, const GuestThread& thread);
+
+  /// Everything a guest fault needs to be understood from one log: the faulting thread's whole register set,
+  /// a 2 KiB stack scan as module+offset, the bytes around the pc, every guest thread's pc/lr/sp/wait state,
+  /// the module map and the threads that stopped earlier. The platform appends its own state through
+  /// `set_fault_suffix` (host-call ring, GL/EGL). `key` throttles: the first three occurrences and one report
+  /// every five seconds are printed in full, the rest stay a one-line summary from the caller.
+  void LogFaultReport(const std::string& key, const GuestThread* faulted, const std::string& why);
+
+  /// Lines the platform adds to a fault report: its host-call ring, context version, pending exceptions.
+  /// Called on the faulting guest thread with the GGL held; it is a report path, not control flow.
+  void set_fault_suffix(std::function<std::vector<std::string>()> suffix) { fault_suffix_ = std::move(suffix); }
   /// The budget one `RunThread` turn of a `clone`d thread gets (it is re-entered until the thread exits).
   static constexpr unsigned kThreadTurnBudget = 1u << 30;
 
@@ -299,7 +308,9 @@ class GuestProcess {
   std::vector<std::string> thread_faults_;
   std::atomic<std::size_t> threads_started_{0};
   mutable std::mutex fault_mu_;
-  std::map<std::string, unsigned> fault_counts_;  ///< "signal:address:pc" -> occurrences (log throttling)
+  std::map<std::string, unsigned> fault_counts_;  ///< fault key -> occurrences (log throttling)
+  std::chrono::steady_clock::time_point fault_report_at_{};  ///< last full report (at most one per 5 s)
+  std::function<std::vector<std::string>()> fault_suffix_;
   /// Adopted threads (GGL-protected). Their host threads' exit hooks reach this process through `alive_`, which
   /// the destructor clears (under its mutex, after the group exit) so a hook never runs on a destroyed process.
   std::list<std::unique_ptr<GuestThread>> adopted_;

@@ -169,6 +169,24 @@ std::size_t GuestMemory::mapped_page_count() const {
   return n;
 }
 
+std::vector<std::pair<std::uint32_t, std::uint32_t>> GuestMemory::MappedRanges() const {
+  std::vector<std::pair<std::uint32_t, std::uint32_t>> out;
+  std::size_t start = 0;
+  bool in = false;
+  for (std::size_t i = 0; i <= pages_.size(); ++i) {
+    const bool live = i < pages_.size() && pages_[i].mapped;
+    if (live && !in) {
+      start = i;
+      in = true;
+    } else if (!live && in) {
+      out.emplace_back(static_cast<std::uint32_t>(start << kGuestPageShift),
+                       static_cast<std::uint32_t>(i << kGuestPageShift));
+      in = false;
+    }
+  }
+  return out;
+}
+
 void GuestMemory::DropPage(std::size_t page_idx) {
   Page& p = pages_[page_idx];
   if (!p.backing) return;

@@ -124,6 +124,9 @@ class GuestMemory {
   unsigned host_page_shift() const { return host_page_shift_; }
   std::size_t out_of_line_page_count() const { return out_of_line_.size(); }
   std::size_t mapped_page_count() const;
+  /// The mapped guest address ranges, coalesced with their protection bits — for a fault report, where every
+  /// pointer in a register can be checked against the map at a glance. One pair per contiguous run.
+  std::vector<std::pair<std::uint32_t, std::uint32_t>> MappedRanges() const;
 
   /// Walks the page table and reports named invariants into the self-audit: every live page backed,
   /// and backed in one of the two legal ways (the window itself, or an out-of-line block); guards and

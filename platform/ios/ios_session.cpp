@@ -304,6 +304,22 @@ bool RbIosSession::Boot(std::string* err) {
   cfg.resolve_host = [self](const std::string& name) -> std::optional<rb::exec::GuestAddr> {
     return self->host ? self->host->Resolve(name) : std::nullopt;
   };
+  // What only this layer knows when the guest faults: the GL context version and the host calls that led
+  // to it. The runtime prints every thread, register and module beside these.
+  cfg.fault_state = [self] {
+    std::vector<std::string> lines;
+    lines.push_back("egl: context version " +
+                    std::to_string(rb::platform::ios::EglShim::Instance().context_version()));
+    if (self->java != nullptr) {
+      const std::string pending = self->java->PendingClass();
+      if (!pending.empty()) lines.push_back("java: pending exception " + pending);
+    }
+    if (self->host) {
+      std::vector<std::string> calls = self->host->RecentCallLines();
+      lines.insert(lines.end(), calls.begin(), calls.end());
+    }
+    return lines;
+  };
   cfg.on_bridge = [self](rb::host::Boot& boot, rb::runtime::GuestProcess& process) {
     self->host = std::make_unique<rb::platform::ios::IosHost>(
         process, boot, [self](const std::string& line) { self->Log(line); });
@@ -422,7 +438,17 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
       if (!s->running.load()) break;
       if (!s->want_run.load()) continue;  // paused by the app, not stalled
       const int now = s->frames.load();
-      if (now == last) s->Log("stall: still frame " + std::to_string(now) + " after 5 s");
+      if (now == last) {
+        s->Log("stall: still frame " + std::to_string(now) + " after 5 s");
+        // The full report with no faulting thread: every thread's pc/lr/sp and stack while the frame is
+        // stuck, so a slow load names the code it is inside instead of only the frame number. Read without
+        // the GGL, as the stall supervisor does: a monitor must never block behind a guest that is itself
+        // the thing being reported.
+        if (s->boot != nullptr && s->boot->process() != nullptr) {
+          s->boot->process()->LogFaultReport("stall:" + std::to_string(now), nullptr,
+                                             "frame " + std::to_string(now) + " has not advanced for 5 s");
+        }
+      }
       last = now;
     }
   });

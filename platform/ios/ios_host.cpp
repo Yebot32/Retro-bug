@@ -624,6 +624,21 @@ std::optional<std::uint32_t> IosHost::Resolve(const std::string& name) {
   return p_.abi().SlotFor(index);
 }
 
+std::vector<std::string> IosHost::RecentCallLines() const {
+  std::vector<std::string> out;
+  const std::uint32_t written = recent_calls_written();
+  const std::uint32_t count = written < kRecentCalls ? written : kRecentCalls;
+  char line[192];
+  for (std::uint32_t i = 0; i < count; ++i) {
+    const std::uint32_t slot = (written - count + i) % kRecentCalls;
+    const RecentHostCall& call = recent_calls()[slot];
+    std::snprintf(line, sizeof line, "host call: %s 0x%08x 0x%08x 0x%08x 0x%08x",
+                  call.name != nullptr ? call.name : "?", call.arg[0], call.arg[1], call.arg[2], call.arg[3]);
+    out.emplace_back(line);
+  }
+  return out;
+}
+
 std::uint32_t IosHost::GuestString(const std::string& key, const std::string& text) {
   if (const auto it = strings_.find(key); it != strings_.end()) return it->second;
   std::string e;

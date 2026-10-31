@@ -87,6 +87,8 @@ class IosHost {
   static constexpr std::uint32_t kRecentCalls = 256;
   const std::array<RecentHostCall, kRecentCalls>& recent_calls() const { return recent_; }
   std::uint32_t recent_calls_written() const { return recent_next_.load(std::memory_order_relaxed); }
+  /// The ring as "host call: name r0 r1 r2 r3" lines, oldest first — for the guest fault report.
+  std::vector<std::string> RecentCallLines() const;
 
  private:
   static void* HostSymbol(const std::string& name);
