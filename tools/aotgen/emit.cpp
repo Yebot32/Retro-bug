@@ -205,19 +205,6 @@ enum class Refusal {
   UnsupportedRelocation,
 };
 
-const char* RefusalName(Refusal r) {
-  switch (r) {
-    case Refusal::None: return "none";
-    case Refusal::Coprocessor: return "coprocessor";
-    case Refusal::VectorFallback: return "vector-fp fallback";
-    case Refusal::Interpret: return "untranslated encoding";
-    case Refusal::OutOfRange: return "outside .text";
-    case Refusal::LocationDescriptor: return "non-default IT/FPSCR descriptor";
-    case Refusal::UnsupportedRelocation: return "unsupported relocation target";
-  }
-  return "?";
-}
-
 constexpr std::size_t kRefusalKinds = 7;
 
 struct BlockRecord {
@@ -885,10 +872,17 @@ struct Emitter {
         auto target_key = std::make_pair(target_off, static_cast<std::uint8_t>(
                                                            target.TFlag() ? kThumb : kArm));
         const auto target_block = by_key.find(target_key);
+        // `by_key` is (offset, ISA); a location descriptor also carries IT and the FPSCR mode. A block
+        // emitted for the default descriptor (IT=0, round-to-nearest) must not be entered through an
+        // IT leg or under another rounding mode: the emitted instructions are not predicated and its
+        // FP immediates were folded for the default FPCR. Such a target is treated exactly like a
+        // missing block, so the dispatcher's descriptor check owns the decision at run time.
+        const bool linked =
+            target_block != by_key.end() && blocks[target_block->second].desc == target_desc;
         for (const auto& br : list) {
           const std::ptrdiff_t at = rec.entry + br.code_offset;
           if (br.type == Backend::BlockRelocationType::Branch) {
-            if (target_block != by_key.end()) {
+            if (linked) {
               const std::uint32_t word = EncodeBranch(at, blocks[target_block->second].entry, false);
               if (word == 0) {
                 *err = "block branch out of range at " + std::to_string(at);
@@ -900,8 +894,8 @@ struct Emitter {
             }
           } else {
             const std::string symbol =
-                target_block != by_key.end() ? offset_label.at(blocks[target_block->second].entry)
-                                             : offset_label.at(prelude.return_to_dispatcher);
+                linked ? offset_label.at(blocks[target_block->second].entry)
+                       : offset_label.at(prelude.return_to_dispatcher);
             if (!add_fixup(at, {"adrp x17, " + symbol, "add x17, x17, :lo12:" + symbol})) return false;
           }
         }

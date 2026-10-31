@@ -300,7 +300,7 @@ void non_default_descriptors_fall_back() {
             "it_probe's entry has no emitted block, so this case would not test the descriptor");
   if (rig.aot->image().Resolve(it->addr - text_base, it->thumb) == nullptr) return;
 
-  const auto run_both = [&](const exec::MachineState& start, const char* what) {
+  const auto run_both = [&](const exec::MachineState& start, std::int32_t expected, const char* what) {
     exec::MachineState si = start;
     exec::MachineState sj = start;
     const std::size_t before = rig.aot->fallback_count();
@@ -308,9 +308,9 @@ void non_default_descriptors_fall_back() {
     const exec::RunResult rj = rig.aot->Run(sj, 8'000'000);
     CHECK_CTX(ri.reason == exec::StopReason::Returned, std::string{what} + " (Tier I) did not return");
     CHECK_CTX(rj.reason == exec::StopReason::Returned, std::string{what} + " (AOT) did not return");
-    CHECK_CTX(static_cast<std::int32_t>(si.r[0]) == 1008,
+    CHECK_CTX(static_cast<std::int32_t>(si.r[0]) == expected,
               std::string{what} + ": Tier I answered " + std::to_string(static_cast<std::int32_t>(si.r[0])) +
-                  ", the predicated result is 1008");
+                  ", the expected result is " + std::to_string(expected));
     CHECK_CTX(sj.r[0] == si.r[0], std::string{what} + ": AOT " + Hex(sj.r[0]) + " != Tier I " +
                                           Hex(si.r[0]));
     const std::string diff = StateDiff(si, sj);
@@ -326,16 +326,21 @@ void non_default_descriptors_fall_back() {
     start.r[3] = 7;
     start.cpsr = exec::CpsrWithIt(start.cpsr, 0xb8) | (1u << 30);  // IT LT; Z set
     start.itstate = 0xb8;
-    run_both(start, "it_probe with a live IT state");
+    run_both(start, 1008, "it_probe with a live IT state");
   }
 
   // A nonzero FPSCR rounding mode is the other half of the descriptor: the block's FP immediates were
-  // emitted for round-to-nearest, so entering it under a different mode is the same refusal.
+  // emitted for round-to-nearest, so entering it under a different mode is the same refusal. Fib is the
+  // case that actually discriminates the FPSCR half: it_probe would fall back on its IT state anyway,
+  // while fib with no IT state must fall back only because the rounding mode differs.
   {
-    exec::MachineState start = EntryState(it->addr, 3, it->thumb);
-    start.r[3] = 7;
-    start.fpscr = 1u << 22;  // FPSCR.RMode = round toward +infinity
-    run_both(start, "it_probe with FPSCR.RMode set");
+    const auto fib = rig.mod->FindExport("Java_com_retrobug_fixture_MainActivity_fib");
+    CHECK_CTX(fib.has_value(), "the fixture exports fib for the FPSCR case");
+    if (fib && rig.aot->image().Resolve(fib->addr - text_base, fib->thumb) != nullptr) {
+      exec::MachineState start = EntryState(fib->addr, 1, fib->thumb);
+      start.fpscr = 1u << 22;  // FPSCR.RMode = round toward +infinity
+      run_both(start, 1, "fib under a non-default FPSCR.RMode");
+    }
   }
 }
 

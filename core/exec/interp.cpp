@@ -3285,6 +3285,14 @@ RunResult InterpExecutor::Run(MachineState& state, unsigned max_instructions) {
                    state.r[0], state.r[4], state.r[5], state.r[13], state.r[14], location.PC());
     }
     steps += runner.steps;
+    if (continued && runner.steps == 0) {
+      // A block whose translation produced no IR at all would re-enter this loop at the same location
+      // with `steps` unchanged and never terminate. No such block is known today, but the fallback
+      // path hands Tier I arbitrary guest pages, so the budget has to cover it; one step is the
+      // smallest charge that makes every iteration advance the loop's only bound. A block that stops
+      // is exempt: a refusal is reported with zero executed instructions, and the loop breaks anyway.
+      ++steps;
+    }
     if (!continued) {
       result = runner.stop;
       // A stop *inside* the block. Everything up to the halt ran — for an `svc` that includes the

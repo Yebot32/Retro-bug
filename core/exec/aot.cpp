@@ -296,9 +296,13 @@ AotExecutor::FallbackStatus AotExecutor::RunFallback(RunResult* out) {
   /**
    * One dispatch miss, on Tier I, in the shape of `JitExecutor::InterpreterFallback`: a bounded chunk
    * (`kFallbackChunkSteps` IR steps) is enough to finish at least one translation block, because Tier I
-   * only stops between blocks. Counting one guest instruction per chunk is the same approximation the
-   * JIT's hand-back makes when its chunk crosses more than one encoding; the load-bearing property is
-   * that every chunk is counted at all, so `max_instructions` is reachable.
+   * only stops between blocks. The chunk is counted as one guest instruction, which is the unit
+   * `RunResult.instructions_executed` uses on both tiers. It is an approximation, not an identity: a
+   * chunk can finish several blocks (a 64-step chunk covers short Thumb blocks) and Tier J's hand-back
+   * counts each encoding, so a fallback-heavy run can exceed `max_instructions` by the blocks one chunk
+   * covers. Counting exactly would need Tier I to report guest encodings; until it does, this is the
+   * documented bound, and the AOT side's tick accounting — the path that matters for translated code —
+   * is exact.
    *
    * A chunk that produces no work is not retried: it is a budget stop with a named detail, which is
    * what keeps a refused or unfetchable instruction from spinning here forever. A chunk that returns a
