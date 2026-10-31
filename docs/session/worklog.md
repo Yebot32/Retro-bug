@@ -1114,3 +1114,29 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
   `f47584467c2401554908f993e025989956e14ee49cbe99ed1a90a7833a1ae2e7`.
 - **Next device log:** KitKat's allocation and draw should now complete; the menu group can build. Any
   further Tier I gap names its own opcode in the log.
+
+### 2026-10-31 — iOS S1z: Tier I is 3.6x faster, and the cache is 16x larger
+- Build 16's device log shows the games are now *correct but slow*: KitKat renders the LOADING screen and
+  then spends over 2.7 minutes inside its `default` group load (the report shows 23 threads, then a lone
+  main thread inside libc), and Blocky sits in engine init for the whole run. Build 11's "101 s load" only
+  finished that fast because the VSHL fault aborted part of the work.
+- The interpreter was hashing for every operand: `temps_`, `produced_`, `carry_` and `ge_` were
+  `std::unordered_map<const Inst*, …>`, so each IR op did 4–6 hash operations. Dynarmic's `Inst::name` is
+  already a dense per-block ordinal (its JIT fills it in the naming pass; this front-end path never did),
+  so `isa::TranslateOne` now numbers each block 1..N and the interpreter indexes flat arrays by it.
+- **Measured on the SM-X710 (arm64 host, ARM32 guest), same 28.5 M IR-step workload: 11.97 M IR-steps/s
+  before, 42.97 M after — 3.6x.** `rb_exec_tier_diff_tests` (1039 checks, Tier I vs Tier J) and
+  `rb_exec_interp_tests` pass on the tablet; `rb_interp_neon_tests` is 11 checks (a new cmp/bne + str/ldr
+  case covers the paths the change touched).
+- The block cache was memory-starved: every `IR::Block` reserved 104 B × 4096 = ~416 KiB, which is what
+  held `kBlockCacheLimit` at 128 — and a full cache is cleared wholesale, so a working set larger than 128
+  re-translated its hot code constantly. Patch `0007` makes the initial pool slab 64 instructions
+  (~6.7 KiB; `Common::Pool` grows in further 64-slot slabs), and the cap is now 2048 (~13 MiB floor).
+- New `rb_interp_bench` (fixture-free, hand-assembled loop) prints the rate on the host lanes: Linux
+  36.12 M IR-steps/s, macOS 30.24 M. It is informational and fails only on a wrong result.
+- **Verified:** workflow `41192209896` green on Linux, macOS, iOS arm64 compile and IPA at `c3a2788`.
+  IPA build 17, commit `c3a2788`, 2,168,186 bytes, SHA-256
+  `57f429b1560a4fab0288916f3887edb4dad09351695ee1b00fc82cb4f416f7cc`.
+- **Expected next device log:** KitKat's atlas load and Blocky's pack parse about 3.6x faster (plus fewer
+  re-translations from the larger cache), so the menu should arrive in well under a minute; steady-state
+  frame time improves by the same factor.
