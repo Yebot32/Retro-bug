@@ -203,7 +203,20 @@ void pointers_are_translated_and_checked() {
 /// page the memory model serves out of line: `Host` refuses that page by design, and the thunk layer used to
 /// refuse it too — the shape a 16 KiB host page gives every file-backed module page at a 4 KiB-aligned base.
 void out_of_line_pointer_args_are_dereferenceable() {
-  auto m = Window();
+  // A window with 16 KiB granules whatever the host's own page size: the shape that leaves a file page
+  // out of line must be reproducible on a 4 KiB runner as well as a 16 KiB one.
+  unsigned native_shift = 12;
+  while ((std::size_t{1} << native_shift) < static_cast<std::size_t>(sysconf(_SC_PAGESIZE))) ++native_shift;
+  mem::AddressModel model;
+  model.kind = mem::AddressModel::kBiased;
+  model.host_page_shift = native_shift > 14 ? native_shift : 14;
+  std::string created;
+  auto m = mem::GuestMemory::Create(std::size_t{1} << 20, model, &created);
+  if (!m) {
+    fail("16 KiB-granule window creation failed", __LINE__, created);
+    return;
+  }
+  CHECK(m->Map(kStack, 0x2000, mem::kRead | mem::kWrite, &created));
   abi::HandleTable h;
   std::string e;
   int fd = -1;
@@ -224,7 +237,7 @@ void out_of_line_pointer_args_are_dereferenceable() {
   CHECK(m->Host(0x1000) == nullptr);
   exec::MachineState s = State(*m, {0x1000});
   CHECK_CTX(abi::ThunkCaller::Call("i:p", reinterpret_cast<void*>(&strlen_of), s, *m, h, &e), e);
-  CHECK_CTX(s.r[0] == 8u, std::to_string(s.r[0]));
+  CHECK_CTX(s.r[0] == 9u, std::to_string(s.r[0]));
   // The offset-or-pointer form resolves it the same way (or it would be passed as a buffer offset).
   exec::MachineState o = State(*m, {0x1000});
   seen = {};
