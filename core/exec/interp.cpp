@@ -36,6 +36,7 @@
  *      rather than a crash.
  */
 #include "rb/exec/interp.h"
+#include "rb/exec/trace.h"
 
 #include "dynarmic/common/variant_util.h"
 #include "dynarmic/frontend/A32/FPSCR.h"
@@ -3219,6 +3220,12 @@ RunResult InterpExecutor::Run(MachineState& state, unsigned max_instructions) {
         break;
       }
       block = std::make_shared<isa::TranslatedBlock>(std::move(*translated));
+      // AOT task 4: a translate miss is a block start. That is true for the first execution of a
+      // cacheable block and for every execution of one in a writable page (never cached), and it is the
+      // path the AOT executor's dispatcher falls back through. Cache *hits* deliberately do not record:
+      // the start was recorded when the block was first translated, and this loop's hot path must not
+      // grow a dedupe lookup. `location` is still the block's entry descriptor here.
+      rb::exec::trace::OnBlockEntry(location.PC(), location.TFlag());
       ++translations_;
       if (cacheable) {
         if (blocks_.size() >= kBlockCacheLimit) {

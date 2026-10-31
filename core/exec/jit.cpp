@@ -16,10 +16,12 @@
 #include <utility>
 
 #include "dynarmic/frontend/A32/a32_ir_emitter.h"
+#include "dynarmic/frontend/A32/a32_location_descriptor.h"
 #include "dynarmic/interface/A32/coprocessor.h"
 #include "dynarmic/ir/terminal.h"
 
 #include "rb/exec/interp.h"
+#include "rb/exec/trace.h"
 #include "rb/isa/front_end.h"
 
 namespace rb::exec {
@@ -877,6 +879,19 @@ std::uint64_t JitExecutor::GetTicksRemaining() {
 
 bool JitExecutor::PreCodeReadHook(bool is_thumb, GuestAddr pc, Dynarmic::A32::IREmitter& ir) {
   translated_.fetch_add(1, std::memory_order_relaxed);
+  /**
+   * AOT task 4's trace wants block *entries*, and this hook is called once per instruction the
+   * translator reads, not once per block. The block's location descriptor is the descriptor the block
+   * is being translated for, so the first instruction is the one whose PC equals it; every later
+   * instruction in the same block has advanced past that PC. Comparing against it records exactly the
+   * entry — whether the block was reached by a direct branch, a linked block, or a computed `bx`/`blx`
+   * target — and adds nothing to the disabled path but `trace::OnBlockEntry`'s own flag test. The
+   * downstream `SetTerm(CheckHalt)` refusals below still record the entry first, which is correct: the
+   * address is real code even on the tier that declines to translate it.
+   */
+  if (Dynarmic::A32::LocationDescriptor{ir.block.Location()}.PC() == pc) {
+    trace::OnBlockEntry(static_cast<std::uint32_t>(pc), is_thumb);
+  }
   /**
    * The ARM64 back end cannot represent `Term::Interpret`, so the six declined encodings have to be
    * stopped before the translator reaches it — see `docs/30` §Step 20a for the SIGABRT this replaces.

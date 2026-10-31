@@ -85,6 +85,15 @@ if(RB_AARCH64_HOST)
   target_sources(rb_aot_tests PRIVATE aot_fixture.S aot_fixture_table.cpp)
 endif()
 
+# AOT task 4: the code-map trace. It drives the fixture through Tier I — host-ISA independent — so it
+# needs the fixture but no AArch64 host, and a missing fixture is a skip with a printed line like the
+# other execution lanes. The assertions read the binary trace back and name the export entry and the
+# static `fib` its recursive `bl` reaches, past the point a static export scan would stop.
+add_executable(rb_code_map_trace_tests code_map_trace_test.cpp)
+target_link_libraries(rb_code_map_trace_tests PRIVATE rb_exec rb_loader)
+target_compile_definitions(rb_code_map_trace_tests PRIVATE
+  RB_FIXTURE_PATH="/data/local/tmp/librb_fixture.so")
+
 # C17's recorder is pure string work, so it needs neither the fixture nor a guest program — and that is
 # part of the point: the component whose job is to say what a launch did must be testable without one.
 add_executable(rb_diag_tests diag_test.cpp)

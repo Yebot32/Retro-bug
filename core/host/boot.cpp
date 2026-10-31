@@ -17,6 +17,7 @@
 
 #include "rb/abi/jni_forward.h"
 #include "rb/exec/jit.h"
+#include "rb/exec/trace.h"
 #include "rb/loader/zip.h"
 #include "rb/runtime/ggl.h"
 #include "rb/runtime/guest_thread.h"
@@ -45,6 +46,9 @@ Boot::Boot(BootConfig config) : cfg_(std::move(config)) {}
 
 Boot::~Boot() {
   StopMonitor();
+  // The trace is a diagnostic; flushing it here covers the normal return path. The recorder also
+  // registers an atexit hook, so a process that leaves through exit() still gets its last buffer.
+  rb::exec::trace::Stop();
   inbound_.reset();
   jni_.reset();
   java_.reset();
@@ -335,6 +339,17 @@ BootResult Boot::BootLibrary(const std::string& apk, const std::string& lib) {
     res.ok = true;
     res.already = true;
     return res;
+  }
+  // AOT task 4: RB_CODEMAP (or Android's debug.retrobug.codemap property) asks for a code-map trace.
+  // Started before any guest code runs — constructors included — so Tier I's block cache cannot hold
+  // a start that was translated before tracing began, which would hide it from the file.
+  {
+    std::string trace_err;
+    if (rb::exec::trace::StartFromEnvironment(&trace_err)) {
+      Say("codemap: recording block entries to " + rb::exec::trace::path());
+    } else if (!trace_err.empty()) {
+      Say("codemap: trace disabled: " + trace_err);
+    }
   }
   std::string report;
   {
