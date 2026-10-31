@@ -48,6 +48,10 @@ add_executable(rb_exec_interp_tests exec_interp_test.cpp)
 target_link_libraries(rb_exec_interp_tests PRIVATE rb_exec rb_loader)
 target_compile_definitions(rb_exec_interp_tests PRIVATE RB_FIXTURE_PATH="/data/local/tmp/librb_fixture.so")
 
+# Tier I's NEON semantics, hand-assembled into a guest page: no fixture, so this runs on every host lane.
+add_executable(rb_interp_neon_tests interp_neon_test.cpp)
+target_link_libraries(rb_interp_neon_tests PRIVATE rb_exec)
+
 # C08's bridge is mostly register arithmetic, so most of its cases need no guest program at all; the
 # ones that do run the real fixture and assert the hardware-oracle values.
 add_executable(rb_abi_jni_tests abi_jni_test.cpp)

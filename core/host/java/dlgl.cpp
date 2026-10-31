@@ -57,6 +57,9 @@ void InstallDlgl(TableJava& j, const AndroidEnv& env) {
   NoOp(j, activity, "openVideo", "(Ljava/lang/String;)V");
   NoOp(j, activity, "resetScoreAlert", "(Ljava/lang/String;)V");
   NoOp(j, activity, "setWallpaper", "(Ljava/lang/String;)V");
+  // The engine's own quit path. Build 14's log shows it reached `callJavaMethod` for this method after a
+  // failed frame; the lookup missed, and the call that followed carried method ID 0 into the bridge.
+  NoOp(j, activity, "exitApp", "(Ljava/lang/String;)V");
 
   // LocalStorage: the engine's saves. Defaults until a real per-game store lands; a save is a no-op.
   const std::string storage = "com/doubleleft/LocalStorage";

@@ -702,10 +702,10 @@ unsigned LaneBits(Dynarmic::IR::Opcode op) {
       return 64;
     case Opcode::VectorBroadcast8: return 8;
     case Opcode::VectorBroadcast16: return 16;
-    case Opcode::VectorLogicalShiftRight8: return 8;
-    case Opcode::VectorLogicalShiftRight16: return 16;
-    case Opcode::VectorLogicalShiftRight32: return 32;
-    case Opcode::VectorLogicalShiftRight64: return 64;
+    case Opcode::VectorLogicalShiftRight8: case Opcode::VectorLogicalShiftLeft8: return 8;
+    case Opcode::VectorLogicalShiftRight16: case Opcode::VectorLogicalShiftLeft16: return 16;
+    case Opcode::VectorLogicalShiftRight32: case Opcode::VectorLogicalShiftLeft32: return 32;
+    case Opcode::VectorLogicalShiftRight64: case Opcode::VectorLogicalShiftLeft64: return 64;
     default: return 0;
   }
 }
@@ -2733,6 +2733,32 @@ bool BlockRunner::Step(const Inst* inst) {
         return r;
       };
       Put(inst, V{shr(a.lo), shr(a.hi)});
+      return true;
+    }
+
+    case Opcode::VectorLogicalShiftLeft8: case Opcode::VectorLogicalShiftLeft16:
+    case Opcode::VectorLogicalShiftLeft32: case Opcode::VectorLogicalShiftLeft64: {
+      // Per-lane logical shift by a constant (VSHL immediate). bionic's jemalloc computes an extent's
+      // lock hash with `vshl.i32` on every allocation path (libc.so+0x5ee72 in extent_lock2), so a title
+      // that allocates after its asset load stops here: KitKat's first malloc after the atlas load was
+      // `VectorLogicalShiftLeft32: no Tier I semantics yet`, the draw call died, and every later frame
+      // dereferenced the half-initialised scene (the SIGSEGV at 0x29). Tier J had the op; only Tier I
+      // was short.
+      const unsigned bits = LaneBits(inst->GetOpcode());
+      V a{};
+      std::uint8_t shift = 0;
+      if (!W128(inst, 0, a) || !ByteArg(inst, 1, shift)) return false;
+      if (bits == 0 || bits > 64) return Fail(inst, "unrecognised lane width in VectorLogicalShiftLeft");
+      const std::uint64_t mask = bits == 64 ? ~0ull : ((1ull << bits) - 1ull);
+      const unsigned s = shift >= bits ? bits : shift;  // a shift of the lane width clears the lane
+      const auto shl = [&](std::uint64_t w) {
+        std::uint64_t r = 0;
+        for (unsigned off = 0; off < 64; off += bits) {
+          r |= ((((w >> off) & mask) << s) & mask) << off;
+        }
+        return r;
+      };
+      Put(inst, V{shl(a.lo), shl(a.hi)});
       return true;
     }
 
