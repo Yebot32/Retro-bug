@@ -83,27 +83,25 @@ void InstallFileHelper(TableJava& j, const AndroidEnv& env) {
   InstanceString(j, cls, "getCacheDir", "()Ljava/lang/String;",
                  [env] { return env.cache_dir.empty() ? env.files_dir : env.cache_dir; });
 
-  // The save store the engine actually reads and writes. A missing save answers null, as the Java class's
-  // catch-all does; an empty one answers a zero-length array.
+  // The save store the engine actually reads and writes. The Java class's catch-all returns
+  // `toByteArray()` even when the file is missing, so a failed read here answers a zero-length array and
+  // never null.
   j.DefineMethod(cls, "readPersistentData", "(Ljava/lang/String;)[B", false,
                  [env](TableJava& f, int, const std::vector<std::uint64_t>& a) -> std::uint64_t {
                    const std::u16string name = f.StringOf(f.ObjectOf(static_cast<Ref>(a[0])));
-                   if (!SaveNameOk(name)) return 0;
-                   std::FILE* file = std::fopen(SavePath(env, Narrow(name)).c_str(), "rb");
-                   if (file == nullptr) return 0;
-                   std::fseek(file, 0, SEEK_END);
-                   const long size = std::ftell(file);
-                   std::rewind(file);
-                   if (size < 0) {
-                     std::fclose(file);
-                     return 0;
+                   std::vector<std::uint8_t> bytes;
+                   if (SaveNameOk(name)) {
+                     if (std::FILE* file = std::fopen(SavePath(env, Narrow(name)).c_str(), "rb")) {
+                       std::fseek(file, 0, SEEK_END);
+                       const long size = std::ftell(file);
+                       std::rewind(file);
+                       if (size > 0) {
+                         bytes.resize(static_cast<std::size_t>(size));
+                         if (std::fread(bytes.data(), 1, bytes.size(), file) != bytes.size()) bytes.clear();
+                       }
+                       std::fclose(file);
+                     }
                    }
-                   std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
-                   if (!bytes.empty() && std::fread(bytes.data(), 1, bytes.size(), file) != bytes.size()) {
-                     std::fclose(file);
-                     return 0;
-                   }
-                   std::fclose(file);
                    const Ref array = f.NewArray('B', static_cast<std::int32_t>(bytes.size()), 0, 0);
                    if (array != 0 && !bytes.empty()) {
                      f.SetArrayRegion('B', array, 0, static_cast<std::int32_t>(bytes.size()), bytes.data());
@@ -152,7 +150,8 @@ void InstallBlockyroads(TableJava& j, const AndroidEnv& env) {
   for (const char* name : {"init", "destroy", "updateDevices"}) NoOpVirtual(j, pad, name, "()V");
   NoOpVirtual(j, pad, "setContext", "(Landroid/content/Context;)V");
   NoOpVirtual(j, pad, "dispatchGenericMotionEvent", "(Landroid/view/MotionEvent;)V");
-  FalseVirtual(j, pad, "dispatchKeyEvent");
+  j.DefineMethod(pad, "dispatchKeyEvent", "(Landroid/view/KeyEvent;)Z", false,
+                 [](TableJava&, int, const std::vector<std::uint64_t>&) { return static_cast<std::uint64_t>(0); });
   j.DefineMethod(pad, "getController", "(I)Lcom/utils/GameController;", false,
                  [](TableJava&, int, const std::vector<std::uint64_t>&) { return static_cast<std::uint64_t>(0); });
 
@@ -177,7 +176,8 @@ void InstallBlockyroads(TableJava& j, const AndroidEnv& env) {
   // "no backend" ones so game logic takes its fallback path rather than waiting for a callback.
   const std::string system = "com/utils/DeviceAndSystem";
   GetInstance(j, system);
-  FalseVirtual(j, system, "OpenURL");
+  j.DefineMethod(system, "OpenURL", "(Ljava/lang/String;)Z", false,
+                 [](TableJava&, int, const std::vector<std::uint64_t>&) { return static_cast<std::uint64_t>(0); });
   FalseVirtual(j, system, "HasVibrator");
   // No guest network stack exists, so "not connected" is the answer that keeps the title on its offline
   // path instead of starting a download whose callback can never arrive.

@@ -457,12 +457,16 @@ void file_helper_store_round_trips() {
   CHECK(read != 0 && r.java.GetArrayRegion('B', read, 0, 5, got));
   CHECK_CTX(std::memcmp(got, payload.data(), payload.size()) == 0, "payload bytes");
   CHECK(r.CallVirtual(helper, "erasePersistentData", "(Ljava/lang/String;)V", {jname}) == 0);
-  CHECK_CTX(static_cast<TableJava::Ref>(
-                 r.CallVirtual(helper, "readPersistentData", "(Ljava/lang/String;)[B", {jname})) == 0,
-            "erased save answers null");
+  // The Java class's catch-all returns toByteArray(), so a missing save is an empty array, never null.
+  const auto erased = static_cast<TableJava::Ref>(
+      r.CallVirtual(helper, "readPersistentData", "(Ljava/lang/String;)[B", {jname}));
+  CHECK_CTX(erased != 0 && r.java.GetArrayLength(erased) == 0, "erased save answers an empty array");
   const TableJava::Ref escape = r.java.NewString(u"../escape");
   CHECK_CTX(r.CallVirtual(helper, "writePersistentData", "(Ljava/lang/String;[B)Z", {escape, array}) == 0,
             "a traversal name is refused");
+  const auto refused = static_cast<TableJava::Ref>(
+      r.CallVirtual(helper, "readPersistentData", "(Ljava/lang/String;)[B", {escape}));
+  CHECK_CTX(refused != 0 && r.java.GetArrayLength(refused) == 0, "a traversal name reads as empty");
   const auto save = static_cast<TableJava::Ref>(r.CallVirtual(helper, "getSaveDir", "()Ljava/lang/String;"));
   CHECK_CTX(r.StringArg(save) == "/tmp", r.StringArg(save));
   CHECK(!r.java.ExceptionCheck());
