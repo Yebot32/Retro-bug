@@ -39,6 +39,7 @@
  */
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 
@@ -88,11 +89,28 @@ void Stop();
 /// The open file's path, or empty when no trace is open. For the boot's one log line.
 [[nodiscard]] std::string path();
 
+namespace detail {
+
+/// The hot-path flag. External linkage only so `OnBlockEntry` can inline the disabled test; nothing
+/// outside this module should touch it.
+extern std::atomic<bool> enabled;
+
+/// The slow half: dedupe, serialise and append. Called only after `enabled` was read as true.
+void RecordBlockEntry(std::uint32_t pc, bool thumb);
+
+}  // namespace detail
+
 /**
- * Report a block start. This is the whole tracing hot path: when disabled, one relaxed load and a
- * return. `pc` is the guest address about to be translated (even; the Thumb bit is `thumb`), which is
- * exactly the unit `CodeMapEntry::off` is formed from once a load bias is subtracted.
+ * Report a block start.
+ *
+ * The whole disabled path is the relaxed load below and a branch — no call, no lock, no allocation.
+ * A diagnostic run pays for the mutex and the `unordered_set` in `RecordBlockEntry`. `pc` is the guest
+ * address about to be translated (even; the Thumb bit is `thumb`), which is exactly the unit
+ * `CodeMapEntry::off` is formed from once a load bias is subtracted.
  */
-void OnBlockEntry(std::uint32_t pc, bool thumb);
+inline void OnBlockEntry(std::uint32_t pc, bool thumb) {
+  if (!detail::enabled.load(std::memory_order_relaxed)) return;
+  detail::RecordBlockEntry(pc, thumb);
+}
 
 }  // namespace rb::exec::trace

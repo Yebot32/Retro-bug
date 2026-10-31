@@ -342,7 +342,9 @@ BootResult Boot::BootLibrary(const std::string& apk, const std::string& lib) {
   }
   // AOT task 4: RB_CODEMAP (or Android's debug.retrobug.codemap property) asks for a code-map trace.
   // Started before any guest code runs — constructors included — so Tier I's block cache cannot hold
-  // a start that was translated before tracing began, which would hide it from the file.
+  // a start that was translated before tracing began, which would hide it from the file. One process
+  // boots several libraries through this function; the second call reuses the open file, so their
+  // records accumulate instead of the later library truncating the earlier one's.
   {
     std::string trace_err;
     if (rb::exec::trace::StartFromEnvironment(&trace_err)) {

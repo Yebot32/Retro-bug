@@ -46,9 +46,6 @@ struct Recorder {
 /// already been destructed would turn "the app is exiting" into a crash in a diagnostic.
 Recorder* const g_recorder = new Recorder;
 
-/// The hot-path flag. Only this load is on the disabled path.
-std::atomic<bool> g_enabled{false};
-
 std::once_flag g_atexit_once;
 
 void PutU32Le(std::uint8_t* out, std::uint32_t value) {
@@ -87,6 +84,35 @@ std::string ConfiguredPath() {
 
 }  // namespace
 
+namespace detail {
+
+std::atomic<bool> enabled{false};
+
+void RecordBlockEntry(std::uint32_t pc, bool thumb) {
+  Recorder& r = *g_recorder;
+  const std::uint64_t key = (static_cast<std::uint64_t>(pc) << 1) | (thumb ? 1u : 0u);
+  std::lock_guard<std::mutex> lk(r.mu);
+  if (r.file == nullptr) return;  // Stop raced this call; the record is simply not part of the file
+  if (!r.seen.insert(key).second) return;  // already recorded: one record per reachable start
+
+  std::uint8_t record[kFileRecordBytes] = {};
+  PutU64Le(record, pc);
+  record[8] = thumb ? 1u : 0u;
+  record[9] = kSourceBlockEntry;
+  if (std::fwrite(record, 1, sizeof record, r.file) != sizeof record) {
+    // A full disk must not turn every later block entry into another failed write. Close, disable, and
+    // leave the records already written on disk for the tool to use.
+    std::fclose(r.file);
+    r.file = nullptr;
+    r.buffer.reset();
+    enabled.store(false, std::memory_order_relaxed);
+    return;
+  }
+  ++r.records;
+}
+
+}  // namespace detail
+
 bool Start(const std::string& path, std::string* err) {
   if (err != nullptr) err->clear();
   if (path.empty()) {
@@ -119,7 +145,7 @@ bool Start(const std::string& path, std::string* err) {
   // which is why the boot also calls Stop() from its destructor and why the format tolerates a
   // truncated tail.
   std::call_once(g_atexit_once, [] { std::atexit(&Stop); });
-  g_enabled.store(true, std::memory_order_relaxed);
+  detail::enabled.store(true, std::memory_order_relaxed);
   return true;
 }
 
@@ -127,11 +153,21 @@ bool StartFromEnvironment(std::string* err) {
   if (err != nullptr) err->clear();
   const std::string configured = ConfiguredPath();
   if (configured.empty()) return false;  // no trace asked for: the normal launch
+  // A process boots one library at a time (each System.loadLibrary reaches the boot separately). The
+  // first call opens the trace; later ones must append, not truncate the starts the earlier libraries
+  // already reported. An explicit `Start` is different: its callers (and the test) ask for a fresh file.
+  {
+    Recorder& r = *g_recorder;
+    std::lock_guard<std::mutex> lk(r.mu);
+    if (detail::enabled.load(std::memory_order_relaxed) && r.file != nullptr && r.path == configured) {
+      return true;
+    }
+  }
   return Start(configured, err);
 }
 
 void Stop() {
-  g_enabled.store(false, std::memory_order_relaxed);
+  detail::enabled.store(false, std::memory_order_relaxed);
   Recorder& r = *g_recorder;
   std::lock_guard<std::mutex> lk(r.mu);
   if (r.file != nullptr) {
@@ -144,10 +180,10 @@ void Stop() {
   r.path.clear();
 }
 
-bool enabled() noexcept { return g_enabled.load(std::memory_order_relaxed); }
+bool enabled() noexcept { return detail::enabled.load(std::memory_order_relaxed); }
 
 std::uint64_t record_count() {
-  if (!g_enabled.load(std::memory_order_relaxed)) return 0;
+  if (!detail::enabled.load(std::memory_order_relaxed)) return 0;
   Recorder& r = *g_recorder;
   std::lock_guard<std::mutex> lk(r.mu);
   return r.records;
@@ -157,32 +193,6 @@ std::string path() {
   Recorder& r = *g_recorder;
   std::lock_guard<std::mutex> lk(r.mu);
   return r.path;
-}
-
-void OnBlockEntry(std::uint32_t pc, bool thumb) {
-  // The disabled path. Nothing below runs unless a diagnostic run asked for it.
-  if (!g_enabled.load(std::memory_order_relaxed)) return;
-
-  Recorder& r = *g_recorder;
-  const std::uint64_t key = (static_cast<std::uint64_t>(pc) << 1) | (thumb ? 1u : 0u);
-  std::lock_guard<std::mutex> lk(r.mu);
-  if (r.file == nullptr) return;  // Stop raced this call; the record is simply not part of the file
-  if (!r.seen.insert(key).second) return;  // already recorded: one record per reachable start
-
-  std::uint8_t record[kFileRecordBytes] = {};
-  PutU64Le(record, pc);
-  record[8] = thumb ? 1u : 0u;
-  record[9] = kSourceBlockEntry;
-  if (std::fwrite(record, 1, sizeof record, r.file) != sizeof record) {
-    // A full disk must not turn every later block entry into another failed write. Close, disable, and
-    // leave the records already written on disk for the tool to use.
-    std::fclose(r.file);
-    r.file = nullptr;
-    r.buffer.reset();
-    g_enabled.store(false, std::memory_order_relaxed);
-    return;
-  }
-  ++r.records;
 }
 
 }  // namespace rb::exec::trace

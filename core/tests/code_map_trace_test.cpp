@@ -30,6 +30,10 @@
 #include "rb/loader/guest_elf.h"
 #include "rb/mem/guest_memory.h"
 
+#if defined(__aarch64__)
+#include "rb/exec/jit.h"  // Tier J exists only where a host can run emitted AArch64
+#endif
+
 #include <unistd.h>
 
 #include <cstdint>
@@ -91,6 +95,12 @@ constexpr const char* kTracePath = "/data/local/tmp/rb_codemap_trace_test.rbcm";
 /// this lane leaves for `rb_aotgen --trace` (the tool's parser is exercised against a runtime-written
 /// file, not only against the writer's mirror image).
 constexpr const char* kTruncatePath = "/data/local/tmp/rb_codemap_trace_truncate_test.rbcm";
+#if defined(__aarch64__)
+constexpr const char* kJitTracePath = "/data/local/tmp/rb_codemap_tier_j_test.rbcm";
+#endif
+#if defined(__ANDROID__)
+constexpr const char* kPropertyPath = "/data/local/tmp/rb_codemap_property_test.rbcm";
+#endif
 
 std::vector<std::uint8_t> ReadFile(const char* path) {
   std::ifstream in(path, std::ios::binary);
@@ -157,9 +167,9 @@ Rig Build() {
 }
 
 /// The same JNI call shape the other fixture lanes use: env in r0, class in r1, the declared argument
-/// in r2.
-exec::RunResult Call(Rig& rig, exec::GuestAddr where, std::int32_t arg, exec::MachineState& state,
-                     bool thumb) {
+/// in r2. `executor` is named rather than reached through the rig so the Tier J case can use it too.
+exec::RunResult CallWith(exec::Executor& executor, exec::GuestAddr where, std::int32_t arg,
+                         exec::MachineState& state, bool thumb) {
   state = exec::MachineState{};
   state.pc = where;
   state.mode = thumb ? isa::Mode::Thumb : isa::Mode::Arm;
@@ -169,7 +179,12 @@ exec::RunResult Call(Rig& rig, exec::GuestAddr where, std::int32_t arg, exec::Ma
   state.r[13] = kStackTop;
   state.r[14] = kReturnAddress;
   state.r[15] = where;
-  return rig.exec->Run(state, 4'000'000);
+  return executor.Run(state, 4'000'000);
+}
+
+exec::RunResult Call(Rig& rig, exec::GuestAddr where, std::int32_t arg, exec::MachineState& state,
+                     bool thumb) {
+  return CallWith(*rig.exec, where, arg, state, thumb);
 }
 
 // ---------------------------------------------------------------- the trace file, read independently
@@ -271,6 +286,19 @@ void tier_one_records_the_reached_starts() {
   CHECK_CTX(exec::trace::path() == kTracePath,
             "the recorder opened " + exec::trace::path() + " instead of " + kTracePath);
 
+  // A process boots one library at a time, and each boot asks the same question. The second
+  // environment start must reuse the open file: a fresh `Start` here would truncate the starts the
+  // earlier library already reported.
+  exec::MachineState warm;
+  const exec::RunResult warm_r = Call(rig, export_fib->addr, 5, warm, export_fib->thumb);
+  CHECK_CTX(warm_r.reason == exec::StopReason::Returned, "the warm-up fib(5) stopped early");
+  CHECK_CTX(static_cast<std::int32_t>(warm.r[0]) == 5, "the warm-up fib(5) returned the wrong value");
+  const std::uint64_t after_warm = exec::trace::record_count();
+  CHECK_CTX(after_warm > 0, "the warm-up run recorded no starts");
+  CHECK_CTX(exec::trace::StartFromEnvironment(&err), "the second environment start: " + err);
+  CHECK_CTX(exec::trace::record_count() == after_warm,
+            "a second environment start truncated the existing trace");
+
   exec::MachineState state;
   const exec::RunResult r = Call(rig, export_fib->addr, 10, state, export_fib->thumb);
   CHECK_CTX(r.reason == exec::StopReason::Returned,
@@ -329,6 +357,106 @@ void tier_one_records_the_reached_starts() {
   // tool's --trace parser is verified with. The next run removes it before starting.
 }
 
+#if defined(__aarch64__)
+/// Tier J: the other hook site. Set equality with Tier I is deliberately not asserted — the two
+/// translators may split the same function into different blocks — but the two starts that matter must
+/// appear, and the count must stay a block count rather than one record per instruction.
+void tier_j_records_block_starts() {
+  Rig rig = Build();
+  if (!rig.ok) return;
+  const auto export_fib = rig.mod->FindExport("Java_com_retrobug_fixture_MainActivity_fib");
+  const loader::LocalSymbol* recursive = rig.mod->FindLocalSymbolEntry("fib");
+  CHECK_CTX(export_fib.has_value(), "the fixture exports the fib JNI method");
+  CHECK_CTX(recursive != nullptr, "the fixture's .symtab names the static fib");
+  if (!export_fib || recursive == nullptr) return;
+
+  exec::JitExecutor jit(*rig.mem, kReturnAddress);
+  CHECK_CTX(jit.ok(), "the JIT could not be built: " + jit.error());
+
+  std::remove(kJitTracePath);
+  CHECK_CTX(setenv("RB_CODEMAP", kJitTracePath, 1) == 0, "setenv(RB_CODEMAP) failed");
+  std::string err = "StartFromEnvironment did not run";
+  CHECK_CTX(exec::trace::StartFromEnvironment(&err), "trace start: " + err);
+
+  exec::MachineState state;
+  const exec::RunResult r = CallWith(jit, export_fib->addr, 10, state, export_fib->thumb);
+  const std::uint64_t recorded = exec::trace::record_count();
+  exec::trace::Stop();
+  unsetenv("RB_CODEMAP");
+
+  CHECK_CTX(r.reason == exec::StopReason::Returned,
+            "the JIT fib(10) ended in reason " + std::to_string(static_cast<int>(r.reason)) + " " +
+                r.detail);
+  CHECK(r.instructions_executed > 0);
+  CHECK_CTX(static_cast<std::int32_t>(state.r[0]) == 55,
+            "the JIT fib(10) returned " + std::to_string(static_cast<std::int32_t>(state.r[0])));
+  CHECK_CTX(recorded > 0, "the JIT recorded no block starts");
+  CHECK_CTX(recorded < r.instructions_executed,
+            "the JIT recorded " + std::to_string(recorded) + " starts for " +
+                std::to_string(r.instructions_executed) +
+                " instructions — PreCodeReadHook was treated as a per-instruction hook");
+  CHECK_CTX(recorded < 200,
+            "the JIT recorded " + std::to_string(recorded) + " starts for fib(10)");
+
+  TraceFile file;
+  CHECK_CTX(ParseTrace(kJitTracePath, &file, &err), "trace parse: " + err);
+  CHECK_CTX(file.records == recorded,
+            "the JIT file has " + std::to_string(file.records) + " records, record_count said " +
+                std::to_string(recorded));
+  CHECK_CTX(file.duplicates == 0,
+            "the JIT file has " + std::to_string(file.duplicates) + " duplicate record(s)");
+  CHECK_CTX(file.all_sources_are_block_entries, "a JIT record carries an unexpected source byte");
+  CHECK_CTX(Contains(file, export_fib->addr, export_fib->thumb),
+            "the JIT trace does not contain the export entry 0x" + Hex(export_fib->addr));
+  CHECK_CTX(Contains(file, recursive->addr, recursive->thumb),
+            "the JIT trace does not contain the recursive-call target 0x" + Hex(recursive->addr));
+  // `PreCodeReadHook` runs before the fetch, so a branch to the unmapped return sentinel is reported
+  // as a block entry even though no code is read there. It is the only expected out-of-image record;
+  // `rb_aotgen --trace` counts it as outside .text and drops it.
+  bool only_sentinel_outside = true;
+  for (const auto& [pc, thumb] : file.entries) {
+    (void)thumb;
+    const bool in_image = pc >= rig.mod->base && pc < rig.mod->base + rig.mod->extent;
+    if (!in_image && pc != kReturnAddress) only_sentinel_outside = false;
+  }
+  CHECK_CTX(only_sentinel_outside,
+            "the JIT trace contains a non-code address other than the return sentinel");
+
+  std::printf("# codemap: Tier J fib(10) -> %zu starts in %u instructions\n", file.records,
+              r.instructions_executed);
+}
+#endif  // __aarch64__
+
+/// Android's fallback: an installed app cannot inherit a shell environment, so the boot also reads the
+/// `debug.retrobug.codemap` property. This lane runs as the shell user, which is exactly the case that
+/// can set it, so the code path is measured instead of only compiled.
+void android_property_names_the_trace() {
+#if defined(__ANDROID__)
+  unsetenv("RB_CODEMAP");
+  std::remove(kPropertyPath);
+  CHECK_CTX(__system_property_set("debug.retrobug.codemap", kPropertyPath) == 0,
+            "could not set debug.retrobug.codemap");
+  std::string err = "StartFromEnvironment did not run";
+  CHECK_CTX(exec::trace::StartFromEnvironment(&err), "property trace start: " + err);
+  CHECK_CTX(exec::trace::path() == kPropertyPath,
+            std::string{"the property named "} + kPropertyPath + " but the recorder opened " +
+                exec::trace::path());
+  exec::trace::OnBlockEntry(0x0001'0000u, true);
+  CHECK(exec::trace::record_count() == 1);
+  exec::trace::Stop();
+  TraceFile file;
+  CHECK_CTX(ParseTrace(kPropertyPath, &file, &err), "property trace parse: " + err);
+  CHECK(file.records == 1);
+  CHECK_CTX(file.entries.size() == 1 && file.entries[0].first == 0x0001'0000u &&
+                file.entries[0].second,
+            "the property trace has the wrong record");
+  std::remove(kPropertyPath);
+  (void)__system_property_set("debug.retrobug.codemap", "");
+#else
+  std::printf("# codemap: Android property path skipped (not Android)\n");
+#endif
+}
+
 /// With no path configured the recorder is inert: the same call runs, no file appears, and even a
 /// direct `OnBlockEntry` writes nothing because there is no file to write to.
 void a_disabled_trace_records_nothing() {
@@ -370,10 +498,17 @@ void a_disabled_trace_records_nothing() {
 }  // namespace
 
 int main() {
-  // Disabled first: its `std::remove(kTracePath)` clears a previous run's artifact, and the enabled
-  // case then leaves this run's trace in place for `rb_aotgen --trace`.
+  // Property first: it is cleared again before the disabled case, which asserts that nothing is
+  // configured at all. The disabled case then clears a previous run's artifact, and the enabled cases
+  // leave this run's traces in place for `rb_aotgen --trace`.
+  android_property_names_the_trace();
   a_disabled_trace_records_nothing();
   tier_one_records_the_reached_starts();
+#if defined(__aarch64__)
+  tier_j_records_block_starts();
+#else
+  std::printf("# codemap: Tier J skipped (not an AArch64 host)\n");
+#endif
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;
 }
