@@ -1086,3 +1086,31 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
   `rb_guest_memory_tests` is 214 checks on Linux (the new `MappedRanges` case included). IPA build 14,
   commit `d1f56bb`, 2,093,143 bytes, SHA-256
   `968b1e160c870b12c00ebaa660e1daf9c823f277ef86ebe1b5e5167353dc4dde`.
+
+### 2026-10-31 — iOS S1y: the full report named the wall — Tier I had no VSHL; the app link was dropping rows
+- Build 14's fault report answered it in one run. KitKat's first failure after the atlas load is
+  `VectorLogicalShiftLeft32: no Tier I semantics yet`, pc `libc.so+0x5edc8`; the instruction is
+  `vshl.i32 d16, d2, #1` at `libc.so+0x5ee72` — **jemalloc's extent lock hash** in `extent_lock2`, which
+  every allocation reaches. Tier J executes it; Tier I never had it, so the first post-load malloc died
+  inside the draw call, the frame presented white, and every later frame dereferenced the
+  half-initialised scene (the 3,088 `SIGSEGV at 0x29` lines were the symptom, not the cause).
+- The same report showed the 101-second load for what it is: 23 guest threads, most parked in the same
+  `libdlgl.so+0x37a/0x37b` spin loop, `last syscall 172`, while one thread reads `AAsset_read(…, 4)` — the
+  engine's job system spinning under the interpreter. No deadlock, just slow; the report names the code.
+- Implemented `VectorLogicalShiftLeft{8,16,32,64}` in the Tier I interpreter (per-lane, lane-width mask,
+  mirroring the existing shift-right case). A new fixture-free suite, `rb_interp_neon_tests`, assembles
+  `vshl.i32`/`vshl.i16` into a guest page and checks the lanes on the Linux and macOS lanes; it caught two
+  of this session's own mistakes (Thumb-2 halfword order, a harness that reset the prepared registers)
+  before a device ever ran it.
+- The same log also showed `Java: no method …AndroidKitKatActivity.exitApp` followed by a call with method
+  id 0; the row is added.
+- **A packaging defect surfaced while verifying the row**: the CMake archive contained `exitApp`, but the
+  linked app did not — the app link's dead-code stripping removed it. `DEAD_CODE_STRIPPING: NO` in
+  `ios/project.yml` fixes it and was verified by string-checking the archive and the app in the same run.
+  Any profile row could have been dropped this way; the app now links the archive unstripped.
+- **Verified:** workflow `41187414418` green on Linux, macOS, iOS arm64 compile and IPA at `5c0a718`;
+  `rb_interp_neon_tests` 7 checks, `rb_guest_memory_tests` 214, `rb_thunk_tests` 43. IPA build 16, commit
+  `5c0a718`, 2,168,355 bytes (the un-stripped archive adds ~75 KB), SHA-256
+  `f47584467c2401554908f993e025989956e14ee49cbe99ed1a90a7833a1ae2e7`.
+- **Next device log:** KitKat's allocation and draw should now complete; the menu group can build. Any
+  further Tier I gap names its own opcode in the log.
