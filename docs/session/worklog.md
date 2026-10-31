@@ -1140,3 +1140,29 @@ Started from `228b606`, tablet `R52Y106BECZ` running 0.1.228, OnePlus not touche
 - **Expected next device log:** KitKat's atlas load and Blocky's pack parse about 3.6x faster (plus fewer
   re-translations from the larger cache), so the menu should arrive in well under a minute; steady-state
   frame time improves by the same factor.
+
+### 2026-10-31 — iOS S2a: the M1 measures the interpreter, and KitKat's load is LodePNG
+- On the iPad Air M1 (iOS 27.2) build 17 behaves: KitKat renders the LOADING screen, then spends over
+  100 s in the `default` group load (20 stall reports, closed at ~114 s); Blocky renders its first frame
+  in **20,681 ms with real content**, against 111,143 ms on the earlier iPad — **5.4x**, the interpreter
+  change landing as measured.
+- KitKat's minutes are not I/O and not the host layer: the stall ring shows the 2.1 MB atlas read and
+  `AAsset_close`d within the first seconds, and the main thread then samples inside
+  `libdlgl.so+0x3b6…`, which resolves to **`LodePNG_zlib_decompress`** — a byte-oriented PNG inflate run
+  as guest code. Tier I is the only tier iOS can run, so this is exactly the workload the interpreter's
+  speed sets the clock for.
+- Build 18 adds the missing instrument: at every slice boundary (each `kSliceSteps` = 200k IR operations)
+  the guest pc is tallied, and every ten seconds the session logs the top twelve sites as
+  `libdlgl.so+0x…` with percentages, the implied IR-steps/s, Tier I's translation/ cached-block counters,
+  and per-name host-call totals (`AAsset_read` volume, GL calls). The same build makes cache eviction
+  generational — demoting the young generation instead of clearing everything, so a working set slightly
+  larger than the 2048-block cap stops re-translating hot code forever — with invalidation applied to both
+  generations.
+- **Verified:** workflows `41192209896` (build 17) and `41199078292` (build 18) green on Linux, macOS, iOS
+  arm64 compile and IPA; on arm64 phones `rb_exec_interp_tests` 1096 checks, `rb_exec_tier_diff_tests` 1039
+  (Tier I vs J, cache-flush rows included), `rb_interp_neon_tests` 11. IPA build 18, commit `1d923de`,
+  2,180,837 bytes, SHA-256 `4a9e230d80e5dd6d472c67e89974e86b9e896415088ebeacb0e05c96bfaaedb3`.
+- **Honest ceiling:** without a JIT there is no "full speed" — an IR interpreter is inherently several
+  times slower than translated native code, which is what Tier J is on Android. The lever left is
+  throughput: 3.6x so far from dense value slots, next a pre-decoded operand/micro-op layer if the profile
+  says the interpreter loop (not the guest algorithm) dominates, plus cheaper host-call round trips.
