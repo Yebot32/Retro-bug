@@ -89,6 +89,9 @@ class IosHost {
   std::uint32_t recent_calls_written() const { return recent_next_.load(std::memory_order_relaxed); }
   /// The ring as "host call: name r0 r1 r2 r3" lines, oldest first — for the guest fault report.
   std::vector<std::string> RecentCallLines() const;
+  /// Per-name call totals, busiest first — the volume half of the profile: a title that reads its assets
+  /// four bytes at a time shows here as hundreds of thousands of AAsset_read calls.
+  std::vector<std::string> CallCountLines() const;
 
  private:
   static void* HostSymbol(const std::string& name);
@@ -104,6 +107,9 @@ class IosHost {
   std::set<std::string> refused_;  ///< names already reported once (a refusal is a log line, not a flood)
   std::array<RecentHostCall, kRecentCalls> recent_{};
   std::atomic<std::uint32_t> recent_next_{0};  ///< relaxed: the crash reader accepts a torn tail
+  /// One counter per bound slot, indexed by the slot's own index. A relaxed add is ~5 ns; the profile
+  /// reads them from another thread, which is why they are atomic and not plain words.
+  std::array<std::atomic<std::uint64_t>, abi::AbiContext::kMaxSlots> slot_calls_{};
 
   void EmitLog(int priority, const std::string& tag, const std::string& text);
   std::unique_ptr<rb::loader::ApkArchive> archive_;

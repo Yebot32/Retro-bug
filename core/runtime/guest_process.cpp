@@ -1104,6 +1104,67 @@ void GuestProcess::LogFaultReport(const std::string& key, const GuestThread* fau
   Log("=== end of guest fault report");
 }
 
+std::string GuestProcess::NameAddress(GuestAddr at) const {
+  for (const auto& m : modules_) {
+    if (m != nullptr && at >= m->base && at - m->base < m->extent) {
+      return (m->soname.empty() ? m->path : m->soname) + "+" + Hex(at - m->base);
+    }
+  }
+  return Hex(at);
+}
+
+void GuestProcess::StartPcProfile() {
+  {
+    std::lock_guard<std::mutex> lk(profile_mu_);
+    profile_pcs_.clear();
+    profile_samples_ = 0;
+    profile_start_ = std::chrono::steady_clock::now();
+  }
+  // The probe runs at every slice boundary, i.e. after kSliceSteps IR operations, so the sample count times
+  // that constant is the interpreter's step count to within one slice.
+  abi_->set_slice_probe([this](std::uint32_t pc) {
+    std::lock_guard<std::mutex> lk(profile_mu_);
+    ++profile_pcs_[pc];
+    ++profile_samples_;
+  });
+}
+
+std::vector<std::string> GuestProcess::ProfileReport() {
+  std::vector<std::pair<std::uint32_t, std::uint64_t>> top;
+  std::uint64_t samples = 0;
+  double seconds = 0;
+  {
+    std::lock_guard<std::mutex> lk(profile_mu_);
+    top.assign(profile_pcs_.begin(), profile_pcs_.end());
+    samples = profile_samples_;
+    seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - profile_start_).count();
+  }
+  if (samples == 0) return {};
+  std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+  std::vector<std::string> out;
+  char line[192];
+  std::snprintf(line, sizeof line, "profile: %llu slices in %.1f s (~%.1f M IR-steps/s)",
+                static_cast<unsigned long long>(samples), seconds,
+                seconds > 0 ? static_cast<double>(samples) * abi::AbiContext::kSliceSteps / seconds / 1e6 : 0.0);
+  out.emplace_back(line);
+  const std::size_t shown = std::min<std::size_t>(top.size(), 12);
+  for (std::size_t i = 0; i < shown; ++i) {
+    std::snprintf(line, sizeof line, "profile: %5.1f%% %s", 100.0 * static_cast<double>(top[i].second) /
+                                                              static_cast<double>(samples),
+                  NameAddress(top[i].first).c_str());
+    out.emplace_back(line);
+  }
+  if (const std::string cache = CacheStats(); !cache.empty()) out.push_back("profile: " + cache);
+  return out;
+}
+
+std::string GuestProcess::CacheStats() {
+  // `engine(1)` is the interpreter by construction (JIT is tier 2), so this needs no RTTI.
+  auto& tier = static_cast<exec::InterpExecutor&>(engine(1));
+  return "tier1: translations " + std::to_string(tier.translations()) + ", blocks cached " +
+         std::to_string(tier.cached_blocks());
+}
+
 std::string GuestProcess::StackWords(GuestAddr sp, std::size_t bytes, std::size_t max_frames) const {
   std::string out;
   std::size_t frames = 0;
@@ -1127,14 +1188,7 @@ std::string GuestProcess::StackWords(GuestAddr sp, std::size_t bytes, std::size_
 }
 
 std::vector<std::string> GuestProcess::StallReport() {
-  const auto name = [this](GuestAddr a) {
-    for (const auto& m : modules_) {
-      if (m != nullptr && a >= m->base && a - m->base < m->extent) {
-        return (m->soname.empty() ? m->path : m->soname) + "+" + Hex(a - m->base);
-      }
-    }
-    return Hex(a);
-  };
+  const auto name = [this](GuestAddr a) { return NameAddress(a); };
   // Return addresses still on the thread's stack, named against the modules — a scan, not an unwind, the
   // same technique the fatal-stop report uses. It names the call chain that reached the wait.
   const auto stack = [this](const GuestThread& t) { return StackWords(t.state.r[13], 512, 6); };

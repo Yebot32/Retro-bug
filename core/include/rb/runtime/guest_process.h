@@ -33,6 +33,7 @@
 #include <thread>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "rb/abi/abi.h"
@@ -201,6 +202,19 @@ class GuestProcess {
   /// Names the module-shaped words in the first `bytes` above `sp` (a scan, not an unwind), at most
   /// `max_frames`. The stall report uses it, and a SIGABRT delivery logs it to name an abort's caller.
   [[nodiscard]] std::string StackWords(GuestAddr sp, std::size_t bytes, std::size_t max_frames = 12) const;
+  /// A guest address as `module+offset` (or bare hex outside every module) — the name a profile sample,
+  /// a stall line or a fault report is read against.
+  [[nodiscard]] std::string NameAddress(GuestAddr at) const;
+
+  /// A statistical profile of guest execution: one sample per slice boundary (`AbiContext::kSliceSteps` IR
+  /// operations), keyed by guest pc. One map increment per ~200k steps is cheap enough to leave on, and on
+  /// a host with no JIT it is the only way to say where an interpreted title's minutes go.
+  void StartPcProfile();
+  /// The top sample sites plus the sample count/rate and Tier I's block-cache counters. Empty before
+  /// `StartPcProfile`.
+  [[nodiscard]] std::vector<std::string> ProfileReport();
+  /// Tier I's block-cache counters: translations so far and blocks currently cached.
+  [[nodiscard]] std::string CacheStats();
   /// A guest fault with no handler installed. Names the fault and, through `LogFaultReport`, prints the full
   /// state a fault needs to be understood without a second run.
   void LogUnhandledFault(const char* sig_name, std::uint32_t addr, const GuestThread& thread);
@@ -309,6 +323,10 @@ class GuestProcess {
   std::atomic<std::size_t> threads_started_{0};
   mutable std::mutex fault_mu_;
   std::map<std::string, unsigned> fault_counts_;  ///< fault key -> occurrences (log throttling)
+  std::mutex profile_mu_;
+  std::unordered_map<std::uint32_t, std::uint64_t> profile_pcs_;
+  std::uint64_t profile_samples_ = 0;
+  std::chrono::steady_clock::time_point profile_start_{};
   std::chrono::steady_clock::time_point fault_report_at_{};  ///< last full report (at most one per 5 s)
   std::function<std::vector<std::string>()> fault_suffix_;
   /// Adopted threads (GGL-protected). Their host threads' exit hooks reach this process through `alive_`, which

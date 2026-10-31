@@ -4,6 +4,7 @@
 
 #include "ios_host.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -610,8 +611,9 @@ std::optional<std::uint32_t> IosHost::Resolve(const std::string& name) {
   }
   slots_.emplace(name, index);
   p_.abi().Bind(index,
-                [this, name, fn](exec::MachineState& s, std::string* why) {
+                [this, name, index, fn](exec::MachineState& s, std::string* why) {
                   g_last_host_call.store(name.c_str(), std::memory_order_relaxed);
+                  if (index < slot_calls_.size()) slot_calls_[index].fetch_add(1, std::memory_order_relaxed);
                   // Recorded before the call runs, so a fault inside the host callee lists the call itself.
                   const std::uint32_t at = recent_next_.fetch_add(1, std::memory_order_relaxed);
                   recent_[at % kRecentCalls] = RecentHostCall{name.c_str(), {s.r[0], s.r[1], s.r[2], s.r[3]}};
@@ -622,6 +624,27 @@ std::optional<std::uint32_t> IosHost::Resolve(const std::string& name) {
                 },
                 Waits(name) ? abi::AbiContext::SlotLock::kReleasesGgl : abi::AbiContext::SlotLock::kHoldsGgl);
   return p_.abi().SlotFor(index);
+}
+
+std::vector<std::string> IosHost::CallCountLines() const {
+  std::vector<std::pair<std::string, std::uint64_t>> counts;
+  counts.reserve(slots_.size());
+  for (const auto& [name, index] : slots_) {
+    if (index >= slot_calls_.size()) continue;
+    const std::uint64_t n = slot_calls_[index].load(std::memory_order_relaxed);
+    if (n != 0) counts.emplace_back(name, n);
+  }
+  std::sort(counts.begin(), counts.end(),
+            [](const auto& a, const auto& b) { return a.second > b.second; });
+  std::vector<std::string> out;
+  char line[160];
+  const std::size_t shown = std::min<std::size_t>(counts.size(), 10);
+  for (std::size_t i = 0; i < shown; ++i) {
+    std::snprintf(line, sizeof line, "host calls: %s %llu", counts[i].first.c_str(),
+                  static_cast<unsigned long long>(counts[i].second));
+    out.emplace_back(line);
+  }
+  return out;
 }
 
 std::vector<std::string> IosHost::RecentCallLines() const {

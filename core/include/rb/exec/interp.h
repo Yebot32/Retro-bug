@@ -127,10 +127,20 @@ class InterpExecutor : public Executor {
   /// blocks add theirs — a bounded, device-safe budget, not the gigabytes the old slab size implied.
   /// The old hazard still governs the bound: the pool does not check `malloc`, and on iOS this much host
   /// heap alongside the guest window once surfaced as a crash inside `PrependNewInst` when the allocation
-  /// returned null, so the cache stays bounded, hot loops stay cached, and a full cache is cleared
-  /// wholesale as before. None of this relaxes the rule above: code the guest can write is still
-  /// re-decoded on every entry, and a cache flush still evicts by range.
+  /// returned null, so the cache stays bounded and hot loops stay cached. None of this relaxes the rule
+  /// above: code the guest can write is still re-decoded on every entry, and a cache flush still evicts by
+  /// range.
+  ///
+  /// Eviction is generational, not wholesale. The cache used to be cleared the moment it filled, so a
+  /// working set slightly larger than the cap re-translated everything forever; now a full young
+  /// generation is demoted and the previous one is dropped, so blocks in an inner loop survive. The bound
+  /// is therefore two generations: 4096 entries, ~27 MiB at the flat per-block cost above.
   static constexpr std::size_t kBlockCacheLimit = 2048;
+
+  /// How many blocks this executor has translated, and how many it currently holds — the two numbers a
+  /// profile needs to say whether translation is part of a slow title's cost.
+  std::size_t translations() const { return translations_; }
+  std::size_t cached_blocks() const { return blocks_.size() + blocks_old_.size(); }
 
   /// Nothing is cached, so nothing can be stale — and that is a property of this tier, not a stub:
   /// running the same block after an invalidation call has to give the same answer, which the test
@@ -167,7 +177,10 @@ class InterpExecutor : public Executor {
   };
   static BlockKey MakeKey(const Dynarmic::A32::LocationDescriptor& location);
   mem::GuestMemory& memory_;
-  std::unordered_map<BlockKey, CachedBlock, BlockKeyHash> blocks_;
+  using BlockMap = std::unordered_map<BlockKey, CachedBlock, BlockKeyHash>;
+  BlockMap blocks_;      ///< the young generation: lookup first, filled by translation
+  BlockMap blocks_old_;  ///< the previous generation: still a hit, promoted on use
+  std::size_t translations_ = 0;
   GuestAddr return_address_;
   const HostDispatch* dispatch_;
   /// Runs so far, for `RB_T1_TRACE=<n>` (trace the n-th Run). Per executor rather than a static.

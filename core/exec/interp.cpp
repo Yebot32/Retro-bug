@@ -3200,7 +3200,15 @@ RunResult InterpExecutor::Run(MachineState& state, unsigned max_instructions) {
     std::shared_ptr<isa::TranslatedBlock> block;
     if (cacheable) {
       const auto it = blocks_.find(key);
-      if (it != blocks_.end()) block = it->second.block;
+      if (it != blocks_.end()) {
+        block = it->second.block;
+      } else if (const auto old = blocks_old_.find(key); old != blocks_old_.end()) {
+        // A hit in the previous generation: promote it, so a loop that was re-entered after a demotion
+        // does not have to survive another one to stay cached.
+        block = old->second.block;
+        blocks_.emplace(key, CachedBlock{block});
+        blocks_old_.erase(old);
+      }
     }
     if (!block) {
       std::string err;
@@ -3211,8 +3219,16 @@ RunResult InterpExecutor::Run(MachineState& state, unsigned max_instructions) {
         break;
       }
       block = std::make_shared<isa::TranslatedBlock>(std::move(*translated));
+      ++translations_;
       if (cacheable) {
-        if (blocks_.size() >= kBlockCacheLimit) blocks_.clear();
+        if (blocks_.size() >= kBlockCacheLimit) {
+          // Generational, not a wholesale clear: the old code dropped every block the moment the cache
+          // filled, so a working set slightly larger than the cap re-translated its hot code forever.
+          // Demoting the young generation keeps everything the previous generation held for one more
+          // pass, which is what an inner loop interleaved with a large working set needs.
+          blocks_old_ = std::move(blocks_);
+          blocks_.clear();
+        }
         blocks_.emplace(key, CachedBlock{block});
       }
     }
@@ -3328,6 +3344,16 @@ void InterpExecutor::Invalidate(GuestAddr from, GuestAddr to) {
         static_cast<GuestAddr>(it->first.pc) & ~static_cast<GuestAddr>(mem::kGuestPage - 1);
     if (bpage >= from_page && bpage < to_page) {
       it = blocks_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  // The previous generation is evicted by the same rule: a flush names bytes, and a demoted block decoded
+  // from those bytes is exactly as stale as a young one.
+  for (auto it = blocks_old_.begin(); it != blocks_old_.end();) {
+    const GuestAddr bpage = static_cast<GuestAddr>(it->first.pc) & ~static_cast<GuestAddr>(mem::kGuestPage - 1);
+    if (bpage >= from_page && bpage < to_page) {
+      it = blocks_old_.erase(it);
     } else {
       ++it;
     }

@@ -349,6 +349,9 @@ bool RbIosSession::Boot(std::string* err) {
     return false;
   }
   process.store(boot->process(), std::memory_order_release);
+  // A sampling profile of guest execution: one sample per slice boundary, cheap enough to leave on, and the
+  // only way to name where an interpreted title spends its minutes on a host with no JIT.
+  boot->process()->StartPcProfile();
   if (dlgl_apk || lib == "libdlgl.so") {
     dlgl = std::make_unique<rb::platform::ios::DlglBootstrap>(
         *java, boot->jni()->env(), lib, [self](const std::string& line) { self->Log(line); });
@@ -443,6 +446,18 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
       }
       if (!s->running.load()) break;
       if (!s->want_run.load()) continue;  // paused by the app, not stalled
+      static int ticks = 0;
+      ++ticks;
+      if (rb::runtime::GuestProcess* p = s->process.load(std::memory_order_acquire)) {
+        // Every other tick (10 s): the profile and the host-call volumes, which is where a slow load's time
+        // actually goes. The stall block below adds the per-thread state when frames are not advancing.
+        if (ticks % 2 == 0) {
+          for (const std::string& line : p->ProfileReport()) s->Log(line);
+          if (s->host) {
+            for (const std::string& line : s->host->CallCountLines()) s->Log(line);
+          }
+        }
+      }
       const int now = s->frames.load();
       if (now == last) {
         s->Log("stall: still frame " + std::to_string(now) + " after 5 s");
