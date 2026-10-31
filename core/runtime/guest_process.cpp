@@ -420,7 +420,7 @@ std::unique_ptr<GuestProcess> GuestProcess::Create(const GuestProcessOptions& op
       }
       const syscall::Monitor::Disposition disp = owner->monitor_->disposition(sig);
       if (!disp.catches()) {
-        owner->Log("signals: " + std::string(sig_name) + " at " + Hex(stop_addr) + " not delivered — no handler");
+        owner->LogUnhandledFault(sig_name, stop_addr, thread);
         return false;
       }
       std::uint32_t interrupted_pc = thread.state.pc;
@@ -923,8 +923,12 @@ std::string GuestProcess::Spawn(std::unique_ptr<GuestThread> t) {
   rec->guest = std::move(t);
   HostThread* raw = rec.get();
   const std::size_t ordinal = threads_started_.load(std::memory_order_relaxed) + 1;
-  if (ordinal <= 8) Log("threads: spawning host thread " + std::to_string(ordinal) + " for guest tid " +
-                       std::to_string(raw->guest->tid) + " stack " + Hex(raw->guest->stack_lo));
+  // Sampled, not capped: a title that spawns one thread per frame is exactly the shape a per-frame fault
+  // takes, and a hard stop at 8 hid whether the count was growing.
+  if (ordinal <= 8 || ordinal % 100 == 0) {
+    Log("threads: spawning host thread " + std::to_string(ordinal) + " for guest tid " +
+        std::to_string(raw->guest->tid) + " stack " + Hex(raw->guest->stack_lo));
+  }
   try {
     rec->host = std::thread([this, raw] { ThreadMain(raw); });
   } catch (const std::system_error& e) {
@@ -1007,6 +1011,26 @@ bool GuestProcess::WaitForThreads(std::chrono::milliseconds limit) {
 std::vector<std::string> GuestProcess::thread_faults() const {
   std::lock_guard<std::mutex> lk(threads_mu_);
   return thread_faults_;
+}
+
+void GuestProcess::LogUnhandledFault(const char* sig_name, std::uint32_t addr, const GuestThread& thread) {
+  const std::uint32_t pc = thread.state.pc;
+  const bool thumb = (thread.state.cpsr & (1u << 5)) != 0;  // CPSR.T: the pc names a Thumb encoding
+  char key[96];
+  std::snprintf(key, sizeof key, "%s:%08x:%08x", sig_name, addr, pc);
+  unsigned count = 0;
+  {
+    std::lock_guard<std::mutex> lk(fault_mu_);
+    count = ++fault_counts_[key];
+  }
+  if (count == 1) {
+    Log("signals: " + std::string{sig_name} + " at " + Hex(addr) + " not delivered — no handler; pc " + Hex(pc) +
+        (thumb ? " thumb" : " arm") + " tid " + std::to_string(thread.tid) + " stack: " +
+        StackWords(thread.state.r[13], 512, 10));
+  } else if (count <= 3 || count % 300 == 0) {
+    Log("signals: " + std::string{sig_name} + " at " + Hex(addr) + " (pc " + Hex(pc) + ") still faulting — " +
+        std::to_string(count) + " time(s)");
+  }
 }
 
 std::string GuestProcess::StackWords(GuestAddr sp, std::size_t bytes, std::size_t max_frames) const {
