@@ -105,7 +105,7 @@ void vshl_i32_shifts_each_lane_left() {
   Rig rig = build();
   if (!rig.ok) return;
   // vshl.i32 d16, d2, #1 ; bx lr
-  const std::uint8_t program[] = {0x12, 0x05, 0xe1, 0xef, 0x70, 0x47};
+  const std::uint8_t program[] = {0xe1, 0xef, 0x12, 0x05, 0x70, 0x47};
   exec::MachineState in{};
   in.d[2] = 0x8000'0001'0000'0001ull;
   const exec::RunResult rr = Run(rig, program, sizeof program, in);
@@ -119,7 +119,7 @@ void vshl_i32_shifts_each_lane_left() {
 void vshl_i32_shift_amount_masks_the_lane() {
   Rig rig = build();
   if (!rig.ok) return;
-  const std::uint8_t program[] = {0x12, 0x05, 0xff, 0xef, 0x70, 0x47};
+  const std::uint8_t program[] = {0xef, 0xff, 0x12, 0x05, 0x70, 0x47};
   exec::MachineState in{};
   in.d[2] = 0x0000'0003'0000'0001ull;
   const exec::RunResult rr = Run(rig, program, sizeof program, in);
@@ -132,7 +132,7 @@ void vshl_i32_shift_amount_masks_the_lane() {
 void vshl_i16_shifts_both_halves_of_the_quad() {
   Rig rig = build();
   if (!rig.ok) return;
-  const std::uint8_t program[] = {0x52, 0x65, 0x93, 0xef, 0x70, 0x47};
+  const std::uint8_t program[] = {0x93, 0xef, 0x52, 0x65, 0x70, 0x47};
   exec::MachineState in{};
   in.d[2] = 0x0001'0002'0003'0004ull;  // lanes, low first: 0x0004 0x0003 0x0002 0x0001
   in.d[3] = 0x8001'8002'8003'8004ull;  // top bits fall out of the lane
