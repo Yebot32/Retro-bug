@@ -34,6 +34,9 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_VERSION: "5.0"
+        # The engine archive is reached only through the symbols the app calls; stripping was measured to drop
+        # a row that is installed by name (AndroidKitKatActivity.exitApp) from the linked image.
+        DEAD_CODE_STRIPPING: "NO"
         CODE_SIGNING_ALLOWED: "NO"
         CODE_SIGNING_REQUIRED: "NO"
     dependencies:
