@@ -1,8 +1,9 @@
 // RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
 //
-// Tier I NEON semantics the guest's own libc depends on. The fixture-based interpreter suite needs the
-// tablet's `librb_fixture.so`; these cases need no fixture — the instructions are assembled into a guest
-// page here, so the same test runs on every host lane and pins the semantics a real bionic routine
+// Tier I NEON semantics the guest's own libc depends on, plus the flag/branch/memory smoke program the
+// interpreter's dispatch must keep green. The fixture-based interpreter suite needs the tablet's
+// `librb_fixture.so`; these cases need no fixture — the instructions are assembled into a guest page
+// here, so the same test runs on every host lane and pins the semantics a real bionic routine
 // (jemalloc's extent hash in `extent_lock2`) reaches on every allocation.
 //
 // The encodings were produced by clang from the mnemonic (see the comments), and the expected lane values
@@ -44,6 +45,7 @@ void fail(const char* what, int line, const std::string& detail = {}) {
   } while (0)
 
 constexpr std::uint32_t kCode = 0x0100'0000;
+constexpr std::uint32_t kData = 0x0180'0000;  // a writable page the flag/memory case stores through
 constexpr std::uint32_t kStackTop = 0x00ff'f000;
 constexpr std::uint32_t kReturn = 0x0fff'fff0;  // never mapped: the executor's sentinel return address
 
@@ -82,8 +84,9 @@ Rig build() {
   // Read+write, not exec: the interpreter decodes by reading the bytes, and macOS refuses PROT_EXEC on an
   // out-of-line anonymous block (a page the window could not serve in place on a 16 KiB granule).
   if (!rig.mem->Map(kCode, mem::kGuestPage, mem::kRead | mem::kWrite, &err) ||
+      !rig.mem->Map(kData, mem::kGuestPage, mem::kRead | mem::kWrite, &err) ||
       !rig.mem->Map(kStackTop - 0x4000, 0x4000, mem::kRead | mem::kWrite, &err)) {
-    fail("could not map the code page or stack", __LINE__, err);
+    fail("could not map the code page, data page or stack", __LINE__, err);
     return rig;
   }
   rig.exec = std::make_unique<exec::InterpExecutor>(*rig.mem, kReturn);
@@ -150,12 +153,47 @@ void vshl_i16_shifts_both_halves_of_the_quad() {
   CHECK_CTX(in.d[7] == 0x0008'0010'0018'0020ull, "d7 = " + Hex64(in.d[7]) + ": q3's high half");
 }
 
+/// Regression coverage for the interpreter's just-landed dispatch optimization, on the paths it touches:
+/// `cmp` must publish the flags its own subtraction produced, `bne` must read those flags, and the
+/// store/load pair must reach the guest data page. The failure leg returns through the same `bx lr` with
+/// r0 = 0, so a wrong condition shows up as a wrong final register rather than a different stop reason;
+/// the register *and* the stored word are asserted, so a load that never occurs cannot hide behind a
+/// correct-looking sum.
+void conditions_and_memory_round_trip() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  // movs r1, #5 ; str r1, [r2] ; ldr r3, [r2] ; cmp r3, #5 ; bne fail ; add r0, r1, r3 ; bx lr
+  // fail: movs r0, #0 ; bx lr
+  const std::uint8_t program[] = {
+      0x05, 0x21,              // 0x2105        movs r1, #5
+      0x11, 0x60,              // 0x6011        str r1, [r2]
+      0x13, 0x68,              // 0x6813        ldr r3, [r2]
+      0x05, 0x2b,              // 0x2b05        cmp r3, #5
+      0x02, 0xd1,              // 0xd102        bne fail (target 0x10 - (pc 0x8 + 4) = 4, imm8 = 2)
+      0x01, 0xeb, 0x03, 0x00,  // 0xeb01 0x0003 add.w r0, r1, r3
+      0x70, 0x47,              // 0x4770        bx lr
+      // fail:
+      0x00, 0x20,              // 0x2000        movs r0, #0
+      0x70, 0x47,              // 0x4770        bx lr
+  };
+  exec::MachineState in{};
+  in.r[2] = kData;
+  const exec::RunResult rr = Run(rig, program, sizeof program, in);
+  CHECK_CTX(rr.reason == exec::StopReason::Returned, rr.detail);
+  CHECK_CTX(in.r[0] == 10, "r0 = " + Hex64(in.r[0]) + ": the taken path's r1 + r3, not the fail leg's 0");
+  CHECK_CTX(in.r[3] == 5, "r3 = " + Hex64(in.r[3]) + ": the word loaded back from the data page");
+  std::uint32_t stored = 0;
+  CHECK_CTX(rig.mem->Read(kData, &stored, sizeof stored) && stored == 5,
+            "data[" + Hex64(kData) + "] = " + Hex64(stored) + ": the word str wrote");
+}
+
 }  // namespace
 
 int main() {
   vshl_i32_shifts_each_lane_left();
   vshl_i32_shift_amount_masks_the_lane();
   vshl_i16_shifts_both_halves_of_the_quad();
+  conditions_and_memory_round_trip();
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;
 }
