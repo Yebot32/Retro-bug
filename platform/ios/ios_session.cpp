@@ -138,6 +138,9 @@ struct RbIosSession {
   std::size_t window_bytes = 0;
 
   std::unique_ptr<rb::host::Boot> boot;                              ///< owns the guest process and the Java
+  /// The process the stall monitor may report on, published atomically: `boot` is assigned on the render
+  /// thread while the monitor reads it, and a plain pointer there is a data race, not a diagnostic.
+  std::atomic<rb::runtime::GuestProcess*> process{nullptr};
   rb::java::TableJava* java = nullptr;                               ///< owned by boot, as its HostJava
   std::unique_ptr<rb::platform::ios::IosHost> host;                  ///< the guest's import answers
   std::unique_ptr<rb::platform::ios::Cocos2dxBootstrap> game;
@@ -332,6 +335,7 @@ bool RbIosSession::Boot(std::string* err) {
   if (!result.ok) {
     *err = result.report.empty() ? std::string{"the boot failed"} : result.report;
     // A failed boot leaves a half-initialised process; dropping it lets the next play start clean.
+    process.store(nullptr, std::memory_order_release);
     boot.reset();
     host.reset();
     java = nullptr;
@@ -339,10 +343,12 @@ bool RbIosSession::Boot(std::string* err) {
   }
   if (java == nullptr) {
     *err = "the Java shim was never created";
+    process.store(nullptr, std::memory_order_release);
     boot.reset();
     host.reset();
     return false;
   }
+  process.store(boot->process(), std::memory_order_release);
   if (dlgl_apk || lib == "libdlgl.so") {
     dlgl = std::make_unique<rb::platform::ios::DlglBootstrap>(
         *java, boot->jni()->env(), lib, [self](const std::string& line) { self->Log(line); });
@@ -444,9 +450,9 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
         // stuck, so a slow load names the code it is inside instead of only the frame number. Read without
         // the GGL, as the stall supervisor does: a monitor must never block behind a guest that is itself
         // the thing being reported.
-        if (s->boot != nullptr && s->boot->process() != nullptr) {
-          s->boot->process()->LogFaultReport("stall:" + std::to_string(now), nullptr,
-                                             "frame " + std::to_string(now) + " has not advanced for 5 s");
+        if (rb::runtime::GuestProcess* process = s->process.load(std::memory_order_acquire)) {
+          process->LogFaultReport("stall:" + std::to_string(now), nullptr,
+                                  "frame " + std::to_string(now) + " has not advanced for 5 s");
         }
       }
       last = now;
@@ -583,6 +589,7 @@ extern "C" void rb_ios_resume(RbIosSession* s) {
 extern "C" void rb_ios_destroy(RbIosSession* s) {
   if (s == nullptr) return;
   rb_ios_stop(s);
+  s->process.store(nullptr, std::memory_order_release);  // no report may reach a process about to go
   rb::platform::ios::EglShim::Instance().Detach();
   s->game.reset();
   s->host.reset();
