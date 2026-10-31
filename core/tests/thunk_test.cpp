@@ -40,9 +40,19 @@ void fail(const char* what, int line, const std::string& detail = {}) {
 
 constexpr std::uint32_t kStack = 0x10000u;  // the guest sp: stacked argument words start here
 
+/// The kernel's page size as a shift. `GuestMemory::Create` refuses a model finer than the real granule,
+/// so a hard-coded 4 KiB model made every case crash on a 16 KiB host — the suite never ran on macOS
+/// before, which is why the null window went unnoticed.
+unsigned NativeHostShift() {
+  unsigned shift = 12;
+  while ((std::size_t{1} << shift) < static_cast<std::size_t>(sysconf(_SC_PAGESIZE))) ++shift;
+  return shift;
+}
+
 std::unique_ptr<mem::GuestMemory> Window() {
   mem::AddressModel model;
   model.kind = mem::AddressModel::kBiased;
+  model.host_page_shift = NativeHostShift();
   std::string err;
   auto m = mem::GuestMemory::Create(std::size_t{1} << 20, model, &err);
   if (m) m->Map(kStack, 0x2000, mem::kRead | mem::kWrite, &err);
@@ -205,8 +215,7 @@ void pointers_are_translated_and_checked() {
 void out_of_line_pointer_args_are_dereferenceable() {
   // A window with 16 KiB granules whatever the host's own page size: the shape that leaves a file page
   // out of line must be reproducible on a 4 KiB runner as well as a 16 KiB one.
-  unsigned native_shift = 12;
-  while ((std::size_t{1} << native_shift) < static_cast<std::size_t>(sysconf(_SC_PAGESIZE))) ++native_shift;
+  const unsigned native_shift = NativeHostShift();
   mem::AddressModel model;
   model.kind = mem::AddressModel::kBiased;
   model.host_page_shift = native_shift > 14 ? native_shift : 14;
