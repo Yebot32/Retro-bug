@@ -2,21 +2,26 @@
 // fingerprint (FNV-1a-64) 0x6be3f83c5f07ce99, .text vaddr 0x00001b60, load bias 0x00010000
 // Regenerate: rb_aotgen --emit <lib.so> --out aot_fixture --base 0x00010000
 // code size 19176 bytes, 80 blocks
+#ifdef __APPLE__
+#define RB_AOT_SYM(x) _##x
+#else
+#define RB_AOT_SYM(x) x
+#endif
     .text
     .p2align 4
-rb_aot_mem_read8_tail_tramp:
+RB_AOT_SYM(rb_aot_mem_read8_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_mem_read8
-rb_aot_mem_read16_tail_tramp:
+    b RB_AOT_SYM(rb_aot_mem_read8)
+RB_AOT_SYM(rb_aot_mem_read16_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_mem_read16
-rb_aot_mem_read32_tail_tramp:
+    b RB_AOT_SYM(rb_aot_mem_read16)
+RB_AOT_SYM(rb_aot_mem_read32_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_mem_read32
-rb_aot_mem_read64_tail_tramp:
+    b RB_AOT_SYM(rb_aot_mem_read32)
+RB_AOT_SYM(rb_aot_mem_read64_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_mem_read64
-rb_aot_mem_read8_tramp:
+    b RB_AOT_SYM(rb_aot_mem_read64)
+RB_AOT_SYM(rb_aot_mem_read8_tramp):
     .word 0xd10a43ff
     .word 0xa90007e0
     .word 0xa9010fe2
@@ -46,7 +51,7 @@ rb_aot_mem_read8_tramp:
     .word 0xd10003ff
     .word 0xaa1c03e0
     .word 0xaa1003e1
-    bl rb_aot_mem_read8
+    bl RB_AOT_SYM(rb_aot_mem_read8)
     .word 0xaa0003f0
     .word 0x910003ff
     .word 0xa94007e0
@@ -77,7 +82,7 @@ rb_aot_mem_read8_tramp:
     .word 0x910a43ff
     .word 0xd65f03c0
     .word 0xd503201f
-rb_aot_mem_read16_tramp:
+RB_AOT_SYM(rb_aot_mem_read16_tramp):
     .word 0xd10a43ff
     .word 0xa90007e0
     .word 0xa9010fe2
@@ -107,7 +112,7 @@ rb_aot_mem_read16_tramp:
     .word 0xd10003ff
     .word 0xaa1c03e0
     .word 0xaa1003e1
-    bl rb_aot_mem_read16
+    bl RB_AOT_SYM(rb_aot_mem_read16)
     .word 0xaa0003f0
     .word 0x910003ff
     .word 0xa94007e0
@@ -138,7 +143,7 @@ rb_aot_mem_read16_tramp:
     .word 0x910a43ff
     .word 0xd65f03c0
     .word 0xd503201f
-rb_aot_mem_read32_tramp:
+RB_AOT_SYM(rb_aot_mem_read32_tramp):
     .word 0xd10a43ff
     .word 0xa90007e0
     .word 0xa9010fe2
@@ -168,7 +173,7 @@ rb_aot_mem_read32_tramp:
     .word 0xd10003ff
     .word 0xaa1c03e0
     .word 0xaa1003e1
-    bl rb_aot_mem_read32
+    bl RB_AOT_SYM(rb_aot_mem_read32)
     .word 0xaa0003f0
     .word 0x910003ff
     .word 0xa94007e0
@@ -199,7 +204,7 @@ rb_aot_mem_read32_tramp:
     .word 0x910a43ff
     .word 0xd65f03c0
     .word 0xd503201f
-rb_aot_mem_read64_tramp:
+RB_AOT_SYM(rb_aot_mem_read64_tramp):
     .word 0xd10a43ff
     .word 0xa90007e0
     .word 0xa9010fe2
@@ -229,7 +234,7 @@ rb_aot_mem_read64_tramp:
     .word 0xd10003ff
     .word 0xaa1c03e0
     .word 0xaa1003e1
-    bl rb_aot_mem_read64
+    bl RB_AOT_SYM(rb_aot_mem_read64)
     .word 0xaa0003f0
     .word 0x910003ff
     .word 0xa94007e0
@@ -260,31 +265,31 @@ rb_aot_mem_read64_tramp:
     .word 0x910a43ff
     .word 0xd65f03c0
     .word 0xd503201f
-rb_aot_excl_read8_tail_tramp:
+RB_AOT_SYM(rb_aot_excl_read8_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_excl_read8
-rb_aot_excl_read16_tail_tramp:
+    b RB_AOT_SYM(rb_aot_excl_read8)
+RB_AOT_SYM(rb_aot_excl_read16_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_excl_read16
-rb_aot_excl_read32_tail_tramp:
+    b RB_AOT_SYM(rb_aot_excl_read16)
+RB_AOT_SYM(rb_aot_excl_read32_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_excl_read32
-rb_aot_excl_read64_tail_tramp:
+    b RB_AOT_SYM(rb_aot_excl_read32)
+RB_AOT_SYM(rb_aot_excl_read64_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_excl_read64
-rb_aot_mem_write8_tail_tramp:
+    b RB_AOT_SYM(rb_aot_excl_read64)
+RB_AOT_SYM(rb_aot_mem_write8_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_mem_write8
-rb_aot_mem_write16_tail_tramp:
+    b RB_AOT_SYM(rb_aot_mem_write8)
+RB_AOT_SYM(rb_aot_mem_write16_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_mem_write16
-rb_aot_mem_write32_tail_tramp:
+    b RB_AOT_SYM(rb_aot_mem_write16)
+RB_AOT_SYM(rb_aot_mem_write32_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_mem_write32
-rb_aot_mem_write64_tail_tramp:
+    b RB_AOT_SYM(rb_aot_mem_write32)
+RB_AOT_SYM(rb_aot_mem_write64_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_mem_write64
-rb_aot_mem_write8_tramp:
+    b RB_AOT_SYM(rb_aot_mem_write64)
+RB_AOT_SYM(rb_aot_mem_write8_tramp):
     .word 0xd10a43ff
     .word 0xa90007e0
     .word 0xa9010fe2
@@ -315,7 +320,7 @@ rb_aot_mem_write8_tramp:
     .word 0xaa1c03e0
     .word 0xaa1003e1
     .word 0xaa1103e2
-    bl rb_aot_mem_write8
+    bl RB_AOT_SYM(rb_aot_mem_write8)
     .word 0x910003ff
     .word 0xa94007e0
     .word 0xa9410fe2
@@ -345,7 +350,7 @@ rb_aot_mem_write8_tramp:
     .word 0x910a43ff
     .word 0xd65f03c0
     .word 0xd503201f
-rb_aot_mem_write16_tramp:
+RB_AOT_SYM(rb_aot_mem_write16_tramp):
     .word 0xd10a43ff
     .word 0xa90007e0
     .word 0xa9010fe2
@@ -376,7 +381,7 @@ rb_aot_mem_write16_tramp:
     .word 0xaa1c03e0
     .word 0xaa1003e1
     .word 0xaa1103e2
-    bl rb_aot_mem_write16
+    bl RB_AOT_SYM(rb_aot_mem_write16)
     .word 0x910003ff
     .word 0xa94007e0
     .word 0xa9410fe2
@@ -406,7 +411,7 @@ rb_aot_mem_write16_tramp:
     .word 0x910a43ff
     .word 0xd65f03c0
     .word 0xd503201f
-rb_aot_mem_write32_tramp:
+RB_AOT_SYM(rb_aot_mem_write32_tramp):
     .word 0xd10a43ff
     .word 0xa90007e0
     .word 0xa9010fe2
@@ -437,7 +442,7 @@ rb_aot_mem_write32_tramp:
     .word 0xaa1c03e0
     .word 0xaa1003e1
     .word 0xaa1103e2
-    bl rb_aot_mem_write32
+    bl RB_AOT_SYM(rb_aot_mem_write32)
     .word 0x910003ff
     .word 0xa94007e0
     .word 0xa9410fe2
@@ -467,7 +472,7 @@ rb_aot_mem_write32_tramp:
     .word 0x910a43ff
     .word 0xd65f03c0
     .word 0xd503201f
-rb_aot_mem_write64_tramp:
+RB_AOT_SYM(rb_aot_mem_write64_tramp):
     .word 0xd10a43ff
     .word 0xa90007e0
     .word 0xa9010fe2
@@ -498,7 +503,7 @@ rb_aot_mem_write64_tramp:
     .word 0xaa1c03e0
     .word 0xaa1003e1
     .word 0xaa1103e2
-    bl rb_aot_mem_write64
+    bl RB_AOT_SYM(rb_aot_mem_write64)
     .word 0x910003ff
     .word 0xa94007e0
     .word 0xa9410fe2
@@ -528,35 +533,35 @@ rb_aot_mem_write64_tramp:
     .word 0x910a43ff
     .word 0xd65f03c0
     .word 0xd503201f
-rb_aot_excl_write8_tail_tramp:
+RB_AOT_SYM(rb_aot_excl_write8_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_excl_write8
-rb_aot_excl_write16_tail_tramp:
+    b RB_AOT_SYM(rb_aot_excl_write8)
+RB_AOT_SYM(rb_aot_excl_write16_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_excl_write16
-rb_aot_excl_write32_tail_tramp:
+    b RB_AOT_SYM(rb_aot_excl_write16)
+RB_AOT_SYM(rb_aot_excl_write32_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_excl_write32
-rb_aot_excl_write64_tail_tramp:
+    b RB_AOT_SYM(rb_aot_excl_write32)
+RB_AOT_SYM(rb_aot_excl_write64_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_excl_write64
-rb_aot_call_svc_tail_tramp:
+    b RB_AOT_SYM(rb_aot_excl_write64)
+RB_AOT_SYM(rb_aot_call_svc_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_call_svc
-rb_aot_exception_raised_tail_tramp:
+    b RB_AOT_SYM(rb_aot_call_svc)
+RB_AOT_SYM(rb_aot_exception_raised_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_exception_raised
-rb_aot_isb_raised_tail_tramp:
+    b RB_AOT_SYM(rb_aot_exception_raised)
+RB_AOT_SYM(rb_aot_isb_raised_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_isb_raised
-rb_aot_add_ticks_tail_tramp:
+    b RB_AOT_SYM(rb_aot_isb_raised)
+RB_AOT_SYM(rb_aot_add_ticks_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_add_ticks
-rb_aot_get_ticks_remaining_tail_tramp:
+    b RB_AOT_SYM(rb_aot_add_ticks)
+RB_AOT_SYM(rb_aot_get_ticks_remaining_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_get_ticks_remaining
-.globl aot_fixture_run_code
-aot_fixture_run_code:
+    b RB_AOT_SYM(rb_aot_get_ticks_remaining)
+.globl RB_AOT_SYM(aot_fixture_run_code)
+RB_AOT_SYM(aot_fixture_run_code):
     .word 0xd10383ff
     .word 0xa90053f3
     .word 0xa9015bf5
@@ -592,7 +597,7 @@ aot_fixture_run_code:
     .word 0x88dfff70
     .word 0x350005f0
     .word 0xd61f0260
-aot_fixture_step_code:
+RB_AOT_SYM(aot_fixture_step_code):
     .word 0xd10383ff
     .word 0xa90053f3
     .word 0xa9015bf5
@@ -630,16 +635,16 @@ aot_fixture_step_code:
     .word 0x8811ff70
     .word 0x35ffff91
     .word 0xd61f0260
-aot_fixture_ret_dispatch:
+RB_AOT_SYM(aot_fixture_ret_dispatch):
     .word 0x88dfff70
     .word 0x350000f0
     .word 0xf100035f
     .word 0x540000ad
     .word 0xaa1c03e0
-    bl rb_aot_dispatch
+    bl RB_AOT_SYM(rb_aot_dispatch)
     .word 0xb4000040
     .word 0xd61f0000
-aot_fixture_ret_run_code:
+RB_AOT_SYM(aot_fixture_ret_run_code):
     .word 0xf94247e1
     .word 0xcb1a0021
     .word 0x97ffffaa
@@ -662,8 +667,8 @@ aot_fixture_ret_run_code:
     .word 0x910383ff
     .word 0xd65f03c0
     .word 0xd503201f
-.globl aot_fixture_block_0000
-aot_fixture_block_0000:
+.globl RB_AOT_SYM(aot_fixture_block_0000)
+RB_AOT_SYM(aot_fixture_block_0000):
     .word 0x52836d81
     .word 0x72a00021
     .word 0x97fffd92
@@ -688,8 +693,8 @@ aot_fixture_block_0000:
     .word 0x17ffffcd
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0001
-aot_fixture_block_0001:
+.globl RB_AOT_SYM(aot_fixture_block_0001)
+RB_AOT_SYM(aot_fixture_block_0001):
     .word 0xb9405393
     .word 0x72000270
     .word 0x52800071
@@ -712,8 +717,8 @@ aot_fixture_block_0001:
     .word 0x17ffffb7
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0002
-aot_fixture_block_0002:
+.globl RB_AOT_SYM(aot_fixture_block_0002)
+RB_AOT_SYM(aot_fixture_block_0002):
     .word 0xd100075a
     .word 0xf100035f
     .word 0x5400004d
@@ -724,8 +729,8 @@ aot_fixture_block_0002:
     .word 0x17ffffad
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0003
-aot_fixture_block_0003:
+.globl RB_AOT_SYM(aot_fixture_block_0003)
+RB_AOT_SYM(aot_fixture_block_0003):
     .word 0xb9401b93
     .word 0x71000274
     .word 0xd53b4213
@@ -738,8 +743,8 @@ aot_fixture_block_0003:
     .word 0x17ffffa1
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0006
-aot_fixture_block_0006:
+.globl RB_AOT_SYM(aot_fixture_block_0006)
+RB_AOT_SYM(aot_fixture_block_0006):
     .word 0xb9401b93
     .word 0xb9001f93
     .word 0x52837381
@@ -782,8 +787,8 @@ aot_fixture_block_0006:
     .word 0x17ffff77
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0007
-aot_fixture_block_0007:
+.globl RB_AOT_SYM(aot_fixture_block_0007)
+RB_AOT_SYM(aot_fixture_block_0007):
     .word 0x52837601
     .word 0x72a00021
     .word 0x97fffd24
@@ -808,8 +813,8 @@ aot_fixture_block_0007:
     .word 0x17ffff5f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0008
-aot_fixture_block_0008:
+.globl RB_AOT_SYM(aot_fixture_block_0008)
+RB_AOT_SYM(aot_fixture_block_0008):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -883,11 +888,11 @@ aot_fixture_block_0008:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0009
-    add x17, x17, :lo12:aot_fixture_block_0009
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0009)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0009)
 #else
-    adrp x17, aot_fixture_block_0009@PAGE
-    add x17, x17, aot_fixture_block_0009@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0009)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0009)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x528378f3
@@ -903,8 +908,8 @@ aot_fixture_block_0008:
     .word 0x17ffff07
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0012
-aot_fixture_block_0012:
+.globl RB_AOT_SYM(aot_fixture_block_0012)
+RB_AOT_SYM(aot_fixture_block_0012):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -983,8 +988,8 @@ aot_fixture_block_0012:
     .word 0x17fffeb9
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0017
-aot_fixture_block_0017:
+.globl RB_AOT_SYM(aot_fixture_block_0017)
+RB_AOT_SYM(aot_fixture_block_0017):
     .word 0xb9402393
     .word 0xb9001b93
     .word 0xd1000b5a
@@ -997,8 +1002,8 @@ aot_fixture_block_0017:
     .word 0x17fffead
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0018
-aot_fixture_block_0018:
+.globl RB_AOT_SYM(aot_fixture_block_0018)
+RB_AOT_SYM(aot_fixture_block_0018):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -1101,11 +1106,11 @@ aot_fixture_block_0018:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0019
-    add x17, x17, :lo12:aot_fixture_block_0019
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0019)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0019)
 #else
-    adrp x17, aot_fixture_block_0019@PAGE
-    add x17, x17, aot_fixture_block_0019@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0019)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0019)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x72000010
@@ -1122,8 +1127,8 @@ aot_fixture_block_0018:
     .word 0x17fffe37
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0020
-aot_fixture_block_0020:
+.globl RB_AOT_SYM(aot_fixture_block_0020)
+RB_AOT_SYM(aot_fixture_block_0020):
     .word 0xb9404f93
     .word 0x51005274
     .word 0xb9402b93
@@ -1271,11 +1276,11 @@ aot_fixture_block_0020:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0021
-    add x17, x17, :lo12:aot_fixture_block_0021
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0021)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0021)
 #else
-    adrp x17, aot_fixture_block_0021@PAGE
-    add x17, x17, aot_fixture_block_0021@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0021)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0021)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x72000010
@@ -1293,8 +1298,8 @@ aot_fixture_block_0020:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0035
-aot_fixture_block_0035:
+.globl RB_AOT_SYM(aot_fixture_block_0035)
+RB_AOT_SYM(aot_fixture_block_0035):
     .word 0xb9404f93
     .word 0x51001274
     .word 0x51002293
@@ -1379,11 +1384,11 @@ aot_fixture_block_0035:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0036
-    add x17, x17, :lo12:aot_fixture_block_0036
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0036)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0036)
 #else
-    adrp x17, aot_fixture_block_0036@PAGE
-    add x17, x17, aot_fixture_block_0036@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0036)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0036)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0xf94043f3
@@ -1402,8 +1407,8 @@ aot_fixture_block_0035:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0037
-aot_fixture_block_0037:
+.globl RB_AOT_SYM(aot_fixture_block_0037)
+RB_AOT_SYM(aot_fixture_block_0037):
     .word 0xb9404f93
     .word 0x51005274
     .word 0xb9402b93
@@ -1551,11 +1556,11 @@ aot_fixture_block_0037:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0038
-    add x17, x17, :lo12:aot_fixture_block_0038
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0038)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0038)
 #else
-    adrp x17, aot_fixture_block_0038@PAGE
-    add x17, x17, aot_fixture_block_0038@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0038)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0038)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x72000010
@@ -1573,8 +1578,8 @@ aot_fixture_block_0037:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0062
-aot_fixture_block_0062:
+.globl RB_AOT_SYM(aot_fixture_block_0062)
+RB_AOT_SYM(aot_fixture_block_0062):
     .word 0xb9404f93
     .word 0x51005274
     .word 0xb9402b93
@@ -1688,11 +1693,11 @@ aot_fixture_block_0062:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0063
-    add x17, x17, :lo12:aot_fixture_block_0063
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0063)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0063)
 #else
-    adrp x17, aot_fixture_block_0063@PAGE
-    add x17, x17, aot_fixture_block_0063@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0063)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0063)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x72000010
@@ -1710,8 +1715,8 @@ aot_fixture_block_0062:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0066
-aot_fixture_block_0066:
+.globl RB_AOT_SYM(aot_fixture_block_0066)
+RB_AOT_SYM(aot_fixture_block_0066):
     .word 0xb9404f93
     .word 0x51001274
     .word 0x51002293
@@ -1796,11 +1801,11 @@ aot_fixture_block_0066:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0067
-    add x17, x17, :lo12:aot_fixture_block_0067
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0067)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0067)
 #else
-    adrp x17, aot_fixture_block_0067@PAGE
-    add x17, x17, aot_fixture_block_0067@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0067)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0067)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0xf94043f3
@@ -1819,8 +1824,8 @@ aot_fixture_block_0066:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0068
-aot_fixture_block_0068:
+.globl RB_AOT_SYM(aot_fixture_block_0068)
+RB_AOT_SYM(aot_fixture_block_0068):
     .word 0xb9402393
     .word 0xb9402794
     .word 0x6b140275
@@ -1837,8 +1842,8 @@ aot_fixture_block_0068:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0069
-aot_fixture_block_0069:
+.globl RB_AOT_SYM(aot_fixture_block_0069)
+RB_AOT_SYM(aot_fixture_block_0069):
     .word 0x52800013
     .word 0xb9001b93
     .word 0xb9402393
@@ -1857,8 +1862,8 @@ aot_fixture_block_0069:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0070
-aot_fixture_block_0070:
+.globl RB_AOT_SYM(aot_fixture_block_0070)
+RB_AOT_SYM(aot_fixture_block_0070):
     .word 0x52800013
     .word 0xb9001b93
     .word 0xb9402393
@@ -1877,8 +1882,8 @@ aot_fixture_block_0070:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0071
-aot_fixture_block_0071:
+.globl RB_AOT_SYM(aot_fixture_block_0071)
+RB_AOT_SYM(aot_fixture_block_0071):
     .word 0x52801f13
     .word 0xb9003793
     .word 0xb94483fe
@@ -1890,11 +1895,11 @@ aot_fixture_block_0071:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0072
-    add x17, x17, :lo12:aot_fixture_block_0072
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0072)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0072)
 #else
-    adrp x17, aot_fixture_block_0072@PAGE
-    add x17, x17, aot_fixture_block_0072@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0072)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0072)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x52840053
@@ -1926,8 +1931,8 @@ aot_fixture_block_0071:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0073
-aot_fixture_block_0073:
+.globl RB_AOT_SYM(aot_fixture_block_0073)
+RB_AOT_SYM(aot_fixture_block_0073):
     .word 0xb9402393
     .word 0xb9001b93
     .word 0x52800293
@@ -1941,11 +1946,11 @@ aot_fixture_block_0073:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0074
-    add x17, x17, :lo12:aot_fixture_block_0074
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0074)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0074)
 #else
-    adrp x17, aot_fixture_block_0074@PAGE
-    add x17, x17, aot_fixture_block_0074@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0074)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0074)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x528401d3
@@ -1977,8 +1982,8 @@ aot_fixture_block_0073:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0075
-aot_fixture_block_0075:
+.globl RB_AOT_SYM(aot_fixture_block_0075)
+RB_AOT_SYM(aot_fixture_block_0075):
     .word 0xb9402393
     .word 0xb9001b93
     .word 0x31004274
@@ -1997,11 +2002,11 @@ aot_fixture_block_0075:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0076
-    add x17, x17, :lo12:aot_fixture_block_0076
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0076)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0076)
 #else
-    adrp x17, aot_fixture_block_0076@PAGE
-    add x17, x17, aot_fixture_block_0076@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0076)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0076)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x52840453
@@ -2032,8 +2037,8 @@ aot_fixture_block_0075:
     .word 0x17fffae7
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0077
-aot_fixture_block_0077:
+.globl RB_AOT_SYM(aot_fixture_block_0077)
+RB_AOT_SYM(aot_fixture_block_0077):
     .word 0xb9402393
     .word 0x71000e74
     .word 0xd53b4213
@@ -2058,8 +2063,8 @@ aot_fixture_block_0077:
     .word 0x17fffacf
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0078
-aot_fixture_block_0078:
+.globl RB_AOT_SYM(aot_fixture_block_0078)
+RB_AOT_SYM(aot_fixture_block_0078):
     .word 0xb9402793
     .word 0x12000a74
     .word 0xb9001f94
@@ -2090,8 +2095,8 @@ aot_fixture_block_0078:
     .word 0x17fffab1
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0004
-aot_fixture_block_0004:
+.globl RB_AOT_SYM(aot_fixture_block_0004)
+RB_AOT_SYM(aot_fixture_block_0004):
     .word 0xb9400390
     .word 0xd51b4210
     .word 0x54000120
@@ -2126,8 +2131,8 @@ aot_fixture_block_0004:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0009
-aot_fixture_block_0009:
+.globl RB_AOT_SYM(aot_fixture_block_0009)
+RB_AOT_SYM(aot_fixture_block_0009):
     .word 0x52837f01
     .word 0x72a00021
     .word 0x97fff83c
@@ -2176,11 +2181,11 @@ aot_fixture_block_0009:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0010
-    add x17, x17, :lo12:aot_fixture_block_0010
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0010)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0010)
 #else
-    adrp x17, aot_fixture_block_0010@PAGE
-    add x17, x17, aot_fixture_block_0010@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0010)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0010)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x52837cf3
@@ -2199,8 +2204,8 @@ aot_fixture_block_0009:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0013
-aot_fixture_block_0013:
+.globl RB_AOT_SYM(aot_fixture_block_0013)
+RB_AOT_SYM(aot_fixture_block_0013):
     .word 0xb9401b93
     .word 0xb9002f93
     .word 0x71000674
@@ -2216,11 +2221,11 @@ aot_fixture_block_0013:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0015
-    add x17, x17, :lo12:aot_fixture_block_0015
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0015)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0015)
 #else
-    adrp x17, aot_fixture_block_0015@PAGE
-    add x17, x17, aot_fixture_block_0015@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0015)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0015)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x528381f3
@@ -2236,8 +2241,8 @@ aot_fixture_block_0013:
     .word 0x17fffa2f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0016
-aot_fixture_block_0016:
+.globl RB_AOT_SYM(aot_fixture_block_0016)
+RB_AOT_SYM(aot_fixture_block_0016):
     .word 0xb9401b93
     .word 0xb9402b94
     .word 0x0b140275
@@ -2308,8 +2313,8 @@ aot_fixture_block_0016:
     .word 0x17fff9e9
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0019
-aot_fixture_block_0019:
+.globl RB_AOT_SYM(aot_fixture_block_0019)
+RB_AOT_SYM(aot_fixture_block_0019):
     .word 0xb9401b93
     .word 0x71000274
     .word 0xd53b4213
@@ -2324,8 +2329,8 @@ aot_fixture_block_0019:
     .word 0x17fff9db
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0021
-aot_fixture_block_0021:
+.globl RB_AOT_SYM(aot_fixture_block_0021)
+RB_AOT_SYM(aot_fixture_block_0021):
     .word 0xb9401b93
     .word 0x71000274
     .word 0xd53b4213
@@ -2350,8 +2355,8 @@ aot_fixture_block_0021:
     .word 0x17fff9c3
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0036
-aot_fixture_block_0036:
+.globl RB_AOT_SYM(aot_fixture_block_0036)
+RB_AOT_SYM(aot_fixture_block_0036):
     .word 0xb9404f93
     .word 0x11001274
     .word 0xaa1403e1
@@ -2398,8 +2403,8 @@ aot_fixture_block_0036:
     .word 0x17fff995
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0038
-aot_fixture_block_0038:
+.globl RB_AOT_SYM(aot_fixture_block_0038)
+RB_AOT_SYM(aot_fixture_block_0038):
     .word 0xb9401b93
     .word 0xb9003b93
     .word 0xb9402b94
@@ -2468,11 +2473,11 @@ aot_fixture_block_0038:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0039
-    add x17, x17, :lo12:aot_fixture_block_0039
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0039)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0039)
 #else
-    adrp x17, aot_fixture_block_0039@PAGE
-    add x17, x17, aot_fixture_block_0039@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0039)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0039)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x72000010
@@ -2489,8 +2494,8 @@ aot_fixture_block_0038:
     .word 0x17fff941
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0063
-aot_fixture_block_0063:
+.globl RB_AOT_SYM(aot_fixture_block_0063)
+RB_AOT_SYM(aot_fixture_block_0063):
     .word 0xb9401b93
     .word 0xb9001f93
     .word 0xb9402f93
@@ -2558,11 +2563,11 @@ aot_fixture_block_0063:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0064
-    add x17, x17, :lo12:aot_fixture_block_0064
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0064)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0064)
 #else
-    adrp x17, aot_fixture_block_0064@PAGE
-    add x17, x17, aot_fixture_block_0064@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0064)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0064)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x72000010
@@ -2580,8 +2585,8 @@ aot_fixture_block_0063:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0067
-aot_fixture_block_0067:
+.globl RB_AOT_SYM(aot_fixture_block_0067)
+RB_AOT_SYM(aot_fixture_block_0067):
     .word 0xb9404f93
     .word 0x11001274
     .word 0xaa1403e1
@@ -2628,8 +2633,8 @@ aot_fixture_block_0067:
     .word 0x17fff8bf
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0072
-aot_fixture_block_0072:
+.globl RB_AOT_SYM(aot_fixture_block_0072)
+RB_AOT_SYM(aot_fixture_block_0072):
     .word 0xb9402393
     .word 0x31000674
     .word 0xb9001b94
@@ -2658,8 +2663,8 @@ aot_fixture_block_0072:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0074
-aot_fixture_block_0074:
+.globl RB_AOT_SYM(aot_fixture_block_0074)
+RB_AOT_SYM(aot_fixture_block_0074):
     .word 0xb9401b93
     .word 0x31000674
     .word 0xb9001b94
@@ -2688,8 +2693,8 @@ aot_fixture_block_0074:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0076
-aot_fixture_block_0076:
+.globl RB_AOT_SYM(aot_fixture_block_0076)
+RB_AOT_SYM(aot_fixture_block_0076):
     .word 0xb9402793
     .word 0x31000674
     .word 0xb9001b94
@@ -2718,8 +2723,8 @@ aot_fixture_block_0076:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0079
-aot_fixture_block_0079:
+.globl RB_AOT_SYM(aot_fixture_block_0079)
+RB_AOT_SYM(aot_fixture_block_0079):
     .word 0xb9401f93
     .word 0x5284af90
     .word 0x72a00030
@@ -2744,8 +2749,8 @@ aot_fixture_block_0079:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0005
-aot_fixture_block_0005:
+.globl RB_AOT_SYM(aot_fixture_block_0005)
+RB_AOT_SYM(aot_fixture_block_0005):
     .word 0xb9401b93
     .word 0x72000270
     .word 0x52800071
@@ -2758,8 +2763,8 @@ aot_fixture_block_0005:
     .word 0x17fff847
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0010
-aot_fixture_block_0010:
+.globl RB_AOT_SYM(aot_fixture_block_0010)
+RB_AOT_SYM(aot_fixture_block_0010):
     .word 0xb9402b93
     .word 0xaa1303e1
     .word 0x97fff5f4
@@ -2793,11 +2798,11 @@ aot_fixture_block_0010:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0011
-    add x17, x17, :lo12:aot_fixture_block_0011
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0011)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0011)
 #else
-    adrp x17, aot_fixture_block_0011@PAGE
-    add x17, x17, aot_fixture_block_0011@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0011)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0011)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x72000010
@@ -2815,8 +2820,8 @@ aot_fixture_block_0010:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0015
-aot_fixture_block_0015:
+.globl RB_AOT_SYM(aot_fixture_block_0015)
+RB_AOT_SYM(aot_fixture_block_0015):
     .word 0xb9402b93
     .word 0xb9401b94
     .word 0x0b140275
@@ -2849,8 +2854,8 @@ aot_fixture_block_0015:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0022
-aot_fixture_block_0022:
+.globl RB_AOT_SYM(aot_fixture_block_0022)
+RB_AOT_SYM(aot_fixture_block_0022):
     .word 0xb9401b93
     .word 0xb9004393
     .word 0xb9402b94
@@ -2919,11 +2924,11 @@ aot_fixture_block_0022:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0023
-    add x17, x17, :lo12:aot_fixture_block_0023
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0023)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0023)
 #else
-    adrp x17, aot_fixture_block_0023@PAGE
-    add x17, x17, aot_fixture_block_0023@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0023)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0023)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x72000010
@@ -2940,8 +2945,8 @@ aot_fixture_block_0022:
     .word 0x17fff7a1
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0030
-aot_fixture_block_0030:
+.globl RB_AOT_SYM(aot_fixture_block_0030)
+RB_AOT_SYM(aot_fixture_block_0030):
     .word 0x12800013
     .word 0xb9001b93
     .word 0xd1000b5a
@@ -2954,8 +2959,8 @@ aot_fixture_block_0030:
     .word 0x17fff795
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0039
-aot_fixture_block_0039:
+.globl RB_AOT_SYM(aot_fixture_block_0039)
+RB_AOT_SYM(aot_fixture_block_0039):
     .word 0xb9401b93
     .word 0xb9003393
     .word 0xb9402b93
@@ -3007,11 +3012,11 @@ aot_fixture_block_0039:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0040
-    add x17, x17, :lo12:aot_fixture_block_0040
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0040)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0040)
 #else
-    adrp x17, aot_fixture_block_0040@PAGE
-    add x17, x17, aot_fixture_block_0040@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0040)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0040)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x72000010
@@ -3029,8 +3034,8 @@ aot_fixture_block_0039:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0064
-aot_fixture_block_0064:
+.globl RB_AOT_SYM(aot_fixture_block_0064)
+RB_AOT_SYM(aot_fixture_block_0064):
     .word 0xb9401b93
     .word 0xb9002393
     .word 0xb9403393
@@ -3057,8 +3062,8 @@ aot_fixture_block_0064:
     .word 0x17fff737
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0011
-aot_fixture_block_0011:
+.globl RB_AOT_SYM(aot_fixture_block_0011)
+RB_AOT_SYM(aot_fixture_block_0011):
     .word 0xb9404f93
     .word 0x11022274
     .word 0xb9004f94
@@ -3127,8 +3132,8 @@ aot_fixture_block_0011:
     .word 0x17fff6f3
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0014
-aot_fixture_block_0014:
+.globl RB_AOT_SYM(aot_fixture_block_0014)
+RB_AOT_SYM(aot_fixture_block_0014):
     .word 0xb9402f93
     .word 0x71000674
     .word 0xb9001b94
@@ -3143,11 +3148,11 @@ aot_fixture_block_0014:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0015
-    add x17, x17, :lo12:aot_fixture_block_0015
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0015)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0015)
 #else
-    adrp x17, aot_fixture_block_0015@PAGE
-    add x17, x17, aot_fixture_block_0015@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0015)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0015)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x528381f3
@@ -3164,8 +3169,8 @@ aot_fixture_block_0014:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0023
-aot_fixture_block_0023:
+.globl RB_AOT_SYM(aot_fixture_block_0023)
+RB_AOT_SYM(aot_fixture_block_0023):
     .word 0xb9401b93
     .word 0x71000274
     .word 0xd53b4213
@@ -3190,8 +3195,8 @@ aot_fixture_block_0023:
     .word 0x17fff6bd
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0034
-aot_fixture_block_0034:
+.globl RB_AOT_SYM(aot_fixture_block_0034)
+RB_AOT_SYM(aot_fixture_block_0034):
     .word 0xb9404f93
     .word 0x11007274
     .word 0x1100b275
@@ -3316,8 +3321,8 @@ aot_fixture_block_0034:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0040
-aot_fixture_block_0040:
+.globl RB_AOT_SYM(aot_fixture_block_0040)
+RB_AOT_SYM(aot_fixture_block_0040):
     .word 0xb9401b93
     .word 0xb9003f93
     .word 0xb9402b94
@@ -3336,11 +3341,11 @@ aot_fixture_block_0040:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0041
-    add x17, x17, :lo12:aot_fixture_block_0041
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0041)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0041)
 #else
-    adrp x17, aot_fixture_block_0041@PAGE
-    add x17, x17, aot_fixture_block_0041@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0041)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0041)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x5283b9f3
@@ -3357,8 +3362,8 @@ aot_fixture_block_0040:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0065
-aot_fixture_block_0065:
+.globl RB_AOT_SYM(aot_fixture_block_0065)
+RB_AOT_SYM(aot_fixture_block_0065):
     .word 0xb9403393
     .word 0x7100027f
     .word 0x1a9f17f4
@@ -3383,8 +3388,8 @@ aot_fixture_block_0065:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0024
-aot_fixture_block_0024:
+.globl RB_AOT_SYM(aot_fixture_block_0024)
+RB_AOT_SYM(aot_fixture_block_0024):
     .word 0xb9401b93
     .word 0xb9002f93
     .word 0xb9402b93
@@ -3436,11 +3441,11 @@ aot_fixture_block_0024:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0025
-    add x17, x17, :lo12:aot_fixture_block_0025
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0025)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0025)
 #else
-    adrp x17, aot_fixture_block_0025@PAGE
-    add x17, x17, aot_fixture_block_0025@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0025)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0025)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x72000010
@@ -3458,8 +3463,8 @@ aot_fixture_block_0024:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0031
-aot_fixture_block_0031:
+.globl RB_AOT_SYM(aot_fixture_block_0031)
+RB_AOT_SYM(aot_fixture_block_0031):
     .word 0x12800033
     .word 0xb9001b93
     .word 0xd1000b5a
@@ -3472,8 +3477,8 @@ aot_fixture_block_0031:
     .word 0x17fff5b7
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0041
-aot_fixture_block_0041:
+.globl RB_AOT_SYM(aot_fixture_block_0041)
+RB_AOT_SYM(aot_fixture_block_0041):
     .word 0xb9401b93
     .word 0x7100027f
     .word 0x1a9f17f4
@@ -3498,8 +3503,8 @@ aot_fixture_block_0041:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0025
-aot_fixture_block_0025:
+.globl RB_AOT_SYM(aot_fixture_block_0025)
+RB_AOT_SYM(aot_fixture_block_0025):
     .word 0xb9401b93
     .word 0x71000274
     .word 0xd53b4213
@@ -3524,8 +3529,8 @@ aot_fixture_block_0025:
     .word 0x17fff587
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0042
-aot_fixture_block_0042:
+.globl RB_AOT_SYM(aot_fixture_block_0042)
+RB_AOT_SYM(aot_fixture_block_0042):
     .word 0xb9401b93
     .word 0xb9002f93
     .word 0xb9402b94
@@ -3560,11 +3565,11 @@ aot_fixture_block_0042:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0043
-    add x17, x17, :lo12:aot_fixture_block_0043
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0043)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0043)
 #else
-    adrp x17, aot_fixture_block_0043@PAGE
-    add x17, x17, aot_fixture_block_0043@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0043)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0043)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x72000010
@@ -3581,8 +3586,8 @@ aot_fixture_block_0042:
     .word 0x17fff555
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0049
-aot_fixture_block_0049:
+.globl RB_AOT_SYM(aot_fixture_block_0049)
+RB_AOT_SYM(aot_fixture_block_0049):
     .word 0x12800013
     .word 0xb9001b93
     .word 0xd1000b5a
@@ -3595,8 +3600,8 @@ aot_fixture_block_0049:
     .word 0x17fff549
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0026
-aot_fixture_block_0026:
+.globl RB_AOT_SYM(aot_fixture_block_0026)
+RB_AOT_SYM(aot_fixture_block_0026):
     .word 0xb9401b93
     .word 0xb9003b93
     .word 0xb9402b94
@@ -3615,11 +3620,11 @@ aot_fixture_block_0026:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0027
-    add x17, x17, :lo12:aot_fixture_block_0027
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0027)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0027)
 #else
-    adrp x17, aot_fixture_block_0027@PAGE
-    add x17, x17, aot_fixture_block_0027@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0027)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0027)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x528396f3
@@ -3636,8 +3641,8 @@ aot_fixture_block_0026:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0032
-aot_fixture_block_0032:
+.globl RB_AOT_SYM(aot_fixture_block_0032)
+RB_AOT_SYM(aot_fixture_block_0032):
     .word 0x12800053
     .word 0xb9001b93
     .word 0xd1000b5a
@@ -3650,8 +3655,8 @@ aot_fixture_block_0032:
     .word 0x17fff51b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0043
-aot_fixture_block_0043:
+.globl RB_AOT_SYM(aot_fixture_block_0043)
+RB_AOT_SYM(aot_fixture_block_0043):
     .word 0xb9401b93
     .word 0xb9003393
     .word 0xb9402b93
@@ -3709,11 +3714,11 @@ aot_fixture_block_0043:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0044
-    add x17, x17, :lo12:aot_fixture_block_0044
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0044)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0044)
 #else
-    adrp x17, aot_fixture_block_0044@PAGE
-    add x17, x17, aot_fixture_block_0044@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0044)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0044)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0xf94043f3
@@ -3731,8 +3736,8 @@ aot_fixture_block_0043:
     .word 0x17fff4d1
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0061
-aot_fixture_block_0061:
+.globl RB_AOT_SYM(aot_fixture_block_0061)
+RB_AOT_SYM(aot_fixture_block_0061):
     .word 0xb9404f93
     .word 0x11003274
     .word 0x11007275
@@ -3857,8 +3862,8 @@ aot_fixture_block_0061:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0027
-aot_fixture_block_0027:
+.globl RB_AOT_SYM(aot_fixture_block_0027)
+RB_AOT_SYM(aot_fixture_block_0027):
     .word 0xb9401b93
     .word 0x71000274
     .word 0xd53b4213
@@ -3883,8 +3888,8 @@ aot_fixture_block_0027:
     .word 0x17fff43d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0044
-aot_fixture_block_0044:
+.globl RB_AOT_SYM(aot_fixture_block_0044)
+RB_AOT_SYM(aot_fixture_block_0044):
     .word 0xb9401b93
     .word 0x7100027f
     .word 0x1a9f17f4
@@ -3909,8 +3914,8 @@ aot_fixture_block_0044:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0028
-aot_fixture_block_0028:
+.globl RB_AOT_SYM(aot_fixture_block_0028)
+RB_AOT_SYM(aot_fixture_block_0028):
     .word 0xb9401b93
     .word 0xb9003f93
     .word 0xb9402b94
@@ -3960,11 +3965,11 @@ aot_fixture_block_0028:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0029
-    add x17, x17, :lo12:aot_fixture_block_0029
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0029)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0029)
 #else
-    adrp x17, aot_fixture_block_0029@PAGE
-    add x17, x17, aot_fixture_block_0029@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0029)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0029)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x72000010
@@ -3982,8 +3987,8 @@ aot_fixture_block_0028:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0033
-aot_fixture_block_0033:
+.globl RB_AOT_SYM(aot_fixture_block_0033)
+RB_AOT_SYM(aot_fixture_block_0033):
     .word 0x12800073
     .word 0xb9001b93
     .word 0xb9404f93
@@ -4110,8 +4115,8 @@ aot_fixture_block_0033:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0045
-aot_fixture_block_0045:
+.globl RB_AOT_SYM(aot_fixture_block_0045)
+RB_AOT_SYM(aot_fixture_block_0045):
     .word 0xb9401b93
     .word 0xb9002393
     .word 0x52800013
@@ -4140,8 +4145,8 @@ aot_fixture_block_0045:
     .word 0x17fff349
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0050
-aot_fixture_block_0050:
+.globl RB_AOT_SYM(aot_fixture_block_0050)
+RB_AOT_SYM(aot_fixture_block_0050):
     .word 0x12800033
     .word 0xb9001b93
     .word 0xd1000b5a
@@ -4154,8 +4159,8 @@ aot_fixture_block_0050:
     .word 0x17fff33d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0029
-aot_fixture_block_0029:
+.globl RB_AOT_SYM(aot_fixture_block_0029)
+RB_AOT_SYM(aot_fixture_block_0029):
     .word 0xb9401b93
     .word 0xb9004793
     .word 0xb9402b94
@@ -4210,8 +4215,8 @@ aot_fixture_block_0029:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0046
-aot_fixture_block_0046:
+.globl RB_AOT_SYM(aot_fixture_block_0046)
+RB_AOT_SYM(aot_fixture_block_0046):
     .word 0xb9402393
     .word 0xaa1303e1
     .word 0x97fff0b0
@@ -4250,8 +4255,8 @@ aot_fixture_block_0046:
     .word 0x17fff2e1
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0051
-aot_fixture_block_0051:
+.globl RB_AOT_SYM(aot_fixture_block_0051)
+RB_AOT_SYM(aot_fixture_block_0051):
     .word 0x52800013
     .word 0xb9004793
     .word 0xb9402f93
@@ -4307,11 +4312,11 @@ aot_fixture_block_0051:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0053
-    add x17, x17, :lo12:aot_fixture_block_0053
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0053)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0053)
 #else
-    adrp x17, aot_fixture_block_0053@PAGE
-    add x17, x17, aot_fixture_block_0053@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0053)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0053)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x72000010
@@ -4329,8 +4334,8 @@ aot_fixture_block_0051:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0047
-aot_fixture_block_0047:
+.globl RB_AOT_SYM(aot_fixture_block_0047)
+RB_AOT_SYM(aot_fixture_block_0047):
     .word 0xb9402393
     .word 0xb9401b94
     .word 0x0b140275
@@ -4375,8 +4380,8 @@ aot_fixture_block_0047:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0048
-aot_fixture_block_0048:
+.globl RB_AOT_SYM(aot_fixture_block_0048)
+RB_AOT_SYM(aot_fixture_block_0048):
     .word 0x5290d413
     .word 0x72a00033
     .word 0xb9001b93
@@ -4395,8 +4400,8 @@ aot_fixture_block_0048:
     .word 0x17fff25b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0053
-aot_fixture_block_0053:
+.globl RB_AOT_SYM(aot_fixture_block_0053)
+RB_AOT_SYM(aot_fixture_block_0053):
     .word 0xb9402b93
     .word 0xaa1303e1
     .word 0x97fff008
@@ -4482,11 +4487,11 @@ aot_fixture_block_0053:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0054
-    add x17, x17, :lo12:aot_fixture_block_0054
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0054)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0054)
 #else
-    adrp x17, aot_fixture_block_0054@PAGE
-    add x17, x17, aot_fixture_block_0054@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0054)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0054)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0xf94043f3
@@ -4504,8 +4509,8 @@ aot_fixture_block_0053:
     .word 0x17fff1f5
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0052
-aot_fixture_block_0052:
+.globl RB_AOT_SYM(aot_fixture_block_0052)
+RB_AOT_SYM(aot_fixture_block_0052):
     .word 0xb9402f93
     .word 0xb9001f93
     .word 0xb9402393
@@ -4559,11 +4564,11 @@ aot_fixture_block_0052:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0053
-    add x17, x17, :lo12:aot_fixture_block_0053
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0053)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0053)
 #else
-    adrp x17, aot_fixture_block_0053@PAGE
-    add x17, x17, aot_fixture_block_0053@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0053)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0053)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x72000010
@@ -4581,8 +4586,8 @@ aot_fixture_block_0052:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0054
-aot_fixture_block_0054:
+.globl RB_AOT_SYM(aot_fixture_block_0054)
+RB_AOT_SYM(aot_fixture_block_0054):
     .word 0xb9402b93
     .word 0xaa1303e1
     .word 0x97ffef5c
@@ -4625,11 +4630,11 @@ aot_fixture_block_0054:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0055
-    add x17, x17, :lo12:aot_fixture_block_0055
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0055)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0055)
 #else
-    adrp x17, aot_fixture_block_0055@PAGE
-    add x17, x17, aot_fixture_block_0055@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0055)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0055)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x72000010
@@ -4646,8 +4651,8 @@ aot_fixture_block_0054:
     .word 0x17fff175
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_fixture_block_0055
-aot_fixture_block_0055:
+.globl RB_AOT_SYM(aot_fixture_block_0055)
+RB_AOT_SYM(aot_fixture_block_0055):
     .word 0xb9401b93
     .word 0xb9002393
     .word 0x11000674
@@ -4703,11 +4708,11 @@ aot_fixture_block_0055:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0056
-    add x17, x17, :lo12:aot_fixture_block_0056
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0056)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0056)
 #else
-    adrp x17, aot_fixture_block_0056@PAGE
-    add x17, x17, aot_fixture_block_0056@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0056)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0056)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x72000010
@@ -4725,8 +4730,8 @@ aot_fixture_block_0055:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0056
-aot_fixture_block_0056:
+.globl RB_AOT_SYM(aot_fixture_block_0056)
+RB_AOT_SYM(aot_fixture_block_0056):
     .word 0xb9402b93
     .word 0xaa1303e1
     .word 0x97ffeeda
@@ -4785,11 +4790,11 @@ aot_fixture_block_0056:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0057
-    add x17, x17, :lo12:aot_fixture_block_0057
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0057)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0057)
 #else
-    adrp x17, aot_fixture_block_0057@PAGE
-    add x17, x17, aot_fixture_block_0057@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0057)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0057)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0xf94043f3
@@ -4808,8 +4813,8 @@ aot_fixture_block_0056:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0057
-aot_fixture_block_0057:
+.globl RB_AOT_SYM(aot_fixture_block_0057)
+RB_AOT_SYM(aot_fixture_block_0057):
     .word 0xb9402b93
     .word 0xaa1303e1
     .word 0x97ffee8e
@@ -4843,11 +4848,11 @@ aot_fixture_block_0057:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0058
-    add x17, x17, :lo12:aot_fixture_block_0058
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0058)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0058)
 #else
-    adrp x17, aot_fixture_block_0058@PAGE
-    add x17, x17, aot_fixture_block_0058@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0058)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0058)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x72000010
@@ -4865,8 +4870,8 @@ aot_fixture_block_0057:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0058
-aot_fixture_block_0058:
+.globl RB_AOT_SYM(aot_fixture_block_0058)
+RB_AOT_SYM(aot_fixture_block_0058):
     .word 0xb9402b93
     .word 0xaa1303e1
     .word 0x97ffee5c
@@ -4900,11 +4905,11 @@ aot_fixture_block_0058:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0059
-    add x17, x17, :lo12:aot_fixture_block_0059
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0059)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0059)
 #else
-    adrp x17, aot_fixture_block_0059@PAGE
-    add x17, x17, aot_fixture_block_0059@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0059)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0059)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x72000010
@@ -4922,8 +4927,8 @@ aot_fixture_block_0058:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0059
-aot_fixture_block_0059:
+.globl RB_AOT_SYM(aot_fixture_block_0059)
+RB_AOT_SYM(aot_fixture_block_0059):
     .word 0xb9402b93
     .word 0xaa1303e1
     .word 0x97ffee2a
@@ -4957,11 +4962,11 @@ aot_fixture_block_0059:
     .word 0xf2a00030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_fixture_block_0060
-    add x17, x17, :lo12:aot_fixture_block_0060
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0060)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_fixture_block_0060)
 #else
-    adrp x17, aot_fixture_block_0060@PAGE
-    add x17, x17, aot_fixture_block_0060@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_fixture_block_0060)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_fixture_block_0060)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x72000010
@@ -4979,8 +4984,8 @@ aot_fixture_block_0059:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_fixture_block_0060
-aot_fixture_block_0060:
+.globl RB_AOT_SYM(aot_fixture_block_0060)
+RB_AOT_SYM(aot_fixture_block_0060):
     .word 0xb9403793
     .word 0x51007674
     .word 0xaa1403e1
@@ -5164,336 +5169,336 @@ aot_fixture_block_0060:
     .section __DATA,__data
 #endif
     .p2align 3
-.globl aot_fixture_blocks
-aot_fixture_blocks:
+.globl RB_AOT_SYM(aot_fixture_blocks)
+RB_AOT_SYM(aot_fixture_blocks):
     .word 0x00000000
     .byte 2
     .zero 3
-    .quad aot_fixture_block_0000
+    .quad RB_AOT_SYM(aot_fixture_block_0000)
     .word 0x00000010
     .byte 2
     .zero 3
-    .quad aot_fixture_block_0001
+    .quad RB_AOT_SYM(aot_fixture_block_0001)
     .word 0x00000014
     .byte 2
     .zero 3
-    .quad aot_fixture_block_0002
+    .quad RB_AOT_SYM(aot_fixture_block_0002)
     .word 0x00000018
     .byte 2
     .zero 3
-    .quad aot_fixture_block_0003
+    .quad RB_AOT_SYM(aot_fixture_block_0003)
     .word 0x0000001c
     .byte 2
     .zero 3
-    .quad aot_fixture_block_0004
+    .quad RB_AOT_SYM(aot_fixture_block_0004)
     .word 0x00000020
     .byte 2
     .zero 3
-    .quad aot_fixture_block_0005
+    .quad RB_AOT_SYM(aot_fixture_block_0005)
     .word 0x00000024
     .byte 2
     .zero 3
-    .quad aot_fixture_block_0006
+    .quad RB_AOT_SYM(aot_fixture_block_0006)
     .word 0x00000044
     .byte 2
     .zero 3
-    .quad aot_fixture_block_0007
+    .quad RB_AOT_SYM(aot_fixture_block_0007)
     .word 0x00000058
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0008
+    .quad RB_AOT_SYM(aot_fixture_block_0008)
     .word 0x00000066
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0009
+    .quad RB_AOT_SYM(aot_fixture_block_0009)
     .word 0x00000086
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0010
+    .quad RB_AOT_SYM(aot_fixture_block_0010)
     .word 0x00000092
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0011
+    .quad RB_AOT_SYM(aot_fixture_block_0011)
     .word 0x0000009c
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0012
+    .quad RB_AOT_SYM(aot_fixture_block_0012)
     .word 0x000000a6
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0013
+    .quad RB_AOT_SYM(aot_fixture_block_0013)
     .word 0x000000a8
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0014
+    .quad RB_AOT_SYM(aot_fixture_block_0014)
     .word 0x000000ae
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0015
+    .quad RB_AOT_SYM(aot_fixture_block_0015)
     .word 0x000000b8
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0016
+    .quad RB_AOT_SYM(aot_fixture_block_0016)
     .word 0x000000bc
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0017
+    .quad RB_AOT_SYM(aot_fixture_block_0017)
     .word 0x000000e0
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0018
+    .quad RB_AOT_SYM(aot_fixture_block_0018)
     .word 0x000000f2
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0019
+    .quad RB_AOT_SYM(aot_fixture_block_0019)
     .word 0x00000100
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0020
+    .quad RB_AOT_SYM(aot_fixture_block_0020)
     .word 0x00000116
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0021
+    .quad RB_AOT_SYM(aot_fixture_block_0021)
     .word 0x0000011a
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0022
+    .quad RB_AOT_SYM(aot_fixture_block_0022)
     .word 0x00000130
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0023
+    .quad RB_AOT_SYM(aot_fixture_block_0023)
     .word 0x00000134
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0024
+    .quad RB_AOT_SYM(aot_fixture_block_0024)
     .word 0x00000144
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0025
+    .quad RB_AOT_SYM(aot_fixture_block_0025)
     .word 0x00000148
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0026
+    .quad RB_AOT_SYM(aot_fixture_block_0026)
     .word 0x00000156
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0027
+    .quad RB_AOT_SYM(aot_fixture_block_0027)
     .word 0x0000015a
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0028
+    .quad RB_AOT_SYM(aot_fixture_block_0028)
     .word 0x0000016c
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0029
+    .quad RB_AOT_SYM(aot_fixture_block_0029)
     .word 0x000001d4
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0030
+    .quad RB_AOT_SYM(aot_fixture_block_0030)
     .word 0x000001da
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0031
+    .quad RB_AOT_SYM(aot_fixture_block_0031)
     .word 0x000001e0
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0032
+    .quad RB_AOT_SYM(aot_fixture_block_0032)
     .word 0x000001e6
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0033
+    .quad RB_AOT_SYM(aot_fixture_block_0033)
     .word 0x000001ea
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0034
+    .quad RB_AOT_SYM(aot_fixture_block_0034)
     .word 0x00000200
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0035
+    .quad RB_AOT_SYM(aot_fixture_block_0035)
     .word 0x00000218
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0036
+    .quad RB_AOT_SYM(aot_fixture_block_0036)
     .word 0x00000224
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0037
+    .quad RB_AOT_SYM(aot_fixture_block_0037)
     .word 0x0000023a
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0038
+    .quad RB_AOT_SYM(aot_fixture_block_0038)
     .word 0x00000250
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0039
+    .quad RB_AOT_SYM(aot_fixture_block_0039)
     .word 0x00000260
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0040
+    .quad RB_AOT_SYM(aot_fixture_block_0040)
     .word 0x0000026e
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0041
+    .quad RB_AOT_SYM(aot_fixture_block_0041)
     .word 0x00000270
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0042
+    .quad RB_AOT_SYM(aot_fixture_block_0042)
     .word 0x0000027e
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0043
+    .quad RB_AOT_SYM(aot_fixture_block_0043)
     .word 0x00000296
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0044
+    .quad RB_AOT_SYM(aot_fixture_block_0044)
     .word 0x00000298
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0045
+    .quad RB_AOT_SYM(aot_fixture_block_0045)
     .word 0x000002a2
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0046
+    .quad RB_AOT_SYM(aot_fixture_block_0046)
     .word 0x000002a6
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0047
+    .quad RB_AOT_SYM(aot_fixture_block_0047)
     .word 0x000002b2
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0048
+    .quad RB_AOT_SYM(aot_fixture_block_0048)
     .word 0x000002c0
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0049
+    .quad RB_AOT_SYM(aot_fixture_block_0049)
     .word 0x000002c6
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0050
+    .quad RB_AOT_SYM(aot_fixture_block_0050)
     .word 0x000002cc
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0051
+    .quad RB_AOT_SYM(aot_fixture_block_0051)
     .word 0x000002d0
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0052
+    .quad RB_AOT_SYM(aot_fixture_block_0052)
     .word 0x000002e2
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0053
+    .quad RB_AOT_SYM(aot_fixture_block_0053)
     .word 0x00000300
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0054
+    .quad RB_AOT_SYM(aot_fixture_block_0054)
     .word 0x0000030e
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0055
+    .quad RB_AOT_SYM(aot_fixture_block_0055)
     .word 0x00000322
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0056
+    .quad RB_AOT_SYM(aot_fixture_block_0056)
     .word 0x00000338
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0057
+    .quad RB_AOT_SYM(aot_fixture_block_0057)
     .word 0x00000342
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0058
+    .quad RB_AOT_SYM(aot_fixture_block_0058)
     .word 0x0000034c
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0059
+    .quad RB_AOT_SYM(aot_fixture_block_0059)
     .word 0x00000356
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0060
+    .quad RB_AOT_SYM(aot_fixture_block_0060)
     .word 0x00000374
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0061
+    .quad RB_AOT_SYM(aot_fixture_block_0061)
     .word 0x00000388
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0062
+    .quad RB_AOT_SYM(aot_fixture_block_0062)
     .word 0x000003a0
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0063
+    .quad RB_AOT_SYM(aot_fixture_block_0063)
     .word 0x000003b4
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0064
+    .quad RB_AOT_SYM(aot_fixture_block_0064)
     .word 0x000003ba
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0065
+    .quad RB_AOT_SYM(aot_fixture_block_0065)
     .word 0x00000434
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0066
+    .quad RB_AOT_SYM(aot_fixture_block_0066)
     .word 0x0000044c
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0067
+    .quad RB_AOT_SYM(aot_fixture_block_0067)
     .word 0x00000456
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0068
+    .quad RB_AOT_SYM(aot_fixture_block_0068)
     .word 0x0000046c
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0069
+    .quad RB_AOT_SYM(aot_fixture_block_0069)
     .word 0x00000484
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0070
+    .quad RB_AOT_SYM(aot_fixture_block_0070)
     .word 0x0000049c
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0071
+    .quad RB_AOT_SYM(aot_fixture_block_0071)
     .word 0x000004a2
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0072
+    .quad RB_AOT_SYM(aot_fixture_block_0072)
     .word 0x000004a6
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0073
+    .quad RB_AOT_SYM(aot_fixture_block_0073)
     .word 0x000004ae
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0074
+    .quad RB_AOT_SYM(aot_fixture_block_0074)
     .word 0x000004b2
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0075
+    .quad RB_AOT_SYM(aot_fixture_block_0075)
     .word 0x000004c2
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0076
+    .quad RB_AOT_SYM(aot_fixture_block_0076)
     .word 0x00000958
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0077
+    .quad RB_AOT_SYM(aot_fixture_block_0077)
     .word 0x00000a08
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0078
+    .quad RB_AOT_SYM(aot_fixture_block_0078)
     .word 0x00000a18
     .byte 1
     .zero 3
-    .quad aot_fixture_block_0079
+    .quad RB_AOT_SYM(aot_fixture_block_0079)
 
 // The table carries these two numbers; rb_aot_tests asserts they agree.
     .p2align 2
-.globl aot_fixture_code_bytes
-aot_fixture_code_bytes:
+.globl RB_AOT_SYM(aot_fixture_code_bytes)
+RB_AOT_SYM(aot_fixture_code_bytes):
     .word 19176
-.globl aot_fixture_block_count
-aot_fixture_block_count:
+.globl RB_AOT_SYM(aot_fixture_block_count)
+RB_AOT_SYM(aot_fixture_block_count):
     .word 80
 #ifdef __ELF__
     .section .note.GNU-stack,"",%progbits

@@ -92,6 +92,11 @@ std::string BaseName(const std::string& path) {
   return slash == std::string::npos ? path : path.substr(slash + 1);
 }
 
+/// Mach-O's assembler writes labels literally while a C compiler prefixes them with '_'; the generated
+/// .S refers to both its own symbols and the runtime's C functions, so every name goes through this
+/// macro (identity on ELF, underscore on Apple).
+std::string Sym(const std::string& name) { return "RB_AOT_SYM(" + name + ")"; }
+
 std::string SymbolPrefix(const std::string& out_prefix) {
   std::string s = BaseName(out_prefix);
   for (char& c : s) {
@@ -102,8 +107,7 @@ std::string SymbolPrefix(const std::string& out_prefix) {
   return s;
 }
 
-std::string TableName(const std::string& out_prefix) {
-  std::string s = BaseName(out_prefix);
+std::string TableName(const std::string& out_prefix) {  std::string s = BaseName(out_prefix);
   if (s.rfind("aot_", 0) == 0) s = s.substr(4);
   std::string camel;
   bool up = true;
@@ -391,7 +395,7 @@ struct Emitter {
     code->MOV(util::X0, Backend::Xstate);
     const std::ptrdiff_t at = code->offset();
     code->dw(0x1400'0000u);  // placeholder: replaced by "b <symbol>"
-    externals.push_back(ExternalFixup{at, "b " + symbol});
+    externals.push_back(ExternalFixup{at, "b " + Sym(symbol)});
     trampolines->push_back(t);
     prelude.target[target] = t.offset;
     prelude.label[target] = t.label_name;
@@ -412,7 +416,7 @@ struct Emitter {
     code->MOV(util::X1, Backend::Xscratch0);
     const std::ptrdiff_t at = code->offset();
     code->dw(0x9400'0000u);
-    externals.push_back(ExternalFixup{at, "bl " + symbol});
+    externals.push_back(ExternalFixup{at, "bl " + Sym(symbol)});
     code->MOV(Backend::Xscratch0, util::X0);
     Backend::ABI_PopRegisters(*code, save, 0);
     code->RET();
@@ -437,7 +441,7 @@ struct Emitter {
     code->MOV(util::X2, Backend::Xscratch1);
     const std::ptrdiff_t at = code->offset();
     code->dw(0x9400'0000u);
-    externals.push_back(ExternalFixup{at, "bl " + symbol});
+    externals.push_back(ExternalFixup{at, "bl " + Sym(symbol)});
     Backend::ABI_PopRegisters(*code, save, 0);
     code->RET();
     trampolines->push_back(t);
@@ -588,7 +592,7 @@ struct Emitter {
       code->MOV(util::X0, Backend::Xstate);
       const std::ptrdiff_t at = code->offset();
       code->dw(0x9400'0000u);  // placeholder: "bl rb_aot_dispatch"
-      externals.push_back(ExternalFixup{at, "bl rb_aot_dispatch"});
+      externals.push_back(ExternalFixup{at, "bl " + Sym("rb_aot_dispatch")});
       code->CBZ(util::X0, return_from_run_code);
       code->BR(util::X0);
     }
@@ -822,16 +826,16 @@ struct Emitter {
     }
 
     std::map<std::ptrdiff_t, std::vector<std::string>> label_lines;
-    label_lines[prelude.run_code].push_back(".globl " + prefix + "_run_code");
-    label_lines[prelude.run_code].push_back(prefix + "_run_code:");
-    label_lines[prelude.step_code].push_back(prefix + "_step_code:");
+    label_lines[prelude.run_code].push_back(".globl " + Sym(prefix + "_run_code"));
+    label_lines[prelude.run_code].push_back(Sym(prefix + "_run_code") + ":");
+    label_lines[prelude.step_code].push_back(Sym(prefix + "_step_code") + ":");
     for (const auto& [at, name] : offset_label) {
       if (at == prelude.run_code) continue;
-      label_lines[at].push_back(name + ":");
+      label_lines[at].push_back(Sym(name) + ":");
     }
     for (std::size_t i = 0; i < blocks.size(); ++i) {
       const std::ptrdiff_t at = blocks[i].entry;
-      label_lines[at].insert(label_lines[at].begin(), {".globl " + offset_label[at]});
+      label_lines[at].insert(label_lines[at].begin(), {".globl " + Sym(offset_label[at])});
     }
 
     std::map<std::ptrdiff_t, TextFixup> fixups;
@@ -902,11 +906,11 @@ struct Emitter {
                        : offset_label.at(prelude.return_to_dispatcher);
             if (!add_fixup(at, {
                                 "#ifdef __ELF__",
-                                "adrp x17, " + symbol,
-                                "add x17, x17, :lo12:" + symbol,
+                                "adrp x17, " + Sym(symbol),
+                                "add x17, x17, :lo12:" + Sym(symbol),
                                 "#else",
-                                "adrp x17, " + symbol + "@PAGE",
-                                "add x17, x17, " + symbol + "@PAGEOFF",
+                                "adrp x17, " + Sym(symbol) + "@PAGE",
+                                "add x17, x17, " + Sym(symbol) + "@PAGEOFF",
                                 "#endif",
                             }))
               return false;
@@ -927,6 +931,11 @@ struct Emitter {
         << " --base " << Hex32(load_bias_) << "\n";
     out << "// code size " << (blocks.empty() ? prelude_end : blocks.back().end) << " bytes, "
         << blocks.size() << " blocks\n";
+    out << "#ifdef __APPLE__\n";
+    out << "#define RB_AOT_SYM(x) _##x\n";
+    out << "#else\n";
+    out << "#define RB_AOT_SYM(x) x\n";
+    out << "#endif\n";
     out << "    .text\n    .p2align 4\n";
 
     const std::uint32_t* words = reinterpret_cast<const std::uint32_t*>(scratch_.get());
@@ -993,14 +1002,14 @@ struct Emitter {
     out << "    .section __DATA,__data\n";
     out << "#endif\n";
     out << "    .p2align 3\n";
-    out << ".globl " << prefix << "_blocks\n";
-    out << prefix << "_blocks:\n";
+    out << ".globl " << Sym(prefix + "_blocks") << "\n";
+    out << Sym(prefix + "_blocks") << ":\n";
     for (const std::size_t i : sorted) {
       const BlockRecord& b = blocks[i];
       out << "    .word " << Hex32(b.off) << "\n";
       out << "    .byte " << static_cast<unsigned>(b.thumb ? kThumb : kArm) << "\n";
       out << "    .zero 3\n";
-      out << "    .quad " << prefix << "_block_" << Pad(b.symbol) << "\n";
+      out << "    .quad " << Sym(prefix + "_block_" + Pad(b.symbol)) << "\n";
     }
     // The trailer is the `.S` half of the pairing check. It is data, not a label after the code: the
     // table carries the same two numbers, and rb_aot_tests asserts this pair agrees with it.
@@ -1012,11 +1021,11 @@ struct Emitter {
     // macro-expanded to `.ifdef 1`).
     out << "\n// The table carries these two numbers; rb_aot_tests asserts they agree.\n";
     out << "    .p2align 2\n";
-    out << ".globl " << prefix << "_code_bytes\n";
-    out << prefix << "_code_bytes:\n";
+    out << ".globl " << Sym(prefix + "_code_bytes") << "\n";
+    out << Sym(prefix + "_code_bytes") << ":\n";
     out << "    .word " << total << "\n";
-    out << ".globl " << prefix << "_block_count\n";
-    out << prefix << "_block_count:\n";
+    out << ".globl " << Sym(prefix + "_block_count") << "\n";
+    out << Sym(prefix + "_block_count") << ":\n";
     out << "    .word " << blocks.size() << "\n";
     out << "#ifdef __ELF__\n";
     out << "    .section .note.GNU-stack,\"\",%progbits\n";
