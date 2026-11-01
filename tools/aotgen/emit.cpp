@@ -192,7 +192,9 @@ struct ExternalFixup {
 
 struct TextFixup {
   std::ptrdiff_t offset;
-  std::vector<std::string> lines;  ///< one 4-byte instruction, or ADRP+ADD (8 bytes)
+  /// Assembly text for the site. Every line that is not a preprocessor directive (a line starting with
+  /// '#') is one 4-byte instruction; directives are emitted but take no space in the stream.
+  std::vector<std::string> lines;
 };
 
 enum class Refusal {
@@ -821,7 +823,6 @@ struct Emitter {
 
     std::map<std::ptrdiff_t, std::vector<std::string>> label_lines;
     label_lines[prelude.run_code].push_back(".globl " + prefix + "_run_code");
-    label_lines[prelude.run_code].push_back(".type " + prefix + "_run_code, %function");
     label_lines[prelude.run_code].push_back(prefix + "_run_code:");
     label_lines[prelude.step_code].push_back(prefix + "_step_code:");
     for (const auto& [at, name] : offset_label) {
@@ -830,9 +831,7 @@ struct Emitter {
     }
     for (std::size_t i = 0; i < blocks.size(); ++i) {
       const std::ptrdiff_t at = blocks[i].entry;
-      label_lines[at].insert(label_lines[at].begin(),
-                             {".globl " + offset_label[at],
-                              ".type " + offset_label[at] + ", %function"});
+      label_lines[at].insert(label_lines[at].begin(), {".globl " + offset_label[at]});
     }
 
     std::map<std::ptrdiff_t, TextFixup> fixups;
@@ -901,7 +900,16 @@ struct Emitter {
             const std::string symbol =
                 linked ? offset_label.at(blocks[target_block->second].entry)
                        : offset_label.at(prelude.return_to_dispatcher);
-            if (!add_fixup(at, {"adrp x17, " + symbol, "add x17, x17, :lo12:" + symbol})) return false;
+            if (!add_fixup(at, {
+                                "#ifdef __ELF__",
+                                "adrp x17, " + symbol,
+                                "add x17, x17, :lo12:" + symbol,
+                                "#else",
+                                "adrp x17, " + symbol + "@PAGE",
+                                "add x17, x17, " + symbol + "@PAGEOFF",
+                                "#endif",
+                            }))
+              return false;
           }
         }
       }
@@ -933,8 +941,24 @@ struct Emitter {
       }
       bool handled = false;
       if (const auto f = fixups.find(at); f != fixups.end()) {
-        for (const auto& line : f->second.lines) out << "    " << line << "\n";
-        at += static_cast<std::ptrdiff_t>(f->second.lines.size()) * 4;
+        // Directives take no bytes. When a fixup has two assembler variants (`#ifdef __ELF__` / `#else`),
+        // only one is assembled, so the stream advances by the first branch's instructions.
+        std::size_t instructions = 0;
+        bool first_branch = true;
+        for (const auto& line : f->second.lines) {
+          if (line == "#else") {
+            first_branch = false;
+            out << line << "\n";
+            continue;
+          }
+          if (!line.empty() && line[0] == '#') {
+            out << line << "\n";
+            continue;
+          }
+          out << "    " << line << "\n";
+          if (first_branch) ++instructions;
+        }
+        at += static_cast<std::ptrdiff_t>(instructions) * 4;
         handled = true;
       }
       if (!handled) {
@@ -950,19 +974,25 @@ struct Emitter {
       }
     }
     code_bytes = total;
-    // The trailer is the `.S` half of the pairing check. It is data, not a label after the code:
-    // `-ffunction-sections` puts every `.type ...,%function` label in its own section, so a symbol
-    // distance would measure link order rather than the emitted size. The table carries the same two
-    // numbers, and rb_aot_tests asserts this pair agrees with it.
+    // The trailer is the `.S` half of the pairing check. It is data, not a label after the code: the
+    // table carries the same two numbers, and rb_aot_tests asserts this pair agrees with it.
+    //
+    // Everything this file emits has to assemble with both GNU as (Android) and Apple's assembler (the
+    // per-game IPA): Apple rejects `.type`, `.rodata` and `.note.GNU-stack`. So the words stay in
+    // `.text` (read-only in the app), and the stack note is preprocessor-guarded — `.S` is preprocessed
+    // on both toolchains, and `#ifdef __ELF__` is the portable spelling (`.ifdef __ELF__` would be
+    // macro-expanded to `.ifdef 1`).
     out << "\n// The table carries these two numbers; rb_aot_tests asserts they agree.\n";
-    out << "    .section .rodata\n    .p2align 2\n";
+    out << "    .p2align 2\n";
     out << ".globl " << prefix << "_code_bytes\n";
     out << prefix << "_code_bytes:\n";
     out << "    .word " << total << "\n";
     out << ".globl " << prefix << "_block_count\n";
     out << prefix << "_block_count:\n";
     out << "    .word " << blocks.size() << "\n";
+    out << "#ifdef __ELF__\n";
     out << "    .section .note.GNU-stack,\"\",%progbits\n";
+    out << "#endif\n";
     if (!out) {
       *err = "write failed for " + out_prefix + ".S";
       return false;
