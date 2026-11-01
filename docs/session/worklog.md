@@ -1271,3 +1271,15 @@ assembled into the app like any other source.
   emitted names now go through `RB_AOT_SYM`. The profile is compiled by the app target (Xcode), not the
   engine archive. Expected log on the iPad: `aot: profile kitkat matches (5 libraries)` and
   `engine: guest code runs on AOT (offline-translated AArch64)`; a hash mismatch logs why and runs Tier I.
+- **Build 23** (`7c93da5`), 8,384,486 bytes, SHA-256
+  `a16afeb2f78833081ddace9ca2f8aae349e6f04d4e29dd4e0911e30ac794d211`. Build 22's log (18) showed: the
+  KitKat AOT profile matching and loading, then the process dying **before the first `ifunc:` line** during
+  the scope load (no host-crash banner: not a caught signal); and Blocky falling back to Tier I on the
+  KitKat-profile APK mismatch, then stopping at `FPVectorMul32: no Tier I semantics yet`. Fixes: IFUNC
+  resolvers now always run on the interpreter (they run once, while their module is half-loaded, and were
+  the first AOT code in the process); the AOT dispatcher prints its first eight pcs to stderr so a crash
+  log names where translated code was entered; Tier I gained vector FP Add/Sub/Mul/Div for 32- and 64-bit
+  lanes with the same FPSCR rounding/flush scope as the scalar forms (gates: interp 1112/0, tier diff
+  1039/0, aot 178/0). A new `rb_aot_scope_tests` repro boots the KitKat scope with the libc image on the
+  tablet and passes, which points the remaining iOS-only crash at the executor path rather than the
+  loader. The JIT dot now reads "JIT available — on/off" (the dot is the probe, not the switch).
