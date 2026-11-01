@@ -59,7 +59,11 @@ if [ "$XCODE_STATUS" -ne 0 ] && [ -n "${RB_AOT_PROFILE:-}" ]; then
   if [ -n "$asm_object" ]; then
     echo "aot: $(nm -g "$asm_object" | grep -c ' T .*_block_' || true) global block symbols in the app object"
     nm -g "$asm_object" | grep '_block_0000$' | head -2
+    nm -m "$asm_object" | grep ' _aot_kitkat_libz_blocks$' | head -2
   fi
+  resp="$(find "$BUILD/dd" -name '*-common-args.resp' | head -1)"
+  echo "aot: visibility flags: $(tr ' ' '\n' < "$resp" 2>/dev/null | grep -c visibility || true)"
+  tr ' ' '\n' < "$resp" 2>/dev/null | grep visibility | head -3
   grep -c 'aot_kitkat_libz.o' "$BUILD/dd/Build/Intermediates.noindex/RetroBug.build/Release-iphoneos/RetroBug.build/Objects-normal/arm64/RetroBug.LinkFileList" 2>/dev/null | sed 's/^/aot: link-file-list mentions of the libz object: /' || true
 fi
 [ "$XCODE_STATUS" -eq 0 ]

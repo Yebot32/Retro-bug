@@ -34,6 +34,10 @@ targets:
           - "$(SRCROOT)/../external/dynarmic/externals/oaknut/include"
           - "$(SRCROOT)/../compat"
         CLANG_CXX_LANGUAGE_STANDARD: "c++20"
+        # The AOT profile is assembly that the table object references by name. A hidden-by-default
+        # build marks the table’s references private-extern, which a default-visibility assembly
+        # definition cannot satisfy, and ld reports every block as undefined.
+        GCC_SYMBOLS_PRIVATE_EXTERN: "NO"
         LIBRARY_SEARCH_PATHS:
           - "$(RB_ENGINE_DIR)"
         OTHER_LDFLAGS:
