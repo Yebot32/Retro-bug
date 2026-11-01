@@ -1260,3 +1260,14 @@ assembled into the app like any other source.
   `aot_profile_ref=aot/kitkat` and `aot_profile_path=aot_kitkat`. The workflow checks that ref out beside
   the repo and passes `RB_AOT_PROFILE_DIR`; the APK itself is never uploaded. The expected log is
   `aot: profile ... matches (5 libraries)` followed by `engine: guest code runs on AOT`.
+- **Build 22 — the first AOT IPA** (`27d595b`, profile branch `aot/kitkat` @ `28505da`), 8,384,088 bytes,
+  SHA-256 `0be66ea952b47c1fa06b249a7e2fb9e112d46fae0c7157b24198a2276c8b3428`. The engine now contains
+  `_aot_kitkat_libdlgl_blocks`/`_aot_kitkat_libc_blocks` and `_rb_aot_builtin_profile`, so the app has
+  translated code for libdlgl, libandroidkitkat, libc, libm and libz. Getting it to link took four real
+  fixes: ELF-only directives (`.type`, `.rodata`, `.note.GNU-stack`, `:lo12:`); libtool's merged archive
+  losing the `.S` members; the block table emitted as data in the object (74,800 cross-object pointers
+  were rejected even when present) with `.data.rel.ro`/`__DATA`; and, the actual root cause of every
+  "undefined symbol", **Mach-O assembly labels are literal while C references get a leading `_`** — all
+  emitted names now go through `RB_AOT_SYM`. The profile is compiled by the app target (Xcode), not the
+  engine archive. Expected log on the iPad: `aot: profile kitkat matches (5 libraries)` and
+  `engine: guest code runs on AOT (offline-translated AArch64)`; a hash mismatch logs why and runs Tier I.
