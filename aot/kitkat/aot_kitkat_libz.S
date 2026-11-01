@@ -2,21 +2,26 @@
 // fingerprint (FNV-1a-64) 0x7a936a527af455bb, .text vaddr 0x00005ae8, load bias 0x1a000000
 // Regenerate: rb_aotgen --emit <lib.so> --out aot_kitkat_libz --base 0x1a000000
 // code size 238780 bytes, 937 blocks
+#ifdef __APPLE__
+#define RB_AOT_SYM(x) _##x
+#else
+#define RB_AOT_SYM(x) x
+#endif
     .text
     .p2align 4
-rb_aot_mem_read8_tail_tramp:
+RB_AOT_SYM(rb_aot_mem_read8_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_mem_read8
-rb_aot_mem_read16_tail_tramp:
+    b RB_AOT_SYM(rb_aot_mem_read8)
+RB_AOT_SYM(rb_aot_mem_read16_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_mem_read16
-rb_aot_mem_read32_tail_tramp:
+    b RB_AOT_SYM(rb_aot_mem_read16)
+RB_AOT_SYM(rb_aot_mem_read32_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_mem_read32
-rb_aot_mem_read64_tail_tramp:
+    b RB_AOT_SYM(rb_aot_mem_read32)
+RB_AOT_SYM(rb_aot_mem_read64_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_mem_read64
-rb_aot_mem_read8_tramp:
+    b RB_AOT_SYM(rb_aot_mem_read64)
+RB_AOT_SYM(rb_aot_mem_read8_tramp):
     .word 0xd10a43ff
     .word 0xa90007e0
     .word 0xa9010fe2
@@ -46,7 +51,7 @@ rb_aot_mem_read8_tramp:
     .word 0xd10003ff
     .word 0xaa1c03e0
     .word 0xaa1003e1
-    bl rb_aot_mem_read8
+    bl RB_AOT_SYM(rb_aot_mem_read8)
     .word 0xaa0003f0
     .word 0x910003ff
     .word 0xa94007e0
@@ -77,7 +82,7 @@ rb_aot_mem_read8_tramp:
     .word 0x910a43ff
     .word 0xd65f03c0
     .word 0xd503201f
-rb_aot_mem_read16_tramp:
+RB_AOT_SYM(rb_aot_mem_read16_tramp):
     .word 0xd10a43ff
     .word 0xa90007e0
     .word 0xa9010fe2
@@ -107,7 +112,7 @@ rb_aot_mem_read16_tramp:
     .word 0xd10003ff
     .word 0xaa1c03e0
     .word 0xaa1003e1
-    bl rb_aot_mem_read16
+    bl RB_AOT_SYM(rb_aot_mem_read16)
     .word 0xaa0003f0
     .word 0x910003ff
     .word 0xa94007e0
@@ -138,7 +143,7 @@ rb_aot_mem_read16_tramp:
     .word 0x910a43ff
     .word 0xd65f03c0
     .word 0xd503201f
-rb_aot_mem_read32_tramp:
+RB_AOT_SYM(rb_aot_mem_read32_tramp):
     .word 0xd10a43ff
     .word 0xa90007e0
     .word 0xa9010fe2
@@ -168,7 +173,7 @@ rb_aot_mem_read32_tramp:
     .word 0xd10003ff
     .word 0xaa1c03e0
     .word 0xaa1003e1
-    bl rb_aot_mem_read32
+    bl RB_AOT_SYM(rb_aot_mem_read32)
     .word 0xaa0003f0
     .word 0x910003ff
     .word 0xa94007e0
@@ -199,7 +204,7 @@ rb_aot_mem_read32_tramp:
     .word 0x910a43ff
     .word 0xd65f03c0
     .word 0xd503201f
-rb_aot_mem_read64_tramp:
+RB_AOT_SYM(rb_aot_mem_read64_tramp):
     .word 0xd10a43ff
     .word 0xa90007e0
     .word 0xa9010fe2
@@ -229,7 +234,7 @@ rb_aot_mem_read64_tramp:
     .word 0xd10003ff
     .word 0xaa1c03e0
     .word 0xaa1003e1
-    bl rb_aot_mem_read64
+    bl RB_AOT_SYM(rb_aot_mem_read64)
     .word 0xaa0003f0
     .word 0x910003ff
     .word 0xa94007e0
@@ -260,31 +265,31 @@ rb_aot_mem_read64_tramp:
     .word 0x910a43ff
     .word 0xd65f03c0
     .word 0xd503201f
-rb_aot_excl_read8_tail_tramp:
+RB_AOT_SYM(rb_aot_excl_read8_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_excl_read8
-rb_aot_excl_read16_tail_tramp:
+    b RB_AOT_SYM(rb_aot_excl_read8)
+RB_AOT_SYM(rb_aot_excl_read16_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_excl_read16
-rb_aot_excl_read32_tail_tramp:
+    b RB_AOT_SYM(rb_aot_excl_read16)
+RB_AOT_SYM(rb_aot_excl_read32_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_excl_read32
-rb_aot_excl_read64_tail_tramp:
+    b RB_AOT_SYM(rb_aot_excl_read32)
+RB_AOT_SYM(rb_aot_excl_read64_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_excl_read64
-rb_aot_mem_write8_tail_tramp:
+    b RB_AOT_SYM(rb_aot_excl_read64)
+RB_AOT_SYM(rb_aot_mem_write8_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_mem_write8
-rb_aot_mem_write16_tail_tramp:
+    b RB_AOT_SYM(rb_aot_mem_write8)
+RB_AOT_SYM(rb_aot_mem_write16_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_mem_write16
-rb_aot_mem_write32_tail_tramp:
+    b RB_AOT_SYM(rb_aot_mem_write16)
+RB_AOT_SYM(rb_aot_mem_write32_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_mem_write32
-rb_aot_mem_write64_tail_tramp:
+    b RB_AOT_SYM(rb_aot_mem_write32)
+RB_AOT_SYM(rb_aot_mem_write64_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_mem_write64
-rb_aot_mem_write8_tramp:
+    b RB_AOT_SYM(rb_aot_mem_write64)
+RB_AOT_SYM(rb_aot_mem_write8_tramp):
     .word 0xd10a43ff
     .word 0xa90007e0
     .word 0xa9010fe2
@@ -315,7 +320,7 @@ rb_aot_mem_write8_tramp:
     .word 0xaa1c03e0
     .word 0xaa1003e1
     .word 0xaa1103e2
-    bl rb_aot_mem_write8
+    bl RB_AOT_SYM(rb_aot_mem_write8)
     .word 0x910003ff
     .word 0xa94007e0
     .word 0xa9410fe2
@@ -345,7 +350,7 @@ rb_aot_mem_write8_tramp:
     .word 0x910a43ff
     .word 0xd65f03c0
     .word 0xd503201f
-rb_aot_mem_write16_tramp:
+RB_AOT_SYM(rb_aot_mem_write16_tramp):
     .word 0xd10a43ff
     .word 0xa90007e0
     .word 0xa9010fe2
@@ -376,7 +381,7 @@ rb_aot_mem_write16_tramp:
     .word 0xaa1c03e0
     .word 0xaa1003e1
     .word 0xaa1103e2
-    bl rb_aot_mem_write16
+    bl RB_AOT_SYM(rb_aot_mem_write16)
     .word 0x910003ff
     .word 0xa94007e0
     .word 0xa9410fe2
@@ -406,7 +411,7 @@ rb_aot_mem_write16_tramp:
     .word 0x910a43ff
     .word 0xd65f03c0
     .word 0xd503201f
-rb_aot_mem_write32_tramp:
+RB_AOT_SYM(rb_aot_mem_write32_tramp):
     .word 0xd10a43ff
     .word 0xa90007e0
     .word 0xa9010fe2
@@ -437,7 +442,7 @@ rb_aot_mem_write32_tramp:
     .word 0xaa1c03e0
     .word 0xaa1003e1
     .word 0xaa1103e2
-    bl rb_aot_mem_write32
+    bl RB_AOT_SYM(rb_aot_mem_write32)
     .word 0x910003ff
     .word 0xa94007e0
     .word 0xa9410fe2
@@ -467,7 +472,7 @@ rb_aot_mem_write32_tramp:
     .word 0x910a43ff
     .word 0xd65f03c0
     .word 0xd503201f
-rb_aot_mem_write64_tramp:
+RB_AOT_SYM(rb_aot_mem_write64_tramp):
     .word 0xd10a43ff
     .word 0xa90007e0
     .word 0xa9010fe2
@@ -498,7 +503,7 @@ rb_aot_mem_write64_tramp:
     .word 0xaa1c03e0
     .word 0xaa1003e1
     .word 0xaa1103e2
-    bl rb_aot_mem_write64
+    bl RB_AOT_SYM(rb_aot_mem_write64)
     .word 0x910003ff
     .word 0xa94007e0
     .word 0xa9410fe2
@@ -528,35 +533,35 @@ rb_aot_mem_write64_tramp:
     .word 0x910a43ff
     .word 0xd65f03c0
     .word 0xd503201f
-rb_aot_excl_write8_tail_tramp:
+RB_AOT_SYM(rb_aot_excl_write8_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_excl_write8
-rb_aot_excl_write16_tail_tramp:
+    b RB_AOT_SYM(rb_aot_excl_write8)
+RB_AOT_SYM(rb_aot_excl_write16_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_excl_write16
-rb_aot_excl_write32_tail_tramp:
+    b RB_AOT_SYM(rb_aot_excl_write16)
+RB_AOT_SYM(rb_aot_excl_write32_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_excl_write32
-rb_aot_excl_write64_tail_tramp:
+    b RB_AOT_SYM(rb_aot_excl_write32)
+RB_AOT_SYM(rb_aot_excl_write64_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_excl_write64
-rb_aot_call_svc_tail_tramp:
+    b RB_AOT_SYM(rb_aot_excl_write64)
+RB_AOT_SYM(rb_aot_call_svc_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_call_svc
-rb_aot_exception_raised_tail_tramp:
+    b RB_AOT_SYM(rb_aot_call_svc)
+RB_AOT_SYM(rb_aot_exception_raised_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_exception_raised
-rb_aot_isb_raised_tail_tramp:
+    b RB_AOT_SYM(rb_aot_exception_raised)
+RB_AOT_SYM(rb_aot_isb_raised_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_isb_raised
-rb_aot_add_ticks_tail_tramp:
+    b RB_AOT_SYM(rb_aot_isb_raised)
+RB_AOT_SYM(rb_aot_add_ticks_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_add_ticks
-rb_aot_get_ticks_remaining_tail_tramp:
+    b RB_AOT_SYM(rb_aot_add_ticks)
+RB_AOT_SYM(rb_aot_get_ticks_remaining_tail_tramp):
     .word 0xaa1c03e0
-    b rb_aot_get_ticks_remaining
-.globl aot_kitkat_libz_run_code
-aot_kitkat_libz_run_code:
+    b RB_AOT_SYM(rb_aot_get_ticks_remaining)
+.globl RB_AOT_SYM(aot_kitkat_libz_run_code)
+RB_AOT_SYM(aot_kitkat_libz_run_code):
     .word 0xd10383ff
     .word 0xa90053f3
     .word 0xa9015bf5
@@ -592,7 +597,7 @@ aot_kitkat_libz_run_code:
     .word 0x88dfff70
     .word 0x350005f0
     .word 0xd61f0260
-aot_kitkat_libz_step_code:
+RB_AOT_SYM(aot_kitkat_libz_step_code):
     .word 0xd10383ff
     .word 0xa90053f3
     .word 0xa9015bf5
@@ -630,16 +635,16 @@ aot_kitkat_libz_step_code:
     .word 0x8811ff70
     .word 0x35ffff91
     .word 0xd61f0260
-aot_kitkat_libz_ret_dispatch:
+RB_AOT_SYM(aot_kitkat_libz_ret_dispatch):
     .word 0x88dfff70
     .word 0x350000f0
     .word 0xf100035f
     .word 0x540000ad
     .word 0xaa1c03e0
-    bl rb_aot_dispatch
+    bl RB_AOT_SYM(rb_aot_dispatch)
     .word 0xb4000040
     .word 0xd61f0000
-aot_kitkat_libz_ret_run_code:
+RB_AOT_SYM(aot_kitkat_libz_ret_run_code):
     .word 0xf94247e1
     .word 0xcb1a0021
     .word 0x97ffffaa
@@ -662,8 +667,8 @@ aot_kitkat_libz_ret_run_code:
     .word 0x910383ff
     .word 0xd65f03c0
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0000
-aot_kitkat_libz_block_0000:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0000)
+RB_AOT_SYM(aot_kitkat_libz_block_0000):
     .word 0xb9404f93
     .word 0x51009274
     .word 0xb9402b93
@@ -798,8 +803,8 @@ aot_kitkat_libz_block_0000:
     .word 0x17ffff5f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0023
-aot_kitkat_libz_block_0023:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0023)
+RB_AOT_SYM(aot_kitkat_libz_block_0023):
     .word 0xd100075a
     .word 0xf100035f
     .word 0x5400004d
@@ -810,8 +815,8 @@ aot_kitkat_libz_block_0023:
     .word 0x17ffff55
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0024
-aot_kitkat_libz_block_0024:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0024)
+RB_AOT_SYM(aot_kitkat_libz_block_0024):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -886,8 +891,8 @@ aot_kitkat_libz_block_0024:
     .word 0x17ffff0b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0027
-aot_kitkat_libz_block_0027:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0027)
+RB_AOT_SYM(aot_kitkat_libz_block_0027):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -962,8 +967,8 @@ aot_kitkat_libz_block_0027:
     .word 0x17fffec1
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0030
-aot_kitkat_libz_block_0030:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0030)
+RB_AOT_SYM(aot_kitkat_libz_block_0030):
     .word 0xb9401b93
     .word 0x530c7e74
     .word 0x0b140275
@@ -1000,8 +1005,8 @@ aot_kitkat_libz_block_0030:
     .word 0x17fffe9d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0032
-aot_kitkat_libz_block_0032:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0032)
+RB_AOT_SYM(aot_kitkat_libz_block_0032):
     .word 0xb9404f93
     .word 0x51002274
     .word 0xb9403793
@@ -1046,11 +1051,11 @@ aot_kitkat_libz_block_0032:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0033
-    add x17, x17, :lo12:aot_kitkat_libz_block_0033
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0033)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0033)
 #else
-    adrp x17, aot_kitkat_libz_block_0033@PAGE
-    add x17, x17, aot_kitkat_libz_block_0033@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0033)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0033)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x528c3cb3
@@ -1069,8 +1074,8 @@ aot_kitkat_libz_block_0032:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0034
-aot_kitkat_libz_block_0034:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0034)
+RB_AOT_SYM(aot_kitkat_libz_block_0034):
     .word 0x528c4081
     .word 0x72a34001
     .word 0x97fffc0c
@@ -1107,8 +1112,8 @@ aot_kitkat_libz_block_0034:
     .word 0x17fffe3b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0035
-aot_kitkat_libz_block_0035:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0035)
+RB_AOT_SYM(aot_kitkat_libz_block_0035):
     .word 0xb9404f93
     .word 0x51009274
     .word 0xb9402b93
@@ -1245,8 +1250,8 @@ aot_kitkat_libz_block_0035:
     .word 0x17fffdb3
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0055
-aot_kitkat_libz_block_0055:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0055)
+RB_AOT_SYM(aot_kitkat_libz_block_0055):
     .word 0xb9404f93
     .word 0x51002274
     .word 0xb9403793
@@ -1297,8 +1302,8 @@ aot_kitkat_libz_block_0055:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0060
-aot_kitkat_libz_block_0060:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0060)
+RB_AOT_SYM(aot_kitkat_libz_block_0060):
     .word 0xb9404f93
     .word 0x51007274
     .word 0xb9402b93
@@ -1413,8 +1418,8 @@ aot_kitkat_libz_block_0060:
     .word 0x17fffd0f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0075
-aot_kitkat_libz_block_0075:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0075)
+RB_AOT_SYM(aot_kitkat_libz_block_0075):
     .word 0xb9404f93
     .word 0x51007274
     .word 0xb9402b93
@@ -1529,8 +1534,8 @@ aot_kitkat_libz_block_0075:
     .word 0x17fffc9d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0090
-aot_kitkat_libz_block_0090:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0090)
+RB_AOT_SYM(aot_kitkat_libz_block_0090):
     .word 0xb9404f93
     .word 0x51005274
     .word 0xb9402b93
@@ -1617,8 +1622,8 @@ aot_kitkat_libz_block_0090:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0101
-aot_kitkat_libz_block_0101:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0101)
+RB_AOT_SYM(aot_kitkat_libz_block_0101):
     .word 0xb9404f93
     .word 0x51005274
     .word 0xb9402b93
@@ -1705,8 +1710,8 @@ aot_kitkat_libz_block_0101:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0112
-aot_kitkat_libz_block_0112:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0112)
+RB_AOT_SYM(aot_kitkat_libz_block_0112):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -1775,8 +1780,8 @@ aot_kitkat_libz_block_0112:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0117
-aot_kitkat_libz_block_0117:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0117)
+RB_AOT_SYM(aot_kitkat_libz_block_0117):
     .word 0xb9404f93
     .word 0x51002274
     .word 0xb9402b93
@@ -1814,11 +1819,11 @@ aot_kitkat_libz_block_0117:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0118
-    add x17, x17, :lo12:aot_kitkat_libz_block_0118
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0118)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0118)
 #else
-    adrp x17, aot_kitkat_libz_block_0118@PAGE
-    add x17, x17, aot_kitkat_libz_block_0118@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0118)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0118)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x528d0e73
@@ -1834,8 +1839,8 @@ aot_kitkat_libz_block_0117:
     .word 0x17fffb79
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0119
-aot_kitkat_libz_block_0119:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0119)
+RB_AOT_SYM(aot_kitkat_libz_block_0119):
     .word 0xb9405393
     .word 0x72000270
     .word 0x52800071
@@ -1858,8 +1863,8 @@ aot_kitkat_libz_block_0119:
     .word 0x17fffb63
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0120
-aot_kitkat_libz_block_0120:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0120)
+RB_AOT_SYM(aot_kitkat_libz_block_0120):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -1936,11 +1941,11 @@ aot_kitkat_libz_block_0120:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0121
-    add x17, x17, :lo12:aot_kitkat_libz_block_0121
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0121)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0121)
 #else
-    adrp x17, aot_kitkat_libz_block_0121@PAGE
-    add x17, x17, aot_kitkat_libz_block_0121@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0121)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0121)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x528d11b3
@@ -1959,8 +1964,8 @@ aot_kitkat_libz_block_0120:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0128
-aot_kitkat_libz_block_0128:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0128)
+RB_AOT_SYM(aot_kitkat_libz_block_0128):
     .word 0xb9404f93
     .word 0x51008274
     .word 0xb9402b93
@@ -2077,8 +2082,8 @@ aot_kitkat_libz_block_0128:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0129
-aot_kitkat_libz_block_0129:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0129)
+RB_AOT_SYM(aot_kitkat_libz_block_0129):
     .word 0xb9404f93
     .word 0x51002274
     .word 0xb9403793
@@ -2157,11 +2162,11 @@ aot_kitkat_libz_block_0129:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0130
-    add x17, x17, :lo12:aot_kitkat_libz_block_0130
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0130)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0130)
 #else
-    adrp x17, aot_kitkat_libz_block_0130@PAGE
-    add x17, x17, aot_kitkat_libz_block_0130@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0130)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0130)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x528d49b3
@@ -2180,8 +2185,8 @@ aot_kitkat_libz_block_0129:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0131
-aot_kitkat_libz_block_0131:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0131)
+RB_AOT_SYM(aot_kitkat_libz_block_0131):
     .word 0xb9404f93
     .word 0x51009274
     .word 0xb9402b93
@@ -2310,11 +2315,11 @@ aot_kitkat_libz_block_0131:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0132
-    add x17, x17, :lo12:aot_kitkat_libz_block_0132
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0132)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0132)
 #else
-    adrp x17, aot_kitkat_libz_block_0132@PAGE
-    add x17, x17, aot_kitkat_libz_block_0132@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0132)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0132)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x528d4c73
@@ -2331,8 +2336,8 @@ aot_kitkat_libz_block_0131:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0135
-aot_kitkat_libz_block_0135:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0135)
+RB_AOT_SYM(aot_kitkat_libz_block_0135):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -2397,8 +2402,8 @@ aot_kitkat_libz_block_0135:
     .word 0x17fff961
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0136
-aot_kitkat_libz_block_0136:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0136)
+RB_AOT_SYM(aot_kitkat_libz_block_0136):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -2460,11 +2465,11 @@ aot_kitkat_libz_block_0136:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0137
-    add x17, x17, :lo12:aot_kitkat_libz_block_0137
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0137)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0137)
 #else
-    adrp x17, aot_kitkat_libz_block_0137@PAGE
-    add x17, x17, aot_kitkat_libz_block_0137@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0137)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0137)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x528da633
@@ -2482,8 +2487,8 @@ aot_kitkat_libz_block_0136:
     .word 0x17fff913
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0138
-aot_kitkat_libz_block_0138:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0138)
+RB_AOT_SYM(aot_kitkat_libz_block_0138):
     .word 0xb9404f93
     .word 0x51009274
     .word 0xb9402b93
@@ -2620,8 +2625,8 @@ aot_kitkat_libz_block_0138:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0148
-aot_kitkat_libz_block_0148:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0148)
+RB_AOT_SYM(aot_kitkat_libz_block_0148):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -2686,8 +2691,8 @@ aot_kitkat_libz_block_0148:
     .word 0x17fff84b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0149
-aot_kitkat_libz_block_0149:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0149)
+RB_AOT_SYM(aot_kitkat_libz_block_0149):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -2752,8 +2757,8 @@ aot_kitkat_libz_block_0149:
     .word 0x17fff80b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0150
-aot_kitkat_libz_block_0150:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0150)
+RB_AOT_SYM(aot_kitkat_libz_block_0150):
     .word 0xb9404f93
     .word 0x51002274
     .word 0xb9403793
@@ -2794,8 +2799,8 @@ aot_kitkat_libz_block_0150:
     .word 0x17fff7e3
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0151
-aot_kitkat_libz_block_0151:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0151)
+RB_AOT_SYM(aot_kitkat_libz_block_0151):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -2860,8 +2865,8 @@ aot_kitkat_libz_block_0151:
     .word 0x17fff7a3
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0152
-aot_kitkat_libz_block_0152:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0152)
+RB_AOT_SYM(aot_kitkat_libz_block_0152):
     .word 0xb9404f93
     .word 0x51007274
     .word 0xb9402b93
@@ -2964,8 +2969,8 @@ aot_kitkat_libz_block_0152:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0153
-aot_kitkat_libz_block_0153:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0153)
+RB_AOT_SYM(aot_kitkat_libz_block_0153):
     .word 0xb9404f93
     .word 0x51005274
     .word 0xb9402b93
@@ -3054,8 +3059,8 @@ aot_kitkat_libz_block_0153:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0163
-aot_kitkat_libz_block_0163:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0163)
+RB_AOT_SYM(aot_kitkat_libz_block_0163):
     .word 0xb9404f93
     .word 0x51009274
     .word 0xb9402b93
@@ -3190,8 +3195,8 @@ aot_kitkat_libz_block_0163:
     .word 0x17fff65f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0173
-aot_kitkat_libz_block_0173:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0173)
+RB_AOT_SYM(aot_kitkat_libz_block_0173):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -3306,8 +3311,8 @@ aot_kitkat_libz_block_0173:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0176
-aot_kitkat_libz_block_0176:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0176)
+RB_AOT_SYM(aot_kitkat_libz_block_0176):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -3372,8 +3377,8 @@ aot_kitkat_libz_block_0176:
     .word 0x17fff5ad
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0177
-aot_kitkat_libz_block_0177:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0177)
+RB_AOT_SYM(aot_kitkat_libz_block_0177):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -3456,8 +3461,8 @@ aot_kitkat_libz_block_0177:
     .word 0x17fff55b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0178
-aot_kitkat_libz_block_0178:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0178)
+RB_AOT_SYM(aot_kitkat_libz_block_0178):
     .word 0xb9404f93
     .word 0x51009274
     .word 0xb9402b93
@@ -3652,8 +3657,8 @@ aot_kitkat_libz_block_0178:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0179
-aot_kitkat_libz_block_0179:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0179)
+RB_AOT_SYM(aot_kitkat_libz_block_0179):
     .word 0xb9404f93
     .word 0x51009274
     .word 0xb9402b93
@@ -3788,8 +3793,8 @@ aot_kitkat_libz_block_0179:
     .word 0x17fff413
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0192
-aot_kitkat_libz_block_0192:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0192)
+RB_AOT_SYM(aot_kitkat_libz_block_0192):
     .word 0xb9404f93
     .word 0x51009274
     .word 0xb9402b93
@@ -3946,8 +3951,8 @@ aot_kitkat_libz_block_0192:
     .word 0x17fff377
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0212
-aot_kitkat_libz_block_0212:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0212)
+RB_AOT_SYM(aot_kitkat_libz_block_0212):
     .word 0xb9404f93
     .word 0x51006274
     .word 0xb9402b93
@@ -4036,8 +4041,8 @@ aot_kitkat_libz_block_0212:
     .word 0x17fff31f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0213
-aot_kitkat_libz_block_0213:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0213)
+RB_AOT_SYM(aot_kitkat_libz_block_0213):
     .word 0xb9404f93
     .word 0x51009274
     .word 0xb9402b93
@@ -4214,8 +4219,8 @@ aot_kitkat_libz_block_0213:
     .word 0x17fff26f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0230
-aot_kitkat_libz_block_0230:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0230)
+RB_AOT_SYM(aot_kitkat_libz_block_0230):
     .word 0xb9404f93
     .word 0x51009274
     .word 0xb9402b93
@@ -4370,8 +4375,8 @@ aot_kitkat_libz_block_0230:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0263
-aot_kitkat_libz_block_0263:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0263)
+RB_AOT_SYM(aot_kitkat_libz_block_0263):
     .word 0xb9404f93
     .word 0x51009274
     .word 0xb9402b93
@@ -4560,8 +4565,8 @@ aot_kitkat_libz_block_0263:
     .word 0x17fff119
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0264
-aot_kitkat_libz_block_0264:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0264)
+RB_AOT_SYM(aot_kitkat_libz_block_0264):
     .word 0xb9401b93
     .word 0x71000274
     .word 0xd53b4213
@@ -4576,8 +4581,8 @@ aot_kitkat_libz_block_0264:
     .word 0x17fff10b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0265
-aot_kitkat_libz_block_0265:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0265)
+RB_AOT_SYM(aot_kitkat_libz_block_0265):
     .word 0xb9401f93
     .word 0xb9002393
     .word 0x12800013
@@ -4592,8 +4597,8 @@ aot_kitkat_libz_block_0265:
     .word 0x17fff0fd
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0266
-aot_kitkat_libz_block_0266:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0266)
+RB_AOT_SYM(aot_kitkat_libz_block_0266):
     .word 0xb9404f93
     .word 0x51009274
     .word 0xb9402b93
@@ -4730,8 +4735,8 @@ aot_kitkat_libz_block_0266:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0279
-aot_kitkat_libz_block_0279:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0279)
+RB_AOT_SYM(aot_kitkat_libz_block_0279):
     .word 0xb9401f93
     .word 0xb9002393
     .word 0x12800013
@@ -4746,8 +4751,8 @@ aot_kitkat_libz_block_0279:
     .word 0x17fff067
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0280
-aot_kitkat_libz_block_0280:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0280)
+RB_AOT_SYM(aot_kitkat_libz_block_0280):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -4826,8 +4831,8 @@ aot_kitkat_libz_block_0280:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0288
-aot_kitkat_libz_block_0288:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0288)
+RB_AOT_SYM(aot_kitkat_libz_block_0288):
     .word 0xb9404f93
     .word 0x51002274
     .word 0xb9403793
@@ -4947,11 +4952,11 @@ aot_kitkat_libz_block_0288:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0289
-    add x17, x17, :lo12:aot_kitkat_libz_block_0289
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0289)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0289)
 #else
-    adrp x17, aot_kitkat_libz_block_0289@PAGE
-    add x17, x17, aot_kitkat_libz_block_0289@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0289)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0289)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x5293c9f3
@@ -4969,8 +4974,8 @@ aot_kitkat_libz_block_0288:
     .word 0x17ffef91
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0290
-aot_kitkat_libz_block_0290:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0290)
+RB_AOT_SYM(aot_kitkat_libz_block_0290):
     .word 0xb9401b93
     .word 0x7100027f
     .word 0x1a9f17f4
@@ -4995,8 +5000,8 @@ aot_kitkat_libz_block_0290:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0293
-aot_kitkat_libz_block_0293:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0293)
+RB_AOT_SYM(aot_kitkat_libz_block_0293):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -5071,8 +5076,8 @@ aot_kitkat_libz_block_0293:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0297
-aot_kitkat_libz_block_0297:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0297)
+RB_AOT_SYM(aot_kitkat_libz_block_0297):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -5147,8 +5152,8 @@ aot_kitkat_libz_block_0297:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0300
-aot_kitkat_libz_block_0300:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0300)
+RB_AOT_SYM(aot_kitkat_libz_block_0300):
     .word 0xb9404f93
     .word 0x51005274
     .word 0xb9402b93
@@ -5249,8 +5254,8 @@ aot_kitkat_libz_block_0300:
     .word 0x17ffee81
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0306
-aot_kitkat_libz_block_0306:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0306)
+RB_AOT_SYM(aot_kitkat_libz_block_0306):
     .word 0xd100075a
     .word 0xf100035f
     .word 0x5400004d
@@ -5261,8 +5266,8 @@ aot_kitkat_libz_block_0306:
     .word 0x17ffee77
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0307
-aot_kitkat_libz_block_0307:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0307)
+RB_AOT_SYM(aot_kitkat_libz_block_0307):
     .word 0xb9401b93
     .word 0x7100027f
     .word 0x1a9f17f4
@@ -5287,8 +5292,8 @@ aot_kitkat_libz_block_0307:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0310
-aot_kitkat_libz_block_0310:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0310)
+RB_AOT_SYM(aot_kitkat_libz_block_0310):
     .word 0xb9401b93
     .word 0x7100027f
     .word 0x1a9f17f4
@@ -5313,8 +5318,8 @@ aot_kitkat_libz_block_0310:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0313
-aot_kitkat_libz_block_0313:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0313)
+RB_AOT_SYM(aot_kitkat_libz_block_0313):
     .word 0xb9404f93
     .word 0x51002274
     .word 0xb9402b93
@@ -5365,8 +5370,8 @@ aot_kitkat_libz_block_0313:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0316
-aot_kitkat_libz_block_0316:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0316)
+RB_AOT_SYM(aot_kitkat_libz_block_0316):
     .word 0xb9404f93
     .word 0x51002274
     .word 0xb9402b93
@@ -5417,8 +5422,8 @@ aot_kitkat_libz_block_0316:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0319
-aot_kitkat_libz_block_0319:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0319)
+RB_AOT_SYM(aot_kitkat_libz_block_0319):
     .word 0xb9401b93
     .word 0x7100027f
     .word 0x1a9f17f4
@@ -5443,8 +5448,8 @@ aot_kitkat_libz_block_0319:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0322
-aot_kitkat_libz_block_0322:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0322)
+RB_AOT_SYM(aot_kitkat_libz_block_0322):
     .word 0xb9401b93
     .word 0x7100027f
     .word 0x1a9f17f4
@@ -5469,8 +5474,8 @@ aot_kitkat_libz_block_0322:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0325
-aot_kitkat_libz_block_0325:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0325)
+RB_AOT_SYM(aot_kitkat_libz_block_0325):
     .word 0xb9404f93
     .word 0x51002274
     .word 0xb9402b93
@@ -5521,8 +5526,8 @@ aot_kitkat_libz_block_0325:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0335
-aot_kitkat_libz_block_0335:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0335)
+RB_AOT_SYM(aot_kitkat_libz_block_0335):
     .word 0xb9404f93
     .word 0x51002274
     .word 0xb9402b93
@@ -5573,8 +5578,8 @@ aot_kitkat_libz_block_0335:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0339
-aot_kitkat_libz_block_0339:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0339)
+RB_AOT_SYM(aot_kitkat_libz_block_0339):
     .word 0xb9404f93
     .word 0x51008274
     .word 0xb9402b93
@@ -5697,8 +5702,8 @@ aot_kitkat_libz_block_0339:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0369
-aot_kitkat_libz_block_0369:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0369)
+RB_AOT_SYM(aot_kitkat_libz_block_0369):
     .word 0xb9404f93
     .word 0x51002274
     .word 0xb9402b93
@@ -5749,8 +5754,8 @@ aot_kitkat_libz_block_0369:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0373
-aot_kitkat_libz_block_0373:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0373)
+RB_AOT_SYM(aot_kitkat_libz_block_0373):
     .word 0xb9404f93
     .word 0x51002274
     .word 0xb9403793
@@ -5847,8 +5852,8 @@ aot_kitkat_libz_block_0373:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0377
-aot_kitkat_libz_block_0377:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0377)
+RB_AOT_SYM(aot_kitkat_libz_block_0377):
     .word 0xb9404f93
     .word 0x51002274
     .word 0xb9403793
@@ -5945,8 +5950,8 @@ aot_kitkat_libz_block_0377:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0381
-aot_kitkat_libz_block_0381:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0381)
+RB_AOT_SYM(aot_kitkat_libz_block_0381):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -6021,8 +6026,8 @@ aot_kitkat_libz_block_0381:
     .word 0x17ffeb99
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0385
-aot_kitkat_libz_block_0385:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0385)
+RB_AOT_SYM(aot_kitkat_libz_block_0385):
     .word 0xb9404f93
     .word 0x51008274
     .word 0xb9402b93
@@ -6139,8 +6144,8 @@ aot_kitkat_libz_block_0385:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0386
-aot_kitkat_libz_block_0386:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0386)
+RB_AOT_SYM(aot_kitkat_libz_block_0386):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -6227,8 +6232,8 @@ aot_kitkat_libz_block_0386:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0403
-aot_kitkat_libz_block_0403:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0403)
+RB_AOT_SYM(aot_kitkat_libz_block_0403):
     .word 0xb9404f93
     .word 0x51002274
     .word 0xb9402b93
@@ -6279,8 +6284,8 @@ aot_kitkat_libz_block_0403:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0408
-aot_kitkat_libz_block_0408:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0408)
+RB_AOT_SYM(aot_kitkat_libz_block_0408):
     .word 0xb9404f93
     .word 0x51005274
     .word 0xb9402b93
@@ -6381,8 +6386,8 @@ aot_kitkat_libz_block_0408:
     .word 0x17ffea39
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0424
-aot_kitkat_libz_block_0424:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0424)
+RB_AOT_SYM(aot_kitkat_libz_block_0424):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -6457,8 +6462,8 @@ aot_kitkat_libz_block_0424:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0437
-aot_kitkat_libz_block_0437:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0437)
+RB_AOT_SYM(aot_kitkat_libz_block_0437):
     .word 0xb9404f93
     .word 0x51005274
     .word 0xb9402b93
@@ -6557,8 +6562,8 @@ aot_kitkat_libz_block_0437:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0450
-aot_kitkat_libz_block_0450:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0450)
+RB_AOT_SYM(aot_kitkat_libz_block_0450):
     .word 0xb9404f93
     .word 0x51002274
     .word 0xb9403793
@@ -6609,8 +6614,8 @@ aot_kitkat_libz_block_0450:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0453
-aot_kitkat_libz_block_0453:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0453)
+RB_AOT_SYM(aot_kitkat_libz_block_0453):
     .word 0xb9404f93
     .word 0x51006274
     .word 0xb9402b93
@@ -6709,8 +6714,8 @@ aot_kitkat_libz_block_0453:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0469
-aot_kitkat_libz_block_0469:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0469)
+RB_AOT_SYM(aot_kitkat_libz_block_0469):
     .word 0xb9404f93
     .word 0x51002274
     .word 0xb9402b93
@@ -6761,8 +6766,8 @@ aot_kitkat_libz_block_0469:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0472
-aot_kitkat_libz_block_0472:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0472)
+RB_AOT_SYM(aot_kitkat_libz_block_0472):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -6883,8 +6888,8 @@ aot_kitkat_libz_block_0472:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0483
-aot_kitkat_libz_block_0483:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0483)
+RB_AOT_SYM(aot_kitkat_libz_block_0483):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -6973,8 +6978,8 @@ aot_kitkat_libz_block_0483:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0490
-aot_kitkat_libz_block_0490:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0490)
+RB_AOT_SYM(aot_kitkat_libz_block_0490):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -7049,8 +7054,8 @@ aot_kitkat_libz_block_0490:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0493
-aot_kitkat_libz_block_0493:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0493)
+RB_AOT_SYM(aot_kitkat_libz_block_0493):
     .word 0xb9404f93
     .word 0x51005274
     .word 0xb9402b93
@@ -7137,8 +7142,8 @@ aot_kitkat_libz_block_0493:
     .word 0x17ffe757
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0496
-aot_kitkat_libz_block_0496:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0496)
+RB_AOT_SYM(aot_kitkat_libz_block_0496):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -7223,11 +7228,11 @@ aot_kitkat_libz_block_0496:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0497
-    add x17, x17, :lo12:aot_kitkat_libz_block_0497
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0497)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0497)
 #else
-    adrp x17, aot_kitkat_libz_block_0497@PAGE
-    add x17, x17, aot_kitkat_libz_block_0497@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0497)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0497)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x5295d173
@@ -7246,8 +7251,8 @@ aot_kitkat_libz_block_0496:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0514
-aot_kitkat_libz_block_0514:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0514)
+RB_AOT_SYM(aot_kitkat_libz_block_0514):
     .word 0xb9404f93
     .word 0x51005274
     .word 0xb9402b93
@@ -7348,8 +7353,8 @@ aot_kitkat_libz_block_0514:
     .word 0x17ffe68d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0540
-aot_kitkat_libz_block_0540:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0540)
+RB_AOT_SYM(aot_kitkat_libz_block_0540):
     .word 0xb9404f93
     .word 0x51002274
     .word 0x51002293
@@ -7458,11 +7463,11 @@ aot_kitkat_libz_block_0540:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0541
-    add x17, x17, :lo12:aot_kitkat_libz_block_0541
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0541)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0541)
 #else
-    adrp x17, aot_kitkat_libz_block_0541@PAGE
-    add x17, x17, aot_kitkat_libz_block_0541@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0541)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0541)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x52960bb3
@@ -7481,8 +7486,8 @@ aot_kitkat_libz_block_0540:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0542
-aot_kitkat_libz_block_0542:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0542)
+RB_AOT_SYM(aot_kitkat_libz_block_0542):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -7557,8 +7562,8 @@ aot_kitkat_libz_block_0542:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0554
-aot_kitkat_libz_block_0554:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0554)
+RB_AOT_SYM(aot_kitkat_libz_block_0554):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -7633,8 +7638,8 @@ aot_kitkat_libz_block_0554:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0558
-aot_kitkat_libz_block_0558:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0558)
+RB_AOT_SYM(aot_kitkat_libz_block_0558):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -7709,8 +7714,8 @@ aot_kitkat_libz_block_0558:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0566
-aot_kitkat_libz_block_0566:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0566)
+RB_AOT_SYM(aot_kitkat_libz_block_0566):
     .word 0xb9404f93
     .word 0x51005274
     .word 0xb9402b93
@@ -7797,8 +7802,8 @@ aot_kitkat_libz_block_0566:
     .word 0x17ffe4db
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0569
-aot_kitkat_libz_block_0569:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0569)
+RB_AOT_SYM(aot_kitkat_libz_block_0569):
     .word 0xb9404f93
     .word 0x51009274
     .word 0xb9402b93
@@ -7995,8 +8000,8 @@ aot_kitkat_libz_block_0569:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0574
-aot_kitkat_libz_block_0574:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0574)
+RB_AOT_SYM(aot_kitkat_libz_block_0574):
     .word 0xb9404f93
     .word 0x51002274
     .word 0xb9402b93
@@ -8047,8 +8052,8 @@ aot_kitkat_libz_block_0574:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0577
-aot_kitkat_libz_block_0577:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0577)
+RB_AOT_SYM(aot_kitkat_libz_block_0577):
     .word 0xb9404f93
     .word 0x51009274
     .word 0xb9402b93
@@ -8615,8 +8620,8 @@ aot_kitkat_libz_block_0577:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0674
-aot_kitkat_libz_block_0674:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0674)
+RB_AOT_SYM(aot_kitkat_libz_block_0674):
     .word 0xb9404f93
     .word 0x51002274
     .word 0xb9402b93
@@ -8657,8 +8662,8 @@ aot_kitkat_libz_block_0674:
     .word 0x17ffe187
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0675
-aot_kitkat_libz_block_0675:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0675)
+RB_AOT_SYM(aot_kitkat_libz_block_0675):
     .word 0xb9404f93
     .word 0x51002274
     .word 0xb9402b93
@@ -8699,8 +8704,8 @@ aot_kitkat_libz_block_0675:
     .word 0x17ffe15f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0676
-aot_kitkat_libz_block_0676:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0676)
+RB_AOT_SYM(aot_kitkat_libz_block_0676):
     .word 0xb9404f93
     .word 0x51005274
     .word 0xb9402b93
@@ -8779,8 +8784,8 @@ aot_kitkat_libz_block_0676:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0677
-aot_kitkat_libz_block_0677:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0677)
+RB_AOT_SYM(aot_kitkat_libz_block_0677):
     .word 0xb9404f93
     .word 0x51007274
     .word 0xb9402b93
@@ -8893,8 +8898,8 @@ aot_kitkat_libz_block_0677:
     .word 0x17ffe0a1
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0680
-aot_kitkat_libz_block_0680:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0680)
+RB_AOT_SYM(aot_kitkat_libz_block_0680):
     .word 0xb9402393
     .word 0xb9002793
     .word 0xb9401f93
@@ -8919,8 +8924,8 @@ aot_kitkat_libz_block_0680:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0681
-aot_kitkat_libz_block_0681:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0681)
+RB_AOT_SYM(aot_kitkat_libz_block_0681):
     .word 0xb9404f93
     .word 0x51002274
     .word 0xb9403793
@@ -8961,8 +8966,8 @@ aot_kitkat_libz_block_0681:
     .word 0x17ffe061
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0682
-aot_kitkat_libz_block_0682:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0682)
+RB_AOT_SYM(aot_kitkat_libz_block_0682):
     .word 0xb9404f93
     .word 0x51009274
     .word 0xb9402b93
@@ -9145,8 +9150,8 @@ aot_kitkat_libz_block_0682:
     .word 0x17ffdfab
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0683
-aot_kitkat_libz_block_0683:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0683)
+RB_AOT_SYM(aot_kitkat_libz_block_0683):
     .word 0xb9404f93
     .word 0x51006274
     .word 0xb9402b93
@@ -9271,8 +9276,8 @@ aot_kitkat_libz_block_0683:
     .word 0x17ffdf2f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0693
-aot_kitkat_libz_block_0693:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0693)
+RB_AOT_SYM(aot_kitkat_libz_block_0693):
     .word 0xb9404f93
     .word 0x51002274
     .word 0xb9402b93
@@ -9313,8 +9318,8 @@ aot_kitkat_libz_block_0693:
     .word 0x17ffdf07
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0694
-aot_kitkat_libz_block_0694:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0694)
+RB_AOT_SYM(aot_kitkat_libz_block_0694):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -9379,8 +9384,8 @@ aot_kitkat_libz_block_0694:
     .word 0x17ffdec7
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0695
-aot_kitkat_libz_block_0695:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0695)
+RB_AOT_SYM(aot_kitkat_libz_block_0695):
     .word 0xb9404f93
     .word 0x51005274
     .word 0xb9402b93
@@ -9459,8 +9464,8 @@ aot_kitkat_libz_block_0695:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0696
-aot_kitkat_libz_block_0696:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0696)
+RB_AOT_SYM(aot_kitkat_libz_block_0696):
     .word 0xb9401b93
     .word 0x71000274
     .word 0xd53b4213
@@ -9475,8 +9480,8 @@ aot_kitkat_libz_block_0696:
     .word 0x17ffde6b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0697
-aot_kitkat_libz_block_0697:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0697)
+RB_AOT_SYM(aot_kitkat_libz_block_0697):
     .word 0xb9404f93
     .word 0x51006274
     .word 0xb9402b93
@@ -9621,8 +9626,8 @@ aot_kitkat_libz_block_0697:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0721
-aot_kitkat_libz_block_0721:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0721)
+RB_AOT_SYM(aot_kitkat_libz_block_0721):
     .word 0xb9401b93
     .word 0x71000274
     .word 0xd53b4213
@@ -9637,8 +9642,8 @@ aot_kitkat_libz_block_0721:
     .word 0x17ffddcd
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0722
-aot_kitkat_libz_block_0722:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0722)
+RB_AOT_SYM(aot_kitkat_libz_block_0722):
     .word 0xb9404f93
     .word 0x51006274
     .word 0xb9402b93
@@ -9727,8 +9732,8 @@ aot_kitkat_libz_block_0722:
     .word 0x17ffdd75
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0723
-aot_kitkat_libz_block_0723:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0723)
+RB_AOT_SYM(aot_kitkat_libz_block_0723):
     .word 0xb9401b93
     .word 0x71000274
     .word 0xd53b4213
@@ -9743,8 +9748,8 @@ aot_kitkat_libz_block_0723:
     .word 0x17ffdd67
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0724
-aot_kitkat_libz_block_0724:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0724)
+RB_AOT_SYM(aot_kitkat_libz_block_0724):
     .word 0xb9401b93
     .word 0x71000274
     .word 0xd53b4213
@@ -9759,8 +9764,8 @@ aot_kitkat_libz_block_0724:
     .word 0x17ffdd59
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0725
-aot_kitkat_libz_block_0725:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0725)
+RB_AOT_SYM(aot_kitkat_libz_block_0725):
     .word 0xb9401b93
     .word 0xb9001f93
     .word 0x71000274
@@ -9779,8 +9784,8 @@ aot_kitkat_libz_block_0725:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0726
-aot_kitkat_libz_block_0726:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0726)
+RB_AOT_SYM(aot_kitkat_libz_block_0726):
     .word 0xb9401b93
     .word 0x71000274
     .word 0xd53b4213
@@ -9795,8 +9800,8 @@ aot_kitkat_libz_block_0726:
     .word 0x17ffdd39
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0727
-aot_kitkat_libz_block_0727:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0727)
+RB_AOT_SYM(aot_kitkat_libz_block_0727):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -10053,8 +10058,8 @@ aot_kitkat_libz_block_0727:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0728
-aot_kitkat_libz_block_0728:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0728)
+RB_AOT_SYM(aot_kitkat_libz_block_0728):
     .word 0xb9401b93
     .word 0x5282de90
     .word 0x0b100274
@@ -10101,8 +10106,8 @@ aot_kitkat_libz_block_0728:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0731
-aot_kitkat_libz_block_0731:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0731)
+RB_AOT_SYM(aot_kitkat_libz_block_0731):
     .word 0xb9404f93
     .word 0x51006274
     .word 0xb9402b93
@@ -10219,8 +10224,8 @@ aot_kitkat_libz_block_0731:
     .word 0x17ffdb97
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0741
-aot_kitkat_libz_block_0741:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0741)
+RB_AOT_SYM(aot_kitkat_libz_block_0741):
     .word 0xb9404f93
     .word 0x51002274
     .word 0xb9403793
@@ -10287,8 +10292,8 @@ aot_kitkat_libz_block_0741:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0744
-aot_kitkat_libz_block_0744:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0744)
+RB_AOT_SYM(aot_kitkat_libz_block_0744):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -10419,8 +10424,8 @@ aot_kitkat_libz_block_0744:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0751
-aot_kitkat_libz_block_0751:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0751)
+RB_AOT_SYM(aot_kitkat_libz_block_0751):
     .word 0xb9404f93
     .word 0x51009274
     .word 0xb9402b93
@@ -10577,8 +10582,8 @@ aot_kitkat_libz_block_0751:
     .word 0x17ffda37
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0848
-aot_kitkat_libz_block_0848:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0848)
+RB_AOT_SYM(aot_kitkat_libz_block_0848):
     .word 0xb9404f93
     .word 0x51009274
     .word 0xb9402b93
@@ -10859,8 +10864,8 @@ aot_kitkat_libz_block_0848:
     .word 0x17ffd91f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0891
-aot_kitkat_libz_block_0891:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0891)
+RB_AOT_SYM(aot_kitkat_libz_block_0891):
     .word 0xb9404f93
     .word 0x51009274
     .word 0xb9402b93
@@ -11013,8 +11018,8 @@ aot_kitkat_libz_block_0891:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0911
-aot_kitkat_libz_block_0911:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0911)
+RB_AOT_SYM(aot_kitkat_libz_block_0911):
     .word 0xb9404f93
     .word 0x51004274
     .word 0xb9402b93
@@ -11185,8 +11190,8 @@ aot_kitkat_libz_block_0911:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0914
-aot_kitkat_libz_block_0914:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0914)
+RB_AOT_SYM(aot_kitkat_libz_block_0914):
     .word 0xb9404f93
     .word 0x51009274
     .word 0xb9402b93
@@ -11323,8 +11328,8 @@ aot_kitkat_libz_block_0914:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0917
-aot_kitkat_libz_block_0917:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0917)
+RB_AOT_SYM(aot_kitkat_libz_block_0917):
     .word 0xb9404f93
     .word 0x51009274
     .word 0xb9402b93
@@ -11537,8 +11542,8 @@ aot_kitkat_libz_block_0917:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0919
-aot_kitkat_libz_block_0919:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0919)
+RB_AOT_SYM(aot_kitkat_libz_block_0919):
     .word 0xb9404f93
     .word 0x51002274
     .word 0xb9403793
@@ -11632,11 +11637,11 @@ aot_kitkat_libz_block_0919:
     .word 0xf2a34030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0921
-    add x17, x17, :lo12:aot_kitkat_libz_block_0921
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0921)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0921)
 #else
-    adrp x17, aot_kitkat_libz_block_0921@PAGE
-    add x17, x17, aot_kitkat_libz_block_0921@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0921)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0921)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x5280cf73
@@ -11654,8 +11659,8 @@ aot_kitkat_libz_block_0919:
     .word 0x17ffd613
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0922
-aot_kitkat_libz_block_0922:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0922)
+RB_AOT_SYM(aot_kitkat_libz_block_0922):
     .word 0x5280d401
     .word 0x72a34021
     .word 0x97ffd3c0
@@ -11692,8 +11697,8 @@ aot_kitkat_libz_block_0922:
     .word 0x17ffd5ef
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0923
-aot_kitkat_libz_block_0923:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0923)
+RB_AOT_SYM(aot_kitkat_libz_block_0923):
     .word 0x52800ab3
     .word 0xb9001b93
     .word 0x52800ab3
@@ -11726,8 +11731,8 @@ aot_kitkat_libz_block_0923:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0924
-aot_kitkat_libz_block_0924:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0924)
+RB_AOT_SYM(aot_kitkat_libz_block_0924):
     .word 0x5280d701
     .word 0x72a34021
     .word 0x97ffd37c
@@ -11788,8 +11793,8 @@ aot_kitkat_libz_block_0924:
     .word 0x17ffd593
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0925
-aot_kitkat_libz_block_0925:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0925)
+RB_AOT_SYM(aot_kitkat_libz_block_0925):
     .word 0xd100075a
     .word 0xb9400390
     .word 0xd51b4210
@@ -11810,8 +11815,8 @@ aot_kitkat_libz_block_0925:
     .word 0x17ffd57f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0926
-aot_kitkat_libz_block_0926:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0926)
+RB_AOT_SYM(aot_kitkat_libz_block_0926):
     .word 0x5280ee13
     .word 0x72a34033
     .word 0xb9004b93
@@ -11822,8 +11827,8 @@ aot_kitkat_libz_block_0926:
     .word 0x17ffd575
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0927
-aot_kitkat_libz_block_0927:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0927)
+RB_AOT_SYM(aot_kitkat_libz_block_0927):
     .word 0x5280fa13
     .word 0x72a34033
     .word 0xb9004b93
@@ -11834,8 +11839,8 @@ aot_kitkat_libz_block_0927:
     .word 0x17ffd56b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0928
-aot_kitkat_libz_block_0928:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0928)
+RB_AOT_SYM(aot_kitkat_libz_block_0928):
     .word 0x5280fe13
     .word 0x72a34033
     .word 0xb9004b93
@@ -11846,8 +11851,8 @@ aot_kitkat_libz_block_0928:
     .word 0x17ffd561
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0929
-aot_kitkat_libz_block_0929:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0929)
+RB_AOT_SYM(aot_kitkat_libz_block_0929):
     .word 0x52810813
     .word 0x72a34033
     .word 0xb9004b93
@@ -11858,8 +11863,8 @@ aot_kitkat_libz_block_0929:
     .word 0x17ffd557
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0930
-aot_kitkat_libz_block_0930:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0930)
+RB_AOT_SYM(aot_kitkat_libz_block_0930):
     .word 0x52810e13
     .word 0x72a34033
     .word 0xb9004b93
@@ -11870,8 +11875,8 @@ aot_kitkat_libz_block_0930:
     .word 0x17ffd54d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0931
-aot_kitkat_libz_block_0931:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0931)
+RB_AOT_SYM(aot_kitkat_libz_block_0931):
     .word 0x52811013
     .word 0x72a34033
     .word 0xb9004b93
@@ -11882,8 +11887,8 @@ aot_kitkat_libz_block_0931:
     .word 0x17ffd543
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0932
-aot_kitkat_libz_block_0932:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0932)
+RB_AOT_SYM(aot_kitkat_libz_block_0932):
     .word 0x52812013
     .word 0x72a34033
     .word 0xb9004b93
@@ -11894,8 +11899,8 @@ aot_kitkat_libz_block_0932:
     .word 0x17ffd539
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0933
-aot_kitkat_libz_block_0933:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0933)
+RB_AOT_SYM(aot_kitkat_libz_block_0933):
     .word 0x52812e13
     .word 0x72a34033
     .word 0xb9004b93
@@ -11906,8 +11911,8 @@ aot_kitkat_libz_block_0933:
     .word 0x17ffd52f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0934
-aot_kitkat_libz_block_0934:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0934)
+RB_AOT_SYM(aot_kitkat_libz_block_0934):
     .word 0x52812c13
     .word 0x72a34033
     .word 0xb9004b93
@@ -11918,8 +11923,8 @@ aot_kitkat_libz_block_0934:
     .word 0x17ffd525
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0935
-aot_kitkat_libz_block_0935:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0935)
+RB_AOT_SYM(aot_kitkat_libz_block_0935):
     .word 0x52811213
     .word 0x72a34033
     .word 0xb9004b93
@@ -11930,8 +11935,8 @@ aot_kitkat_libz_block_0935:
     .word 0x17ffd51b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0936
-aot_kitkat_libz_block_0936:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0936)
+RB_AOT_SYM(aot_kitkat_libz_block_0936):
     .word 0x52811613
     .word 0x72a34033
     .word 0xb9004b93
@@ -11942,8 +11947,8 @@ aot_kitkat_libz_block_0936:
     .word 0x17ffd511
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0001
-aot_kitkat_libz_block_0001:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0001)
+RB_AOT_SYM(aot_kitkat_libz_block_0001):
     .word 0xb9402393
     .word 0x71010274
     .word 0xd53b4213
@@ -11968,8 +11973,8 @@ aot_kitkat_libz_block_0001:
     .word 0x17ffd4f9
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0003
-aot_kitkat_libz_block_0003:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0003)
+RB_AOT_SYM(aot_kitkat_libz_block_0003):
     .word 0xb9401b93
     .word 0x53003e74
     .word 0xb9004794
@@ -12000,8 +12005,8 @@ aot_kitkat_libz_block_0003:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0025
-aot_kitkat_libz_block_0025:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0025)
+RB_AOT_SYM(aot_kitkat_libz_block_0025):
     .word 0xb9401b93
     .word 0x53003e74
     .word 0xb9003394
@@ -12062,8 +12067,8 @@ aot_kitkat_libz_block_0025:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0026
-aot_kitkat_libz_block_0026:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0026)
+RB_AOT_SYM(aot_kitkat_libz_block_0026):
     .word 0x12800013
     .word 0xb9001b93
     .word 0xb9404f93
@@ -12132,8 +12137,8 @@ aot_kitkat_libz_block_0026:
     .word 0x17ffd45b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0028
-aot_kitkat_libz_block_0028:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0028)
+RB_AOT_SYM(aot_kitkat_libz_block_0028):
     .word 0xb9401b93
     .word 0x53003e74
     .word 0xb9003394
@@ -12194,8 +12199,8 @@ aot_kitkat_libz_block_0028:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0029
-aot_kitkat_libz_block_0029:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0029)
+RB_AOT_SYM(aot_kitkat_libz_block_0029):
     .word 0x12800013
     .word 0xb9001b93
     .word 0xb9404f93
@@ -12264,8 +12269,8 @@ aot_kitkat_libz_block_0029:
     .word 0x17ffd3db
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0033
-aot_kitkat_libz_block_0033:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0033)
+RB_AOT_SYM(aot_kitkat_libz_block_0033):
     .word 0x528c3f01
     .word 0x72a34001
     .word 0x97ffd188
@@ -12346,8 +12351,8 @@ aot_kitkat_libz_block_0033:
     .word 0x17ffd38b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0036
-aot_kitkat_libz_block_0036:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0036)
+RB_AOT_SYM(aot_kitkat_libz_block_0036):
     .word 0xb9401b93
     .word 0xb9002793
     .word 0x528c8681
@@ -12406,8 +12411,8 @@ aot_kitkat_libz_block_0036:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0038
-aot_kitkat_libz_block_0038:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0038)
+RB_AOT_SYM(aot_kitkat_libz_block_0038):
     .word 0xb9403f93
     .word 0x71000274
     .word 0xd53b4213
@@ -12422,8 +12427,8 @@ aot_kitkat_libz_block_0038:
     .word 0x17ffd343
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0056
-aot_kitkat_libz_block_0056:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0056)
+RB_AOT_SYM(aot_kitkat_libz_block_0056):
     .word 0x528cca01
     .word 0x72a34001
     .word 0x97ffd0f0
@@ -12480,8 +12485,8 @@ aot_kitkat_libz_block_0056:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0058
-aot_kitkat_libz_block_0058:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0058)
+RB_AOT_SYM(aot_kitkat_libz_block_0058):
     .word 0xb9402393
     .word 0x71000274
     .word 0xd53b4213
@@ -12496,8 +12501,8 @@ aot_kitkat_libz_block_0058:
     .word 0x17ffd2fd
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0061
-aot_kitkat_libz_block_0061:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0061)
+RB_AOT_SYM(aot_kitkat_libz_block_0061):
     .word 0x528cdb81
     .word 0x72a34001
     .word 0x97ffd0aa
@@ -12528,8 +12533,8 @@ aot_kitkat_libz_block_0061:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0069
-aot_kitkat_libz_block_0069:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0069)
+RB_AOT_SYM(aot_kitkat_libz_block_0069):
     .word 0x52b00013
     .word 0xb9002793
     .word 0x52800013
@@ -12554,8 +12559,8 @@ aot_kitkat_libz_block_0069:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0076
-aot_kitkat_libz_block_0076:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0076)
+RB_AOT_SYM(aot_kitkat_libz_block_0076):
     .word 0x528ced01
     .word 0x72a34001
     .word 0x97ffd074
@@ -12586,8 +12591,8 @@ aot_kitkat_libz_block_0076:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0084
-aot_kitkat_libz_block_0084:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0084)
+RB_AOT_SYM(aot_kitkat_libz_block_0084):
     .word 0x52b00013
     .word 0xb9002793
     .word 0x52800013
@@ -12612,8 +12617,8 @@ aot_kitkat_libz_block_0084:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0091
-aot_kitkat_libz_block_0091:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0091)
+RB_AOT_SYM(aot_kitkat_libz_block_0091):
     .word 0x528cf981
     .word 0x72a34001
     .word 0x97ffd03e
@@ -12646,8 +12651,8 @@ aot_kitkat_libz_block_0091:
     .word 0x17ffd271
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0100
-aot_kitkat_libz_block_0100:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0100)
+RB_AOT_SYM(aot_kitkat_libz_block_0100):
     .word 0x52b00013
     .word 0xb9001b93
     .word 0xb9404f93
@@ -12728,8 +12733,8 @@ aot_kitkat_libz_block_0100:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0102
-aot_kitkat_libz_block_0102:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0102)
+RB_AOT_SYM(aot_kitkat_libz_block_0102):
     .word 0x528d0601
     .word 0x72a34001
     .word 0x97ffcfce
@@ -12762,8 +12767,8 @@ aot_kitkat_libz_block_0102:
     .word 0x17ffd201
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0111
-aot_kitkat_libz_block_0111:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0111)
+RB_AOT_SYM(aot_kitkat_libz_block_0111):
     .word 0x52b00013
     .word 0xb9001b93
     .word 0xb9404f93
@@ -12844,8 +12849,8 @@ aot_kitkat_libz_block_0111:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0114
-aot_kitkat_libz_block_0114:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0114)
+RB_AOT_SYM(aot_kitkat_libz_block_0114):
     .word 0xb9402793
     .word 0xb9402394
     .word 0x6a140275
@@ -12874,8 +12879,8 @@ aot_kitkat_libz_block_0114:
     .word 0x17ffd195
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0031
-aot_kitkat_libz_block_0031:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0031)
+RB_AOT_SYM(aot_kitkat_libz_block_0031):
     .word 0x528c3a81
     .word 0x72a34001
     .word 0x97ffcf42
@@ -12916,8 +12921,8 @@ aot_kitkat_libz_block_0031:
     .word 0x17ffd16d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0118
-aot_kitkat_libz_block_0118:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0118)
+RB_AOT_SYM(aot_kitkat_libz_block_0118):
     .word 0xb9402b93
     .word 0xaa1303e1
     .word 0x97ffcf1a
@@ -12994,8 +12999,8 @@ aot_kitkat_libz_block_0118:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0121
-aot_kitkat_libz_block_0121:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0121)
+RB_AOT_SYM(aot_kitkat_libz_block_0121):
     .word 0xb9403393
     .word 0x7100027f
     .word 0x1a9f17f4
@@ -13020,8 +13025,8 @@ aot_kitkat_libz_block_0121:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0130
-aot_kitkat_libz_block_0130:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0130)
+RB_AOT_SYM(aot_kitkat_libz_block_0130):
     .word 0xb9404f93
     .word 0x11004274
     .word 0xb9004f94
@@ -13068,8 +13073,8 @@ aot_kitkat_libz_block_0130:
     .word 0x17ffd0db
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0132
-aot_kitkat_libz_block_0132:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0132)
+RB_AOT_SYM(aot_kitkat_libz_block_0132):
     .word 0xb9404f93
     .word 0x1100c274
     .word 0xaa1403e1
@@ -13104,8 +13109,8 @@ aot_kitkat_libz_block_0132:
     .word 0x17ffd0b9
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0137
-aot_kitkat_libz_block_0137:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0137)
+RB_AOT_SYM(aot_kitkat_libz_block_0137):
     .word 0xb9401b93
     .word 0x71000274
     .word 0xd53b4213
@@ -13120,8 +13125,8 @@ aot_kitkat_libz_block_0137:
     .word 0x17ffd0ab
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0139
-aot_kitkat_libz_block_0139:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0139)
+RB_AOT_SYM(aot_kitkat_libz_block_0139):
     .word 0xb9401b93
     .word 0x11008274
     .word 0xaa1403e1
@@ -13158,8 +13163,8 @@ aot_kitkat_libz_block_0139:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0147
-aot_kitkat_libz_block_0147:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0147)
+RB_AOT_SYM(aot_kitkat_libz_block_0147):
     .word 0x12800033
     .word 0xb9002793
     .word 0x12800033
@@ -13286,8 +13291,8 @@ aot_kitkat_libz_block_0147:
     .word 0x17ffd009
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0154
-aot_kitkat_libz_block_0154:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0154)
+RB_AOT_SYM(aot_kitkat_libz_block_0154):
     .word 0xb9401b93
     .word 0x11008274
     .word 0xaa1403e1
@@ -13324,8 +13329,8 @@ aot_kitkat_libz_block_0154:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0162
-aot_kitkat_libz_block_0162:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0162)
+RB_AOT_SYM(aot_kitkat_libz_block_0162):
     .word 0x12800033
     .word 0xb9002793
     .word 0x12800033
@@ -13410,8 +13415,8 @@ aot_kitkat_libz_block_0162:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0164
-aot_kitkat_libz_block_0164:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0164)
+RB_AOT_SYM(aot_kitkat_libz_block_0164):
     .word 0xb9401b93
     .word 0x11008274
     .word 0xaa1403e1
@@ -13446,8 +13451,8 @@ aot_kitkat_libz_block_0164:
     .word 0x17ffcf6f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0169
-aot_kitkat_libz_block_0169:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0169)
+RB_AOT_SYM(aot_kitkat_libz_block_0169):
     .word 0x12800033
     .word 0xb9002393
     .word 0x12800033
@@ -13574,8 +13579,8 @@ aot_kitkat_libz_block_0169:
     .word 0x17ffcef1
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0174
-aot_kitkat_libz_block_0174:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0174)
+RB_AOT_SYM(aot_kitkat_libz_block_0174):
     .word 0xb9402393
     .word 0xb9004b93
     .word 0xb9402793
@@ -13590,8 +13595,8 @@ aot_kitkat_libz_block_0174:
     .word 0x17ffcee3
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0180
-aot_kitkat_libz_block_0180:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0180)
+RB_AOT_SYM(aot_kitkat_libz_block_0180):
     .word 0xb9402b93
     .word 0x11031274
     .word 0xaa1403e1
@@ -13626,8 +13631,8 @@ aot_kitkat_libz_block_0180:
     .word 0x17ffcec1
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0193
-aot_kitkat_libz_block_0193:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0193)
+RB_AOT_SYM(aot_kitkat_libz_block_0193):
     .word 0xb9402b93
     .word 0x11031274
     .word 0xaa1403e1
@@ -13664,8 +13669,8 @@ aot_kitkat_libz_block_0193:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0214
-aot_kitkat_libz_block_0214:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0214)
+RB_AOT_SYM(aot_kitkat_libz_block_0214):
     .word 0xb9403f93
     .word 0x11031274
     .word 0xaa1403e1
@@ -13702,8 +13707,8 @@ aot_kitkat_libz_block_0214:
     .word 0x17ffce79
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0232
-aot_kitkat_libz_block_0232:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0232)
+RB_AOT_SYM(aot_kitkat_libz_block_0232):
     .word 0xb9404393
     .word 0x11031274
     .word 0xaa1403e1
@@ -13740,8 +13745,8 @@ aot_kitkat_libz_block_0232:
     .word 0x17ffce55
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0267
-aot_kitkat_libz_block_0267:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0267)
+RB_AOT_SYM(aot_kitkat_libz_block_0267):
     .word 0xb9401b93
     .word 0xb9002b93
     .word 0x52801213
@@ -13766,11 +13771,11 @@ aot_kitkat_libz_block_0267:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0268
-    add x17, x17, :lo12:aot_kitkat_libz_block_0268
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0268)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0268)
 #else
-    adrp x17, aot_kitkat_libz_block_0268@PAGE
-    add x17, x17, aot_kitkat_libz_block_0268@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0268)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0268)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x52937733
@@ -13789,8 +13794,8 @@ aot_kitkat_libz_block_0267:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0278
-aot_kitkat_libz_block_0278:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0278)
+RB_AOT_SYM(aot_kitkat_libz_block_0278):
     .word 0x52800013
     .word 0xb9001b93
     .word 0x52800013
@@ -13923,8 +13928,8 @@ aot_kitkat_libz_block_0278:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0281
-aot_kitkat_libz_block_0281:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0281)
+RB_AOT_SYM(aot_kitkat_libz_block_0281):
     .word 0x52800273
     .word 0xb9001b93
     .word 0x52800273
@@ -13945,11 +13950,11 @@ aot_kitkat_libz_block_0281:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0282
-    add x17, x17, :lo12:aot_kitkat_libz_block_0282
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0282)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0282)
 #else
-    adrp x17, aot_kitkat_libz_block_0282@PAGE
-    add x17, x17, aot_kitkat_libz_block_0282@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0282)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0282)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x5293bef3
@@ -13968,8 +13973,8 @@ aot_kitkat_libz_block_0281:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0287
-aot_kitkat_libz_block_0287:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0287)
+RB_AOT_SYM(aot_kitkat_libz_block_0287):
     .word 0x52800013
     .word 0xb9001b93
     .word 0x52800013
@@ -14048,8 +14053,8 @@ aot_kitkat_libz_block_0287:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0289
-aot_kitkat_libz_block_0289:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0289)
+RB_AOT_SYM(aot_kitkat_libz_block_0289):
     .word 0xb9404f93
     .word 0x11003274
     .word 0xaa1403e1
@@ -14110,8 +14115,8 @@ aot_kitkat_libz_block_0289:
     .word 0x17ffccf7
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0291
-aot_kitkat_libz_block_0291:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0291)
+RB_AOT_SYM(aot_kitkat_libz_block_0291):
     .word 0xb9401b93
     .word 0x11003274
     .word 0xaa1403e1
@@ -14140,8 +14145,8 @@ aot_kitkat_libz_block_0291:
     .word 0x17ffccdb
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0292
-aot_kitkat_libz_block_0292:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0292)
+RB_AOT_SYM(aot_kitkat_libz_block_0292):
     .word 0x12800013
     .word 0xb9001b93
     .word 0xb9405393
@@ -14166,8 +14171,8 @@ aot_kitkat_libz_block_0292:
     .word 0x17ffccc3
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0294
-aot_kitkat_libz_block_0294:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0294)
+RB_AOT_SYM(aot_kitkat_libz_block_0294):
     .word 0xb9401b93
     .word 0x11003274
     .word 0xaa1403e1
@@ -14206,8 +14211,8 @@ aot_kitkat_libz_block_0294:
     .word 0x17ffcc9d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0296
-aot_kitkat_libz_block_0296:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0296)
+RB_AOT_SYM(aot_kitkat_libz_block_0296):
     .word 0x12800013
     .word 0xb9001b93
     .word 0xb9404f93
@@ -14276,8 +14281,8 @@ aot_kitkat_libz_block_0296:
     .word 0x17ffcc59
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0298
-aot_kitkat_libz_block_0298:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0298)
+RB_AOT_SYM(aot_kitkat_libz_block_0298):
     .word 0xb9401b93
     .word 0x11003274
     .word 0xaa1403e1
@@ -14306,8 +14311,8 @@ aot_kitkat_libz_block_0298:
     .word 0x17ffcc3d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0299
-aot_kitkat_libz_block_0299:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0299)
+RB_AOT_SYM(aot_kitkat_libz_block_0299):
     .word 0x12800013
     .word 0xb9001b93
     .word 0xb9404f93
@@ -14376,8 +14381,8 @@ aot_kitkat_libz_block_0299:
     .word 0x17ffcbf9
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0301
-aot_kitkat_libz_block_0301:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0301)
+RB_AOT_SYM(aot_kitkat_libz_block_0301):
     .word 0xb9402f93
     .word 0x11014274
     .word 0xaa1403e1
@@ -14414,8 +14419,8 @@ aot_kitkat_libz_block_0301:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0305
-aot_kitkat_libz_block_0305:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0305)
+RB_AOT_SYM(aot_kitkat_libz_block_0305):
     .word 0xb9401f93
     .word 0x31001674
     .word 0xb9001b94
@@ -14432,8 +14437,8 @@ aot_kitkat_libz_block_0305:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0308
-aot_kitkat_libz_block_0308:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0308)
+RB_AOT_SYM(aot_kitkat_libz_block_0308):
     .word 0xb9401b93
     .word 0x11003274
     .word 0xaa1403e1
@@ -14462,8 +14467,8 @@ aot_kitkat_libz_block_0308:
     .word 0x17ffcba9
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0309
-aot_kitkat_libz_block_0309:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0309)
+RB_AOT_SYM(aot_kitkat_libz_block_0309):
     .word 0x12800013
     .word 0xb9001b93
     .word 0xb9405393
@@ -14488,8 +14493,8 @@ aot_kitkat_libz_block_0309:
     .word 0x17ffcb91
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0311
-aot_kitkat_libz_block_0311:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0311)
+RB_AOT_SYM(aot_kitkat_libz_block_0311):
     .word 0xb9401b93
     .word 0x11003274
     .word 0xaa1403e1
@@ -14518,8 +14523,8 @@ aot_kitkat_libz_block_0311:
     .word 0x17ffcb75
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0312
-aot_kitkat_libz_block_0312:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0312)
+RB_AOT_SYM(aot_kitkat_libz_block_0312):
     .word 0x12800013
     .word 0xb9001b93
     .word 0xb9405393
@@ -14544,8 +14549,8 @@ aot_kitkat_libz_block_0312:
     .word 0x17ffcb5d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0314
-aot_kitkat_libz_block_0314:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0314)
+RB_AOT_SYM(aot_kitkat_libz_block_0314):
     .word 0xb9401b93
     .word 0x11003274
     .word 0xaa1403e1
@@ -14574,8 +14579,8 @@ aot_kitkat_libz_block_0314:
     .word 0x17ffcb41
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0315
-aot_kitkat_libz_block_0315:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0315)
+RB_AOT_SYM(aot_kitkat_libz_block_0315):
     .word 0x12800013
     .word 0xb9001b93
     .word 0xb9404f93
@@ -14622,8 +14627,8 @@ aot_kitkat_libz_block_0315:
     .word 0x17ffcb13
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0317
-aot_kitkat_libz_block_0317:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0317)
+RB_AOT_SYM(aot_kitkat_libz_block_0317):
     .word 0xb9401b93
     .word 0x11003274
     .word 0xaa1403e1
@@ -14652,8 +14657,8 @@ aot_kitkat_libz_block_0317:
     .word 0x17ffcaf7
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0318
-aot_kitkat_libz_block_0318:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0318)
+RB_AOT_SYM(aot_kitkat_libz_block_0318):
     .word 0x12800013
     .word 0xb9001b93
     .word 0xb9404f93
@@ -14700,8 +14705,8 @@ aot_kitkat_libz_block_0318:
     .word 0x17ffcac9
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0320
-aot_kitkat_libz_block_0320:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0320)
+RB_AOT_SYM(aot_kitkat_libz_block_0320):
     .word 0xb9401b93
     .word 0x11003274
     .word 0xaa1403e1
@@ -14730,8 +14735,8 @@ aot_kitkat_libz_block_0320:
     .word 0x17ffcaad
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0321
-aot_kitkat_libz_block_0321:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0321)
+RB_AOT_SYM(aot_kitkat_libz_block_0321):
     .word 0x52800013
     .word 0xb9001b93
     .word 0x52800013
@@ -14764,8 +14769,8 @@ aot_kitkat_libz_block_0321:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0323
-aot_kitkat_libz_block_0323:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0323)
+RB_AOT_SYM(aot_kitkat_libz_block_0323):
     .word 0xb9401b93
     .word 0x11003274
     .word 0xaa1403e1
@@ -14794,8 +14799,8 @@ aot_kitkat_libz_block_0323:
     .word 0x17ffca71
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0324
-aot_kitkat_libz_block_0324:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0324)
+RB_AOT_SYM(aot_kitkat_libz_block_0324):
     .word 0x52800013
     .word 0xb9001b93
     .word 0x52800013
@@ -14828,8 +14833,8 @@ aot_kitkat_libz_block_0324:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0326
-aot_kitkat_libz_block_0326:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0326)
+RB_AOT_SYM(aot_kitkat_libz_block_0326):
     .word 0xb9401b93
     .word 0x11003274
     .word 0xaa1403e1
@@ -14868,8 +14873,8 @@ aot_kitkat_libz_block_0326:
     .word 0x17ffca2b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0334
-aot_kitkat_libz_block_0334:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0334)
+RB_AOT_SYM(aot_kitkat_libz_block_0334):
     .word 0xb9404f93
     .word 0xaa1303e1
     .word 0x97ffc7d8
@@ -14914,8 +14919,8 @@ aot_kitkat_libz_block_0334:
     .word 0x17ffc9ff
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0336
-aot_kitkat_libz_block_0336:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0336)
+RB_AOT_SYM(aot_kitkat_libz_block_0336):
     .word 0xb9401b93
     .word 0x11003274
     .word 0xaa1403e1
@@ -14954,8 +14959,8 @@ aot_kitkat_libz_block_0336:
     .word 0x17ffc9d9
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0338
-aot_kitkat_libz_block_0338:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0338)
+RB_AOT_SYM(aot_kitkat_libz_block_0338):
     .word 0x12800013
     .word 0xb9001b93
     .word 0xb9404f93
@@ -15002,8 +15007,8 @@ aot_kitkat_libz_block_0338:
     .word 0x17ffc9ab
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0340
-aot_kitkat_libz_block_0340:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0340)
+RB_AOT_SYM(aot_kitkat_libz_block_0340):
     .word 0xb9401b93
     .word 0xb9002b93
     .word 0x11013274
@@ -15044,8 +15049,8 @@ aot_kitkat_libz_block_0340:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0349
-aot_kitkat_libz_block_0349:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0349)
+RB_AOT_SYM(aot_kitkat_libz_block_0349):
     .word 0x52800013
     .word 0xb9001b93
     .word 0x52800013
@@ -15166,8 +15171,8 @@ aot_kitkat_libz_block_0349:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0370
-aot_kitkat_libz_block_0370:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0370)
+RB_AOT_SYM(aot_kitkat_libz_block_0370):
     .word 0xb9402793
     .word 0x11003274
     .word 0xaa1403e1
@@ -15206,8 +15211,8 @@ aot_kitkat_libz_block_0370:
     .word 0x17ffc8e5
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0372
-aot_kitkat_libz_block_0372:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0372)
+RB_AOT_SYM(aot_kitkat_libz_block_0372):
     .word 0x52800013
     .word 0xb9001b93
     .word 0x52800013
@@ -15262,8 +15267,8 @@ aot_kitkat_libz_block_0372:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0374
-aot_kitkat_libz_block_0374:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0374)
+RB_AOT_SYM(aot_kitkat_libz_block_0374):
     .word 0xb9401b93
     .word 0x11003274
     .word 0xaa1403e1
@@ -15302,8 +15307,8 @@ aot_kitkat_libz_block_0374:
     .word 0x17ffc889
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0376
-aot_kitkat_libz_block_0376:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0376)
+RB_AOT_SYM(aot_kitkat_libz_block_0376):
     .word 0x12800013
     .word 0xb9001b93
     .word 0xb9404f93
@@ -15366,8 +15371,8 @@ aot_kitkat_libz_block_0376:
     .word 0x17ffc84b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0378
-aot_kitkat_libz_block_0378:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0378)
+RB_AOT_SYM(aot_kitkat_libz_block_0378):
     .word 0xb9401b93
     .word 0x11003274
     .word 0xaa1403e1
@@ -15406,8 +15411,8 @@ aot_kitkat_libz_block_0378:
     .word 0x17ffc825
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0380
-aot_kitkat_libz_block_0380:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0380)
+RB_AOT_SYM(aot_kitkat_libz_block_0380):
     .word 0x12800013
     .word 0xb9001b93
     .word 0xb9404f93
@@ -15470,8 +15475,8 @@ aot_kitkat_libz_block_0380:
     .word 0x17ffc7e7
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0382
-aot_kitkat_libz_block_0382:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0382)
+RB_AOT_SYM(aot_kitkat_libz_block_0382):
     .word 0xb9401f93
     .word 0xb9002b93
     .word 0x11003274
@@ -15512,8 +15517,8 @@ aot_kitkat_libz_block_0382:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0384
-aot_kitkat_libz_block_0384:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0384)
+RB_AOT_SYM(aot_kitkat_libz_block_0384):
     .word 0x12800013
     .word 0xb9001b93
     .word 0xb9404f93
@@ -15582,8 +15587,8 @@ aot_kitkat_libz_block_0384:
     .word 0x17ffc77b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0388
-aot_kitkat_libz_block_0388:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0388)
+RB_AOT_SYM(aot_kitkat_libz_block_0388):
     .word 0xb9401b93
     .word 0x71000a74
     .word 0xd53b4213
@@ -15608,8 +15613,8 @@ aot_kitkat_libz_block_0388:
     .word 0x17ffc763
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0394
-aot_kitkat_libz_block_0394:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0394)
+RB_AOT_SYM(aot_kitkat_libz_block_0394):
     .word 0xb9402b93
     .word 0xb9001b93
     .word 0xb94483fe
@@ -15621,11 +15626,11 @@ aot_kitkat_libz_block_0394:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0395
-    add x17, x17, :lo12:aot_kitkat_libz_block_0395
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0395)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0395)
 #else
-    adrp x17, aot_kitkat_libz_block_0395@PAGE
-    add x17, x17, aot_kitkat_libz_block_0395@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0395)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0395)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x5294dff3
@@ -15641,8 +15646,8 @@ aot_kitkat_libz_block_0394:
     .word 0x17ffc749
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0404
-aot_kitkat_libz_block_0404:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0404)
+RB_AOT_SYM(aot_kitkat_libz_block_0404):
     .word 0xb9401b93
     .word 0x11003274
     .word 0xaa1403e1
@@ -15681,8 +15686,8 @@ aot_kitkat_libz_block_0404:
     .word 0x17ffc723
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0407
-aot_kitkat_libz_block_0407:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0407)
+RB_AOT_SYM(aot_kitkat_libz_block_0407):
     .word 0x52800013
     .word 0xb9001b93
     .word 0x52800013
@@ -15737,8 +15742,8 @@ aot_kitkat_libz_block_0407:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0409
-aot_kitkat_libz_block_0409:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0409)
+RB_AOT_SYM(aot_kitkat_libz_block_0409):
     .word 0xb9402b93
     .word 0x11017274
     .word 0xaa1403e1
@@ -15775,8 +15780,8 @@ aot_kitkat_libz_block_0409:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0419
-aot_kitkat_libz_block_0419:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0419)
+RB_AOT_SYM(aot_kitkat_libz_block_0419):
     .word 0xb9402b93
     .word 0x11007274
     .word 0xaa1403e1
@@ -15799,11 +15804,11 @@ aot_kitkat_libz_block_0419:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0420
-    add x17, x17, :lo12:aot_kitkat_libz_block_0420
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0420)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0420)
 #else
-    adrp x17, aot_kitkat_libz_block_0420@PAGE
-    add x17, x17, aot_kitkat_libz_block_0420@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0420)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0420)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x529502b3
@@ -15822,8 +15827,8 @@ aot_kitkat_libz_block_0419:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0425
-aot_kitkat_libz_block_0425:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0425)
+RB_AOT_SYM(aot_kitkat_libz_block_0425):
     .word 0xb9401b93
     .word 0x11003274
     .word 0xaa1403e1
@@ -15862,8 +15867,8 @@ aot_kitkat_libz_block_0425:
     .word 0x17ffc67b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0436
-aot_kitkat_libz_block_0436:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0436)
+RB_AOT_SYM(aot_kitkat_libz_block_0436):
     .word 0x12800033
     .word 0xb9001b93
     .word 0xb9404f93
@@ -15932,8 +15937,8 @@ aot_kitkat_libz_block_0436:
     .word 0x17ffc637
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0439
-aot_kitkat_libz_block_0439:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0439)
+RB_AOT_SYM(aot_kitkat_libz_block_0439):
     .word 0xb9402b93
     .word 0x11017274
     .word 0xaa1403e1
@@ -15968,8 +15973,8 @@ aot_kitkat_libz_block_0439:
     .word 0x17ffc615
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0451
-aot_kitkat_libz_block_0451:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0451)
+RB_AOT_SYM(aot_kitkat_libz_block_0451):
     .word 0xb9401b93
     .word 0x11003274
     .word 0xaa1403e1
@@ -15998,8 +16003,8 @@ aot_kitkat_libz_block_0451:
     .word 0x17ffc5f9
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0452
-aot_kitkat_libz_block_0452:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0452)
+RB_AOT_SYM(aot_kitkat_libz_block_0452):
     .word 0x52800013
     .word 0xb9001b93
     .word 0x52800013
@@ -16054,8 +16059,8 @@ aot_kitkat_libz_block_0452:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0454
-aot_kitkat_libz_block_0454:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0454)
+RB_AOT_SYM(aot_kitkat_libz_block_0454):
     .word 0xb9401b93
     .word 0xb9002f93
     .word 0x11006274
@@ -16096,8 +16101,8 @@ aot_kitkat_libz_block_0454:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0463
-aot_kitkat_libz_block_0463:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0463)
+RB_AOT_SYM(aot_kitkat_libz_block_0463):
     .word 0x52800013
     .word 0xb9001b93
     .word 0x52800013
@@ -16196,8 +16201,8 @@ aot_kitkat_libz_block_0463:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0470
-aot_kitkat_libz_block_0470:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0470)
+RB_AOT_SYM(aot_kitkat_libz_block_0470):
     .word 0xb9402793
     .word 0x11003274
     .word 0xaa1403e1
@@ -16226,8 +16231,8 @@ aot_kitkat_libz_block_0470:
     .word 0x17ffc51d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0471
-aot_kitkat_libz_block_0471:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0471)
+RB_AOT_SYM(aot_kitkat_libz_block_0471):
     .word 0x52800013
     .word 0xb9001b93
     .word 0x52800013
@@ -16282,8 +16287,8 @@ aot_kitkat_libz_block_0471:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0473
-aot_kitkat_libz_block_0473:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0473)
+RB_AOT_SYM(aot_kitkat_libz_block_0473):
     .word 0xb9401b93
     .word 0x11003274
     .word 0xaa1403e1
@@ -16322,8 +16327,8 @@ aot_kitkat_libz_block_0473:
     .word 0x17ffc4c1
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0475
-aot_kitkat_libz_block_0475:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0475)
+RB_AOT_SYM(aot_kitkat_libz_block_0475):
     .word 0x12800013
     .word 0xb9001b93
     .word 0xb9404f93
@@ -16386,8 +16391,8 @@ aot_kitkat_libz_block_0475:
     .word 0x17ffc483
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0484
-aot_kitkat_libz_block_0484:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0484)
+RB_AOT_SYM(aot_kitkat_libz_block_0484):
     .word 0xb9402b93
     .word 0xb9001b93
     .word 0x52800013
@@ -16408,11 +16413,11 @@ aot_kitkat_libz_block_0484:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0485
-    add x17, x17, :lo12:aot_kitkat_libz_block_0485
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0485)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0485)
 #else
-    adrp x17, aot_kitkat_libz_block_0485@PAGE
-    add x17, x17, aot_kitkat_libz_block_0485@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0485)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0485)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x529598f3
@@ -16429,8 +16434,8 @@ aot_kitkat_libz_block_0484:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0486
-aot_kitkat_libz_block_0486:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0486)
+RB_AOT_SYM(aot_kitkat_libz_block_0486):
     .word 0xb9402f93
     .word 0x7100027f
     .word 0x1a9f17f4
@@ -16455,8 +16460,8 @@ aot_kitkat_libz_block_0486:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0491
-aot_kitkat_libz_block_0491:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0491)
+RB_AOT_SYM(aot_kitkat_libz_block_0491):
     .word 0xb9401b93
     .word 0x11003274
     .word 0xaa1403e1
@@ -16485,8 +16490,8 @@ aot_kitkat_libz_block_0491:
     .word 0x17ffc42b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0492
-aot_kitkat_libz_block_0492:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0492)
+RB_AOT_SYM(aot_kitkat_libz_block_0492):
     .word 0x12800013
     .word 0xb9001b93
     .word 0xb9404f93
@@ -16555,8 +16560,8 @@ aot_kitkat_libz_block_0492:
     .word 0x17ffc3e7
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0494
-aot_kitkat_libz_block_0494:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0494)
+RB_AOT_SYM(aot_kitkat_libz_block_0494):
     .word 0xb9401b93
     .word 0x11003274
     .word 0xaa1403e1
@@ -16585,8 +16590,8 @@ aot_kitkat_libz_block_0494:
     .word 0x17ffc3cb
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0495
-aot_kitkat_libz_block_0495:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0495)
+RB_AOT_SYM(aot_kitkat_libz_block_0495):
     .word 0x12800033
     .word 0xb9001b93
     .word 0xb9404f93
@@ -16669,8 +16674,8 @@ aot_kitkat_libz_block_0495:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0497
-aot_kitkat_libz_block_0497:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0497)
+RB_AOT_SYM(aot_kitkat_libz_block_0497):
     .word 0xb9402b93
     .word 0x11008274
     .word 0xb9401b93
@@ -16707,8 +16712,8 @@ aot_kitkat_libz_block_0497:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0515
-aot_kitkat_libz_block_0515:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0515)
+RB_AOT_SYM(aot_kitkat_libz_block_0515):
     .word 0xb9402b93
     .word 0xb9001b93
     .word 0xb94483fe
@@ -16720,11 +16725,11 @@ aot_kitkat_libz_block_0515:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0516
-    add x17, x17, :lo12:aot_kitkat_libz_block_0516
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0516)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0516)
 #else
-    adrp x17, aot_kitkat_libz_block_0516@PAGE
-    add x17, x17, aot_kitkat_libz_block_0516@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0516)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0516)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x5295e573
@@ -16740,8 +16745,8 @@ aot_kitkat_libz_block_0515:
     .word 0x17ffc33b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0517
-aot_kitkat_libz_block_0517:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0517)
+RB_AOT_SYM(aot_kitkat_libz_block_0517):
     .word 0xb9402b93
     .word 0x1100a274
     .word 0xaa1403e1
@@ -16776,8 +16781,8 @@ aot_kitkat_libz_block_0517:
     .word 0x17ffc319
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0541
-aot_kitkat_libz_block_0541:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0541)
+RB_AOT_SYM(aot_kitkat_libz_block_0541):
     .word 0xb9404f93
     .word 0x11001274
     .word 0xaa1403e1
@@ -16838,8 +16843,8 @@ aot_kitkat_libz_block_0541:
     .word 0x17ffc2dd
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0543
-aot_kitkat_libz_block_0543:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0543)
+RB_AOT_SYM(aot_kitkat_libz_block_0543):
     .word 0xb9401b93
     .word 0x11003274
     .word 0xaa1403e1
@@ -16878,8 +16883,8 @@ aot_kitkat_libz_block_0543:
     .word 0x17ffc2b7
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0553
-aot_kitkat_libz_block_0553:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0553)
+RB_AOT_SYM(aot_kitkat_libz_block_0553):
     .word 0x12800033
     .word 0xb9001b93
     .word 0xb9404f93
@@ -16948,8 +16953,8 @@ aot_kitkat_libz_block_0553:
     .word 0x17ffc273
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0555
-aot_kitkat_libz_block_0555:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0555)
+RB_AOT_SYM(aot_kitkat_libz_block_0555):
     .word 0xb9401b93
     .word 0x11003274
     .word 0xaa1403e1
@@ -16988,8 +16993,8 @@ aot_kitkat_libz_block_0555:
     .word 0x17ffc24d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0557
-aot_kitkat_libz_block_0557:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0557)
+RB_AOT_SYM(aot_kitkat_libz_block_0557):
     .word 0x12800033
     .word 0xb9001b93
     .word 0xb9404f93
@@ -17058,8 +17063,8 @@ aot_kitkat_libz_block_0557:
     .word 0x17ffc209
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0559
-aot_kitkat_libz_block_0559:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0559)
+RB_AOT_SYM(aot_kitkat_libz_block_0559):
     .word 0xb9401b93
     .word 0xb9002f93
     .word 0x11003274
@@ -17100,8 +17105,8 @@ aot_kitkat_libz_block_0559:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0565
-aot_kitkat_libz_block_0565:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0565)
+RB_AOT_SYM(aot_kitkat_libz_block_0565):
     .word 0x12800033
     .word 0xb9001b93
     .word 0xb9404f93
@@ -17170,8 +17175,8 @@ aot_kitkat_libz_block_0565:
     .word 0x17ffc19d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0567
-aot_kitkat_libz_block_0567:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0567)
+RB_AOT_SYM(aot_kitkat_libz_block_0567):
     .word 0xb9404f93
     .word 0x11006274
     .word 0xaa1403e1
@@ -17200,8 +17205,8 @@ aot_kitkat_libz_block_0567:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0568
-aot_kitkat_libz_block_0568:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0568)
+RB_AOT_SYM(aot_kitkat_libz_block_0568):
     .word 0x128000b3
     .word 0xb9004b93
     .word 0x128000b3
@@ -17286,8 +17291,8 @@ aot_kitkat_libz_block_0568:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0570
-aot_kitkat_libz_block_0570:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0570)
+RB_AOT_SYM(aot_kitkat_libz_block_0570):
     .word 0xb9401b93
     .word 0x11007274
     .word 0xaa1403e1
@@ -17324,8 +17329,8 @@ aot_kitkat_libz_block_0570:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0572
-aot_kitkat_libz_block_0572:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0572)
+RB_AOT_SYM(aot_kitkat_libz_block_0572):
     .word 0x12800033
     .word 0xb9001b93
     .word 0xd1000b5a
@@ -17338,8 +17343,8 @@ aot_kitkat_libz_block_0572:
     .word 0x17ffc0fd
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0575
-aot_kitkat_libz_block_0575:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0575)
+RB_AOT_SYM(aot_kitkat_libz_block_0575):
     .word 0xb9401b93
     .word 0x11007274
     .word 0xaa1403e1
@@ -17366,8 +17371,8 @@ aot_kitkat_libz_block_0575:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0576
-aot_kitkat_libz_block_0576:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0576)
+RB_AOT_SYM(aot_kitkat_libz_block_0576):
     .word 0x12800033
     .word 0xb9001b93
     .word 0xb9404f93
@@ -17414,8 +17419,8 @@ aot_kitkat_libz_block_0576:
     .word 0x17ffc0b5
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0579
-aot_kitkat_libz_block_0579:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0579)
+RB_AOT_SYM(aot_kitkat_libz_block_0579):
     .word 0xb9402f93
     .word 0xaa1303e1
     .word 0x97ffbe5e
@@ -17542,8 +17547,8 @@ aot_kitkat_libz_block_0579:
     .word 0x17ffc037
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0580
-aot_kitkat_libz_block_0580:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0580)
+RB_AOT_SYM(aot_kitkat_libz_block_0580):
     .word 0xb9404f93
     .word 0x1102a274
     .word 0xaa1403e1
@@ -17620,8 +17625,8 @@ aot_kitkat_libz_block_0580:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0678
-aot_kitkat_libz_block_0678:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0678)
+RB_AOT_SYM(aot_kitkat_libz_block_0678):
     .word 0xb9402793
     .word 0x7100e274
     .word 0xd53b4213
@@ -17636,8 +17641,8 @@ aot_kitkat_libz_block_0678:
     .word 0x17ffbfdd
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0679
-aot_kitkat_libz_block_0679:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0679)
+RB_AOT_SYM(aot_kitkat_libz_block_0679):
     .word 0xb9402b93
     .word 0xb9001b93
     .word 0xb9404f93
@@ -17740,8 +17745,8 @@ aot_kitkat_libz_block_0679:
     .word 0x17ffbf77
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0684
-aot_kitkat_libz_block_0684:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0684)
+RB_AOT_SYM(aot_kitkat_libz_block_0684):
     .word 0xb9403793
     .word 0x1100a274
     .word 0xaa1403e1
@@ -17806,11 +17811,11 @@ aot_kitkat_libz_block_0684:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0685
-    add x17, x17, :lo12:aot_kitkat_libz_block_0685
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0685)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0685)
 #else
-    adrp x17, aot_kitkat_libz_block_0685@PAGE
-    add x17, x17, aot_kitkat_libz_block_0685@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0685)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0685)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0xf9404bf3
@@ -17829,8 +17834,8 @@ aot_kitkat_libz_block_0684:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0686
-aot_kitkat_libz_block_0686:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0686)
+RB_AOT_SYM(aot_kitkat_libz_block_0686):
     .word 0xb9403793
     .word 0x1100b274
     .word 0xaa1403e1
@@ -17865,8 +17870,8 @@ aot_kitkat_libz_block_0686:
     .word 0x17ffbf03
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0698
-aot_kitkat_libz_block_0698:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0698)
+RB_AOT_SYM(aot_kitkat_libz_block_0698):
     .word 0xb9401b93
     .word 0x11008274
     .word 0xaa1403e1
@@ -17901,8 +17906,8 @@ aot_kitkat_libz_block_0698:
     .word 0x17ffbee1
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0706
-aot_kitkat_libz_block_0706:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0706)
+RB_AOT_SYM(aot_kitkat_libz_block_0706):
     .word 0x12800033
     .word 0xb9001b93
     .word 0xb9404f93
@@ -17965,8 +17970,8 @@ aot_kitkat_libz_block_0706:
     .word 0x17ffbea3
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0729
-aot_kitkat_libz_block_0729:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0729)
+RB_AOT_SYM(aot_kitkat_libz_block_0729):
     .word 0xb9401f93
     .word 0xb9402394
     .word 0xb9402795
@@ -18009,8 +18014,8 @@ aot_kitkat_libz_block_0729:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0730
-aot_kitkat_libz_block_0730:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0730)
+RB_AOT_SYM(aot_kitkat_libz_block_0730):
     .word 0x52800013
     .word 0xb9002393
     .word 0x52800033
@@ -18633,8 +18638,8 @@ aot_kitkat_libz_block_0730:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0732
-aot_kitkat_libz_block_0732:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0732)
+RB_AOT_SYM(aot_kitkat_libz_block_0732):
     .word 0xb9402f93
     .word 0x11005274
     .word 0xaa1403e1
@@ -18839,8 +18844,8 @@ aot_kitkat_libz_block_0732:
     .word 0x17ffbb3f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0735
-aot_kitkat_libz_block_0735:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0735)
+RB_AOT_SYM(aot_kitkat_libz_block_0735):
     .word 0xb9401b93
     .word 0xaa1303e1
     .word 0x97ffb8ea
@@ -18897,8 +18902,8 @@ aot_kitkat_libz_block_0735:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0742
-aot_kitkat_libz_block_0742:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0742)
+RB_AOT_SYM(aot_kitkat_libz_block_0742):
     .word 0xb9401b93
     .word 0x11005274
     .word 0xaa1403e1
@@ -19099,8 +19104,8 @@ aot_kitkat_libz_block_0742:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0743
-aot_kitkat_libz_block_0743:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0743)
+RB_AOT_SYM(aot_kitkat_libz_block_0743):
     .word 0xb9402393
     .word 0x71002274
     .word 0xd53b4213
@@ -19115,8 +19120,8 @@ aot_kitkat_libz_block_0743:
     .word 0x17ffba31
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0745
-aot_kitkat_libz_block_0745:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0745)
+RB_AOT_SYM(aot_kitkat_libz_block_0745):
     .word 0xb9401b93
     .word 0x11005274
     .word 0xaa1403e1
@@ -19297,8 +19302,8 @@ aot_kitkat_libz_block_0745:
     .word 0x17ffb97d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0748
-aot_kitkat_libz_block_0748:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0748)
+RB_AOT_SYM(aot_kitkat_libz_block_0748):
     .word 0xb9402793
     .word 0x11000e74
     .word 0xb9002794
@@ -19337,8 +19342,8 @@ aot_kitkat_libz_block_0748:
     .word 0x17ffb957
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0752
-aot_kitkat_libz_block_0752:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0752)
+RB_AOT_SYM(aot_kitkat_libz_block_0752):
     .word 0xb9403b93
     .word 0xaa1303e1
     .word 0x97ffb704
@@ -19399,8 +19404,8 @@ aot_kitkat_libz_block_0752:
     .word 0x17ffb91b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0773
-aot_kitkat_libz_block_0773:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0773)
+RB_AOT_SYM(aot_kitkat_libz_block_0773):
     .word 0xb9404393
     .word 0x11001674
     .word 0xb9003794
@@ -19431,8 +19436,8 @@ aot_kitkat_libz_block_0773:
     .word 0x17ffb8fd
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0849
-aot_kitkat_libz_block_0849:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0849)
+RB_AOT_SYM(aot_kitkat_libz_block_0849):
     .word 0x12800013
     .word 0xb9002f93
     .word 0xb9401b93
@@ -19459,8 +19464,8 @@ aot_kitkat_libz_block_0849:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0855
-aot_kitkat_libz_block_0855:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0855)
+RB_AOT_SYM(aot_kitkat_libz_block_0855):
     .word 0x12800013
     .word 0xb9002f93
     .word 0xb9404f93
@@ -19515,8 +19520,8 @@ aot_kitkat_libz_block_0855:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0892
-aot_kitkat_libz_block_0892:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0892)
+RB_AOT_SYM(aot_kitkat_libz_block_0892):
     .word 0x52800013
     .word 0xb9004b93
     .word 0xd1000b5a
@@ -19529,8 +19534,8 @@ aot_kitkat_libz_block_0892:
     .word 0x17ffb8a1
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0907
-aot_kitkat_libz_block_0907:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0907)
+RB_AOT_SYM(aot_kitkat_libz_block_0907):
     .word 0xb9404793
     .word 0x1100a274
     .word 0xaa1403e1
@@ -19627,8 +19632,8 @@ aot_kitkat_libz_block_0907:
     .word 0x17ffb841
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0912
-aot_kitkat_libz_block_0912:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0912)
+RB_AOT_SYM(aot_kitkat_libz_block_0912):
     .word 0x52803a01
     .word 0x72a34021
     .word 0x97ffb5ee
@@ -19701,8 +19706,8 @@ aot_kitkat_libz_block_0912:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0913
-aot_kitkat_libz_block_0913:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0913)
+RB_AOT_SYM(aot_kitkat_libz_block_0913):
     .word 0xb9402393
     .word 0x531e7674
     .word 0xb9401b93
@@ -19825,8 +19830,8 @@ aot_kitkat_libz_block_0913:
     .word 0x17ffb77f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0915
-aot_kitkat_libz_block_0915:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0915)
+RB_AOT_SYM(aot_kitkat_libz_block_0915):
     .word 0xb9401f93
     .word 0x11000a74
     .word 0xaa1403e1
@@ -19869,8 +19874,8 @@ aot_kitkat_libz_block_0915:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0916
-aot_kitkat_libz_block_0916:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0916)
+RB_AOT_SYM(aot_kitkat_libz_block_0916):
     .word 0xb9404f93
     .word 0x11005274
     .word 0x1100e275
@@ -19993,8 +19998,8 @@ aot_kitkat_libz_block_0916:
     .word 0x17ffb6db
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0918
-aot_kitkat_libz_block_0918:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0918)
+RB_AOT_SYM(aot_kitkat_libz_block_0918):
     .word 0x52800013
     .word 0xb9001f93
     .word 0x52800013
@@ -20025,8 +20030,8 @@ aot_kitkat_libz_block_0918:
     .word 0x17ffb6bd
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0921
-aot_kitkat_libz_block_0921:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0921)
+RB_AOT_SYM(aot_kitkat_libz_block_0921):
     .word 0xb9404f93
     .word 0x11001274
     .word 0xaa1403e1
@@ -20087,8 +20092,8 @@ aot_kitkat_libz_block_0921:
     .word 0x17ffb681
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0920
-aot_kitkat_libz_block_0920:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0920)
+RB_AOT_SYM(aot_kitkat_libz_block_0920):
     .word 0xb94483fe
     .word 0x110043de
     .word 0x121c0bde
@@ -20098,11 +20103,11 @@ aot_kitkat_libz_block_0920:
     .word 0xf2a34030
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0921
-    add x17, x17, :lo12:aot_kitkat_libz_block_0921
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0921)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0921)
 #else
-    adrp x17, aot_kitkat_libz_block_0921@PAGE
-    add x17, x17, aot_kitkat_libz_block_0921@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0921)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0921)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x5280cf73
@@ -20120,8 +20125,8 @@ aot_kitkat_libz_block_0920:
     .word 0x17ffb667
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0002
-aot_kitkat_libz_block_0002:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0002)
+RB_AOT_SYM(aot_kitkat_libz_block_0002):
     .word 0xb9404f93
     .word 0x11001274
     .word 0x1100a275
@@ -20234,8 +20239,8 @@ aot_kitkat_libz_block_0002:
     .word 0x17ffb5f7
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0004
-aot_kitkat_libz_block_0004:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0004)
+RB_AOT_SYM(aot_kitkat_libz_block_0004):
     .word 0xb9401f93
     .word 0xaa1303e1
     .word 0x97ffb3a0
@@ -20268,8 +20273,8 @@ aot_kitkat_libz_block_0004:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0005
-aot_kitkat_libz_block_0005:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0005)
+RB_AOT_SYM(aot_kitkat_libz_block_0005):
     .word 0xb9401f93
     .word 0x7100027f
     .word 0x1a9f17f4
@@ -20294,8 +20299,8 @@ aot_kitkat_libz_block_0005:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0037
-aot_kitkat_libz_block_0037:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0037)
+RB_AOT_SYM(aot_kitkat_libz_block_0037):
     .word 0xb9401f93
     .word 0xb9001b93
     .word 0xb9403f93
@@ -20414,8 +20419,8 @@ aot_kitkat_libz_block_0037:
     .word 0x17ffb549
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0039
-aot_kitkat_libz_block_0039:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0039)
+RB_AOT_SYM(aot_kitkat_libz_block_0039):
     .word 0xb9402793
     .word 0x2a3303f4
     .word 0xb9001b94
@@ -20444,8 +20449,8 @@ aot_kitkat_libz_block_0039:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0057
-aot_kitkat_libz_block_0057:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0057)
+RB_AOT_SYM(aot_kitkat_libz_block_0057):
     .word 0xb9401b93
     .word 0xb9002793
     .word 0xb9401f94
@@ -20488,8 +20493,8 @@ aot_kitkat_libz_block_0057:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0059
-aot_kitkat_libz_block_0059:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0059)
+RB_AOT_SYM(aot_kitkat_libz_block_0059):
     .word 0xb9404f93
     .word 0x11002274
     .word 0xaa1303e1
@@ -20524,8 +20529,8 @@ aot_kitkat_libz_block_0059:
     .word 0x17ffb4e1
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0063
-aot_kitkat_libz_block_0063:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0063)
+RB_AOT_SYM(aot_kitkat_libz_block_0063):
     .word 0xb9402393
     .word 0x53010675
     .word 0x53030ab5
@@ -20558,8 +20563,8 @@ aot_kitkat_libz_block_0063:
     .word 0x17ffb4c1
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0072
-aot_kitkat_libz_block_0072:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0072)
+RB_AOT_SYM(aot_kitkat_libz_block_0072):
     .word 0xb9403393
     .word 0xb9402794
     .word 0x6a140275
@@ -20588,8 +20593,8 @@ aot_kitkat_libz_block_0072:
     .word 0x17ffb4a5
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0078
-aot_kitkat_libz_block_0078:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0078)
+RB_AOT_SYM(aot_kitkat_libz_block_0078):
     .word 0xb9402393
     .word 0x53010675
     .word 0x53030ab5
@@ -20622,8 +20627,8 @@ aot_kitkat_libz_block_0078:
     .word 0x17ffb485
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0087
-aot_kitkat_libz_block_0087:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0087)
+RB_AOT_SYM(aot_kitkat_libz_block_0087):
     .word 0xb9403393
     .word 0xb9402794
     .word 0x6a140275
@@ -20652,8 +20657,8 @@ aot_kitkat_libz_block_0087:
     .word 0x17ffb469
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0093
-aot_kitkat_libz_block_0093:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0093)
+RB_AOT_SYM(aot_kitkat_libz_block_0093):
     .word 0xb9401b93
     .word 0x53010675
     .word 0x53030ab5
@@ -20686,8 +20691,8 @@ aot_kitkat_libz_block_0093:
     .word 0x17ffb449
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0104
-aot_kitkat_libz_block_0104:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0104)
+RB_AOT_SYM(aot_kitkat_libz_block_0104):
     .word 0xb9401b93
     .word 0x53010675
     .word 0x53030ab5
@@ -20720,8 +20725,8 @@ aot_kitkat_libz_block_0104:
     .word 0x17ffb429
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0113
-aot_kitkat_libz_block_0113:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0113)
+RB_AOT_SYM(aot_kitkat_libz_block_0113):
     .word 0xb9401b93
     .word 0x53017e74
     .word 0xb9405395
@@ -20748,8 +20753,8 @@ aot_kitkat_libz_block_0113:
     .word 0x17ffb40f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0115
-aot_kitkat_libz_block_0115:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0115)
+RB_AOT_SYM(aot_kitkat_libz_block_0115):
     .word 0xb9402793
     .word 0x71000674
     .word 0xb9002b94
@@ -20786,8 +20791,8 @@ aot_kitkat_libz_block_0115:
     .word 0x17ffb3eb
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0122
-aot_kitkat_libz_block_0122:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0122)
+RB_AOT_SYM(aot_kitkat_libz_block_0122):
     .word 0xb9402b93
     .word 0x1100c274
     .word 0xaa1403e1
@@ -20856,8 +20861,8 @@ aot_kitkat_libz_block_0122:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0125
-aot_kitkat_libz_block_0125:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0125)
+RB_AOT_SYM(aot_kitkat_libz_block_0125):
     .word 0xb9402f93
     .word 0x71000274
     .word 0xd53b4213
@@ -20872,8 +20877,8 @@ aot_kitkat_libz_block_0125:
     .word 0x17ffb399
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0133
-aot_kitkat_libz_block_0133:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0133)
+RB_AOT_SYM(aot_kitkat_libz_block_0133):
     .word 0xb9404f93
     .word 0x1100d274
     .word 0xaa1403e1
@@ -20902,8 +20907,8 @@ aot_kitkat_libz_block_0133:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0134
-aot_kitkat_libz_block_0134:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0134)
+RB_AOT_SYM(aot_kitkat_libz_block_0134):
     .word 0x128000b3
     .word 0xb9001b93
     .word 0xb9404f93
@@ -21028,8 +21033,8 @@ aot_kitkat_libz_block_0134:
     .word 0x17ffb301
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0140
-aot_kitkat_libz_block_0140:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0140)
+RB_AOT_SYM(aot_kitkat_libz_block_0140):
     .word 0xb9401b93
     .word 0x11009274
     .word 0xaa1403e1
@@ -21066,8 +21071,8 @@ aot_kitkat_libz_block_0140:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0155
-aot_kitkat_libz_block_0155:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0155)
+RB_AOT_SYM(aot_kitkat_libz_block_0155):
     .word 0xb9401b93
     .word 0x11009274
     .word 0xaa1403e1
@@ -21104,8 +21109,8 @@ aot_kitkat_libz_block_0155:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0165
-aot_kitkat_libz_block_0165:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0165)
+RB_AOT_SYM(aot_kitkat_libz_block_0165):
     .word 0xb9401b93
     .word 0x11009274
     .word 0xaa1403e1
@@ -21140,8 +21145,8 @@ aot_kitkat_libz_block_0165:
     .word 0x17ffb297
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0175
-aot_kitkat_libz_block_0175:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0175)
+RB_AOT_SYM(aot_kitkat_libz_block_0175):
     .word 0xb9404b93
     .word 0x51000a74
     .word 0xb9002794
@@ -21170,8 +21175,8 @@ aot_kitkat_libz_block_0175:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0181
-aot_kitkat_libz_block_0181:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0181)
+RB_AOT_SYM(aot_kitkat_libz_block_0181):
     .word 0xb9402b93
     .word 0xb9001b93
     .word 0xb94483fe
@@ -21183,11 +21188,11 @@ aot_kitkat_libz_block_0181:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0182
-    add x17, x17, :lo12:aot_kitkat_libz_block_0182
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0182)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0182)
 #else
-    adrp x17, aot_kitkat_libz_block_0182@PAGE
-    add x17, x17, aot_kitkat_libz_block_0182@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0182)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0182)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x529141f3
@@ -21203,8 +21208,8 @@ aot_kitkat_libz_block_0181:
     .word 0x17ffb261
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0183
-aot_kitkat_libz_block_0183:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0183)
+RB_AOT_SYM(aot_kitkat_libz_block_0183):
     .word 0xb9402b93
     .word 0x11022274
     .word 0xaa1403e1
@@ -21457,8 +21462,8 @@ aot_kitkat_libz_block_0183:
     .word 0x17ffb165
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0194
-aot_kitkat_libz_block_0194:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0194)
+RB_AOT_SYM(aot_kitkat_libz_block_0194):
     .word 0xb9402b93
     .word 0xb9001b93
     .word 0xb94483fe
@@ -21470,11 +21475,11 @@ aot_kitkat_libz_block_0194:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0195
-    add x17, x17, :lo12:aot_kitkat_libz_block_0195
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0195)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0195)
 #else
-    adrp x17, aot_kitkat_libz_block_0195@PAGE
-    add x17, x17, aot_kitkat_libz_block_0195@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0195)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0195)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x529184f3
@@ -21490,8 +21495,8 @@ aot_kitkat_libz_block_0194:
     .word 0x17ffb14b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0201
-aot_kitkat_libz_block_0201:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0201)
+RB_AOT_SYM(aot_kitkat_libz_block_0201):
     .word 0xb9402b93
     .word 0x1102f274
     .word 0xaa1403e1
@@ -21540,8 +21545,8 @@ aot_kitkat_libz_block_0201:
     .word 0x17ffb11b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0215
-aot_kitkat_libz_block_0215:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0215)
+RB_AOT_SYM(aot_kitkat_libz_block_0215):
     .word 0xb9403f93
     .word 0xb9001b93
     .word 0xb94483fe
@@ -21553,11 +21558,11 @@ aot_kitkat_libz_block_0215:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0216
-    add x17, x17, :lo12:aot_kitkat_libz_block_0216
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0216)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0216)
 #else
-    adrp x17, aot_kitkat_libz_block_0216@PAGE
-    add x17, x17, aot_kitkat_libz_block_0216@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0216)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0216)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x52922e33
@@ -21573,8 +21578,8 @@ aot_kitkat_libz_block_0215:
     .word 0x17ffb101
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0220
-aot_kitkat_libz_block_0220:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0220)
+RB_AOT_SYM(aot_kitkat_libz_block_0220):
     .word 0xb9403f93
     .word 0x1102f274
     .word 0xaa1403e1
@@ -21779,8 +21784,8 @@ aot_kitkat_libz_block_0220:
     .word 0x17ffb035
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0233
-aot_kitkat_libz_block_0233:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0233)
+RB_AOT_SYM(aot_kitkat_libz_block_0233):
     .word 0xb9404393
     .word 0xb9001b93
     .word 0xb94483fe
@@ -21792,11 +21797,11 @@ aot_kitkat_libz_block_0233:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0234
-    add x17, x17, :lo12:aot_kitkat_libz_block_0234
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0234)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0234)
 #else
-    adrp x17, aot_kitkat_libz_block_0234@PAGE
-    add x17, x17, aot_kitkat_libz_block_0234@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0234)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0234)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x5292aaf3
@@ -21812,8 +21817,8 @@ aot_kitkat_libz_block_0233:
     .word 0x17ffb01b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0238
-aot_kitkat_libz_block_0238:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0238)
+RB_AOT_SYM(aot_kitkat_libz_block_0238):
     .word 0xb9404393
     .word 0x1102f274
     .word 0xaa1403e1
@@ -22068,8 +22073,8 @@ aot_kitkat_libz_block_0238:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0268
-aot_kitkat_libz_block_0268:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0268)
+RB_AOT_SYM(aot_kitkat_libz_block_0268):
     .word 0x52800013
     .word 0xb9001f93
     .word 0xb9401b93
@@ -22096,8 +22101,8 @@ aot_kitkat_libz_block_0268:
     .word 0x17ffaf03
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0282
-aot_kitkat_libz_block_0282:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0282)
+RB_AOT_SYM(aot_kitkat_libz_block_0282):
     .word 0xb9401b93
     .word 0x7100027f
     .word 0x1a9f17f4
@@ -22122,8 +22127,8 @@ aot_kitkat_libz_block_0282:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0295
-aot_kitkat_libz_block_0295:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0295)
+RB_AOT_SYM(aot_kitkat_libz_block_0295):
     .word 0xb9401b93
     .word 0x11014274
     .word 0xaa1403e1
@@ -22150,8 +22155,8 @@ aot_kitkat_libz_block_0295:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0302
-aot_kitkat_libz_block_0302:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0302)
+RB_AOT_SYM(aot_kitkat_libz_block_0302):
     .word 0xb9401f93
     .word 0xb9003393
     .word 0xb94483fe
@@ -22163,11 +22168,11 @@ aot_kitkat_libz_block_0302:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0303
-    add x17, x17, :lo12:aot_kitkat_libz_block_0303
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0303)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0303)
 #else
-    adrp x17, aot_kitkat_libz_block_0303@PAGE
-    add x17, x17, aot_kitkat_libz_block_0303@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0303)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0303)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x52940433
@@ -22185,8 +22190,8 @@ aot_kitkat_libz_block_0302:
     .word 0x17ffaeb5
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0304
-aot_kitkat_libz_block_0304:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0304)
+RB_AOT_SYM(aot_kitkat_libz_block_0304):
     .word 0xb9402f93
     .word 0x11015274
     .word 0xaa1403e1
@@ -22215,8 +22220,8 @@ aot_kitkat_libz_block_0304:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0327
-aot_kitkat_libz_block_0327:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0327)
+RB_AOT_SYM(aot_kitkat_libz_block_0327):
     .word 0x528389f3
     .word 0xb9002393
     .word 0xb9401f93
@@ -22235,8 +22240,8 @@ aot_kitkat_libz_block_0327:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0328
-aot_kitkat_libz_block_0328:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0328)
+RB_AOT_SYM(aot_kitkat_libz_block_0328):
     .word 0xb9401b93
     .word 0x11015274
     .word 0xaa1403e1
@@ -22271,8 +22276,8 @@ aot_kitkat_libz_block_0328:
     .word 0x17ffae65
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0337
-aot_kitkat_libz_block_0337:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0337)
+RB_AOT_SYM(aot_kitkat_libz_block_0337):
     .word 0xb9401b93
     .word 0x11014274
     .word 0xaa1403e1
@@ -22299,8 +22304,8 @@ aot_kitkat_libz_block_0337:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0341
-aot_kitkat_libz_block_0341:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0341)
+RB_AOT_SYM(aot_kitkat_libz_block_0341):
     .word 0xb9402b93
     .word 0x11012274
     .word 0xaa1403e1
@@ -22343,8 +22348,8 @@ aot_kitkat_libz_block_0341:
     .word 0x17ffae21
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0350
-aot_kitkat_libz_block_0350:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0350)
+RB_AOT_SYM(aot_kitkat_libz_block_0350):
     .word 0x52800013
     .word 0xb9003f93
     .word 0x52800033
@@ -22361,8 +22366,8 @@ aot_kitkat_libz_block_0350:
     .word 0x17ffae11
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0371
-aot_kitkat_libz_block_0371:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0371)
+RB_AOT_SYM(aot_kitkat_libz_block_0371):
     .word 0xb9402793
     .word 0x11014274
     .word 0xaa1403e1
@@ -22389,8 +22394,8 @@ aot_kitkat_libz_block_0371:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0375
-aot_kitkat_libz_block_0375:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0375)
+RB_AOT_SYM(aot_kitkat_libz_block_0375):
     .word 0xb9401b93
     .word 0x11014274
     .word 0xaa1403e1
@@ -22417,8 +22422,8 @@ aot_kitkat_libz_block_0375:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0379
-aot_kitkat_libz_block_0379:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0379)
+RB_AOT_SYM(aot_kitkat_libz_block_0379):
     .word 0xb9401b93
     .word 0x11014274
     .word 0xaa1403e1
@@ -22445,8 +22450,8 @@ aot_kitkat_libz_block_0379:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0383
-aot_kitkat_libz_block_0383:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0383)
+RB_AOT_SYM(aot_kitkat_libz_block_0383):
     .word 0xb9402b93
     .word 0x11014274
     .word 0xaa1403e1
@@ -22473,8 +22478,8 @@ aot_kitkat_libz_block_0383:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0389
-aot_kitkat_libz_block_0389:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0389)
+RB_AOT_SYM(aot_kitkat_libz_block_0389):
     .word 0xb9401b93
     .word 0x71000674
     .word 0xd53b4213
@@ -22499,8 +22504,8 @@ aot_kitkat_libz_block_0389:
     .word 0x17ffad91
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0391
-aot_kitkat_libz_block_0391:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0391)
+RB_AOT_SYM(aot_kitkat_libz_block_0391):
     .word 0xb9402b93
     .word 0x11006274
     .word 0xaa1403e1
@@ -22558,11 +22563,11 @@ aot_kitkat_libz_block_0391:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0392
-    add x17, x17, :lo12:aot_kitkat_libz_block_0392
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0392)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0392)
 #else
-    adrp x17, aot_kitkat_libz_block_0392@PAGE
-    add x17, x17, aot_kitkat_libz_block_0392@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0392)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0392)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x5294de73
@@ -22578,8 +22583,8 @@ aot_kitkat_libz_block_0391:
     .word 0x17ffad49
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0395
-aot_kitkat_libz_block_0395:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0395)
+RB_AOT_SYM(aot_kitkat_libz_block_0395):
     .word 0xb9401b93
     .word 0x31000674
     .word 0xb9001b94
@@ -22606,8 +22611,8 @@ aot_kitkat_libz_block_0395:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0405
-aot_kitkat_libz_block_0405:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0405)
+RB_AOT_SYM(aot_kitkat_libz_block_0405):
     .word 0xb9401b93
     .word 0x1100b274
     .word 0xaa1403e1
@@ -22634,8 +22639,8 @@ aot_kitkat_libz_block_0405:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0406
-aot_kitkat_libz_block_0406:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0406)
+RB_AOT_SYM(aot_kitkat_libz_block_0406):
     .word 0xb9401b93
     .word 0x1100a274
     .word 0xaa1403e1
@@ -22692,8 +22697,8 @@ aot_kitkat_libz_block_0406:
     .word 0x17ffacdd
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0410
-aot_kitkat_libz_block_0410:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0410)
+RB_AOT_SYM(aot_kitkat_libz_block_0410):
     .word 0xb9402b93
     .word 0xb9001b93
     .word 0xb94483fe
@@ -22705,11 +22710,11 @@ aot_kitkat_libz_block_0410:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0411
-    add x17, x17, :lo12:aot_kitkat_libz_block_0411
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0411)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0411)
 #else
-    adrp x17, aot_kitkat_libz_block_0411@PAGE
-    add x17, x17, aot_kitkat_libz_block_0411@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0411)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0411)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x5294f9f3
@@ -22725,8 +22730,8 @@ aot_kitkat_libz_block_0410:
     .word 0x17ffacc3
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0414
-aot_kitkat_libz_block_0414:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0414)
+RB_AOT_SYM(aot_kitkat_libz_block_0414):
     .word 0xb9402f93
     .word 0xaa1303e1
     .word 0x97ffaa70
@@ -22763,8 +22768,8 @@ aot_kitkat_libz_block_0414:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0420
-aot_kitkat_libz_block_0420:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0420)
+RB_AOT_SYM(aot_kitkat_libz_block_0420):
     .word 0xb9401b93
     .word 0xb9003793
     .word 0xb9402b94
@@ -22800,11 +22805,11 @@ aot_kitkat_libz_block_0420:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0421
-    add x17, x17, :lo12:aot_kitkat_libz_block_0421
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0421)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0421)
 #else
-    adrp x17, aot_kitkat_libz_block_0421@PAGE
-    add x17, x17, aot_kitkat_libz_block_0421@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0421)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0421)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x529503f3
@@ -22822,8 +22827,8 @@ aot_kitkat_libz_block_0420:
     .word 0x17ffac6b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0426
-aot_kitkat_libz_block_0426:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0426)
+RB_AOT_SYM(aot_kitkat_libz_block_0426):
     .word 0xb9401b93
     .word 0x11006274
     .word 0xaa1403e1
@@ -22858,8 +22863,8 @@ aot_kitkat_libz_block_0426:
     .word 0x17ffac49
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0440
-aot_kitkat_libz_block_0440:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0440)
+RB_AOT_SYM(aot_kitkat_libz_block_0440):
     .word 0xb9402b93
     .word 0xb9001b93
     .word 0xb94483fe
@@ -22871,11 +22876,11 @@ aot_kitkat_libz_block_0440:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0441
-    add x17, x17, :lo12:aot_kitkat_libz_block_0441
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0441)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0441)
 #else
-    adrp x17, aot_kitkat_libz_block_0441@PAGE
-    add x17, x17, aot_kitkat_libz_block_0441@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0441)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0441)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x529528b3
@@ -22891,8 +22896,8 @@ aot_kitkat_libz_block_0440:
     .word 0x17ffac2f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0443
-aot_kitkat_libz_block_0443:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0443)
+RB_AOT_SYM(aot_kitkat_libz_block_0443):
     .word 0xb9403393
     .word 0xb9001b93
     .word 0x52800013
@@ -22913,11 +22918,11 @@ aot_kitkat_libz_block_0443:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0444
-    add x17, x17, :lo12:aot_kitkat_libz_block_0444
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0444)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0444)
 #else
-    adrp x17, aot_kitkat_libz_block_0444@PAGE
-    add x17, x17, aot_kitkat_libz_block_0444@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0444)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0444)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x52952ab3
@@ -22936,8 +22941,8 @@ aot_kitkat_libz_block_0443:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0455
-aot_kitkat_libz_block_0455:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0455)
+RB_AOT_SYM(aot_kitkat_libz_block_0455):
     .word 0xb9402f93
     .word 0xb9001b93
     .word 0xb94483fe
@@ -22949,11 +22954,11 @@ aot_kitkat_libz_block_0455:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0456
-    add x17, x17, :lo12:aot_kitkat_libz_block_0456
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0456)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0456)
 #else
-    adrp x17, aot_kitkat_libz_block_0456@PAGE
-    add x17, x17, aot_kitkat_libz_block_0456@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0456)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0456)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x52956073
@@ -22969,8 +22974,8 @@ aot_kitkat_libz_block_0455:
     .word 0x17ffabef
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0457
-aot_kitkat_libz_block_0457:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0457)
+RB_AOT_SYM(aot_kitkat_libz_block_0457):
     .word 0xb9402f93
     .word 0x11013274
     .word 0xaa1403e1
@@ -23005,8 +23010,8 @@ aot_kitkat_libz_block_0457:
     .word 0x17ffabcd
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0474
-aot_kitkat_libz_block_0474:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0474)
+RB_AOT_SYM(aot_kitkat_libz_block_0474):
     .word 0xb9401b93
     .word 0x11014274
     .word 0xaa1403e1
@@ -23041,8 +23046,8 @@ aot_kitkat_libz_block_0474:
     .word 0x17ffabab
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0485
-aot_kitkat_libz_block_0485:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0485)
+RB_AOT_SYM(aot_kitkat_libz_block_0485):
     .word 0xb9401b93
     .word 0x31000674
     .word 0xb9001b94
@@ -23069,8 +23074,8 @@ aot_kitkat_libz_block_0485:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0487
-aot_kitkat_libz_block_0487:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0487)
+RB_AOT_SYM(aot_kitkat_libz_block_0487):
     .word 0xb9402b93
     .word 0x11006274
     .word 0xaa1403e1
@@ -23111,8 +23116,8 @@ aot_kitkat_libz_block_0487:
     .word 0x17ffab69
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0488
-aot_kitkat_libz_block_0488:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0488)
+RB_AOT_SYM(aot_kitkat_libz_block_0488):
     .word 0x52800013
     .word 0xb9001b93
     .word 0x52800013
@@ -23189,8 +23194,8 @@ aot_kitkat_libz_block_0488:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0498
-aot_kitkat_libz_block_0498:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0498)
+RB_AOT_SYM(aot_kitkat_libz_block_0498):
     .word 0xb9402b93
     .word 0x1100a274
     .word 0xaa1403e1
@@ -23225,8 +23230,8 @@ aot_kitkat_libz_block_0498:
     .word 0x17ffaafb
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0510
-aot_kitkat_libz_block_0510:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0510)
+RB_AOT_SYM(aot_kitkat_libz_block_0510):
     .word 0x5295e201
     .word 0x72a34001
     .word 0x97ffa8a8
@@ -23254,11 +23259,11 @@ aot_kitkat_libz_block_0510:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0511
-    add x17, x17, :lo12:aot_kitkat_libz_block_0511
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0511)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0511)
 #else
-    adrp x17, aot_kitkat_libz_block_0511@PAGE
-    add x17, x17, aot_kitkat_libz_block_0511@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0511)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0511)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x5295de33
@@ -23274,8 +23279,8 @@ aot_kitkat_libz_block_0510:
     .word 0x17ffaad1
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0516
-aot_kitkat_libz_block_0516:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0516)
+RB_AOT_SYM(aot_kitkat_libz_block_0516):
     .word 0xb9401b93
     .word 0x31000674
     .word 0xb9001b94
@@ -23302,8 +23307,8 @@ aot_kitkat_libz_block_0516:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0518
-aot_kitkat_libz_block_0518:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0518)
+RB_AOT_SYM(aot_kitkat_libz_block_0518):
     .word 0xb9402b93
     .word 0x11017274
     .word 0xaa1403e1
@@ -23338,8 +23343,8 @@ aot_kitkat_libz_block_0518:
     .word 0x17ffaa95
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0522
-aot_kitkat_libz_block_0522:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0522)
+RB_AOT_SYM(aot_kitkat_libz_block_0522):
     .word 0xb9402b93
     .word 0x11011274
     .word 0xaa1403e1
@@ -23376,8 +23381,8 @@ aot_kitkat_libz_block_0522:
     .word 0x17ffaa71
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0544
-aot_kitkat_libz_block_0544:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0544)
+RB_AOT_SYM(aot_kitkat_libz_block_0544):
     .word 0x12800033
     .word 0xb9002393
     .word 0xb9401f93
@@ -23404,8 +23409,8 @@ aot_kitkat_libz_block_0544:
     .word 0x17ffaa57
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0556
-aot_kitkat_libz_block_0556:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0556)
+RB_AOT_SYM(aot_kitkat_libz_block_0556):
     .word 0xb9401b93
     .word 0x11014274
     .word 0xaa1403e1
@@ -23432,8 +23437,8 @@ aot_kitkat_libz_block_0556:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0560
-aot_kitkat_libz_block_0560:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0560)
+RB_AOT_SYM(aot_kitkat_libz_block_0560):
     .word 0xb9402f93
     .word 0x11013274
     .word 0xaa1403e1
@@ -23478,8 +23483,8 @@ aot_kitkat_libz_block_0560:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0571
-aot_kitkat_libz_block_0571:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0571)
+RB_AOT_SYM(aot_kitkat_libz_block_0571):
     .word 0x5287e7f3
     .word 0xb9003393
     .word 0xb9401b93
@@ -23574,8 +23579,8 @@ aot_kitkat_libz_block_0571:
     .word 0x17ffa9b3
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0573
-aot_kitkat_libz_block_0573:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0573)
+RB_AOT_SYM(aot_kitkat_libz_block_0573):
     .word 0xb9404f93
     .word 0x1100e274
     .word 0xaa1403e1
@@ -23636,8 +23641,8 @@ aot_kitkat_libz_block_0573:
     .word 0x17ffa977
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0581
-aot_kitkat_libz_block_0581:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0581)
+RB_AOT_SYM(aot_kitkat_libz_block_0581):
     .word 0xb9401f93
     .word 0x53051675
     .word 0x53030ab5
@@ -23670,8 +23675,8 @@ aot_kitkat_libz_block_0581:
     .word 0x17ffa957
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0584
-aot_kitkat_libz_block_0584:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0584)
+RB_AOT_SYM(aot_kitkat_libz_block_0584):
     .word 0xb9401b93
     .word 0x11000a74
     .word 0xaa1403e1
@@ -23734,8 +23739,8 @@ aot_kitkat_libz_block_0584:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0685
-aot_kitkat_libz_block_0685:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0685)
+RB_AOT_SYM(aot_kitkat_libz_block_0685):
     .word 0xb9401b93
     .word 0x71000274
     .word 0xd53b4214
@@ -23772,8 +23777,8 @@ aot_kitkat_libz_block_0685:
     .word 0x17ffa8f5
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0687
-aot_kitkat_libz_block_0687:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0687)
+RB_AOT_SYM(aot_kitkat_libz_block_0687):
     .word 0xb9402f93
     .word 0xb9402394
     .word 0x6b140275
@@ -23800,8 +23805,8 @@ aot_kitkat_libz_block_0687:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0689
-aot_kitkat_libz_block_0689:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0689)
+RB_AOT_SYM(aot_kitkat_libz_block_0689):
     .word 0xb9403793
     .word 0x1100a274
     .word 0xaa1403e1
@@ -23874,8 +23879,8 @@ aot_kitkat_libz_block_0689:
     .word 0x17ffa893
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0699
-aot_kitkat_libz_block_0699:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0699)
+RB_AOT_SYM(aot_kitkat_libz_block_0699):
     .word 0xb9401b93
     .word 0x11009274
     .word 0xaa1403e1
@@ -23910,8 +23915,8 @@ aot_kitkat_libz_block_0699:
     .word 0x17ffa871
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0733
-aot_kitkat_libz_block_0733:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0733)
+RB_AOT_SYM(aot_kitkat_libz_block_0733):
     .word 0xb9402793
     .word 0x71000674
     .word 0xd53b4213
@@ -23936,8 +23941,8 @@ aot_kitkat_libz_block_0733:
     .word 0x17ffa859
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0736
-aot_kitkat_libz_block_0736:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0736)
+RB_AOT_SYM(aot_kitkat_libz_block_0736):
     .word 0xb9402f93
     .word 0x11002274
     .word 0xaa1403e1
@@ -24298,8 +24303,8 @@ aot_kitkat_libz_block_0736:
     .word 0x17ffa6f1
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0746
-aot_kitkat_libz_block_0746:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0746)
+RB_AOT_SYM(aot_kitkat_libz_block_0746):
     .word 0xb9402793
     .word 0x11001e74
     .word 0xb9002794
@@ -24338,8 +24343,8 @@ aot_kitkat_libz_block_0746:
     .word 0x17ffa6cb
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0749
-aot_kitkat_libz_block_0749:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0749)
+RB_AOT_SYM(aot_kitkat_libz_block_0749):
     .word 0xb9401b93
     .word 0x11005274
     .word 0xaa1403e1
@@ -24514,8 +24519,8 @@ aot_kitkat_libz_block_0749:
     .word 0x17ffa61d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0753
-aot_kitkat_libz_block_0753:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0753)
+RB_AOT_SYM(aot_kitkat_libz_block_0753):
     .word 0xb9403b93
     .word 0x11039274
     .word 0xaa1403e1
@@ -24550,8 +24555,8 @@ aot_kitkat_libz_block_0753:
     .word 0x17ffa5fb
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0763
-aot_kitkat_libz_block_0763:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0763)
+RB_AOT_SYM(aot_kitkat_libz_block_0763):
     .word 0xb9403b93
     .word 0x112da274
     .word 0xb9001f94
@@ -24578,11 +24583,11 @@ aot_kitkat_libz_block_0763:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0764
-    add x17, x17, :lo12:aot_kitkat_libz_block_0764
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0764)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0764)
 #else
-    adrp x17, aot_kitkat_libz_block_0764@PAGE
-    add x17, x17, aot_kitkat_libz_block_0764@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0764)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0764)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x529e4a33
@@ -24599,8 +24604,8 @@ aot_kitkat_libz_block_0763:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0774
-aot_kitkat_libz_block_0774:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0774)
+RB_AOT_SYM(aot_kitkat_libz_block_0774):
     .word 0xd100075a
     .word 0xf100035f
     .word 0x5400004d
@@ -24611,8 +24616,8 @@ aot_kitkat_libz_block_0774:
     .word 0x17ffa5c7
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0796
-aot_kitkat_libz_block_0796:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0796)
+RB_AOT_SYM(aot_kitkat_libz_block_0796):
     .word 0xb9404393
     .word 0x11001274
     .word 0xb9002394
@@ -24641,8 +24646,8 @@ aot_kitkat_libz_block_0796:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0851
-aot_kitkat_libz_block_0851:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0851)
+RB_AOT_SYM(aot_kitkat_libz_block_0851):
     .word 0xb9402b93
     .word 0xb9403f94
     .word 0x531e7675
@@ -24681,8 +24686,8 @@ aot_kitkat_libz_block_0851:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0895
-aot_kitkat_libz_block_0895:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0895)
+RB_AOT_SYM(aot_kitkat_libz_block_0895):
     .word 0xb9404793
     .word 0xaa1303e1
     .word 0x97ffa334
@@ -24745,8 +24750,8 @@ aot_kitkat_libz_block_0895:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0909
-aot_kitkat_libz_block_0909:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0909)
+RB_AOT_SYM(aot_kitkat_libz_block_0909):
     .word 0xb9401b93
     .word 0x11005274
     .word 0xaa1403e1
@@ -25045,8 +25050,8 @@ aot_kitkat_libz_block_0909:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0910
-aot_kitkat_libz_block_0910:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0910)
+RB_AOT_SYM(aot_kitkat_libz_block_0910):
     .word 0xb9402b93
     .word 0xb9401f94
     .word 0x2b140275
@@ -25187,8 +25192,8 @@ aot_kitkat_libz_block_0910:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0006
-aot_kitkat_libz_block_0006:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0006)
+RB_AOT_SYM(aot_kitkat_libz_block_0006):
     .word 0xb9402393
     .word 0x71004274
     .word 0xd53b4213
@@ -25213,8 +25218,8 @@ aot_kitkat_libz_block_0006:
     .word 0x17ffa379
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0010
-aot_kitkat_libz_block_0010:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0010)
+RB_AOT_SYM(aot_kitkat_libz_block_0010):
     .word 0xb9402393
     .word 0x71000274
     .word 0xd53b4213
@@ -25229,8 +25234,8 @@ aot_kitkat_libz_block_0010:
     .word 0x17ffa36b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0040
-aot_kitkat_libz_block_0040:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0040)
+RB_AOT_SYM(aot_kitkat_libz_block_0040):
     .word 0xb9401f93
     .word 0x53020a75
     .word 0x53030ab5
@@ -25263,8 +25268,8 @@ aot_kitkat_libz_block_0040:
     .word 0x17ffa34b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0048
-aot_kitkat_libz_block_0048:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0048)
+RB_AOT_SYM(aot_kitkat_libz_block_0048):
     .word 0xb9403f93
     .word 0x71002274
     .word 0xd53b4213
@@ -25289,8 +25294,8 @@ aot_kitkat_libz_block_0048:
     .word 0x17ffa333
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0062
-aot_kitkat_libz_block_0062:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0062)
+RB_AOT_SYM(aot_kitkat_libz_block_0062):
     .word 0xb9405393
     .word 0x11000674
     .word 0xb9005394
@@ -25329,8 +25334,8 @@ aot_kitkat_libz_block_0062:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0064
-aot_kitkat_libz_block_0064:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0064)
+RB_AOT_SYM(aot_kitkat_libz_block_0064):
     .word 0xb9405393
     .word 0x12001274
     .word 0xb9402793
@@ -25369,8 +25374,8 @@ aot_kitkat_libz_block_0064:
     .word 0x17ffa2e7
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0071
-aot_kitkat_libz_block_0071:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0071)
+RB_AOT_SYM(aot_kitkat_libz_block_0071):
     .word 0xb9401b93
     .word 0x53017e74
     .word 0xb9404b95
@@ -25397,8 +25402,8 @@ aot_kitkat_libz_block_0071:
     .word 0x17ffa2cd
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0073
-aot_kitkat_libz_block_0073:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0073)
+RB_AOT_SYM(aot_kitkat_libz_block_0073):
     .word 0xb9403393
     .word 0x71000674
     .word 0xb9001f94
@@ -25435,8 +25440,8 @@ aot_kitkat_libz_block_0073:
     .word 0x17ffa2a9
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0077
-aot_kitkat_libz_block_0077:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0077)
+RB_AOT_SYM(aot_kitkat_libz_block_0077):
     .word 0xb9405393
     .word 0x11000674
     .word 0xb9005394
@@ -25475,8 +25480,8 @@ aot_kitkat_libz_block_0077:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0079
-aot_kitkat_libz_block_0079:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0079)
+RB_AOT_SYM(aot_kitkat_libz_block_0079):
     .word 0xb9405393
     .word 0x12001274
     .word 0xb9402793
@@ -25515,8 +25520,8 @@ aot_kitkat_libz_block_0079:
     .word 0x17ffa25d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0086
-aot_kitkat_libz_block_0086:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0086)
+RB_AOT_SYM(aot_kitkat_libz_block_0086):
     .word 0xb9401b93
     .word 0x53017e74
     .word 0xb9404b95
@@ -25543,8 +25548,8 @@ aot_kitkat_libz_block_0086:
     .word 0x17ffa243
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0088
-aot_kitkat_libz_block_0088:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0088)
+RB_AOT_SYM(aot_kitkat_libz_block_0088):
     .word 0xb9403393
     .word 0x71000674
     .word 0xb9001f94
@@ -25581,8 +25586,8 @@ aot_kitkat_libz_block_0088:
     .word 0x17ffa21f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0092
-aot_kitkat_libz_block_0092:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0092)
+RB_AOT_SYM(aot_kitkat_libz_block_0092):
     .word 0xb9404b93
     .word 0x11000674
     .word 0xb9004b94
@@ -25621,8 +25626,8 @@ aot_kitkat_libz_block_0092:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0094
-aot_kitkat_libz_block_0094:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0094)
+RB_AOT_SYM(aot_kitkat_libz_block_0094):
     .word 0xb9404b93
     .word 0x12001274
     .word 0xb9001f94
@@ -25663,8 +25668,8 @@ aot_kitkat_libz_block_0094:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0103
-aot_kitkat_libz_block_0103:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0103)
+RB_AOT_SYM(aot_kitkat_libz_block_0103):
     .word 0xb9404b93
     .word 0x11000674
     .word 0xb9004b94
@@ -25703,8 +25708,8 @@ aot_kitkat_libz_block_0103:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0105
-aot_kitkat_libz_block_0105:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0105)
+RB_AOT_SYM(aot_kitkat_libz_block_0105):
     .word 0xb9404b93
     .word 0x12001274
     .word 0xb9001f94
@@ -25745,8 +25750,8 @@ aot_kitkat_libz_block_0105:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0116
-aot_kitkat_libz_block_0116:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0116)
+RB_AOT_SYM(aot_kitkat_libz_block_0116):
     .word 0xb9401f93
     .word 0xb9404b94
     .word 0x4a130295
@@ -25817,8 +25822,8 @@ aot_kitkat_libz_block_0116:
     .word 0x17ffa13d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0123
-aot_kitkat_libz_block_0123:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0123)
+RB_AOT_SYM(aot_kitkat_libz_block_0123):
     .word 0xb9403393
     .word 0xb9001b93
     .word 0xb9402f93
@@ -25832,11 +25837,11 @@ aot_kitkat_libz_block_0123:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0124
-    add x17, x17, :lo12:aot_kitkat_libz_block_0124
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0124)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0124)
 #else
-    adrp x17, aot_kitkat_libz_block_0124@PAGE
-    add x17, x17, aot_kitkat_libz_block_0124@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0124)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0124)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x528d1473
@@ -25852,8 +25857,8 @@ aot_kitkat_libz_block_0123:
     .word 0x17ffa121
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0126
-aot_kitkat_libz_block_0126:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0126)
+RB_AOT_SYM(aot_kitkat_libz_block_0126):
     .word 0xb9402393
     .word 0xb9001b93
     .word 0xb9403393
@@ -25869,11 +25874,11 @@ aot_kitkat_libz_block_0126:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0127
-    add x17, x17, :lo12:aot_kitkat_libz_block_0127
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0127)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0127)
 #else
-    adrp x17, aot_kitkat_libz_block_0127@PAGE
-    add x17, x17, aot_kitkat_libz_block_0127@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0127)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0127)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x528d17f3
@@ -25891,8 +25896,8 @@ aot_kitkat_libz_block_0126:
     .word 0x17ffa101
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0141
-aot_kitkat_libz_block_0141:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0141)
+RB_AOT_SYM(aot_kitkat_libz_block_0141):
     .word 0xb9401b93
     .word 0x11007274
     .word 0xaa1403e1
@@ -25929,8 +25934,8 @@ aot_kitkat_libz_block_0141:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0156
-aot_kitkat_libz_block_0156:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0156)
+RB_AOT_SYM(aot_kitkat_libz_block_0156):
     .word 0xb9401b93
     .word 0x11007274
     .word 0xaa1403e1
@@ -25967,8 +25972,8 @@ aot_kitkat_libz_block_0156:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0166
-aot_kitkat_libz_block_0166:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0166)
+RB_AOT_SYM(aot_kitkat_libz_block_0166):
     .word 0xb9401b93
     .word 0x11007274
     .word 0xaa1403e1
@@ -26003,8 +26008,8 @@ aot_kitkat_libz_block_0166:
     .word 0x17ffa097
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0182
-aot_kitkat_libz_block_0182:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0182)
+RB_AOT_SYM(aot_kitkat_libz_block_0182):
     .word 0xb9402b93
     .word 0x11031274
     .word 0xaa1403e1
@@ -26041,8 +26046,8 @@ aot_kitkat_libz_block_0182:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0184
-aot_kitkat_libz_block_0184:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0184)
+RB_AOT_SYM(aot_kitkat_libz_block_0184):
     .word 0xb9402b93
     .word 0x1102b274
     .word 0xaa1403e1
@@ -26071,8 +26076,8 @@ aot_kitkat_libz_block_0184:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0195
-aot_kitkat_libz_block_0195:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0195)
+RB_AOT_SYM(aot_kitkat_libz_block_0195):
     .word 0xb9402b93
     .word 0x11031274
     .word 0xaa1403e1
@@ -26109,8 +26114,8 @@ aot_kitkat_libz_block_0195:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0202
-aot_kitkat_libz_block_0202:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0202)
+RB_AOT_SYM(aot_kitkat_libz_block_0202):
     .word 0xb9402b93
     .word 0x11022274
     .word 0xaa1403e1
@@ -26173,8 +26178,8 @@ aot_kitkat_libz_block_0202:
     .word 0x17ff9ff5
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0204
-aot_kitkat_libz_block_0204:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0204)
+RB_AOT_SYM(aot_kitkat_libz_block_0204):
     .word 0xb9403b93
     .word 0x11003274
     .word 0xaa1403e1
@@ -26405,8 +26410,8 @@ aot_kitkat_libz_block_0204:
     .word 0x17ff9f0f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0216
-aot_kitkat_libz_block_0216:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0216)
+RB_AOT_SYM(aot_kitkat_libz_block_0216):
     .word 0xb9404f93
     .word 0x11002274
     .word 0xaa1403e1
@@ -26455,8 +26460,8 @@ aot_kitkat_libz_block_0216:
     .word 0x17ff9edf
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0221
-aot_kitkat_libz_block_0221:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0221)
+RB_AOT_SYM(aot_kitkat_libz_block_0221):
     .word 0xb9403f93
     .word 0x1101f274
     .word 0xaa1403e1
@@ -26509,8 +26514,8 @@ aot_kitkat_libz_block_0221:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0222
-aot_kitkat_libz_block_0222:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0222)
+RB_AOT_SYM(aot_kitkat_libz_block_0222):
     .word 0xb9403f93
     .word 0x1102c274
     .word 0xaa1403e1
@@ -26547,8 +26552,8 @@ aot_kitkat_libz_block_0222:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0234
-aot_kitkat_libz_block_0234:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0234)
+RB_AOT_SYM(aot_kitkat_libz_block_0234):
     .word 0xb9404f93
     .word 0x11002274
     .word 0xaa1403e1
@@ -26597,8 +26602,8 @@ aot_kitkat_libz_block_0234:
     .word 0x17ff9e57
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0239
-aot_kitkat_libz_block_0239:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0239)
+RB_AOT_SYM(aot_kitkat_libz_block_0239):
     .word 0xb9404393
     .word 0x11034274
     .word 0xaa1403e1
@@ -26635,8 +26640,8 @@ aot_kitkat_libz_block_0239:
     .word 0x17ff9e33
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0245
-aot_kitkat_libz_block_0245:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0245)
+RB_AOT_SYM(aot_kitkat_libz_block_0245):
     .word 0xb9402393
     .word 0x71000e74
     .word 0xd53b4213
@@ -26661,8 +26666,8 @@ aot_kitkat_libz_block_0245:
     .word 0x17ff9e1b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0269
-aot_kitkat_libz_block_0269:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0269)
+RB_AOT_SYM(aot_kitkat_libz_block_0269):
     .word 0xb9402f93
     .word 0xaa1303e1
     .word 0x97ff9bc4
@@ -26765,8 +26770,8 @@ aot_kitkat_libz_block_0269:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0283
-aot_kitkat_libz_block_0283:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0283)
+RB_AOT_SYM(aot_kitkat_libz_block_0283):
     .word 0x5293c501
     .word 0x72a34001
     .word 0x97ff9b62
@@ -26817,11 +26822,11 @@ aot_kitkat_libz_block_0283:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0284
-    add x17, x17, :lo12:aot_kitkat_libz_block_0284
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0284)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0284)
 #else
-    adrp x17, aot_kitkat_libz_block_0284@PAGE
-    add x17, x17, aot_kitkat_libz_block_0284@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0284)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0284)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x5293c133
@@ -26838,8 +26843,8 @@ aot_kitkat_libz_block_0283:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0303
-aot_kitkat_libz_block_0303:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0303)
+RB_AOT_SYM(aot_kitkat_libz_block_0303):
     .word 0xb9403393
     .word 0xb9001f93
     .word 0xb9402f94
@@ -26868,8 +26873,8 @@ aot_kitkat_libz_block_0303:
     .word 0x17ff9d57
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0329
-aot_kitkat_libz_block_0329:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0329)
+RB_AOT_SYM(aot_kitkat_libz_block_0329):
     .word 0xb9401b93
     .word 0x11014274
     .word 0xaa1403e1
@@ -26906,8 +26911,8 @@ aot_kitkat_libz_block_0329:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0333
-aot_kitkat_libz_block_0333:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0333)
+RB_AOT_SYM(aot_kitkat_libz_block_0333):
     .word 0x52800013
     .word 0xb9001f93
     .word 0x52800013
@@ -26974,8 +26979,8 @@ aot_kitkat_libz_block_0333:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0343
-aot_kitkat_libz_block_0343:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0343)
+RB_AOT_SYM(aot_kitkat_libz_block_0343):
     .word 0xb9403793
     .word 0x7100027f
     .word 0x1a9f17f4
@@ -27000,8 +27005,8 @@ aot_kitkat_libz_block_0343:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0354
-aot_kitkat_libz_block_0354:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0354)
+RB_AOT_SYM(aot_kitkat_libz_block_0354):
     .word 0xb9402b93
     .word 0xaa1303e1
     .word 0x97ff9a86
@@ -27036,8 +27041,8 @@ aot_kitkat_libz_block_0354:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0390
-aot_kitkat_libz_block_0390:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0390)
+RB_AOT_SYM(aot_kitkat_libz_block_0390):
     .word 0xd100075a
     .word 0xf100035f
     .word 0x5400004d
@@ -27048,8 +27053,8 @@ aot_kitkat_libz_block_0390:
     .word 0x17ff9cad
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0397
-aot_kitkat_libz_block_0397:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0397)
+RB_AOT_SYM(aot_kitkat_libz_block_0397):
     .word 0xb9402b93
     .word 0xaa1303e1
     .word 0x97ff9a5a
@@ -27084,8 +27089,8 @@ aot_kitkat_libz_block_0397:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0392
-aot_kitkat_libz_block_0392:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0392)
+RB_AOT_SYM(aot_kitkat_libz_block_0392):
     .word 0xb9401b93
     .word 0x31000674
     .word 0xb9001b94
@@ -27112,8 +27117,8 @@ aot_kitkat_libz_block_0392:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0396
-aot_kitkat_libz_block_0396:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0396)
+RB_AOT_SYM(aot_kitkat_libz_block_0396):
     .word 0xb9402b93
     .word 0x1100b274
     .word 0xaa1403e1
@@ -27148,8 +27153,8 @@ aot_kitkat_libz_block_0396:
     .word 0x17ff9c4f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0401
-aot_kitkat_libz_block_0401:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0401)
+RB_AOT_SYM(aot_kitkat_libz_block_0401):
     .word 0x12800013
     .word 0xb9001b93
     .word 0xb9404f93
@@ -27218,8 +27223,8 @@ aot_kitkat_libz_block_0401:
     .word 0x17ff9c0b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0411
-aot_kitkat_libz_block_0411:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0411)
+RB_AOT_SYM(aot_kitkat_libz_block_0411):
     .word 0xb9401b93
     .word 0x31000674
     .word 0xb9001b94
@@ -27246,8 +27251,8 @@ aot_kitkat_libz_block_0411:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0449
-aot_kitkat_libz_block_0449:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0449)
+RB_AOT_SYM(aot_kitkat_libz_block_0449):
     .word 0xb9404f93
     .word 0x51005274
     .word 0xb9402b93
@@ -27338,8 +27343,8 @@ aot_kitkat_libz_block_0449:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0421
-aot_kitkat_libz_block_0421:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0421)
+RB_AOT_SYM(aot_kitkat_libz_block_0421):
     .word 0xb9403793
     .word 0x71000274
     .word 0xd53b4213
@@ -27368,8 +27373,8 @@ aot_kitkat_libz_block_0421:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0427
-aot_kitkat_libz_block_0427:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0427)
+RB_AOT_SYM(aot_kitkat_libz_block_0427):
     .word 0xb9401b93
     .word 0x11016274
     .word 0xb9001f94
@@ -27384,11 +27389,11 @@ aot_kitkat_libz_block_0427:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0428
-    add x17, x17, :lo12:aot_kitkat_libz_block_0428
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0428)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0428)
 #else
-    adrp x17, aot_kitkat_libz_block_0428@PAGE
-    add x17, x17, aot_kitkat_libz_block_0428@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0428)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0428)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x52951b73
@@ -27407,8 +27412,8 @@ aot_kitkat_libz_block_0427:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0431
-aot_kitkat_libz_block_0431:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0431)
+RB_AOT_SYM(aot_kitkat_libz_block_0431):
     .word 0x52800013
     .word 0xb9001f93
     .word 0x52800013
@@ -27442,11 +27447,11 @@ aot_kitkat_libz_block_0431:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0432
-    add x17, x17, :lo12:aot_kitkat_libz_block_0432
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0432)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0432)
 #else
-    adrp x17, aot_kitkat_libz_block_0432@PAGE
-    add x17, x17, aot_kitkat_libz_block_0432@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0432)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0432)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x52951eb3
@@ -27462,8 +27467,8 @@ aot_kitkat_libz_block_0431:
     .word 0x17ff9b2b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0441
-aot_kitkat_libz_block_0441:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0441)
+RB_AOT_SYM(aot_kitkat_libz_block_0441):
     .word 0xb9401b93
     .word 0x31000674
     .word 0xb9001b94
@@ -27490,8 +27495,8 @@ aot_kitkat_libz_block_0441:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0444
-aot_kitkat_libz_block_0444:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0444)
+RB_AOT_SYM(aot_kitkat_libz_block_0444):
     .word 0xb9401b93
     .word 0xb9002f93
     .word 0x11001274
@@ -27520,8 +27525,8 @@ aot_kitkat_libz_block_0444:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0456
-aot_kitkat_libz_block_0456:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0456)
+RB_AOT_SYM(aot_kitkat_libz_block_0456):
     .word 0xb9401b93
     .word 0x31000674
     .word 0xb9001b94
@@ -27548,8 +27553,8 @@ aot_kitkat_libz_block_0456:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0458
-aot_kitkat_libz_block_0458:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0458)
+RB_AOT_SYM(aot_kitkat_libz_block_0458):
     .word 0xb9402f93
     .word 0x11012274
     .word 0xaa1403e1
@@ -27592,11 +27597,11 @@ aot_kitkat_libz_block_0458:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0459
-    add x17, x17, :lo12:aot_kitkat_libz_block_0459
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0459)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0459)
 #else
-    adrp x17, aot_kitkat_libz_block_0459@PAGE
-    add x17, x17, aot_kitkat_libz_block_0459@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0459)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0459)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x529562f3
@@ -27613,8 +27618,8 @@ aot_kitkat_libz_block_0458:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0460
-aot_kitkat_libz_block_0460:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0460)
+RB_AOT_SYM(aot_kitkat_libz_block_0460):
     .word 0xb9402f93
     .word 0x11006274
     .word 0xaa1403e1
@@ -27651,8 +27656,8 @@ aot_kitkat_libz_block_0460:
     .word 0x17ff9a7d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0476
-aot_kitkat_libz_block_0476:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0476)
+RB_AOT_SYM(aot_kitkat_libz_block_0476):
     .word 0xb9401b93
     .word 0x11013274
     .word 0xaa1403e1
@@ -27687,8 +27692,8 @@ aot_kitkat_libz_block_0476:
     .word 0x17ff9a5b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0489
-aot_kitkat_libz_block_0489:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0489)
+RB_AOT_SYM(aot_kitkat_libz_block_0489):
     .word 0x12800013
     .word 0xb9001b93
     .word 0xb9404f93
@@ -27757,8 +27762,8 @@ aot_kitkat_libz_block_0489:
     .word 0x17ff9a17
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0499
-aot_kitkat_libz_block_0499:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0499)
+RB_AOT_SYM(aot_kitkat_libz_block_0499):
     .word 0xb9402b93
     .word 0x11006274
     .word 0xb9402f93
@@ -27849,8 +27854,8 @@ aot_kitkat_libz_block_0499:
     .word 0x17ff99bd
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0502
-aot_kitkat_libz_block_0502:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0502)
+RB_AOT_SYM(aot_kitkat_libz_block_0502):
     .word 0xb9401b93
     .word 0xb9003393
     .word 0xb9402f93
@@ -27864,11 +27869,11 @@ aot_kitkat_libz_block_0502:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0503
-    add x17, x17, :lo12:aot_kitkat_libz_block_0503
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0503)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0503)
 #else
-    adrp x17, aot_kitkat_libz_block_0503@PAGE
-    add x17, x17, aot_kitkat_libz_block_0503@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0503)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0503)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x5295d473
@@ -27886,8 +27891,8 @@ aot_kitkat_libz_block_0502:
     .word 0x17ff999f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0511
-aot_kitkat_libz_block_0511:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0511)
+RB_AOT_SYM(aot_kitkat_libz_block_0511):
     .word 0x12800013
     .word 0xb9001b93
     .word 0xb9404f93
@@ -27958,8 +27963,8 @@ aot_kitkat_libz_block_0511:
     .word 0x17ff9959
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0537
-aot_kitkat_libz_block_0537:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0537)
+RB_AOT_SYM(aot_kitkat_libz_block_0537):
     .word 0x12800013
     .word 0xb9001b93
     .word 0xb9404f93
@@ -28042,8 +28047,8 @@ aot_kitkat_libz_block_0537:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0519
-aot_kitkat_libz_block_0519:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0519)
+RB_AOT_SYM(aot_kitkat_libz_block_0519):
     .word 0xb9402b93
     .word 0x11016274
     .word 0xaa1403e1
@@ -28072,8 +28077,8 @@ aot_kitkat_libz_block_0519:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0520
-aot_kitkat_libz_block_0520:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0520)
+RB_AOT_SYM(aot_kitkat_libz_block_0520):
     .word 0x52800013
     .word 0x6a13027f
     .word 0xd53b4213
@@ -28162,8 +28167,8 @@ aot_kitkat_libz_block_0520:
     .word 0x17ff9893
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0523
-aot_kitkat_libz_block_0523:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0523)
+RB_AOT_SYM(aot_kitkat_libz_block_0523):
     .word 0xb9402b93
     .word 0x11017274
     .word 0xaa1403e1
@@ -28202,8 +28207,8 @@ aot_kitkat_libz_block_0523:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0526
-aot_kitkat_libz_block_0526:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0526)
+RB_AOT_SYM(aot_kitkat_libz_block_0526):
     .word 0xb9402b93
     .word 0x1101a274
     .word 0xaa1403e1
@@ -28248,8 +28253,8 @@ aot_kitkat_libz_block_0526:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0545
-aot_kitkat_libz_block_0545:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0545)
+RB_AOT_SYM(aot_kitkat_libz_block_0545):
     .word 0xb9401b93
     .word 0x11014274
     .word 0xaa1403e1
@@ -28284,8 +28289,8 @@ aot_kitkat_libz_block_0545:
     .word 0x17ff981f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0552
-aot_kitkat_libz_block_0552:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0552)
+RB_AOT_SYM(aot_kitkat_libz_block_0552):
     .word 0xb9402393
     .word 0xb9001b93
     .word 0xb9404f93
@@ -28354,8 +28359,8 @@ aot_kitkat_libz_block_0552:
     .word 0x17ff97db
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0561
-aot_kitkat_libz_block_0561:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0561)
+RB_AOT_SYM(aot_kitkat_libz_block_0561):
     .word 0xb9402f93
     .word 0x11012274
     .word 0xaa1403e1
@@ -28390,11 +28395,11 @@ aot_kitkat_libz_block_0561:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0562
-    add x17, x17, :lo12:aot_kitkat_libz_block_0562
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0562)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0562)
 #else
-    adrp x17, aot_kitkat_libz_block_0562@PAGE
-    add x17, x17, aot_kitkat_libz_block_0562@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0562)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0562)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x52962fb3
@@ -28411,8 +28416,8 @@ aot_kitkat_libz_block_0561:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0563
-aot_kitkat_libz_block_0563:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0563)
+RB_AOT_SYM(aot_kitkat_libz_block_0563):
     .word 0xb9402f93
     .word 0xb9001b93
     .word 0x52800093
@@ -28433,11 +28438,11 @@ aot_kitkat_libz_block_0563:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0564
-    add x17, x17, :lo12:aot_kitkat_libz_block_0564
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0564)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0564)
 #else
-    adrp x17, aot_kitkat_libz_block_0564@PAGE
-    add x17, x17, aot_kitkat_libz_block_0564@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0564)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0564)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x52963173
@@ -28454,8 +28459,8 @@ aot_kitkat_libz_block_0563:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0582
-aot_kitkat_libz_block_0582:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0582)
+RB_AOT_SYM(aot_kitkat_libz_block_0582):
     .word 0xb9401f93
     .word 0x53071e75
     .word 0x53030ab5
@@ -28488,8 +28493,8 @@ aot_kitkat_libz_block_0582:
     .word 0x17ff9765
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0588
-aot_kitkat_libz_block_0588:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0588)
+RB_AOT_SYM(aot_kitkat_libz_block_0588):
     .word 0xb9402f93
     .word 0xb9002393
     .word 0xb9401b93
@@ -28532,8 +28537,8 @@ aot_kitkat_libz_block_0588:
     .word 0x17ff973b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0586
-aot_kitkat_libz_block_0586:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0586)
+RB_AOT_SYM(aot_kitkat_libz_block_0586):
     .word 0xb9403f93
     .word 0xb9403394
     .word 0x6b140275
@@ -28560,8 +28565,8 @@ aot_kitkat_libz_block_0586:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0672
-aot_kitkat_libz_block_0672:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0672)
+RB_AOT_SYM(aot_kitkat_libz_block_0672):
     .word 0xb9403f93
     .word 0xb9403394
     .word 0x4b130295
@@ -28798,8 +28803,8 @@ aot_kitkat_libz_block_0672:
     .word 0x17ff9635
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0692
-aot_kitkat_libz_block_0692:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0692)
+RB_AOT_SYM(aot_kitkat_libz_block_0692):
     .word 0x52800033
     .word 0xb9001b93
     .word 0x52800033
@@ -28898,8 +28903,8 @@ aot_kitkat_libz_block_0692:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0688
-aot_kitkat_libz_block_0688:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0688)
+RB_AOT_SYM(aot_kitkat_libz_block_0688):
     .word 0xb9403793
     .word 0x1100d274
     .word 0xaa1403e1
@@ -28936,8 +28941,8 @@ aot_kitkat_libz_block_0688:
     .word 0x17ff95af
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0690
-aot_kitkat_libz_block_0690:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0690)
+RB_AOT_SYM(aot_kitkat_libz_block_0690):
     .word 0xb9402393
     .word 0xb9403b94
     .word 0x4b130295
@@ -28951,11 +28956,11 @@ aot_kitkat_libz_block_0690:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0691
-    add x17, x17, :lo12:aot_kitkat_libz_block_0691
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0691)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0691)
 #else
-    adrp x17, aot_kitkat_libz_block_0691@PAGE
-    add x17, x17, aot_kitkat_libz_block_0691@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0691)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0691)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x529c74f3
@@ -28973,8 +28978,8 @@ aot_kitkat_libz_block_0690:
     .word 0x17ff9591
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0700
-aot_kitkat_libz_block_0700:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0700)
+RB_AOT_SYM(aot_kitkat_libz_block_0700):
     .word 0xb9401b93
     .word 0x11007274
     .word 0xaa1403e1
@@ -29011,8 +29016,8 @@ aot_kitkat_libz_block_0700:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0734
-aot_kitkat_libz_block_0734:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0734)
+RB_AOT_SYM(aot_kitkat_libz_block_0734):
     .word 0xb9402f93
     .word 0x11005274
     .word 0xb9002794
@@ -29029,8 +29034,8 @@ aot_kitkat_libz_block_0734:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0738
-aot_kitkat_libz_block_0738:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0738)
+RB_AOT_SYM(aot_kitkat_libz_block_0738):
     .word 0xb9402f93
     .word 0x11002274
     .word 0xaa1403e1
@@ -29277,8 +29282,8 @@ aot_kitkat_libz_block_0738:
     .word 0x17ff9467
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0739
-aot_kitkat_libz_block_0739:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0739)
+RB_AOT_SYM(aot_kitkat_libz_block_0739):
     .word 0xb9402f93
     .word 0x11002274
     .word 0xaa1403e1
@@ -29315,11 +29320,11 @@ aot_kitkat_libz_block_0739:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0740
-    add x17, x17, :lo12:aot_kitkat_libz_block_0740
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0740)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0740)
 #else
-    adrp x17, aot_kitkat_libz_block_0740@PAGE
-    add x17, x17, aot_kitkat_libz_block_0740@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0740)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0740)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x529e1573
@@ -29338,8 +29343,8 @@ aot_kitkat_libz_block_0739:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0740
-aot_kitkat_libz_block_0740:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0740)
+RB_AOT_SYM(aot_kitkat_libz_block_0740):
     .word 0xb9402f93
     .word 0x11005274
     .word 0xaa1403e1
@@ -29454,8 +29459,8 @@ aot_kitkat_libz_block_0740:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0747
-aot_kitkat_libz_block_0747:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0747)
+RB_AOT_SYM(aot_kitkat_libz_block_0747):
     .word 0xb9402793
     .word 0x71002274
     .word 0xd53b4213
@@ -29470,8 +29475,8 @@ aot_kitkat_libz_block_0747:
     .word 0x17ff93b1
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0750
-aot_kitkat_libz_block_0750:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0750)
+RB_AOT_SYM(aot_kitkat_libz_block_0750):
     .word 0xb9401b93
     .word 0x11005274
     .word 0xaa1403e1
@@ -29682,8 +29687,8 @@ aot_kitkat_libz_block_0750:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0754
-aot_kitkat_libz_block_0754:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0754)
+RB_AOT_SYM(aot_kitkat_libz_block_0754):
     .word 0xb9403b93
     .word 0x1103a274
     .word 0xaa1403e1
@@ -29718,8 +29723,8 @@ aot_kitkat_libz_block_0754:
     .word 0x17ff92bd
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0762
-aot_kitkat_libz_block_0762:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0762)
+RB_AOT_SYM(aot_kitkat_libz_block_0762):
     .word 0x52800013
     .word 0x6a13027f
     .word 0xd53b4213
@@ -29765,11 +29770,11 @@ aot_kitkat_libz_block_0762:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0764
-    add x17, x17, :lo12:aot_kitkat_libz_block_0764
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0764)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0764)
 #else
-    adrp x17, aot_kitkat_libz_block_0764@PAGE
-    add x17, x17, aot_kitkat_libz_block_0764@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0764)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0764)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x529e4a33
@@ -29785,8 +29790,8 @@ aot_kitkat_libz_block_0762:
     .word 0x17ff9281
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0764
-aot_kitkat_libz_block_0764:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0764)
+RB_AOT_SYM(aot_kitkat_libz_block_0764):
     .word 0xb9403b93
     .word 0x112dd274
     .word 0xb9001f94
@@ -29800,11 +29805,11 @@ aot_kitkat_libz_block_0764:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0765
-    add x17, x17, :lo12:aot_kitkat_libz_block_0765
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0765)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0765)
 #else
-    adrp x17, aot_kitkat_libz_block_0765@PAGE
-    add x17, x17, aot_kitkat_libz_block_0765@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0765)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0765)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x529e4b73
@@ -29820,8 +29825,8 @@ aot_kitkat_libz_block_0764:
     .word 0x17ff9265
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0807
-aot_kitkat_libz_block_0807:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0807)
+RB_AOT_SYM(aot_kitkat_libz_block_0807):
     .word 0xb9404793
     .word 0x11005274
     .word 0xaa1403e1
@@ -29860,8 +29865,8 @@ aot_kitkat_libz_block_0807:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0797
-aot_kitkat_libz_block_0797:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0797)
+RB_AOT_SYM(aot_kitkat_libz_block_0797):
     .word 0xb9403b93
     .word 0xb9001b93
     .word 0xb9404393
@@ -29877,11 +29882,11 @@ aot_kitkat_libz_block_0797:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0798
-    add x17, x17, :lo12:aot_kitkat_libz_block_0798
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0798)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0798)
 #else
-    adrp x17, aot_kitkat_libz_block_0798@PAGE
-    add x17, x17, aot_kitkat_libz_block_0798@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0798)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0798)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x529e96b3
@@ -29897,8 +29902,8 @@ aot_kitkat_libz_block_0797:
     .word 0x17ff9221
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0850
-aot_kitkat_libz_block_0850:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0850)
+RB_AOT_SYM(aot_kitkat_libz_block_0850):
     .word 0xb9402b93
     .word 0x531e7674
     .word 0xb9403f95
@@ -29943,8 +29948,8 @@ aot_kitkat_libz_block_0850:
     .word 0x17ff91f5
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0852
-aot_kitkat_libz_block_0852:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0852)
+RB_AOT_SYM(aot_kitkat_libz_block_0852):
     .word 0xb9405393
     .word 0xaa1303e1
     .word 0x97ff8fa2
@@ -30023,8 +30028,8 @@ aot_kitkat_libz_block_0852:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0896
-aot_kitkat_libz_block_0896:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0896)
+RB_AOT_SYM(aot_kitkat_libz_block_0896):
     .word 0x52802681
     .word 0x72a34021
     .word 0x97ff8f54
@@ -30151,8 +30156,8 @@ aot_kitkat_libz_block_0896:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0898
-aot_kitkat_libz_block_0898:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0898)
+RB_AOT_SYM(aot_kitkat_libz_block_0898):
     .word 0xb9404393
     .word 0xb9401f94
     .word 0x531e7675
@@ -30253,8 +30258,8 @@ aot_kitkat_libz_block_0898:
     .word 0x17ff90c5
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0007
-aot_kitkat_libz_block_0007:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0007)
+RB_AOT_SYM(aot_kitkat_libz_block_0007):
     .word 0xb9402393
     .word 0x7100027f
     .word 0x1a9f17f4
@@ -30279,8 +30284,8 @@ aot_kitkat_libz_block_0007:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0011
-aot_kitkat_libz_block_0011:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0011)
+RB_AOT_SYM(aot_kitkat_libz_block_0011):
     .word 0x5282b613
     .word 0xb9004b93
     .word 0xb9402393
@@ -30309,8 +30314,8 @@ aot_kitkat_libz_block_0011:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0041
-aot_kitkat_libz_block_0041:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0041)
+RB_AOT_SYM(aot_kitkat_libz_block_0041):
     .word 0xb9401f93
     .word 0x11000674
     .word 0xaa1303e1
@@ -30371,8 +30376,8 @@ aot_kitkat_libz_block_0041:
     .word 0x17ff9055
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0042
-aot_kitkat_libz_block_0042:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0042)
+RB_AOT_SYM(aot_kitkat_libz_block_0042):
     .word 0xb9401f93
     .word 0xb9003393
     .word 0xb9403f93
@@ -30419,8 +30424,8 @@ aot_kitkat_libz_block_0042:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0049
-aot_kitkat_libz_block_0049:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0049)
+RB_AOT_SYM(aot_kitkat_libz_block_0049):
     .word 0x528cc281
     .word 0x72a34001
     .word 0x97ff8dd4
@@ -30683,8 +30688,8 @@ aot_kitkat_libz_block_0049:
     .word 0x17ff8f21
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0051
-aot_kitkat_libz_block_0051:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0051)
+RB_AOT_SYM(aot_kitkat_libz_block_0051):
     .word 0xb9403f93
     .word 0x71000274
     .word 0xd53b4213
@@ -30709,8 +30714,8 @@ aot_kitkat_libz_block_0051:
     .word 0x17ff8f09
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0070
-aot_kitkat_libz_block_0070:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0070)
+RB_AOT_SYM(aot_kitkat_libz_block_0070):
     .word 0x52800013
     .word 0xb9002393
     .word 0x52800013
@@ -30733,8 +30738,8 @@ aot_kitkat_libz_block_0070:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0066
-aot_kitkat_libz_block_0066:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0066)
+RB_AOT_SYM(aot_kitkat_libz_block_0066):
     .word 0xb9403393
     .word 0xb9402f94
     .word 0x6a140275
@@ -30763,8 +30768,8 @@ aot_kitkat_libz_block_0066:
     .word 0x17ff8ed7
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0074
-aot_kitkat_libz_block_0074:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0074)
+RB_AOT_SYM(aot_kitkat_libz_block_0074):
     .word 0xb9403b93
     .word 0xb9402394
     .word 0x4a130295
@@ -30869,8 +30874,8 @@ aot_kitkat_libz_block_0074:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0085
-aot_kitkat_libz_block_0085:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0085)
+RB_AOT_SYM(aot_kitkat_libz_block_0085):
     .word 0x52800013
     .word 0xb9002393
     .word 0x52800013
@@ -30893,8 +30898,8 @@ aot_kitkat_libz_block_0085:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0081
-aot_kitkat_libz_block_0081:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0081)
+RB_AOT_SYM(aot_kitkat_libz_block_0081):
     .word 0xb9403393
     .word 0xb9402f94
     .word 0x6a140275
@@ -30923,8 +30928,8 @@ aot_kitkat_libz_block_0081:
     .word 0x17ff8e3d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0089
-aot_kitkat_libz_block_0089:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0089)
+RB_AOT_SYM(aot_kitkat_libz_block_0089):
     .word 0xb9403b93
     .word 0xb9402394
     .word 0x4a130295
@@ -31029,8 +31034,8 @@ aot_kitkat_libz_block_0089:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0099
-aot_kitkat_libz_block_0099:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0099)
+RB_AOT_SYM(aot_kitkat_libz_block_0099):
     .word 0xb9402393
     .word 0xb9001b93
     .word 0xb9404f93
@@ -31111,8 +31116,8 @@ aot_kitkat_libz_block_0099:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0096
-aot_kitkat_libz_block_0096:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0096)
+RB_AOT_SYM(aot_kitkat_libz_block_0096):
     .word 0xb9402f93
     .word 0xb9402b94
     .word 0x6a140275
@@ -31141,8 +31146,8 @@ aot_kitkat_libz_block_0096:
     .word 0x17ff8d69
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0110
-aot_kitkat_libz_block_0110:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0110)
+RB_AOT_SYM(aot_kitkat_libz_block_0110):
     .word 0xb9402393
     .word 0xb9001b93
     .word 0xb9404f93
@@ -31223,8 +31228,8 @@ aot_kitkat_libz_block_0110:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0107
-aot_kitkat_libz_block_0107:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0107)
+RB_AOT_SYM(aot_kitkat_libz_block_0107):
     .word 0xb9402f93
     .word 0xb9402b94
     .word 0x6a140275
@@ -31253,8 +31258,8 @@ aot_kitkat_libz_block_0107:
     .word 0x17ff8cfd
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0124
-aot_kitkat_libz_block_0124:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0124)
+RB_AOT_SYM(aot_kitkat_libz_block_0124):
     .word 0xb9402b93
     .word 0x1100c274
     .word 0xb9401b93
@@ -31335,8 +31340,8 @@ aot_kitkat_libz_block_0124:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0127
-aot_kitkat_libz_block_0127:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0127)
+RB_AOT_SYM(aot_kitkat_libz_block_0127):
     .word 0xb9402b93
     .word 0x1100c274
     .word 0xb9401b93
@@ -31417,8 +31422,8 @@ aot_kitkat_libz_block_0127:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0142
-aot_kitkat_libz_block_0142:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0142)
+RB_AOT_SYM(aot_kitkat_libz_block_0142):
     .word 0xb9403f93
     .word 0xaa1303e1
     .word 0x97ff8a0a
@@ -31455,8 +31460,8 @@ aot_kitkat_libz_block_0142:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0157
-aot_kitkat_libz_block_0157:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0157)
+RB_AOT_SYM(aot_kitkat_libz_block_0157):
     .word 0xb9402b93
     .word 0xaa1303e1
     .word 0x97ff89e6
@@ -31493,8 +31498,8 @@ aot_kitkat_libz_block_0157:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0167
-aot_kitkat_libz_block_0167:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0167)
+RB_AOT_SYM(aot_kitkat_libz_block_0167):
     .word 0xb9402b93
     .word 0xaa1303e1
     .word 0x97ff89c2
@@ -31531,8 +31536,8 @@ aot_kitkat_libz_block_0167:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0185
-aot_kitkat_libz_block_0185:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0185)
+RB_AOT_SYM(aot_kitkat_libz_block_0185):
     .word 0x52800013
     .word 0xb9001b93
     .word 0xb9403b93
@@ -31559,8 +31564,8 @@ aot_kitkat_libz_block_0185:
     .word 0x17ff8bd7
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0196
-aot_kitkat_libz_block_0196:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0196)
+RB_AOT_SYM(aot_kitkat_libz_block_0196):
     .word 0xb9401f93
     .word 0x71040a74
     .word 0xd53b4213
@@ -31585,8 +31590,8 @@ aot_kitkat_libz_block_0196:
     .word 0x17ff8bbf
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0197
-aot_kitkat_libz_block_0197:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0197)
+RB_AOT_SYM(aot_kitkat_libz_block_0197):
     .word 0xb9401f93
     .word 0x71000274
     .word 0xd53b4213
@@ -31611,8 +31616,8 @@ aot_kitkat_libz_block_0197:
     .word 0x17ff8ba7
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0203
-aot_kitkat_libz_block_0203:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0203)
+RB_AOT_SYM(aot_kitkat_libz_block_0203):
     .word 0xb9402393
     .word 0x11000674
     .word 0xaa1403e1
@@ -31639,8 +31644,8 @@ aot_kitkat_libz_block_0203:
     .word 0x17ff8b8d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0205
-aot_kitkat_libz_block_0205:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0205)
+RB_AOT_SYM(aot_kitkat_libz_block_0205):
     .word 0xb9402b93
     .word 0x1102b274
     .word 0xaa1403e1
@@ -31669,8 +31674,8 @@ aot_kitkat_libz_block_0205:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0217
-aot_kitkat_libz_block_0217:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0217)
+RB_AOT_SYM(aot_kitkat_libz_block_0217):
     .word 0xb9401b93
     .word 0x71041a74
     .word 0xd53b4213
@@ -31695,8 +31700,8 @@ aot_kitkat_libz_block_0217:
     .word 0x17ff8b59
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0218
-aot_kitkat_libz_block_0218:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0218)
+RB_AOT_SYM(aot_kitkat_libz_block_0218):
     .word 0xb9401b93
     .word 0x71000274
     .word 0xd53b4213
@@ -31721,8 +31726,8 @@ aot_kitkat_libz_block_0218:
     .word 0x17ff8b41
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0224
-aot_kitkat_libz_block_0224:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0224)
+RB_AOT_SYM(aot_kitkat_libz_block_0224):
     .word 0xb9403f93
     .word 0xb9001b93
     .word 0xb94483fe
@@ -31734,11 +31739,11 @@ aot_kitkat_libz_block_0224:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0225
-    add x17, x17, :lo12:aot_kitkat_libz_block_0225
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0225)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0225)
 #else
-    adrp x17, aot_kitkat_libz_block_0225@PAGE
-    add x17, x17, aot_kitkat_libz_block_0225@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0225)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0225)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x52925cf3
@@ -31754,8 +31759,8 @@ aot_kitkat_libz_block_0224:
     .word 0x17ff8b27
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0223
-aot_kitkat_libz_block_0223:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0223)
+RB_AOT_SYM(aot_kitkat_libz_block_0223):
     .word 0xb9403f93
     .word 0x1102f274
     .word 0xaa1403e1
@@ -31866,8 +31871,8 @@ aot_kitkat_libz_block_0223:
     .word 0x17ff8ab9
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0226
-aot_kitkat_libz_block_0226:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0226)
+RB_AOT_SYM(aot_kitkat_libz_block_0226):
     .word 0xb9403f93
     .word 0x11022274
     .word 0xaa1403e1
@@ -32110,8 +32115,8 @@ aot_kitkat_libz_block_0226:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0235
-aot_kitkat_libz_block_0235:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0235)
+RB_AOT_SYM(aot_kitkat_libz_block_0235):
     .word 0xb9401b93
     .word 0x71041a74
     .word 0xd53b4213
@@ -32136,8 +32141,8 @@ aot_kitkat_libz_block_0235:
     .word 0x17ff89af
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0236
-aot_kitkat_libz_block_0236:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0236)
+RB_AOT_SYM(aot_kitkat_libz_block_0236):
     .word 0xb9401b93
     .word 0x71000274
     .word 0xd53b4213
@@ -32162,8 +32167,8 @@ aot_kitkat_libz_block_0236:
     .word 0x17ff8997
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0240
-aot_kitkat_libz_block_0240:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0240)
+RB_AOT_SYM(aot_kitkat_libz_block_0240):
     .word 0xb9404393
     .word 0x1101f274
     .word 0xaa1403e1
@@ -32216,8 +32221,8 @@ aot_kitkat_libz_block_0240:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0241
-aot_kitkat_libz_block_0241:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0241)
+RB_AOT_SYM(aot_kitkat_libz_block_0241):
     .word 0x52800053
     .word 0xb9001b93
     .word 0xb9404393
@@ -32256,8 +32261,8 @@ aot_kitkat_libz_block_0241:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0246
-aot_kitkat_libz_block_0246:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0246)
+RB_AOT_SYM(aot_kitkat_libz_block_0246):
     .word 0xb9401b93
     .word 0xb9402394
     .word 0x6b140275
@@ -32284,8 +32289,8 @@ aot_kitkat_libz_block_0246:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0248
-aot_kitkat_libz_block_0248:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0248)
+RB_AOT_SYM(aot_kitkat_libz_block_0248):
     .word 0xb9404393
     .word 0x1102e274
     .word 0xaa1403e1
@@ -32322,8 +32327,8 @@ aot_kitkat_libz_block_0248:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0270
-aot_kitkat_libz_block_0270:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0270)
+RB_AOT_SYM(aot_kitkat_libz_block_0270):
     .word 0xb9402f93
     .word 0x31000674
     .word 0xb9002394
@@ -32360,8 +32365,8 @@ aot_kitkat_libz_block_0270:
     .word 0x17ff88db
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0277
-aot_kitkat_libz_block_0277:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0277)
+RB_AOT_SYM(aot_kitkat_libz_block_0277):
     .word 0xb94483fe
     .word 0x110043de
     .word 0x121c0bde
@@ -32371,11 +32376,11 @@ aot_kitkat_libz_block_0277:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0278
-    add x17, x17, :lo12:aot_kitkat_libz_block_0278
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0278)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0278)
 #else
-    adrp x17, aot_kitkat_libz_block_0278@PAGE
-    add x17, x17, aot_kitkat_libz_block_0278@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0278)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0278)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x5293a233
@@ -32393,8 +32398,8 @@ aot_kitkat_libz_block_0277:
     .word 0x17ff88c1
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0284
-aot_kitkat_libz_block_0284:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0284)
+RB_AOT_SYM(aot_kitkat_libz_block_0284):
     .word 0xb9403393
     .word 0xb9001b93
     .word 0xb9402f93
@@ -32410,11 +32415,11 @@ aot_kitkat_libz_block_0284:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0285
-    add x17, x17, :lo12:aot_kitkat_libz_block_0285
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0285)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0285)
 #else
-    adrp x17, aot_kitkat_libz_block_0285@PAGE
-    add x17, x17, aot_kitkat_libz_block_0285@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0285)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0285)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x5293c273
@@ -32430,8 +32435,8 @@ aot_kitkat_libz_block_0284:
     .word 0x17ff88a3
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0330
-aot_kitkat_libz_block_0330:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0330)
+RB_AOT_SYM(aot_kitkat_libz_block_0330):
     .word 0xb9401b93
     .word 0xb9002b93
     .word 0xb9401f93
@@ -32445,11 +32450,11 @@ aot_kitkat_libz_block_0330:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0331
-    add x17, x17, :lo12:aot_kitkat_libz_block_0331
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0331)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0331)
 #else
-    adrp x17, aot_kitkat_libz_block_0331@PAGE
-    add x17, x17, aot_kitkat_libz_block_0331@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0331)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0331)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x52943e33
@@ -32467,8 +32472,8 @@ aot_kitkat_libz_block_0330:
     .word 0x17ff8885
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0332
-aot_kitkat_libz_block_0332:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0332)
+RB_AOT_SYM(aot_kitkat_libz_block_0332):
     .word 0xb9401b93
     .word 0x11015274
     .word 0xaa1403e1
@@ -32545,8 +32550,8 @@ aot_kitkat_libz_block_0332:
     .word 0x17ff8839
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0344
-aot_kitkat_libz_block_0344:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0344)
+RB_AOT_SYM(aot_kitkat_libz_block_0344):
     .word 0xb9402b93
     .word 0xaa1303e1
     .word 0x97ff85e6
@@ -32581,8 +32586,8 @@ aot_kitkat_libz_block_0344:
     .word 0x17ff8817
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0355
-aot_kitkat_libz_block_0355:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0355)
+RB_AOT_SYM(aot_kitkat_libz_block_0355):
     .word 0xb9402b93
     .word 0x11001274
     .word 0xaa1403e1
@@ -32611,8 +32616,8 @@ aot_kitkat_libz_block_0355:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0358
-aot_kitkat_libz_block_0358:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0358)
+RB_AOT_SYM(aot_kitkat_libz_block_0358):
     .word 0xb9402b93
     .word 0x1100d274
     .word 0xaa1403e1
@@ -32647,8 +32652,8 @@ aot_kitkat_libz_block_0358:
     .word 0x17ff87d9
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0402
-aot_kitkat_libz_block_0402:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0402)
+RB_AOT_SYM(aot_kitkat_libz_block_0402):
     .word 0xb9402b93
     .word 0x11006274
     .word 0xaa1403e1
@@ -32717,8 +32722,8 @@ aot_kitkat_libz_block_0402:
     .word 0x17ff8795
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0398
-aot_kitkat_libz_block_0398:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0398)
+RB_AOT_SYM(aot_kitkat_libz_block_0398):
     .word 0xb9402b93
     .word 0x1100d274
     .word 0xaa1403e1
@@ -32755,8 +32760,8 @@ aot_kitkat_libz_block_0398:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0400
-aot_kitkat_libz_block_0400:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0400)
+RB_AOT_SYM(aot_kitkat_libz_block_0400):
     .word 0x52800013
     .word 0xb9001b93
     .word 0x52800013
@@ -32833,8 +32838,8 @@ aot_kitkat_libz_block_0400:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0393
-aot_kitkat_libz_block_0393:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0393)
+RB_AOT_SYM(aot_kitkat_libz_block_0393):
     .word 0xd100075a
     .word 0xf100035f
     .word 0x5400004d
@@ -32845,8 +32850,8 @@ aot_kitkat_libz_block_0393:
     .word 0x17ff871b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0412
-aot_kitkat_libz_block_0412:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0412)
+RB_AOT_SYM(aot_kitkat_libz_block_0412):
     .word 0xb9402b93
     .word 0x11017274
     .word 0xaa1403e1
@@ -32881,8 +32886,8 @@ aot_kitkat_libz_block_0412:
     .word 0x17ff86f9
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0423
-aot_kitkat_libz_block_0423:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0423)
+RB_AOT_SYM(aot_kitkat_libz_block_0423):
     .word 0x12800013
     .word 0xb9002393
     .word 0x12800013
@@ -32967,8 +32972,8 @@ aot_kitkat_libz_block_0423:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0428
-aot_kitkat_libz_block_0428:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0428)
+RB_AOT_SYM(aot_kitkat_libz_block_0428):
     .word 0xb9402b93
     .word 0x11009274
     .word 0xaa1403e1
@@ -32990,11 +32995,11 @@ aot_kitkat_libz_block_0428:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0429
-    add x17, x17, :lo12:aot_kitkat_libz_block_0429
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0429)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0429)
 #else
-    adrp x17, aot_kitkat_libz_block_0429@PAGE
-    add x17, x17, aot_kitkat_libz_block_0429@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0429)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0429)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x52951c33
@@ -33012,8 +33017,8 @@ aot_kitkat_libz_block_0428:
     .word 0x17ff867f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0432
-aot_kitkat_libz_block_0432:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0432)
+RB_AOT_SYM(aot_kitkat_libz_block_0432):
     .word 0xb9402b93
     .word 0x11005274
     .word 0xaa1403e1
@@ -33035,11 +33040,11 @@ aot_kitkat_libz_block_0432:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0433
-    add x17, x17, :lo12:aot_kitkat_libz_block_0433
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0433)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0433)
 #else
-    adrp x17, aot_kitkat_libz_block_0433@PAGE
-    add x17, x17, aot_kitkat_libz_block_0433@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0433)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0433)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x52951f73
@@ -33057,8 +33062,8 @@ aot_kitkat_libz_block_0432:
     .word 0x17ff8659
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0442
-aot_kitkat_libz_block_0442:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0442)
+RB_AOT_SYM(aot_kitkat_libz_block_0442):
     .word 0xb9402b93
     .word 0x11017274
     .word 0xaa1403e1
@@ -33093,8 +33098,8 @@ aot_kitkat_libz_block_0442:
     .word 0x17ff8637
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0446
-aot_kitkat_libz_block_0446:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0446)
+RB_AOT_SYM(aot_kitkat_libz_block_0446):
     .word 0x12800013
     .word 0xb9001b93
     .word 0xb9404f93
@@ -33177,8 +33182,8 @@ aot_kitkat_libz_block_0446:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0438
-aot_kitkat_libz_block_0438:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0438)
+RB_AOT_SYM(aot_kitkat_libz_block_0438):
     .word 0xb9402b93
     .word 0x1101a274
     .word 0xaa1403e1
@@ -33205,8 +33210,8 @@ aot_kitkat_libz_block_0438:
     .word 0x17ff85cb
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0445
-aot_kitkat_libz_block_0445:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0445)
+RB_AOT_SYM(aot_kitkat_libz_block_0445):
     .word 0xb9401b93
     .word 0x52952c10
     .word 0x72a34010
@@ -33231,8 +33236,8 @@ aot_kitkat_libz_block_0445:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0459
-aot_kitkat_libz_block_0459:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0459)
+RB_AOT_SYM(aot_kitkat_libz_block_0459):
     .word 0xb9401b93
     .word 0x31000674
     .word 0xb9001b94
@@ -33259,8 +33264,8 @@ aot_kitkat_libz_block_0459:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0461
-aot_kitkat_libz_block_0461:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0461)
+RB_AOT_SYM(aot_kitkat_libz_block_0461):
     .word 0xb9403b93
     .word 0xb9002b93
     .word 0xb9402f93
@@ -33301,8 +33306,8 @@ aot_kitkat_libz_block_0461:
     .word 0x17ff8571
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0464
-aot_kitkat_libz_block_0464:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0464)
+RB_AOT_SYM(aot_kitkat_libz_block_0464):
     .word 0xb9402f93
     .word 0x11017274
     .word 0xaa1403e1
@@ -33337,8 +33342,8 @@ aot_kitkat_libz_block_0464:
     .word 0x17ff854f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0477
-aot_kitkat_libz_block_0477:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0477)
+RB_AOT_SYM(aot_kitkat_libz_block_0477):
     .word 0xb9401b93
     .word 0x11012274
     .word 0xaa1403e1
@@ -33386,11 +33391,11 @@ aot_kitkat_libz_block_0477:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0478
-    add x17, x17, :lo12:aot_kitkat_libz_block_0478
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0478)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0478)
 #else
-    adrp x17, aot_kitkat_libz_block_0478@PAGE
-    add x17, x17, aot_kitkat_libz_block_0478@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0478)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0478)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x52958a33
@@ -33406,8 +33411,8 @@ aot_kitkat_libz_block_0477:
     .word 0x17ff8511
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0479
-aot_kitkat_libz_block_0479:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0479)
+RB_AOT_SYM(aot_kitkat_libz_block_0479):
     .word 0xb9401b93
     .word 0x11006274
     .word 0xaa1403e1
@@ -33442,8 +33447,8 @@ aot_kitkat_libz_block_0479:
     .word 0x17ff84ef
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0503
-aot_kitkat_libz_block_0503:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0503)
+RB_AOT_SYM(aot_kitkat_libz_block_0503):
     .word 0xb9402b93
     .word 0x11009274
     .word 0xb9401b93
@@ -33480,8 +33485,8 @@ aot_kitkat_libz_block_0503:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0521
-aot_kitkat_libz_block_0521:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0521)
+RB_AOT_SYM(aot_kitkat_libz_block_0521):
     .word 0xb9403793
     .word 0xb9001b93
     .word 0xb9404f93
@@ -33564,8 +33569,8 @@ aot_kitkat_libz_block_0521:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0524
-aot_kitkat_libz_block_0524:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0524)
+RB_AOT_SYM(aot_kitkat_libz_block_0524):
     .word 0xb9403393
     .word 0xb9001b93
     .word 0xb94483fe
@@ -33577,11 +33582,11 @@ aot_kitkat_libz_block_0524:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0525
-    add x17, x17, :lo12:aot_kitkat_libz_block_0525
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0525)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0525)
 #else
-    adrp x17, aot_kitkat_libz_block_0525@PAGE
-    add x17, x17, aot_kitkat_libz_block_0525@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0525)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0525)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x5295eff3
@@ -33599,8 +33604,8 @@ aot_kitkat_libz_block_0524:
     .word 0x17ff845d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0528
-aot_kitkat_libz_block_0528:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0528)
+RB_AOT_SYM(aot_kitkat_libz_block_0528):
     .word 0xb9402f93
     .word 0x71001274
     .word 0xb9001f94
@@ -33617,8 +33622,8 @@ aot_kitkat_libz_block_0528:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0529
-aot_kitkat_libz_block_0529:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0529)
+RB_AOT_SYM(aot_kitkat_libz_block_0529):
     .word 0xb9402b93
     .word 0x11001274
     .word 0xaa1403e1
@@ -33667,8 +33672,8 @@ aot_kitkat_libz_block_0529:
     .word 0x17ff841d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0546
-aot_kitkat_libz_block_0546:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0546)
+RB_AOT_SYM(aot_kitkat_libz_block_0546):
     .word 0xb9401b93
     .word 0x11013274
     .word 0xaa1403e1
@@ -33703,8 +33708,8 @@ aot_kitkat_libz_block_0546:
     .word 0x17ff83fb
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0562
-aot_kitkat_libz_block_0562:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0562)
+RB_AOT_SYM(aot_kitkat_libz_block_0562):
     .word 0xb9401b93
     .word 0x31000674
     .word 0xb9001b94
@@ -33721,8 +33726,8 @@ aot_kitkat_libz_block_0562:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0564
-aot_kitkat_libz_block_0564:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0564)
+RB_AOT_SYM(aot_kitkat_libz_block_0564):
     .word 0xb9401b93
     .word 0x31000674
     .word 0xb9001b94
@@ -33739,8 +33744,8 @@ aot_kitkat_libz_block_0564:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0583
-aot_kitkat_libz_block_0583:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0583)
+RB_AOT_SYM(aot_kitkat_libz_block_0583):
     .word 0xb9401b93
     .word 0x11000a74
     .word 0xaa1403e1
@@ -33825,8 +33830,8 @@ aot_kitkat_libz_block_0583:
     .word 0x17ff8387
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0666
-aot_kitkat_libz_block_0666:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0666)
+RB_AOT_SYM(aot_kitkat_libz_block_0666):
     .word 0xb9401f93
     .word 0x53061a75
     .word 0x53030ab5
@@ -33859,8 +33864,8 @@ aot_kitkat_libz_block_0666:
     .word 0x17ff8367
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0589
-aot_kitkat_libz_block_0589:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0589)
+RB_AOT_SYM(aot_kitkat_libz_block_0589):
     .word 0xb9402793
     .word 0xb9401b94
     .word 0x6b140275
@@ -33887,8 +33892,8 @@ aot_kitkat_libz_block_0589:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0593
-aot_kitkat_libz_block_0593:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0593)
+RB_AOT_SYM(aot_kitkat_libz_block_0593):
     .word 0xb9402793
     .word 0x71003a74
     .word 0xd53b4213
@@ -33929,8 +33934,8 @@ aot_kitkat_libz_block_0593:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0578
-aot_kitkat_libz_block_0578:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0578)
+RB_AOT_SYM(aot_kitkat_libz_block_0578):
     .word 0xb9402793
     .word 0x71003a74
     .word 0xd53b4213
@@ -33955,8 +33960,8 @@ aot_kitkat_libz_block_0578:
     .word 0x17ff830d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0587
-aot_kitkat_libz_block_0587:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0587)
+RB_AOT_SYM(aot_kitkat_libz_block_0587):
     .word 0xd100075a
     .word 0xf100035f
     .word 0x5400004d
@@ -33967,8 +33972,8 @@ aot_kitkat_libz_block_0587:
     .word 0x17ff8303
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0691
-aot_kitkat_libz_block_0691:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0691)
+RB_AOT_SYM(aot_kitkat_libz_block_0691):
     .word 0x52800013
     .word 0xb9001b93
     .word 0x52800013
@@ -34093,8 +34098,8 @@ aot_kitkat_libz_block_0691:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0701
-aot_kitkat_libz_block_0701:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0701)
+RB_AOT_SYM(aot_kitkat_libz_block_0701):
     .word 0xb9403b93
     .word 0xaa1303e1
     .word 0x97ff8034
@@ -34131,8 +34136,8 @@ aot_kitkat_libz_block_0701:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0737
-aot_kitkat_libz_block_0737:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0737)
+RB_AOT_SYM(aot_kitkat_libz_block_0737):
     .word 0xb9402b93
     .word 0xaa1303e1
     .word 0x97ff8010
@@ -34431,8 +34436,8 @@ aot_kitkat_libz_block_0737:
     .word 0x17ff8139
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0755
-aot_kitkat_libz_block_0755:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0755)
+RB_AOT_SYM(aot_kitkat_libz_block_0755):
     .word 0xb9403b93
     .word 0x1103b274
     .word 0xaa1403e1
@@ -34467,8 +34472,8 @@ aot_kitkat_libz_block_0755:
     .word 0x17ff8117
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0765
-aot_kitkat_libz_block_0765:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0765)
+RB_AOT_SYM(aot_kitkat_libz_block_0765):
     .word 0xb9403b93
     .word 0x112db274
     .word 0xaa1403e1
@@ -34535,8 +34540,8 @@ aot_kitkat_libz_block_0765:
     .word 0x17ff80d5
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0808
-aot_kitkat_libz_block_0808:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0808)
+RB_AOT_SYM(aot_kitkat_libz_block_0808):
     .word 0xb9402b93
     .word 0x11000a74
     .word 0xb9001b94
@@ -34565,8 +34570,8 @@ aot_kitkat_libz_block_0808:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0810
-aot_kitkat_libz_block_0810:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0810)
+RB_AOT_SYM(aot_kitkat_libz_block_0810):
     .word 0xb9402b93
     .word 0x11001274
     .word 0xb9001f94
@@ -34595,8 +34600,8 @@ aot_kitkat_libz_block_0810:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0798
-aot_kitkat_libz_block_0798:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0798)
+RB_AOT_SYM(aot_kitkat_libz_block_0798):
     .word 0xb9403b93
     .word 0xb9001b93
     .word 0xb94483fe
@@ -34608,11 +34613,11 @@ aot_kitkat_libz_block_0798:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0799
-    add x17, x17, :lo12:aot_kitkat_libz_block_0799
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0799)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0799)
 #else
-    adrp x17, aot_kitkat_libz_block_0799@PAGE
-    add x17, x17, aot_kitkat_libz_block_0799@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0799)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0799)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x529e9773
@@ -34628,8 +34633,8 @@ aot_kitkat_libz_block_0798:
     .word 0x17ff8083
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0853
-aot_kitkat_libz_block_0853:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0853)
+RB_AOT_SYM(aot_kitkat_libz_block_0853):
     .word 0xb9405393
     .word 0xaa1303e1
     .word 0x97ff7e30
@@ -34664,8 +34669,8 @@ aot_kitkat_libz_block_0853:
     .word 0x17ff8061
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0897
-aot_kitkat_libz_block_0897:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0897)
+RB_AOT_SYM(aot_kitkat_libz_block_0897):
     .word 0xb9401b93
     .word 0x11005274
     .word 0xaa1403e1
@@ -34828,8 +34833,8 @@ aot_kitkat_libz_block_0897:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0900
-aot_kitkat_libz_block_0900:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0900)
+RB_AOT_SYM(aot_kitkat_libz_block_0900):
     .word 0xb9403393
     .word 0xb9403794
     .word 0x0b140275
@@ -34898,8 +34903,8 @@ aot_kitkat_libz_block_0900:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0893
-aot_kitkat_libz_block_0893:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0893)
+RB_AOT_SYM(aot_kitkat_libz_block_0893):
     .word 0xb9403393
     .word 0xb9402f94
     .word 0x0b140275
@@ -34954,8 +34959,8 @@ aot_kitkat_libz_block_0893:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0899
-aot_kitkat_libz_block_0899:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0899)
+RB_AOT_SYM(aot_kitkat_libz_block_0899):
     .word 0xb9401b93
     .word 0x11005274
     .word 0xaa1403e1
@@ -35116,8 +35121,8 @@ aot_kitkat_libz_block_0899:
     .word 0x17ff7ea5
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0008
-aot_kitkat_libz_block_0008:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0008)
+RB_AOT_SYM(aot_kitkat_libz_block_0008):
     .word 0xb9401f93
     .word 0x11000674
     .word 0xaa1303e1
@@ -35162,8 +35167,8 @@ aot_kitkat_libz_block_0008:
     .word 0x17ff7e79
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0009
-aot_kitkat_libz_block_0009:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0009)
+RB_AOT_SYM(aot_kitkat_libz_block_0009):
     .word 0xb9404393
     .word 0x52900e35
     .word 0x72b000f5
@@ -35194,8 +35199,8 @@ aot_kitkat_libz_block_0009:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0012
-aot_kitkat_libz_block_0012:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0012)
+RB_AOT_SYM(aot_kitkat_libz_block_0012):
     .word 0x529ffe33
     .word 0xb9003f93
     .word 0x52900e33
@@ -35462,8 +35467,8 @@ aot_kitkat_libz_block_0012:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0018
-aot_kitkat_libz_block_0018:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0018)
+RB_AOT_SYM(aot_kitkat_libz_block_0018):
     .word 0xb9401f93
     .word 0x11004274
     .word 0xaa1303e1
@@ -35726,8 +35731,8 @@ aot_kitkat_libz_block_0018:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0043
-aot_kitkat_libz_block_0043:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0043)
+RB_AOT_SYM(aot_kitkat_libz_block_0043):
     .word 0xb9401f93
     .word 0x531e7674
     .word 0x12800270
@@ -36318,8 +36323,8 @@ aot_kitkat_libz_block_0043:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0046
-aot_kitkat_libz_block_0046:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0046)
+RB_AOT_SYM(aot_kitkat_libz_block_0046):
     .word 0x52800013
     .word 0xb9002f93
     .word 0x52800013
@@ -36740,8 +36745,8 @@ aot_kitkat_libz_block_0046:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0050
-aot_kitkat_libz_block_0050:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0050)
+RB_AOT_SYM(aot_kitkat_libz_block_0050):
     .word 0xb9401f93
     .word 0x11002274
     .word 0xaa1303e1
@@ -36992,8 +36997,8 @@ aot_kitkat_libz_block_0050:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0052
-aot_kitkat_libz_block_0052:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0052)
+RB_AOT_SYM(aot_kitkat_libz_block_0052):
     .word 0x528cc301
     .word 0x72a34001
     .word 0x97ff750c
@@ -37064,8 +37069,8 @@ aot_kitkat_libz_block_0052:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0054
-aot_kitkat_libz_block_0054:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0054)
+RB_AOT_SYM(aot_kitkat_libz_block_0054):
     .word 0xb9401b93
     .word 0x2a3303f4
     .word 0xb9001b94
@@ -37198,8 +37203,8 @@ aot_kitkat_libz_block_0054:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0065
-aot_kitkat_libz_block_0065:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0065)
+RB_AOT_SYM(aot_kitkat_libz_block_0065):
     .word 0xb9403793
     .word 0x53017e74
     .word 0xb9404b95
@@ -37226,8 +37231,8 @@ aot_kitkat_libz_block_0065:
     .word 0x17ff767b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0067
-aot_kitkat_libz_block_0067:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0067)
+RB_AOT_SYM(aot_kitkat_libz_block_0067):
     .word 0xb9403393
     .word 0x71000674
     .word 0xb9002b94
@@ -37264,8 +37269,8 @@ aot_kitkat_libz_block_0067:
     .word 0x17ff7657
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0080
-aot_kitkat_libz_block_0080:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0080)
+RB_AOT_SYM(aot_kitkat_libz_block_0080):
     .word 0xb9403793
     .word 0x53017e74
     .word 0xb9404b95
@@ -37292,8 +37297,8 @@ aot_kitkat_libz_block_0080:
     .word 0x17ff763d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0082
-aot_kitkat_libz_block_0082:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0082)
+RB_AOT_SYM(aot_kitkat_libz_block_0082):
     .word 0xb9403393
     .word 0x71000674
     .word 0xb9002b94
@@ -37330,8 +37335,8 @@ aot_kitkat_libz_block_0082:
     .word 0x17ff7619
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0095
-aot_kitkat_libz_block_0095:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0095)
+RB_AOT_SYM(aot_kitkat_libz_block_0095):
     .word 0xb9403393
     .word 0x53017e74
     .word 0xb9402795
@@ -37358,8 +37363,8 @@ aot_kitkat_libz_block_0095:
     .word 0x17ff75ff
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0097
-aot_kitkat_libz_block_0097:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0097)
+RB_AOT_SYM(aot_kitkat_libz_block_0097):
     .word 0xb9402f93
     .word 0x71000674
     .word 0xb9003794
@@ -37396,8 +37401,8 @@ aot_kitkat_libz_block_0097:
     .word 0x17ff75db
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0106
-aot_kitkat_libz_block_0106:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0106)
+RB_AOT_SYM(aot_kitkat_libz_block_0106):
     .word 0xb9403393
     .word 0x53017e74
     .word 0xb9402795
@@ -37424,8 +37429,8 @@ aot_kitkat_libz_block_0106:
     .word 0x17ff75c1
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0108
-aot_kitkat_libz_block_0108:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0108)
+RB_AOT_SYM(aot_kitkat_libz_block_0108):
     .word 0xb9402f93
     .word 0x71000674
     .word 0xb9003794
@@ -37462,8 +37467,8 @@ aot_kitkat_libz_block_0108:
     .word 0x17ff759d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0143
-aot_kitkat_libz_block_0143:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0143)
+RB_AOT_SYM(aot_kitkat_libz_block_0143):
     .word 0x12800033
     .word 0xb9002793
     .word 0x12800033
@@ -37590,8 +37595,8 @@ aot_kitkat_libz_block_0143:
     .word 0x17ff751f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0144
-aot_kitkat_libz_block_0144:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0144)
+RB_AOT_SYM(aot_kitkat_libz_block_0144):
     .word 0xb9403f93
     .word 0x11001274
     .word 0xaa1403e1
@@ -37632,8 +37637,8 @@ aot_kitkat_libz_block_0144:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0158
-aot_kitkat_libz_block_0158:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0158)
+RB_AOT_SYM(aot_kitkat_libz_block_0158):
     .word 0x12800033
     .word 0xb9002793
     .word 0x12800033
@@ -37718,8 +37723,8 @@ aot_kitkat_libz_block_0158:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0159
-aot_kitkat_libz_block_0159:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0159)
+RB_AOT_SYM(aot_kitkat_libz_block_0159):
     .word 0xb9402b93
     .word 0x11001274
     .word 0xaa1403e1
@@ -37760,8 +37765,8 @@ aot_kitkat_libz_block_0159:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0168
-aot_kitkat_libz_block_0168:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0168)
+RB_AOT_SYM(aot_kitkat_libz_block_0168):
     .word 0x12800033
     .word 0xb9002393
     .word 0x12800033
@@ -37888,8 +37893,8 @@ aot_kitkat_libz_block_0168:
     .word 0x17ff73fd
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0170
-aot_kitkat_libz_block_0170:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0170)
+RB_AOT_SYM(aot_kitkat_libz_block_0170):
     .word 0xb9402b93
     .word 0x11001274
     .word 0xaa1403e1
@@ -37930,8 +37935,8 @@ aot_kitkat_libz_block_0170:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0186
-aot_kitkat_libz_block_0186:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0186)
+RB_AOT_SYM(aot_kitkat_libz_block_0186):
     .word 0xb9403b93
     .word 0x71001274
     .word 0xd53b4213
@@ -37970,8 +37975,8 @@ aot_kitkat_libz_block_0186:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0191
-aot_kitkat_libz_block_0191:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0191)
+RB_AOT_SYM(aot_kitkat_libz_block_0191):
     .word 0xb9404f93
     .word 0x11001274
     .word 0x1100a275
@@ -38094,8 +38099,8 @@ aot_kitkat_libz_block_0191:
     .word 0x17ff7335
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0211
-aot_kitkat_libz_block_0211:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0211)
+RB_AOT_SYM(aot_kitkat_libz_block_0211):
     .word 0x52800013
     .word 0xb9001b93
     .word 0x52800013
@@ -38228,8 +38233,8 @@ aot_kitkat_libz_block_0211:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0198
-aot_kitkat_libz_block_0198:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0198)
+RB_AOT_SYM(aot_kitkat_libz_block_0198):
     .word 0xb9402b93
     .word 0x1102f274
     .word 0xaa1403e1
@@ -38278,8 +38283,8 @@ aot_kitkat_libz_block_0198:
     .word 0x17ff7281
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0206
-aot_kitkat_libz_block_0206:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0206)
+RB_AOT_SYM(aot_kitkat_libz_block_0206):
     .word 0x52800013
     .word 0xb9001b93
     .word 0xb9402f93
@@ -38318,8 +38323,8 @@ aot_kitkat_libz_block_0206:
     .word 0x17ff725b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0229
-aot_kitkat_libz_block_0229:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0229)
+RB_AOT_SYM(aot_kitkat_libz_block_0229):
     .word 0x52800013
     .word 0xb9001b93
     .word 0x52800013
@@ -38452,8 +38457,8 @@ aot_kitkat_libz_block_0229:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0219
-aot_kitkat_libz_block_0219:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0219)
+RB_AOT_SYM(aot_kitkat_libz_block_0219):
     .word 0xb9401b93
     .word 0x71000e74
     .word 0xd53b4213
@@ -38478,8 +38483,8 @@ aot_kitkat_libz_block_0219:
     .word 0x17ff71bf
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0228
-aot_kitkat_libz_block_0228:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0228)
+RB_AOT_SYM(aot_kitkat_libz_block_0228):
     .word 0xb9403f93
     .word 0x1102f274
     .word 0xaa1403e1
@@ -38506,8 +38511,8 @@ aot_kitkat_libz_block_0228:
     .word 0x17ff71a5
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0225
-aot_kitkat_libz_block_0225:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0225)
+RB_AOT_SYM(aot_kitkat_libz_block_0225):
     .word 0xb9403f93
     .word 0xb9401b94
     .word 0x1102c275
@@ -38544,8 +38549,8 @@ aot_kitkat_libz_block_0225:
     .word 0x17ff7181
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0227
-aot_kitkat_libz_block_0227:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0227)
+RB_AOT_SYM(aot_kitkat_libz_block_0227):
     .word 0xb9403f93
     .word 0x1102b274
     .word 0xaa1403e1
@@ -38574,8 +38579,8 @@ aot_kitkat_libz_block_0227:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0262
-aot_kitkat_libz_block_0262:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0262)
+RB_AOT_SYM(aot_kitkat_libz_block_0262):
     .word 0x52800013
     .word 0xb9001b93
     .word 0x52800013
@@ -38708,8 +38713,8 @@ aot_kitkat_libz_block_0262:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0237
-aot_kitkat_libz_block_0237:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0237)
+RB_AOT_SYM(aot_kitkat_libz_block_0237):
     .word 0xb9401b93
     .word 0x71000a74
     .word 0xd53b4213
@@ -38734,8 +38739,8 @@ aot_kitkat_libz_block_0237:
     .word 0x17ff70c9
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0259
-aot_kitkat_libz_block_0259:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0259)
+RB_AOT_SYM(aot_kitkat_libz_block_0259):
     .word 0xb9404393
     .word 0x1102e274
     .word 0xaa1403e1
@@ -38770,8 +38775,8 @@ aot_kitkat_libz_block_0259:
     .word 0x17ff70a7
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0252
-aot_kitkat_libz_block_0252:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0252)
+RB_AOT_SYM(aot_kitkat_libz_block_0252):
     .word 0xb9404393
     .word 0xb9001b93
     .word 0xb94483fe
@@ -38783,11 +38788,11 @@ aot_kitkat_libz_block_0252:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0253
-    add x17, x17, :lo12:aot_kitkat_libz_block_0253
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0253)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0253)
 #else
-    adrp x17, aot_kitkat_libz_block_0253@PAGE
-    add x17, x17, aot_kitkat_libz_block_0253@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0253)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0253)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x52930af3
@@ -38803,8 +38808,8 @@ aot_kitkat_libz_block_0252:
     .word 0x17ff708d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0243
-aot_kitkat_libz_block_0243:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0243)
+RB_AOT_SYM(aot_kitkat_libz_block_0243):
     .word 0xd100075a
     .word 0xf100035f
     .word 0x5400004d
@@ -38815,8 +38820,8 @@ aot_kitkat_libz_block_0243:
     .word 0x17ff7083
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0247
-aot_kitkat_libz_block_0247:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0247)
+RB_AOT_SYM(aot_kitkat_libz_block_0247):
     .word 0xb9404393
     .word 0x1102d274
     .word 0xaa1403e1
@@ -38969,8 +38974,8 @@ aot_kitkat_libz_block_0247:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0249
-aot_kitkat_libz_block_0249:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0249)
+RB_AOT_SYM(aot_kitkat_libz_block_0249):
     .word 0xb9404393
     .word 0x11022274
     .word 0xaa1403e1
@@ -39161,8 +39166,8 @@ aot_kitkat_libz_block_0249:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0251
-aot_kitkat_libz_block_0251:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0251)
+RB_AOT_SYM(aot_kitkat_libz_block_0251):
     .word 0xb9404393
     .word 0x1102f274
     .word 0xaa1403e1
@@ -39231,8 +39236,8 @@ aot_kitkat_libz_block_0251:
     .word 0x17ff6ee9
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0273
-aot_kitkat_libz_block_0273:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0273)
+RB_AOT_SYM(aot_kitkat_libz_block_0273):
     .word 0xb9403793
     .word 0x5100c274
     .word 0xb9002794
@@ -39259,8 +39264,8 @@ aot_kitkat_libz_block_0273:
     .word 0x17ff6ecf
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0285
-aot_kitkat_libz_block_0285:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0285)
+RB_AOT_SYM(aot_kitkat_libz_block_0285):
     .word 0xb9401b93
     .word 0xb9002b93
     .word 0xb9403393
@@ -39274,11 +39279,11 @@ aot_kitkat_libz_block_0285:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0286
-    add x17, x17, :lo12:aot_kitkat_libz_block_0286
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0286)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0286)
 #else
-    adrp x17, aot_kitkat_libz_block_0286@PAGE
-    add x17, x17, aot_kitkat_libz_block_0286@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0286)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0286)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x5293c373
@@ -39296,8 +39301,8 @@ aot_kitkat_libz_block_0285:
     .word 0x17ff6eb1
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0331
-aot_kitkat_libz_block_0331:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0331)
+RB_AOT_SYM(aot_kitkat_libz_block_0331):
     .word 0xb9402b93
     .word 0xb9001b93
     .word 0x11015274
@@ -39376,8 +39381,8 @@ aot_kitkat_libz_block_0331:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0342
-aot_kitkat_libz_block_0342:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0342)
+RB_AOT_SYM(aot_kitkat_libz_block_0342):
     .word 0xb9403793
     .word 0xb9001f93
     .word 0xb9401b94
@@ -39394,8 +39399,8 @@ aot_kitkat_libz_block_0342:
     .word 0x17ff6e53
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0345
-aot_kitkat_libz_block_0345:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0345)
+RB_AOT_SYM(aot_kitkat_libz_block_0345):
     .word 0xb9402b93
     .word 0x1100d274
     .word 0xaa1403e1
@@ -39430,8 +39435,8 @@ aot_kitkat_libz_block_0345:
     .word 0x17ff6e31
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0359
-aot_kitkat_libz_block_0359:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0359)
+RB_AOT_SYM(aot_kitkat_libz_block_0359):
     .word 0xb9402b93
     .word 0x11017274
     .word 0xaa1403e1
@@ -39466,8 +39471,8 @@ aot_kitkat_libz_block_0359:
     .word 0x17ff6e0f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0360
-aot_kitkat_libz_block_0360:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0360)
+RB_AOT_SYM(aot_kitkat_libz_block_0360):
     .word 0xb9402b93
     .word 0x1100b274
     .word 0xaa1403e1
@@ -39504,8 +39509,8 @@ aot_kitkat_libz_block_0360:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0387
-aot_kitkat_libz_block_0387:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0387)
+RB_AOT_SYM(aot_kitkat_libz_block_0387):
     .word 0xb9402b93
     .word 0x1100b274
     .word 0xaa1403e1
@@ -39540,8 +39545,8 @@ aot_kitkat_libz_block_0387:
     .word 0x17ff6dc9
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0399
-aot_kitkat_libz_block_0399:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0399)
+RB_AOT_SYM(aot_kitkat_libz_block_0399):
     .word 0xb9402b93
     .word 0x11017274
     .word 0xaa1403e1
@@ -39578,8 +39583,8 @@ aot_kitkat_libz_block_0399:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0413
-aot_kitkat_libz_block_0413:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0413)
+RB_AOT_SYM(aot_kitkat_libz_block_0413):
     .word 0xb9402393
     .word 0x71000674
     .word 0xd53b4213
@@ -39604,8 +39609,8 @@ aot_kitkat_libz_block_0413:
     .word 0x17ff6d8d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0418
-aot_kitkat_libz_block_0418:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0418)
+RB_AOT_SYM(aot_kitkat_libz_block_0418):
     .word 0xb9402393
     .word 0xb9001b93
     .word 0xb9404f93
@@ -39688,8 +39693,8 @@ aot_kitkat_libz_block_0418:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0429
-aot_kitkat_libz_block_0429:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0429)
+RB_AOT_SYM(aot_kitkat_libz_block_0429):
     .word 0xb9402b93
     .word 0x11008274
     .word 0xaa1403e1
@@ -39711,11 +39716,11 @@ aot_kitkat_libz_block_0429:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0430
-    add x17, x17, :lo12:aot_kitkat_libz_block_0430
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0430)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0430)
 #else
-    adrp x17, aot_kitkat_libz_block_0430@PAGE
-    add x17, x17, aot_kitkat_libz_block_0430@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0430)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0430)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x52951cf3
@@ -39733,8 +39738,8 @@ aot_kitkat_libz_block_0429:
     .word 0x17ff6d15
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0433
-aot_kitkat_libz_block_0433:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0433)
+RB_AOT_SYM(aot_kitkat_libz_block_0433):
     .word 0xb9402b93
     .word 0x11004274
     .word 0xaa1403e1
@@ -39756,11 +39761,11 @@ aot_kitkat_libz_block_0433:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0434
-    add x17, x17, :lo12:aot_kitkat_libz_block_0434
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0434)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0434)
 #else
-    adrp x17, aot_kitkat_libz_block_0434@PAGE
-    add x17, x17, aot_kitkat_libz_block_0434@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0434)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0434)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x52952033
@@ -39778,8 +39783,8 @@ aot_kitkat_libz_block_0433:
     .word 0x17ff6cef
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0447
-aot_kitkat_libz_block_0447:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0447)
+RB_AOT_SYM(aot_kitkat_libz_block_0447):
     .word 0x52953981
     .word 0x72a34001
     .word 0x97ff6a9c
@@ -39807,11 +39812,11 @@ aot_kitkat_libz_block_0447:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0448
-    add x17, x17, :lo12:aot_kitkat_libz_block_0448
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0448)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0448)
 #else
-    adrp x17, aot_kitkat_libz_block_0448@PAGE
-    add x17, x17, aot_kitkat_libz_block_0448@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0448)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0448)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x529535f3
@@ -39827,8 +39832,8 @@ aot_kitkat_libz_block_0447:
     .word 0x17ff6cc5
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0462
-aot_kitkat_libz_block_0462:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0462)
+RB_AOT_SYM(aot_kitkat_libz_block_0462):
     .word 0xb9403793
     .word 0xb9001b93
     .word 0xb9404f93
@@ -39919,8 +39924,8 @@ aot_kitkat_libz_block_0462:
     .word 0x17ff6c6b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0465
-aot_kitkat_libz_block_0465:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0465)
+RB_AOT_SYM(aot_kitkat_libz_block_0465):
     .word 0xb9402f93
     .word 0xb9001b93
     .word 0x52800013
@@ -39943,11 +39948,11 @@ aot_kitkat_libz_block_0465:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0466
-    add x17, x17, :lo12:aot_kitkat_libz_block_0466
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0466)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0466)
 #else
-    adrp x17, aot_kitkat_libz_block_0466@PAGE
-    add x17, x17, aot_kitkat_libz_block_0466@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0466)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0466)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x52957033
@@ -39964,8 +39969,8 @@ aot_kitkat_libz_block_0465:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0467
-aot_kitkat_libz_block_0467:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0467)
+RB_AOT_SYM(aot_kitkat_libz_block_0467):
     .word 0xb9402f93
     .word 0x11002274
     .word 0xaa1403e1
@@ -40025,11 +40030,11 @@ aot_kitkat_libz_block_0467:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0468
-    add x17, x17, :lo12:aot_kitkat_libz_block_0468
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0468)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0468)
 #else
-    adrp x17, aot_kitkat_libz_block_0468@PAGE
-    add x17, x17, aot_kitkat_libz_block_0468@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0468)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0468)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x529572f3
@@ -40045,8 +40050,8 @@ aot_kitkat_libz_block_0467:
     .word 0x17ff6bfb
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0478
-aot_kitkat_libz_block_0478:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0478)
+RB_AOT_SYM(aot_kitkat_libz_block_0478):
     .word 0xb9401b93
     .word 0xb9402f94
     .word 0xb9001f94
@@ -40077,8 +40082,8 @@ aot_kitkat_libz_block_0478:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0480
-aot_kitkat_libz_block_0480:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0480)
+RB_AOT_SYM(aot_kitkat_libz_block_0480):
     .word 0xb9401b93
     .word 0x11017274
     .word 0xaa1403e1
@@ -40117,8 +40122,8 @@ aot_kitkat_libz_block_0480:
     .word 0x17ff6bb7
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0481
-aot_kitkat_libz_block_0481:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0481)
+RB_AOT_SYM(aot_kitkat_libz_block_0481):
     .word 0xb9404f93
     .word 0x11000e74
     .word 0xb9401f95
@@ -40154,11 +40159,11 @@ aot_kitkat_libz_block_0481:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0482
-    add x17, x17, :lo12:aot_kitkat_libz_block_0482
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0482)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0482)
 #else
-    adrp x17, aot_kitkat_libz_block_0482@PAGE
-    add x17, x17, aot_kitkat_libz_block_0482@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0482)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0482)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x529593b3
@@ -40174,8 +40179,8 @@ aot_kitkat_libz_block_0481:
     .word 0x17ff6b85
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0504
-aot_kitkat_libz_block_0504:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0504)
+RB_AOT_SYM(aot_kitkat_libz_block_0504):
     .word 0x5295e281
     .word 0x72a34001
     .word 0x97ff6932
@@ -40287,11 +40292,11 @@ aot_kitkat_libz_block_0504:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0505
-    add x17, x17, :lo12:aot_kitkat_libz_block_0505
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0505)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0505)
 #else
-    adrp x17, aot_kitkat_libz_block_0505@PAGE
-    add x17, x17, aot_kitkat_libz_block_0505@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0505)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0505)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x5295da33
@@ -40309,8 +40314,8 @@ aot_kitkat_libz_block_0504:
     .word 0x17ff6b05
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0508
-aot_kitkat_libz_block_0508:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0508)
+RB_AOT_SYM(aot_kitkat_libz_block_0508):
     .word 0xb9403393
     .word 0xb9001b93
     .word 0xb94483fe
@@ -40322,11 +40327,11 @@ aot_kitkat_libz_block_0508:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0510
-    add x17, x17, :lo12:aot_kitkat_libz_block_0510
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0510)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0510)
 #else
-    adrp x17, aot_kitkat_libz_block_0510@PAGE
-    add x17, x17, aot_kitkat_libz_block_0510@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0510)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0510)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x5295dc73
@@ -40344,8 +40349,8 @@ aot_kitkat_libz_block_0508:
     .word 0x17ff6ae9
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0525
-aot_kitkat_libz_block_0525:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0525)
+RB_AOT_SYM(aot_kitkat_libz_block_0525):
     .word 0xb9402b93
     .word 0x11011274
     .word 0xb9403795
@@ -40402,8 +40407,8 @@ aot_kitkat_libz_block_0525:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0530
-aot_kitkat_libz_block_0530:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0530)
+RB_AOT_SYM(aot_kitkat_libz_block_0530):
     .word 0xb9402b93
     .word 0x11004274
     .word 0xaa1403e1
@@ -40436,8 +40441,8 @@ aot_kitkat_libz_block_0530:
     .word 0x17ff6a91
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0531
-aot_kitkat_libz_block_0531:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0531)
+RB_AOT_SYM(aot_kitkat_libz_block_0531):
     .word 0xb9403793
     .word 0x7100027f
     .word 0x1a9f17f4
@@ -40462,8 +40467,8 @@ aot_kitkat_libz_block_0531:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0547
-aot_kitkat_libz_block_0547:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0547)
+RB_AOT_SYM(aot_kitkat_libz_block_0547):
     .word 0xb9401b93
     .word 0x11012274
     .word 0xaa1403e1
@@ -40511,11 +40516,11 @@ aot_kitkat_libz_block_0547:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0548
-    add x17, x17, :lo12:aot_kitkat_libz_block_0548
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0548)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0548)
 #else
-    adrp x17, aot_kitkat_libz_block_0548@PAGE
-    add x17, x17, aot_kitkat_libz_block_0548@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0548)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0548)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x529615f3
@@ -40531,8 +40536,8 @@ aot_kitkat_libz_block_0547:
     .word 0x17ff6a3b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0549
-aot_kitkat_libz_block_0549:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0549)
+RB_AOT_SYM(aot_kitkat_libz_block_0549):
     .word 0xb9401b93
     .word 0xb9002b93
     .word 0xb94483fe
@@ -40544,11 +40549,11 @@ aot_kitkat_libz_block_0549:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0550
-    add x17, x17, :lo12:aot_kitkat_libz_block_0550
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0550)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0550)
 #else
-    adrp x17, aot_kitkat_libz_block_0550@PAGE
-    add x17, x17, aot_kitkat_libz_block_0550@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0550)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0550)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x529617f3
@@ -40564,8 +40569,8 @@ aot_kitkat_libz_block_0549:
     .word 0x17ff6a21
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0667
-aot_kitkat_libz_block_0667:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0667)
+RB_AOT_SYM(aot_kitkat_libz_block_0667):
     .word 0x5298ef01
     .word 0x72a34001
     .word 0x97ff67ce
@@ -40590,8 +40595,8 @@ aot_kitkat_libz_block_0667:
     .word 0x17ff6a09
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0668
-aot_kitkat_libz_block_0668:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0668)
+RB_AOT_SYM(aot_kitkat_libz_block_0668):
     .word 0x5287e7f3
     .word 0xb9001b93
     .word 0xd1000b5a
@@ -40604,8 +40609,8 @@ aot_kitkat_libz_block_0668:
     .word 0x17ff69fd
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0590
-aot_kitkat_libz_block_0590:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0590)
+RB_AOT_SYM(aot_kitkat_libz_block_0590):
     .word 0xb9402393
     .word 0x11000674
     .word 0xaa1303e1
@@ -40642,8 +40647,8 @@ aot_kitkat_libz_block_0590:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0591
-aot_kitkat_libz_block_0591:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0591)
+RB_AOT_SYM(aot_kitkat_libz_block_0591):
     .word 0xb9404393
     .word 0xb9001f93
     .word 0xb9402794
@@ -40706,8 +40711,8 @@ aot_kitkat_libz_block_0591:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0594
-aot_kitkat_libz_block_0594:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0594)
+RB_AOT_SYM(aot_kitkat_libz_block_0594):
     .word 0xb9402393
     .word 0xaa1303e1
     .word 0x97ff6744
@@ -40776,8 +40781,8 @@ aot_kitkat_libz_block_0594:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0595
-aot_kitkat_libz_block_0595:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0595)
+RB_AOT_SYM(aot_kitkat_libz_block_0595):
     .word 0xb9402393
     .word 0xb9001b93
     .word 0xb9404f93
@@ -40876,8 +40881,8 @@ aot_kitkat_libz_block_0595:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0702
-aot_kitkat_libz_block_0702:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0702)
+RB_AOT_SYM(aot_kitkat_libz_block_0702):
     .word 0xb9403b93
     .word 0x11001274
     .word 0xaa1403e1
@@ -40916,8 +40921,8 @@ aot_kitkat_libz_block_0702:
     .word 0x17ff68cf
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0756
-aot_kitkat_libz_block_0756:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0756)
+RB_AOT_SYM(aot_kitkat_libz_block_0756):
     .word 0xb9403b93
     .word 0x1103c274
     .word 0xaa1403e1
@@ -40952,8 +40957,8 @@ aot_kitkat_libz_block_0756:
     .word 0x17ff68ad
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0766
-aot_kitkat_libz_block_0766:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0766)
+RB_AOT_SYM(aot_kitkat_libz_block_0766):
     .word 0xb9403b93
     .word 0x1103aa74
     .word 0xb9002394
@@ -40986,8 +40991,8 @@ aot_kitkat_libz_block_0766:
     .word 0x17ff688d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0767
-aot_kitkat_libz_block_0767:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0767)
+RB_AOT_SYM(aot_kitkat_libz_block_0767):
     .word 0xb9403b93
     .word 0x112de274
     .word 0xaa1403e1
@@ -41052,8 +41057,8 @@ aot_kitkat_libz_block_0767:
     .word 0x17ff684d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0809
-aot_kitkat_libz_block_0809:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0809)
+RB_AOT_SYM(aot_kitkat_libz_block_0809):
     .word 0xb9403b93
     .word 0x11002274
     .word 0xaa1403e1
@@ -41270,8 +41275,8 @@ aot_kitkat_libz_block_0809:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0812
-aot_kitkat_libz_block_0812:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0812)
+RB_AOT_SYM(aot_kitkat_libz_block_0812):
     .word 0xb9404793
     .word 0x11004274
     .word 0xaa1403e1
@@ -41360,11 +41365,11 @@ aot_kitkat_libz_block_0812:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0814
-    add x17, x17, :lo12:aot_kitkat_libz_block_0814
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0814)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0814)
 #else
-    adrp x17, aot_kitkat_libz_block_0814@PAGE
-    add x17, x17, aot_kitkat_libz_block_0814@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0814)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0814)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x529ebab3
@@ -41381,8 +41386,8 @@ aot_kitkat_libz_block_0812:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0811
-aot_kitkat_libz_block_0811:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0811)
+RB_AOT_SYM(aot_kitkat_libz_block_0811):
     .word 0xb9403b93
     .word 0x11002274
     .word 0xaa1403e1
@@ -41585,8 +41590,8 @@ aot_kitkat_libz_block_0811:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0817
-aot_kitkat_libz_block_0817:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0817)
+RB_AOT_SYM(aot_kitkat_libz_block_0817):
     .word 0xb9404793
     .word 0x11004274
     .word 0xaa1403e1
@@ -41671,8 +41676,8 @@ aot_kitkat_libz_block_0817:
     .word 0x17ff65ef
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0799
-aot_kitkat_libz_block_0799:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0799)
+RB_AOT_SYM(aot_kitkat_libz_block_0799):
     .word 0xb9402b93
     .word 0x71000274
     .word 0xd53b4213
@@ -41697,8 +41702,8 @@ aot_kitkat_libz_block_0799:
     .word 0x17ff65d7
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0854
-aot_kitkat_libz_block_0854:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0854)
+RB_AOT_SYM(aot_kitkat_libz_block_0854):
     .word 0xd100075a
     .word 0xf100035f
     .word 0x5400004d
@@ -41709,8 +41714,8 @@ aot_kitkat_libz_block_0854:
     .word 0x17ff65cd
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0856
-aot_kitkat_libz_block_0856:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0856)
+RB_AOT_SYM(aot_kitkat_libz_block_0856):
     .word 0xb9404f93
     .word 0x11005274
     .word 0xaa1403e1
@@ -41763,8 +41768,8 @@ aot_kitkat_libz_block_0856:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0901
-aot_kitkat_libz_block_0901:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0901)
+RB_AOT_SYM(aot_kitkat_libz_block_0901):
     .word 0x52802701
     .word 0x72a34021
     .word 0x97ff6346
@@ -41829,8 +41834,8 @@ aot_kitkat_libz_block_0901:
     .word 0x17ff6559
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0902
-aot_kitkat_libz_block_0902:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0902)
+RB_AOT_SYM(aot_kitkat_libz_block_0902):
     .word 0x52802781
     .word 0x72a34021
     .word 0x97ff6306
@@ -41893,8 +41898,8 @@ aot_kitkat_libz_block_0902:
     .word 0x17ff651b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0906
-aot_kitkat_libz_block_0906:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0906)
+RB_AOT_SYM(aot_kitkat_libz_block_0906):
     .word 0x52802801
     .word 0x72a34021
     .word 0x97ff62c8
@@ -41929,8 +41934,8 @@ aot_kitkat_libz_block_0906:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0908
-aot_kitkat_libz_block_0908:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0908)
+RB_AOT_SYM(aot_kitkat_libz_block_0908):
     .word 0xb9401f93
     .word 0x11100274
     .word 0xaa1403e1
@@ -42015,8 +42020,8 @@ aot_kitkat_libz_block_0908:
     .word 0x17ff64a5
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0894
-aot_kitkat_libz_block_0894:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0894)
+RB_AOT_SYM(aot_kitkat_libz_block_0894):
     .word 0xb9404793
     .word 0xb9402b94
     .word 0x1100a275
@@ -42067,8 +42072,8 @@ aot_kitkat_libz_block_0894:
     .word 0x17ff6473
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0014
-aot_kitkat_libz_block_0014:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0014)
+RB_AOT_SYM(aot_kitkat_libz_block_0014):
     .word 0xb9401f93
     .word 0xb9403394
     .word 0x0b140275
@@ -42329,8 +42334,8 @@ aot_kitkat_libz_block_0014:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0015
-aot_kitkat_libz_block_0015:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0015)
+RB_AOT_SYM(aot_kitkat_libz_block_0015):
     .word 0xb9404393
     .word 0xb9405394
     .word 0x9b147e75
@@ -42381,8 +42386,8 @@ aot_kitkat_libz_block_0015:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0019
-aot_kitkat_libz_block_0019:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0019)
+RB_AOT_SYM(aot_kitkat_libz_block_0019):
     .word 0xb9402393
     .word 0x7100027f
     .word 0x1a9f17f4
@@ -42407,8 +42412,8 @@ aot_kitkat_libz_block_0019:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0044
-aot_kitkat_libz_block_0044:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0044)
+RB_AOT_SYM(aot_kitkat_libz_block_0044):
     .word 0xb9404f93
     .word 0x11003274
     .word 0xb9402f95
@@ -42931,8 +42936,8 @@ aot_kitkat_libz_block_0044:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0045
-aot_kitkat_libz_block_0045:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0045)
+RB_AOT_SYM(aot_kitkat_libz_block_0045):
     .word 0xb9404f93
     .word 0xaa1303e1
     .word 0x97ff5eca
@@ -42961,8 +42966,8 @@ aot_kitkat_libz_block_0045:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0053
-aot_kitkat_libz_block_0053:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0053)
+RB_AOT_SYM(aot_kitkat_libz_block_0053):
     .word 0xb9401f93
     .word 0x11000674
     .word 0xaa1303e1
@@ -43019,8 +43024,8 @@ aot_kitkat_libz_block_0053:
     .word 0x17ff60c7
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0068
-aot_kitkat_libz_block_0068:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0068)
+RB_AOT_SYM(aot_kitkat_libz_block_0068):
     .word 0xd100075a
     .word 0xf100035f
     .word 0x5400004d
@@ -43031,8 +43036,8 @@ aot_kitkat_libz_block_0068:
     .word 0x17ff60bd
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0083
-aot_kitkat_libz_block_0083:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0083)
+RB_AOT_SYM(aot_kitkat_libz_block_0083):
     .word 0xd100075a
     .word 0xf100035f
     .word 0x5400004d
@@ -43043,8 +43048,8 @@ aot_kitkat_libz_block_0083:
     .word 0x17ff60b3
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0098
-aot_kitkat_libz_block_0098:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0098)
+RB_AOT_SYM(aot_kitkat_libz_block_0098):
     .word 0xd100075a
     .word 0xf100035f
     .word 0x5400004d
@@ -43055,8 +43060,8 @@ aot_kitkat_libz_block_0098:
     .word 0x17ff60a9
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0109
-aot_kitkat_libz_block_0109:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0109)
+RB_AOT_SYM(aot_kitkat_libz_block_0109):
     .word 0xd100075a
     .word 0xf100035f
     .word 0x5400004d
@@ -43067,8 +43072,8 @@ aot_kitkat_libz_block_0109:
     .word 0x17ff609f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0145
-aot_kitkat_libz_block_0145:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0145)
+RB_AOT_SYM(aot_kitkat_libz_block_0145):
     .word 0xb9403793
     .word 0x528dc190
     .word 0x72a34010
@@ -43093,8 +43098,8 @@ aot_kitkat_libz_block_0145:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0146
-aot_kitkat_libz_block_0146:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0146)
+RB_AOT_SYM(aot_kitkat_libz_block_0146):
     .word 0x52805353
     .word 0xb9003793
     .word 0xb9403393
@@ -43111,8 +43116,8 @@ aot_kitkat_libz_block_0146:
     .word 0x17ff6077
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0160
-aot_kitkat_libz_block_0160:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0160)
+RB_AOT_SYM(aot_kitkat_libz_block_0160):
     .word 0xb9403393
     .word 0x528eda90
     .word 0x72a34010
@@ -43137,8 +43142,8 @@ aot_kitkat_libz_block_0160:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0161
-aot_kitkat_libz_block_0161:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0161)
+RB_AOT_SYM(aot_kitkat_libz_block_0161):
     .word 0x52805353
     .word 0xb9003393
     .word 0xb9403793
@@ -43155,8 +43160,8 @@ aot_kitkat_libz_block_0161:
     .word 0x17ff604f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0171
-aot_kitkat_libz_block_0171:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0171)
+RB_AOT_SYM(aot_kitkat_libz_block_0171):
     .word 0xb9403793
     .word 0x528f0e10
     .word 0x72a34010
@@ -43181,8 +43186,8 @@ aot_kitkat_libz_block_0171:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0172
-aot_kitkat_libz_block_0172:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0172)
+RB_AOT_SYM(aot_kitkat_libz_block_0172):
     .word 0x52805353
     .word 0xb9003793
     .word 0xb9402793
@@ -43199,8 +43204,8 @@ aot_kitkat_libz_block_0172:
     .word 0x17ff6027
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0187
-aot_kitkat_libz_block_0187:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0187)
+RB_AOT_SYM(aot_kitkat_libz_block_0187):
     .word 0xb9402b93
     .word 0x1102b274
     .word 0xaa1403e1
@@ -43229,8 +43234,8 @@ aot_kitkat_libz_block_0187:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0188
-aot_kitkat_libz_block_0188:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0188)
+RB_AOT_SYM(aot_kitkat_libz_block_0188):
     .word 0xb9404793
     .word 0x11003274
     .word 0xaa1403e1
@@ -43265,8 +43270,8 @@ aot_kitkat_libz_block_0188:
     .word 0x17ff5fe9
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0199
-aot_kitkat_libz_block_0199:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0199)
+RB_AOT_SYM(aot_kitkat_libz_block_0199):
     .word 0xb9401b93
     .word 0x7100027f
     .word 0x1a9f17f4
@@ -43291,8 +43296,8 @@ aot_kitkat_libz_block_0199:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0207
-aot_kitkat_libz_block_0207:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0207)
+RB_AOT_SYM(aot_kitkat_libz_block_0207):
     .word 0xb9402b93
     .word 0x1102b274
     .word 0xaa1403e1
@@ -43321,8 +43326,8 @@ aot_kitkat_libz_block_0207:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0208
-aot_kitkat_libz_block_0208:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0208)
+RB_AOT_SYM(aot_kitkat_libz_block_0208):
     .word 0xb9403b93
     .word 0x11003274
     .word 0xaa1403e1
@@ -43357,8 +43362,8 @@ aot_kitkat_libz_block_0208:
     .word 0x17ff5f93
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0244
-aot_kitkat_libz_block_0244:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0244)
+RB_AOT_SYM(aot_kitkat_libz_block_0244):
     .word 0xb9404393
     .word 0x11030274
     .word 0xaa1403e1
@@ -43437,8 +43442,8 @@ aot_kitkat_libz_block_0244:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0260
-aot_kitkat_libz_block_0260:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0260)
+RB_AOT_SYM(aot_kitkat_libz_block_0260):
     .word 0xb9404393
     .word 0x11022274
     .word 0xaa1403e1
@@ -43629,8 +43634,8 @@ aot_kitkat_libz_block_0260:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0261
-aot_kitkat_libz_block_0261:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0261)
+RB_AOT_SYM(aot_kitkat_libz_block_0261):
     .word 0xb9404393
     .word 0x1102f274
     .word 0xaa1403e1
@@ -43657,8 +43662,8 @@ aot_kitkat_libz_block_0261:
     .word 0x17ff5e6d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0253
-aot_kitkat_libz_block_0253:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0253)
+RB_AOT_SYM(aot_kitkat_libz_block_0253):
     .word 0xb9401b93
     .word 0x71001674
     .word 0xd53b4214
@@ -43695,8 +43700,8 @@ aot_kitkat_libz_block_0253:
     .word 0x17ff5e49
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0231
-aot_kitkat_libz_block_0231:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0231)
+RB_AOT_SYM(aot_kitkat_libz_block_0231):
     .word 0xb9404393
     .word 0x1102f274
     .word 0xaa1403e1
@@ -43793,8 +43798,8 @@ aot_kitkat_libz_block_0231:
     .word 0x17ff5de9
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0250
-aot_kitkat_libz_block_0250:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0250)
+RB_AOT_SYM(aot_kitkat_libz_block_0250):
     .word 0xb9404393
     .word 0x1102b274
     .word 0xaa1403e1
@@ -43823,8 +43828,8 @@ aot_kitkat_libz_block_0250:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0271
-aot_kitkat_libz_block_0271:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0271)
+RB_AOT_SYM(aot_kitkat_libz_block_0271):
     .word 0xb9401b93
     .word 0x1100f274
     .word 0xb9402793
@@ -43875,8 +43880,8 @@ aot_kitkat_libz_block_0271:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0274
-aot_kitkat_libz_block_0274:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0274)
+RB_AOT_SYM(aot_kitkat_libz_block_0274):
     .word 0xb9403793
     .word 0x5100ae74
     .word 0xb9003794
@@ -43903,8 +43908,8 @@ aot_kitkat_libz_block_0274:
     .word 0x17ff5d81
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0286
-aot_kitkat_libz_block_0286:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0286)
+RB_AOT_SYM(aot_kitkat_libz_block_0286):
     .word 0xb9402b93
     .word 0xb9001b93
     .word 0xb9404f93
@@ -43975,8 +43980,8 @@ aot_kitkat_libz_block_0286:
     .word 0x17ff5d3b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0346
-aot_kitkat_libz_block_0346:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0346)
+RB_AOT_SYM(aot_kitkat_libz_block_0346):
     .word 0xb9402b93
     .word 0x11017274
     .word 0xaa1403e1
@@ -44011,8 +44016,8 @@ aot_kitkat_libz_block_0346:
     .word 0x17ff5d19
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0347
-aot_kitkat_libz_block_0347:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0347)
+RB_AOT_SYM(aot_kitkat_libz_block_0347):
     .word 0xb9402b93
     .word 0xb9001b93
     .word 0xb94483fe
@@ -44024,11 +44029,11 @@ aot_kitkat_libz_block_0347:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0348
-    add x17, x17, :lo12:aot_kitkat_libz_block_0348
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0348)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0348)
 #else
-    adrp x17, aot_kitkat_libz_block_0348@PAGE
-    add x17, x17, aot_kitkat_libz_block_0348@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0348)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0348)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x52945333
@@ -44044,8 +44049,8 @@ aot_kitkat_libz_block_0347:
     .word 0x17ff5cff
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0368
-aot_kitkat_libz_block_0368:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0368)
+RB_AOT_SYM(aot_kitkat_libz_block_0368):
     .word 0x52800033
     .word 0x6a13027f
     .word 0xd53b4213
@@ -44178,8 +44183,8 @@ aot_kitkat_libz_block_0368:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0351
-aot_kitkat_libz_block_0351:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0351)
+RB_AOT_SYM(aot_kitkat_libz_block_0351):
     .word 0xb9402b93
     .word 0xb9001b93
     .word 0xb94483fe
@@ -44191,11 +44196,11 @@ aot_kitkat_libz_block_0351:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0352
-    add x17, x17, :lo12:aot_kitkat_libz_block_0352
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0352)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0352)
 #else
-    adrp x17, aot_kitkat_libz_block_0352@PAGE
-    add x17, x17, aot_kitkat_libz_block_0352@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0352)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0352)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x529456f3
@@ -44211,8 +44216,8 @@ aot_kitkat_libz_block_0351:
     .word 0x17ff5c61
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0361
-aot_kitkat_libz_block_0361:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0361)
+RB_AOT_SYM(aot_kitkat_libz_block_0361):
     .word 0xb9402b93
     .word 0x11006274
     .word 0xaa1403e1
@@ -44251,8 +44256,8 @@ aot_kitkat_libz_block_0361:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0415
-aot_kitkat_libz_block_0415:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0415)
+RB_AOT_SYM(aot_kitkat_libz_block_0415):
     .word 0xb9402b93
     .word 0x1100a274
     .word 0xaa1403e1
@@ -44289,8 +44294,8 @@ aot_kitkat_libz_block_0415:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0430
-aot_kitkat_libz_block_0430:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0430)
+RB_AOT_SYM(aot_kitkat_libz_block_0430):
     .word 0xb9402b93
     .word 0xb9001b93
     .word 0x52800014
@@ -44325,11 +44330,11 @@ aot_kitkat_libz_block_0430:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0432
-    add x17, x17, :lo12:aot_kitkat_libz_block_0432
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0432)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0432)
 #else
-    adrp x17, aot_kitkat_libz_block_0432@PAGE
-    add x17, x17, aot_kitkat_libz_block_0432@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0432)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0432)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x52951eb3
@@ -44346,8 +44351,8 @@ aot_kitkat_libz_block_0430:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0434
-aot_kitkat_libz_block_0434:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0434)
+RB_AOT_SYM(aot_kitkat_libz_block_0434):
     .word 0xb9401b93
     .word 0xb9002f93
     .word 0xb9402b93
@@ -44361,11 +44366,11 @@ aot_kitkat_libz_block_0434:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0435
-    add x17, x17, :lo12:aot_kitkat_libz_block_0435
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0435)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0435)
 #else
-    adrp x17, aot_kitkat_libz_block_0435@PAGE
-    add x17, x17, aot_kitkat_libz_block_0435@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0435)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0435)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x52952133
@@ -44383,8 +44388,8 @@ aot_kitkat_libz_block_0434:
     .word 0x17ff5bc7
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0448
-aot_kitkat_libz_block_0448:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0448)
+RB_AOT_SYM(aot_kitkat_libz_block_0448):
     .word 0xb9402b93
     .word 0x1101a274
     .word 0xaa1403e1
@@ -44441,8 +44446,8 @@ aot_kitkat_libz_block_0448:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0466
-aot_kitkat_libz_block_0466:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0466)
+RB_AOT_SYM(aot_kitkat_libz_block_0466):
     .word 0xb9401b93
     .word 0x31000674
     .word 0xb9001b94
@@ -44469,8 +44474,8 @@ aot_kitkat_libz_block_0466:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0468
-aot_kitkat_libz_block_0468:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0468)
+RB_AOT_SYM(aot_kitkat_libz_block_0468):
     .word 0xb9401b93
     .word 0x12800010
     .word 0x6b100274
@@ -44487,8 +44492,8 @@ aot_kitkat_libz_block_0468:
     .word 0x17ff5b65
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0482
-aot_kitkat_libz_block_0482:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0482)
+RB_AOT_SYM(aot_kitkat_libz_block_0482):
     .word 0xb9401b93
     .word 0xb9001f93
     .word 0x12800014
@@ -44507,8 +44512,8 @@ aot_kitkat_libz_block_0482:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0505
-aot_kitkat_libz_block_0505:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0505)
+RB_AOT_SYM(aot_kitkat_libz_block_0505):
     .word 0xb9401b93
     .word 0x7100027f
     .word 0x1a9f17f4
@@ -44533,8 +44538,8 @@ aot_kitkat_libz_block_0505:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0532
-aot_kitkat_libz_block_0532:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0532)
+RB_AOT_SYM(aot_kitkat_libz_block_0532):
     .word 0xb9402b93
     .word 0x11006274
     .word 0xaa1403e1
@@ -44598,11 +44603,11 @@ aot_kitkat_libz_block_0532:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0534
-    add x17, x17, :lo12:aot_kitkat_libz_block_0534
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0534)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0534)
 #else
-    adrp x17, aot_kitkat_libz_block_0534@PAGE
-    add x17, x17, aot_kitkat_libz_block_0534@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0534)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0534)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x5295fcb3
@@ -44620,8 +44625,8 @@ aot_kitkat_libz_block_0532:
     .word 0x17ff5aeb
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0533
-aot_kitkat_libz_block_0533:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0533)
+RB_AOT_SYM(aot_kitkat_libz_block_0533):
     .word 0xb9403393
     .word 0xb9001b93
     .word 0xb9402f93
@@ -44635,11 +44640,11 @@ aot_kitkat_libz_block_0533:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0534
-    add x17, x17, :lo12:aot_kitkat_libz_block_0534
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0534)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0534)
 #else
-    adrp x17, aot_kitkat_libz_block_0534@PAGE
-    add x17, x17, aot_kitkat_libz_block_0534@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0534)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0534)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x5295fcb3
@@ -44657,8 +44662,8 @@ aot_kitkat_libz_block_0533:
     .word 0x17ff5acd
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0548
-aot_kitkat_libz_block_0548:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0548)
+RB_AOT_SYM(aot_kitkat_libz_block_0548):
     .word 0xb9401b93
     .word 0xb9402f94
     .word 0xb9001f94
@@ -44689,8 +44694,8 @@ aot_kitkat_libz_block_0548:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0550
-aot_kitkat_libz_block_0550:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0550)
+RB_AOT_SYM(aot_kitkat_libz_block_0550):
     .word 0xb9402b93
     .word 0x11014274
     .word 0xaa1403e1
@@ -44771,8 +44776,8 @@ aot_kitkat_libz_block_0550:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0670
-aot_kitkat_libz_block_0670:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0670)
+RB_AOT_SYM(aot_kitkat_libz_block_0670):
     .word 0xb9404f93
     .word 0x11028274
     .word 0xaa1403e1
@@ -45053,8 +45058,8 @@ aot_kitkat_libz_block_0670:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0671
-aot_kitkat_libz_block_0671:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0671)
+RB_AOT_SYM(aot_kitkat_libz_block_0671):
     .word 0xb9404f93
     .word 0x11029274
     .word 0xaa1403e1
@@ -45313,8 +45318,8 @@ aot_kitkat_libz_block_0671:
     .word 0x17ff5845
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0592
-aot_kitkat_libz_block_0592:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0592)
+RB_AOT_SYM(aot_kitkat_libz_block_0592):
     .word 0xb9402793
     .word 0xb9401b94
     .word 0x4b140275
@@ -45375,8 +45380,8 @@ aot_kitkat_libz_block_0592:
     .word 0x17ff5809
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0596
-aot_kitkat_libz_block_0596:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0596)
+RB_AOT_SYM(aot_kitkat_libz_block_0596):
     .word 0xb9404f93
     .word 0x11026274
     .word 0xaa1403e1
@@ -45473,8 +45478,8 @@ aot_kitkat_libz_block_0596:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0597
-aot_kitkat_libz_block_0597:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0597)
+RB_AOT_SYM(aot_kitkat_libz_block_0597):
     .word 0xb9403793
     .word 0x53071e75
     .word 0x53030ab5
@@ -45507,8 +45512,8 @@ aot_kitkat_libz_block_0597:
     .word 0x17ff5789
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0599
-aot_kitkat_libz_block_0599:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0599)
+RB_AOT_SYM(aot_kitkat_libz_block_0599):
     .word 0xb9403393
     .word 0x11000a74
     .word 0xaa1403e1
@@ -45561,8 +45566,8 @@ aot_kitkat_libz_block_0599:
     .word 0x17ff5755
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0703
-aot_kitkat_libz_block_0703:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0703)
+RB_AOT_SYM(aot_kitkat_libz_block_0703):
     .word 0xb9401b93
     .word 0x11001274
     .word 0xaa1403e1
@@ -45597,8 +45602,8 @@ aot_kitkat_libz_block_0703:
     .word 0x17ff5733
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0757
-aot_kitkat_libz_block_0757:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0757)
+RB_AOT_SYM(aot_kitkat_libz_block_0757):
     .word 0xb9403b93
     .word 0x1103d274
     .word 0xaa1403e1
@@ -45633,8 +45638,8 @@ aot_kitkat_libz_block_0757:
     .word 0x17ff5711
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0768
-aot_kitkat_libz_block_0768:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0768)
+RB_AOT_SYM(aot_kitkat_libz_block_0768):
     .word 0xb9403b93
     .word 0x11277a74
     .word 0xb9001b94
@@ -45667,8 +45672,8 @@ aot_kitkat_libz_block_0768:
     .word 0x17ff56f1
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0769
-aot_kitkat_libz_block_0769:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0769)
+RB_AOT_SYM(aot_kitkat_libz_block_0769):
     .word 0xb9403b93
     .word 0x112e0274
     .word 0xb9001f94
@@ -45682,11 +45687,11 @@ aot_kitkat_libz_block_0769:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0770
-    add x17, x17, :lo12:aot_kitkat_libz_block_0770
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0770)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0770)
 #else
-    adrp x17, aot_kitkat_libz_block_0770@PAGE
-    add x17, x17, aot_kitkat_libz_block_0770@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0770)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0770)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x529e7f73
@@ -45702,8 +45707,8 @@ aot_kitkat_libz_block_0769:
     .word 0x17ff56d5
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0813
-aot_kitkat_libz_block_0813:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0813)
+RB_AOT_SYM(aot_kitkat_libz_block_0813):
     .word 0x529f1201
     .word 0x72a34001
     .word 0x97ff5482
@@ -45760,11 +45765,11 @@ aot_kitkat_libz_block_0813:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0814
-    add x17, x17, :lo12:aot_kitkat_libz_block_0814
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0814)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0814)
 #else
-    adrp x17, aot_kitkat_libz_block_0814@PAGE
-    add x17, x17, aot_kitkat_libz_block_0814@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0814)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0814)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x529ebab3
@@ -45781,8 +45786,8 @@ aot_kitkat_libz_block_0813:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0814
-aot_kitkat_libz_block_0814:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0814)
+RB_AOT_SYM(aot_kitkat_libz_block_0814):
     .word 0xb9403b93
     .word 0xb9001b93
     .word 0xb94483fe
@@ -45794,11 +45799,11 @@ aot_kitkat_libz_block_0814:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0815
-    add x17, x17, :lo12:aot_kitkat_libz_block_0815
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0815)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0815)
 #else
-    adrp x17, aot_kitkat_libz_block_0815@PAGE
-    add x17, x17, aot_kitkat_libz_block_0815@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0815)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0815)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x529ebb73
@@ -45814,8 +45819,8 @@ aot_kitkat_libz_block_0814:
     .word 0x17ff5673
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0818
-aot_kitkat_libz_block_0818:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0818)
+RB_AOT_SYM(aot_kitkat_libz_block_0818):
     .word 0xb9403b93
     .word 0x112db274
     .word 0xaa1403e1
@@ -45880,8 +45885,8 @@ aot_kitkat_libz_block_0818:
     .word 0x17ff5633
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0819
-aot_kitkat_libz_block_0819:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0819)
+RB_AOT_SYM(aot_kitkat_libz_block_0819):
     .word 0xb9403b93
     .word 0x11002274
     .word 0xaa1403e1
@@ -46078,8 +46083,8 @@ aot_kitkat_libz_block_0819:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0821
-aot_kitkat_libz_block_0821:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0821)
+RB_AOT_SYM(aot_kitkat_libz_block_0821):
     .word 0xb9402793
     .word 0x53001e74
     .word 0xb9403795
@@ -46128,8 +46133,8 @@ aot_kitkat_libz_block_0821:
     .word 0x17ff553f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0800
-aot_kitkat_libz_block_0800:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0800)
+RB_AOT_SYM(aot_kitkat_libz_block_0800):
     .word 0xb9404793
     .word 0x11005274
     .word 0xaa1403e1
@@ -46166,8 +46171,8 @@ aot_kitkat_libz_block_0800:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0835
-aot_kitkat_libz_block_0835:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0835)
+RB_AOT_SYM(aot_kitkat_libz_block_0835):
     .word 0xb9404f93
     .word 0x11003274
     .word 0x1100c275
@@ -46290,8 +46295,8 @@ aot_kitkat_libz_block_0835:
     .word 0x17ff54a1
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0857
-aot_kitkat_libz_block_0857:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0857)
+RB_AOT_SYM(aot_kitkat_libz_block_0857):
     .word 0xb9401f93
     .word 0x11001274
     .word 0xb9402f95
@@ -46364,8 +46369,8 @@ aot_kitkat_libz_block_0857:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0903
-aot_kitkat_libz_block_0903:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0903)
+RB_AOT_SYM(aot_kitkat_libz_block_0903):
     .word 0xb9401b93
     .word 0x11002274
     .word 0xaa1403e1
@@ -46530,8 +46535,8 @@ aot_kitkat_libz_block_0903:
     .word 0x17ff53b5
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0904
-aot_kitkat_libz_block_0904:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0904)
+RB_AOT_SYM(aot_kitkat_libz_block_0904):
     .word 0xb9403793
     .word 0xb9402f94
     .word 0x2a140275
@@ -46598,8 +46603,8 @@ aot_kitkat_libz_block_0904:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0013
-aot_kitkat_libz_block_0013:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0013)
+RB_AOT_SYM(aot_kitkat_libz_block_0013):
     .word 0xb9404b93
     .word 0xb9402394
     .word 0x4b130295
@@ -46860,8 +46865,8 @@ aot_kitkat_libz_block_0013:
     .word 0x17ff526f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0016
-aot_kitkat_libz_block_0016:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0016)
+RB_AOT_SYM(aot_kitkat_libz_block_0016):
     .word 0xb9402393
     .word 0x71000274
     .word 0xd53b4213
@@ -46886,8 +46891,8 @@ aot_kitkat_libz_block_0016:
     .word 0x17ff5257
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0020
-aot_kitkat_libz_block_0020:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0020)
+RB_AOT_SYM(aot_kitkat_libz_block_0020):
     .word 0xb9401f93
     .word 0x11000674
     .word 0xaa1303e1
@@ -46932,8 +46937,8 @@ aot_kitkat_libz_block_0020:
     .word 0x17ff522b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0021
-aot_kitkat_libz_block_0021:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0021)
+RB_AOT_SYM(aot_kitkat_libz_block_0021):
     .word 0xb9404393
     .word 0x52900e35
     .word 0x72b000f5
@@ -47090,8 +47095,8 @@ aot_kitkat_libz_block_0021:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0047
-aot_kitkat_libz_block_0047:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0047)
+RB_AOT_SYM(aot_kitkat_libz_block_0047):
     .word 0xb9403393
     .word 0xaa1303e1
     .word 0x97ff4f3e
@@ -47502,8 +47507,8 @@ aot_kitkat_libz_block_0047:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0189
-aot_kitkat_libz_block_0189:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0189)
+RB_AOT_SYM(aot_kitkat_libz_block_0189):
     .word 0xb9402b93
     .word 0x1102b274
     .word 0xaa1403e1
@@ -47532,8 +47537,8 @@ aot_kitkat_libz_block_0189:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0190
-aot_kitkat_libz_block_0190:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0190)
+RB_AOT_SYM(aot_kitkat_libz_block_0190):
     .word 0x52800033
     .word 0xb9001b93
     .word 0x52800033
@@ -47666,8 +47671,8 @@ aot_kitkat_libz_block_0190:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0200
-aot_kitkat_libz_block_0200:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0200)
+RB_AOT_SYM(aot_kitkat_libz_block_0200):
     .word 0xd100075a
     .word 0xf100035f
     .word 0x5400004d
@@ -47678,8 +47683,8 @@ aot_kitkat_libz_block_0200:
     .word 0x17ff4f4b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0209
-aot_kitkat_libz_block_0209:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0209)
+RB_AOT_SYM(aot_kitkat_libz_block_0209):
     .word 0xb9402b93
     .word 0x1102b274
     .word 0xaa1403e1
@@ -47708,8 +47713,8 @@ aot_kitkat_libz_block_0209:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0210
-aot_kitkat_libz_block_0210:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0210)
+RB_AOT_SYM(aot_kitkat_libz_block_0210):
     .word 0x52800033
     .word 0xb9001b93
     .word 0x52800033
@@ -47842,8 +47847,8 @@ aot_kitkat_libz_block_0210:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0242
-aot_kitkat_libz_block_0242:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0242)
+RB_AOT_SYM(aot_kitkat_libz_block_0242):
     .word 0xb9404393
     .word 0x11032274
     .word 0xaa1403e1
@@ -47880,8 +47885,8 @@ aot_kitkat_libz_block_0242:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0254
-aot_kitkat_libz_block_0254:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0254)
+RB_AOT_SYM(aot_kitkat_libz_block_0254):
     .word 0xb9404393
     .word 0x11036274
     .word 0xaa1403e1
@@ -47918,8 +47923,8 @@ aot_kitkat_libz_block_0254:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0276
-aot_kitkat_libz_block_0276:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0276)
+RB_AOT_SYM(aot_kitkat_libz_block_0276):
     .word 0xb9402f93
     .word 0x71000274
     .word 0xd53b4213
@@ -47936,8 +47941,8 @@ aot_kitkat_libz_block_0276:
     .word 0x17ff4e53
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0272
-aot_kitkat_libz_block_0272:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0272)
+RB_AOT_SYM(aot_kitkat_libz_block_0272):
     .word 0xb9402393
     .word 0x11000674
     .word 0xaa1303e1
@@ -47974,8 +47979,8 @@ aot_kitkat_libz_block_0272:
     .word 0x17ff4e2f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0275
-aot_kitkat_libz_block_0275:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0275)
+RB_AOT_SYM(aot_kitkat_libz_block_0275):
     .word 0xb9403793
     .word 0x52938310
     .word 0x72a34010
@@ -48000,8 +48005,8 @@ aot_kitkat_libz_block_0275:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0348
-aot_kitkat_libz_block_0348:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0348)
+RB_AOT_SYM(aot_kitkat_libz_block_0348):
     .word 0xb9401b93
     .word 0x31000674
     .word 0xb9001b94
@@ -48028,8 +48033,8 @@ aot_kitkat_libz_block_0348:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0352
-aot_kitkat_libz_block_0352:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0352)
+RB_AOT_SYM(aot_kitkat_libz_block_0352):
     .word 0xb9401b93
     .word 0x31000674
     .word 0xb9001b94
@@ -48056,8 +48061,8 @@ aot_kitkat_libz_block_0352:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0362
-aot_kitkat_libz_block_0362:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0362)
+RB_AOT_SYM(aot_kitkat_libz_block_0362):
     .word 0xb9401b93
     .word 0x71000674
     .word 0xd53b4213
@@ -48082,8 +48087,8 @@ aot_kitkat_libz_block_0362:
     .word 0x17ff4dcb
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0416
-aot_kitkat_libz_block_0416:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0416)
+RB_AOT_SYM(aot_kitkat_libz_block_0416):
     .word 0xb9402b93
     .word 0x11009274
     .word 0xaa1403e1
@@ -48128,11 +48133,11 @@ aot_kitkat_libz_block_0416:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0417
-    add x17, x17, :lo12:aot_kitkat_libz_block_0417
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0417)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0417)
 #else
-    adrp x17, aot_kitkat_libz_block_0417@PAGE
-    add x17, x17, aot_kitkat_libz_block_0417@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0417)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0417)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x5294ff33
@@ -48151,8 +48156,8 @@ aot_kitkat_libz_block_0416:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0422
-aot_kitkat_libz_block_0422:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0422)
+RB_AOT_SYM(aot_kitkat_libz_block_0422):
     .word 0x52800013
     .word 0xb9002393
     .word 0x52800033
@@ -48277,8 +48282,8 @@ aot_kitkat_libz_block_0422:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0435
-aot_kitkat_libz_block_0435:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0435)
+RB_AOT_SYM(aot_kitkat_libz_block_0435):
     .word 0xb9403393
     .word 0xb9001b93
     .word 0x31001674
@@ -48295,8 +48300,8 @@ aot_kitkat_libz_block_0435:
     .word 0x17ff4d01
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0506
-aot_kitkat_libz_block_0506:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0506)
+RB_AOT_SYM(aot_kitkat_libz_block_0506):
     .word 0xb9402b93
     .word 0x11009274
     .word 0xaa1403e1
@@ -48318,11 +48323,11 @@ aot_kitkat_libz_block_0506:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0507
-    add x17, x17, :lo12:aot_kitkat_libz_block_0507
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0507)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0507)
 #else
-    adrp x17, aot_kitkat_libz_block_0507@PAGE
-    add x17, x17, aot_kitkat_libz_block_0507@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0507)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0507)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x5295db33
@@ -48340,8 +48345,8 @@ aot_kitkat_libz_block_0506:
     .word 0x17ff4cdb
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0512
-aot_kitkat_libz_block_0512:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0512)
+RB_AOT_SYM(aot_kitkat_libz_block_0512):
     .word 0xb9402b93
     .word 0x11007274
     .word 0xaa1403e1
@@ -48416,8 +48421,8 @@ aot_kitkat_libz_block_0512:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0534
-aot_kitkat_libz_block_0534:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0534)
+RB_AOT_SYM(aot_kitkat_libz_block_0534):
     .word 0xb9401b93
     .word 0x31000a74
     .word 0xb9001f94
@@ -48444,8 +48449,8 @@ aot_kitkat_libz_block_0534:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0551
-aot_kitkat_libz_block_0551:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0551)
+RB_AOT_SYM(aot_kitkat_libz_block_0551):
     .word 0xb9401b93
     .word 0x11014274
     .word 0xaa1403e1
@@ -48526,8 +48531,8 @@ aot_kitkat_libz_block_0551:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0598
-aot_kitkat_libz_block_0598:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0598)
+RB_AOT_SYM(aot_kitkat_libz_block_0598):
     .word 0xb9403393
     .word 0x11000a74
     .word 0xaa1403e1
@@ -48622,8 +48627,8 @@ aot_kitkat_libz_block_0598:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0669
-aot_kitkat_libz_block_0669:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0669)
+RB_AOT_SYM(aot_kitkat_libz_block_0669):
     .word 0x5298ee81
     .word 0x72a34001
     .word 0x97ff4976
@@ -48922,8 +48927,8 @@ aot_kitkat_libz_block_0669:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0600
-aot_kitkat_libz_block_0600:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0600)
+RB_AOT_SYM(aot_kitkat_libz_block_0600):
     .word 0xb9401b93
     .word 0x11000674
     .word 0xaa1303e1
@@ -48986,8 +48991,8 @@ aot_kitkat_libz_block_0600:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0602
-aot_kitkat_libz_block_0602:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0602)
+RB_AOT_SYM(aot_kitkat_libz_block_0602):
     .word 0xb9404f93
     .word 0x11021274
     .word 0xb9401b95
@@ -49060,8 +49065,8 @@ aot_kitkat_libz_block_0602:
     .word 0x17ff4a19
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0704
-aot_kitkat_libz_block_0704:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0704)
+RB_AOT_SYM(aot_kitkat_libz_block_0704):
     .word 0xb9403b93
     .word 0x11010274
     .word 0xaa1403e1
@@ -49098,8 +49103,8 @@ aot_kitkat_libz_block_0704:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0708
-aot_kitkat_libz_block_0708:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0708)
+RB_AOT_SYM(aot_kitkat_libz_block_0708):
     .word 0x5287ea73
     .word 0xb9002793
     .word 0xb9401f93
@@ -49128,8 +49133,8 @@ aot_kitkat_libz_block_0708:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0758
-aot_kitkat_libz_block_0758:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0758)
+RB_AOT_SYM(aot_kitkat_libz_block_0758):
     .word 0xb9403b93
     .word 0x1103e274
     .word 0xaa1403e1
@@ -49164,8 +49169,8 @@ aot_kitkat_libz_block_0758:
     .word 0x17ff49b7
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0770
-aot_kitkat_libz_block_0770:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0770)
+RB_AOT_SYM(aot_kitkat_libz_block_0770):
     .word 0xb9403b93
     .word 0x112c2a74
     .word 0xaa1403e1
@@ -49200,8 +49205,8 @@ aot_kitkat_libz_block_0770:
     .word 0x17ff4995
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0815
-aot_kitkat_libz_block_0815:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0815)
+RB_AOT_SYM(aot_kitkat_libz_block_0815):
     .word 0xb9402b93
     .word 0x71000274
     .word 0xd53b4213
@@ -49226,8 +49231,8 @@ aot_kitkat_libz_block_0815:
     .word 0x17ff497d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0820
-aot_kitkat_libz_block_0820:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0820)
+RB_AOT_SYM(aot_kitkat_libz_block_0820):
     .word 0xb9402793
     .word 0x53001e74
     .word 0xb9403f95
@@ -49254,8 +49259,8 @@ aot_kitkat_libz_block_0820:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0822
-aot_kitkat_libz_block_0822:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0822)
+RB_AOT_SYM(aot_kitkat_libz_block_0822):
     .word 0xb9403b93
     .word 0x11002274
     .word 0xaa1403e1
@@ -49456,8 +49461,8 @@ aot_kitkat_libz_block_0822:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0801
-aot_kitkat_libz_block_0801:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0801)
+RB_AOT_SYM(aot_kitkat_libz_block_0801):
     .word 0xb9403b93
     .word 0x11002274
     .word 0xaa1403e1
@@ -49548,8 +49553,8 @@ aot_kitkat_libz_block_0801:
     .word 0x17ff4841
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0802
-aot_kitkat_libz_block_0802:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0802)
+RB_AOT_SYM(aot_kitkat_libz_block_0802):
     .word 0xb9401b93
     .word 0x71000674
     .word 0xd53b4213
@@ -49574,8 +49579,8 @@ aot_kitkat_libz_block_0802:
     .word 0x17ff4829
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0858
-aot_kitkat_libz_block_0858:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0858)
+RB_AOT_SYM(aot_kitkat_libz_block_0858):
     .word 0xb9404f93
     .word 0x11005274
     .word 0xaa1403e1
@@ -49606,8 +49611,8 @@ aot_kitkat_libz_block_0858:
     .word 0x17ff480b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0875
-aot_kitkat_libz_block_0875:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0875)
+RB_AOT_SYM(aot_kitkat_libz_block_0875):
     .word 0xb9404f93
     .word 0x11005274
     .word 0xaa1403e1
@@ -49648,8 +49653,8 @@ aot_kitkat_libz_block_0875:
     .word 0x17ff47e3
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0905
-aot_kitkat_libz_block_0905:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0905)
+RB_AOT_SYM(aot_kitkat_libz_block_0905):
     .word 0xb9404793
     .word 0xb9402f94
     .word 0x11009275
@@ -49710,8 +49715,8 @@ aot_kitkat_libz_block_0905:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0017
-aot_kitkat_libz_block_0017:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0017)
+RB_AOT_SYM(aot_kitkat_libz_block_0017):
     .word 0xb9402393
     .word 0x71004274
     .word 0xd53b4213
@@ -49736,8 +49741,8 @@ aot_kitkat_libz_block_0017:
     .word 0x17ff478f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0022
-aot_kitkat_libz_block_0022:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0022)
+RB_AOT_SYM(aot_kitkat_libz_block_0022):
     .word 0xb9404393
     .word 0x53103e74
     .word 0xb9404793
@@ -49866,8 +49871,8 @@ aot_kitkat_libz_block_0022:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0255
-aot_kitkat_libz_block_0255:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0255)
+RB_AOT_SYM(aot_kitkat_libz_block_0255):
     .word 0x52800053
     .word 0xb9001b93
     .word 0x52800053
@@ -49900,8 +49905,8 @@ aot_kitkat_libz_block_0255:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0256
-aot_kitkat_libz_block_0256:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0256)
+RB_AOT_SYM(aot_kitkat_libz_block_0256):
     .word 0xb9401b93
     .word 0x71000e74
     .word 0xd53b4213
@@ -49926,8 +49931,8 @@ aot_kitkat_libz_block_0256:
     .word 0x17ff46d7
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0353
-aot_kitkat_libz_block_0353:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0353)
+RB_AOT_SYM(aot_kitkat_libz_block_0353):
     .word 0xb9402f93
     .word 0x71000274
     .word 0xd53b4213
@@ -49952,8 +49957,8 @@ aot_kitkat_libz_block_0353:
     .word 0x17ff46bf
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0363
-aot_kitkat_libz_block_0363:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0363)
+RB_AOT_SYM(aot_kitkat_libz_block_0363):
     .word 0x52800013
     .word 0xb9003793
     .word 0xb9402b93
@@ -49990,8 +49995,8 @@ aot_kitkat_libz_block_0363:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0364
-aot_kitkat_libz_block_0364:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0364)
+RB_AOT_SYM(aot_kitkat_libz_block_0364):
     .word 0xb9402b93
     .word 0xb9001b93
     .word 0xb9403394
@@ -50018,11 +50023,11 @@ aot_kitkat_libz_block_0364:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0365
-    add x17, x17, :lo12:aot_kitkat_libz_block_0365
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0365)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0365)
 #else
-    adrp x17, aot_kitkat_libz_block_0365@PAGE
-    add x17, x17, aot_kitkat_libz_block_0365@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0365)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0365)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x52946773
@@ -50039,8 +50044,8 @@ aot_kitkat_libz_block_0364:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0417
-aot_kitkat_libz_block_0417:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0417)
+RB_AOT_SYM(aot_kitkat_libz_block_0417):
     .word 0x52800013
     .word 0xb9002393
     .word 0x52800013
@@ -50179,8 +50184,8 @@ aot_kitkat_libz_block_0417:
     .word 0x17ff45e7
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0507
-aot_kitkat_libz_block_0507:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0507)
+RB_AOT_SYM(aot_kitkat_libz_block_0507):
     .word 0xb9402b93
     .word 0x11008274
     .word 0xaa1403e1
@@ -50203,8 +50208,8 @@ aot_kitkat_libz_block_0507:
     .word 0x17ff45d1
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0501
-aot_kitkat_libz_block_0501:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0501)
+RB_AOT_SYM(aot_kitkat_libz_block_0501):
     .word 0xb9404f93
     .word 0x11004274
     .word 0xb9004f94
@@ -50273,8 +50278,8 @@ aot_kitkat_libz_block_0501:
     .word 0x17ff458d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0513
-aot_kitkat_libz_block_0513:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0513)
+RB_AOT_SYM(aot_kitkat_libz_block_0513):
     .word 0xb9402b93
     .word 0x11009274
     .word 0xaa1403e1
@@ -50323,8 +50328,8 @@ aot_kitkat_libz_block_0513:
     .word 0x17ff455d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0535
-aot_kitkat_libz_block_0535:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0535)
+RB_AOT_SYM(aot_kitkat_libz_block_0535):
     .word 0xb9402b93
     .word 0x1101a274
     .word 0xaa1403e1
@@ -50363,8 +50368,8 @@ aot_kitkat_libz_block_0535:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0538
-aot_kitkat_libz_block_0538:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0538)
+RB_AOT_SYM(aot_kitkat_libz_block_0538):
     .word 0x52960781
     .word 0x72a34001
     .word 0x97ff42e4
@@ -50392,11 +50397,11 @@ aot_kitkat_libz_block_0538:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0539
-    add x17, x17, :lo12:aot_kitkat_libz_block_0539
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0539)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0539)
 #else
-    adrp x17, aot_kitkat_libz_block_0539@PAGE
-    add x17, x17, aot_kitkat_libz_block_0539@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0539)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0539)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x52960673
@@ -50412,8 +50417,8 @@ aot_kitkat_libz_block_0538:
     .word 0x17ff450d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0601
-aot_kitkat_libz_block_0601:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0601)
+RB_AOT_SYM(aot_kitkat_libz_block_0601):
     .word 0xb9401b93
     .word 0x11000674
     .word 0xaa1403e1
@@ -50466,8 +50471,8 @@ aot_kitkat_libz_block_0601:
     .word 0x17ff44d9
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0603
-aot_kitkat_libz_block_0603:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0603)
+RB_AOT_SYM(aot_kitkat_libz_block_0603):
     .word 0xb9404f93
     .word 0x11024274
     .word 0xaa1403e1
@@ -50528,8 +50533,8 @@ aot_kitkat_libz_block_0603:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0604
-aot_kitkat_libz_block_0604:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0604)
+RB_AOT_SYM(aot_kitkat_libz_block_0604):
     .word 0xb9404f93
     .word 0x11022274
     .word 0xaa1403e1
@@ -50570,8 +50575,8 @@ aot_kitkat_libz_block_0604:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0622
-aot_kitkat_libz_block_0622:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0622)
+RB_AOT_SYM(aot_kitkat_libz_block_0622):
     .word 0xb9402f93
     .word 0x52800055
     .word 0x4b1302b4
@@ -50592,8 +50597,8 @@ aot_kitkat_libz_block_0622:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0705
-aot_kitkat_libz_block_0705:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0705)
+RB_AOT_SYM(aot_kitkat_libz_block_0705):
     .word 0x12800093
     .word 0xb9001b93
     .word 0xd1000b5a
@@ -50606,8 +50611,8 @@ aot_kitkat_libz_block_0705:
     .word 0x17ff4455
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0709
-aot_kitkat_libz_block_0709:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0709)
+RB_AOT_SYM(aot_kitkat_libz_block_0709):
     .word 0xb9403b93
     .word 0x1101b274
     .word 0xaa1403e1
@@ -50630,8 +50635,8 @@ aot_kitkat_libz_block_0709:
     .word 0x17ff443f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0710
-aot_kitkat_libz_block_0710:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0710)
+RB_AOT_SYM(aot_kitkat_libz_block_0710):
     .word 0xb9403b93
     .word 0x1100f274
     .word 0xaa1403e1
@@ -50710,8 +50715,8 @@ aot_kitkat_libz_block_0710:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0759
-aot_kitkat_libz_block_0759:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0759)
+RB_AOT_SYM(aot_kitkat_libz_block_0759):
     .word 0xb9403b93
     .word 0x1103f274
     .word 0xaa1403e1
@@ -50746,8 +50751,8 @@ aot_kitkat_libz_block_0759:
     .word 0x17ff43cf
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0771
-aot_kitkat_libz_block_0771:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0771)
+RB_AOT_SYM(aot_kitkat_libz_block_0771):
     .word 0x52800253
     .word 0xb9001b93
     .word 0x52800253
@@ -50782,8 +50787,8 @@ aot_kitkat_libz_block_0771:
     .word 0x17ff43ad
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0775
-aot_kitkat_libz_block_0775:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0775)
+RB_AOT_SYM(aot_kitkat_libz_block_0775):
     .word 0xb9403b93
     .word 0x112b4a74
     .word 0xaa1403e1
@@ -50836,8 +50841,8 @@ aot_kitkat_libz_block_0775:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0816
-aot_kitkat_libz_block_0816:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0816)
+RB_AOT_SYM(aot_kitkat_libz_block_0816):
     .word 0xd100075a
     .word 0xf100035f
     .word 0x5400004d
@@ -50848,8 +50853,8 @@ aot_kitkat_libz_block_0816:
     .word 0x17ff436f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0823
-aot_kitkat_libz_block_0823:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0823)
+RB_AOT_SYM(aot_kitkat_libz_block_0823):
     .word 0xb9402b93
     .word 0xb9004393
     .word 0xb9401b93
@@ -50892,8 +50897,8 @@ aot_kitkat_libz_block_0823:
     .word 0x17ff4345
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0824
-aot_kitkat_libz_block_0824:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0824)
+RB_AOT_SYM(aot_kitkat_libz_block_0824):
     .word 0xb9403b93
     .word 0x11002274
     .word 0xaa1403e1
@@ -51068,8 +51073,8 @@ aot_kitkat_libz_block_0824:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0825
-aot_kitkat_libz_block_0825:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0825)
+RB_AOT_SYM(aot_kitkat_libz_block_0825):
     .word 0xb9402793
     .word 0x53001e74
     .word 0xb9403795
@@ -51128,8 +51133,8 @@ aot_kitkat_libz_block_0825:
     .word 0x17ff425d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0804
-aot_kitkat_libz_block_0804:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0804)
+RB_AOT_SYM(aot_kitkat_libz_block_0804):
     .word 0xb9401b93
     .word 0xaa1303e1
     .word 0x97ff400a
@@ -51336,8 +51341,8 @@ aot_kitkat_libz_block_0804:
     .word 0x17ff418f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0803
-aot_kitkat_libz_block_0803:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0803)
+RB_AOT_SYM(aot_kitkat_libz_block_0803):
     .word 0xb9404793
     .word 0x11004274
     .word 0xaa1403e1
@@ -51558,8 +51563,8 @@ aot_kitkat_libz_block_0803:
     .word 0x17ff40b3
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0805
-aot_kitkat_libz_block_0805:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0805)
+RB_AOT_SYM(aot_kitkat_libz_block_0805):
     .word 0x52800013
     .word 0xb9001b93
     .word 0x52800013
@@ -51714,8 +51719,8 @@ aot_kitkat_libz_block_0805:
     .word 0x17ff4019
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0861
-aot_kitkat_libz_block_0861:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0861)
+RB_AOT_SYM(aot_kitkat_libz_block_0861):
     .word 0xb9404793
     .word 0xb9402794
     .word 0x531e7675
@@ -51766,8 +51771,8 @@ aot_kitkat_libz_block_0861:
     .word 0x17ff3fe7
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0876
-aot_kitkat_libz_block_0876:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0876)
+RB_AOT_SYM(aot_kitkat_libz_block_0876):
     .word 0xb9402393
     .word 0x51000674
     .word 0xb9002f94
@@ -51846,8 +51851,8 @@ aot_kitkat_libz_block_0876:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0257
-aot_kitkat_libz_block_0257:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0257)
+RB_AOT_SYM(aot_kitkat_libz_block_0257):
     .word 0xb9404393
     .word 0x1102f274
     .word 0xaa1403e1
@@ -51888,8 +51893,8 @@ aot_kitkat_libz_block_0257:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0367
-aot_kitkat_libz_block_0367:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0367)
+RB_AOT_SYM(aot_kitkat_libz_block_0367):
     .word 0xb9403b93
     .word 0xb9001b93
     .word 0xb9404f93
@@ -52002,8 +52007,8 @@ aot_kitkat_libz_block_0367:
     .word 0x17ff3f01
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0365
-aot_kitkat_libz_block_0365:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0365)
+RB_AOT_SYM(aot_kitkat_libz_block_0365):
     .word 0xb9401b93
     .word 0x31000674
     .word 0xb9001b94
@@ -52030,8 +52035,8 @@ aot_kitkat_libz_block_0365:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0509
-aot_kitkat_libz_block_0509:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0509)
+RB_AOT_SYM(aot_kitkat_libz_block_0509):
     .word 0xb94483fe
     .word 0x110043de
     .word 0x121c0bde
@@ -52041,11 +52046,11 @@ aot_kitkat_libz_block_0509:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0510
-    add x17, x17, :lo12:aot_kitkat_libz_block_0510
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0510)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0510)
 #else
-    adrp x17, aot_kitkat_libz_block_0510@PAGE
-    add x17, x17, aot_kitkat_libz_block_0510@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0510)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0510)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x5295dc73
@@ -52063,8 +52068,8 @@ aot_kitkat_libz_block_0509:
     .word 0x17ff3ecd
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0500
-aot_kitkat_libz_block_0500:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0500)
+RB_AOT_SYM(aot_kitkat_libz_block_0500):
     .word 0x52800013
     .word 0xb9001b93
     .word 0x52800013
@@ -52143,8 +52148,8 @@ aot_kitkat_libz_block_0500:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0527
-aot_kitkat_libz_block_0527:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0527)
+RB_AOT_SYM(aot_kitkat_libz_block_0527):
     .word 0xb9403793
     .word 0x7100027f
     .word 0x1a9f17f4
@@ -52169,8 +52174,8 @@ aot_kitkat_libz_block_0527:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0536
-aot_kitkat_libz_block_0536:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0536)
+RB_AOT_SYM(aot_kitkat_libz_block_0536):
     .word 0xb9402f93
     .word 0x71001274
     .word 0xd53b4213
@@ -52185,8 +52190,8 @@ aot_kitkat_libz_block_0536:
     .word 0x17ff3e59
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0539
-aot_kitkat_libz_block_0539:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0539)
+RB_AOT_SYM(aot_kitkat_libz_block_0539):
     .word 0x12800013
     .word 0xb9001b93
     .word 0xb9404f93
@@ -52269,8 +52274,8 @@ aot_kitkat_libz_block_0539:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0605
-aot_kitkat_libz_block_0605:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0605)
+RB_AOT_SYM(aot_kitkat_libz_block_0605):
     .word 0xb9404f93
     .word 0x11020274
     .word 0xaa1403e1
@@ -52317,8 +52322,8 @@ aot_kitkat_libz_block_0605:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0606
-aot_kitkat_libz_block_0606:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0606)
+RB_AOT_SYM(aot_kitkat_libz_block_0606):
     .word 0xb9404f93
     .word 0x11025274
     .word 0xaa1403e1
@@ -52355,8 +52360,8 @@ aot_kitkat_libz_block_0606:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0707
-aot_kitkat_libz_block_0707:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0707)
+RB_AOT_SYM(aot_kitkat_libz_block_0707):
     .word 0xb9404f93
     .word 0x11001274
     .word 0xaa1403e1
@@ -52417,8 +52422,8 @@ aot_kitkat_libz_block_0707:
     .word 0x17ff3d79
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0715
-aot_kitkat_libz_block_0715:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0715)
+RB_AOT_SYM(aot_kitkat_libz_block_0715):
     .word 0x52800013
     .word 0xb9002793
     .word 0x52800013
@@ -52451,8 +52456,8 @@ aot_kitkat_libz_block_0715:
     .word 0x17ff3d59
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0711
-aot_kitkat_libz_block_0711:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0711)
+RB_AOT_SYM(aot_kitkat_libz_block_0711):
     .word 0xb9402393
     .word 0x121d7274
     .word 0xb9002394
@@ -52511,8 +52516,8 @@ aot_kitkat_libz_block_0711:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0714
-aot_kitkat_libz_block_0714:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0714)
+RB_AOT_SYM(aot_kitkat_libz_block_0714):
     .word 0x52800013
     .word 0xb9002b93
     .word 0xb9403b93
@@ -52581,8 +52586,8 @@ aot_kitkat_libz_block_0714:
     .word 0x17ff3cdb
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0760
-aot_kitkat_libz_block_0760:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0760)
+RB_AOT_SYM(aot_kitkat_libz_block_0760):
     .word 0xb9403b93
     .word 0x11047274
     .word 0xaa1403e1
@@ -52617,8 +52622,8 @@ aot_kitkat_libz_block_0760:
     .word 0x17ff3cb9
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0793
-aot_kitkat_libz_block_0793:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0793)
+RB_AOT_SYM(aot_kitkat_libz_block_0793):
     .word 0xb9404793
     .word 0xaa1303e1
     .word 0x97ff3a68
@@ -52679,8 +52684,8 @@ aot_kitkat_libz_block_0793:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0776
-aot_kitkat_libz_block_0776:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0776)
+RB_AOT_SYM(aot_kitkat_libz_block_0776):
     .word 0x52800233
     .word 0xb9001b93
     .word 0x52800233
@@ -52701,8 +52706,8 @@ aot_kitkat_libz_block_0776:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0777
-aot_kitkat_libz_block_0777:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0777)
+RB_AOT_SYM(aot_kitkat_libz_block_0777):
     .word 0xb9403b93
     .word 0x112c1a74
     .word 0xaa1403e1
@@ -52737,8 +52742,8 @@ aot_kitkat_libz_block_0777:
     .word 0x17ff3c47
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0826
-aot_kitkat_libz_block_0826:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0826)
+RB_AOT_SYM(aot_kitkat_libz_block_0826):
     .word 0x529f1301
     .word 0x72a34001
     .word 0x97ff39f4
@@ -52787,8 +52792,8 @@ aot_kitkat_libz_block_0826:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0828
-aot_kitkat_libz_block_0828:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0828)
+RB_AOT_SYM(aot_kitkat_libz_block_0828):
     .word 0xb9402793
     .word 0x11000674
     .word 0xaa1303e1
@@ -52861,8 +52866,8 @@ aot_kitkat_libz_block_0828:
     .word 0x17ff3bcf
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0860
-aot_kitkat_libz_block_0860:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0860)
+RB_AOT_SYM(aot_kitkat_libz_block_0860):
     .word 0xb9404793
     .word 0x71000674
     .word 0xb9004794
@@ -52903,8 +52908,8 @@ aot_kitkat_libz_block_0860:
     .word 0x17ff3ba7
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0862
-aot_kitkat_libz_block_0862:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0862)
+RB_AOT_SYM(aot_kitkat_libz_block_0862):
     .word 0xb9404793
     .word 0x531f7a74
     .word 0xb9002394
@@ -52919,8 +52924,8 @@ aot_kitkat_libz_block_0862:
     .word 0x17ff3b99
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0877
-aot_kitkat_libz_block_0877:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0877)
+RB_AOT_SYM(aot_kitkat_libz_block_0877):
     .word 0x52800033
     .word 0xb9002393
     .word 0x52800033
@@ -52941,8 +52946,8 @@ aot_kitkat_libz_block_0877:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0878
-aot_kitkat_libz_block_0878:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0878)
+RB_AOT_SYM(aot_kitkat_libz_block_0878):
     .word 0x52800033
     .word 0xb9003393
     .word 0x52800053
@@ -52965,8 +52970,8 @@ aot_kitkat_libz_block_0878:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0258
-aot_kitkat_libz_block_0258:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0258)
+RB_AOT_SYM(aot_kitkat_libz_block_0258):
     .word 0x52800073
     .word 0xb9001b93
     .word 0x52800073
@@ -52987,8 +52992,8 @@ aot_kitkat_libz_block_0258:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0366
-aot_kitkat_libz_block_0366:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0366)
+RB_AOT_SYM(aot_kitkat_libz_block_0366):
     .word 0xb9402b93
     .word 0xaa1303e1
     .word 0x97ff3908
@@ -53021,8 +53026,8 @@ aot_kitkat_libz_block_0366:
     .word 0x17ff3b3b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0673
-aot_kitkat_libz_block_0673:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0673)
+RB_AOT_SYM(aot_kitkat_libz_block_0673):
     .word 0x5298ee01
     .word 0x72a34001
     .word 0x97ff38e8
@@ -53073,8 +53078,8 @@ aot_kitkat_libz_block_0673:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0607
-aot_kitkat_libz_block_0607:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0607)
+RB_AOT_SYM(aot_kitkat_libz_block_0607):
     .word 0xb9404f93
     .word 0x11023274
     .word 0xaa1403e1
@@ -53113,8 +53118,8 @@ aot_kitkat_libz_block_0607:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0623
-aot_kitkat_libz_block_0623:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0623)
+RB_AOT_SYM(aot_kitkat_libz_block_0623):
     .word 0xb9404f93
     .word 0x1101e274
     .word 0xaa1403e1
@@ -53169,8 +53174,8 @@ aot_kitkat_libz_block_0623:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0716
-aot_kitkat_libz_block_0716:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0716)
+RB_AOT_SYM(aot_kitkat_libz_block_0716):
     .word 0xb9402b93
     .word 0x71000e74
     .word 0xd53b4213
@@ -53195,8 +53200,8 @@ aot_kitkat_libz_block_0716:
     .word 0x17ff3a95
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0718
-aot_kitkat_libz_block_0718:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0718)
+RB_AOT_SYM(aot_kitkat_libz_block_0718):
     .word 0xb9402b93
     .word 0xb9403b94
     .word 0x1101b295
@@ -53319,8 +53324,8 @@ aot_kitkat_libz_block_0718:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0712
-aot_kitkat_libz_block_0712:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0712)
+RB_AOT_SYM(aot_kitkat_libz_block_0712):
     .word 0xb9402f93
     .word 0xb9404b94
     .word 0xb9401f95
@@ -53365,8 +53370,8 @@ aot_kitkat_libz_block_0712:
     .word 0x17ff39ef
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0713
-aot_kitkat_libz_block_0713:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0713)
+RB_AOT_SYM(aot_kitkat_libz_block_0713):
     .word 0x52800013
     .word 0xb9002793
     .word 0xb9403b93
@@ -53421,8 +53426,8 @@ aot_kitkat_libz_block_0713:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0761
-aot_kitkat_libz_block_0761:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0761)
+RB_AOT_SYM(aot_kitkat_libz_block_0761):
     .word 0xb9403b93
     .word 0x11048274
     .word 0xaa1403e1
@@ -53459,8 +53464,8 @@ aot_kitkat_libz_block_0761:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0794
-aot_kitkat_libz_block_0794:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0794)
+RB_AOT_SYM(aot_kitkat_libz_block_0794):
     .word 0xb9403b93
     .word 0x11036274
     .word 0xaa1403e1
@@ -53497,8 +53502,8 @@ aot_kitkat_libz_block_0794:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0795
-aot_kitkat_libz_block_0795:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0795)
+RB_AOT_SYM(aot_kitkat_libz_block_0795):
     .word 0xb9403793
     .word 0xb9002793
     .word 0xb9401f93
@@ -53525,8 +53530,8 @@ aot_kitkat_libz_block_0795:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0778
-aot_kitkat_libz_block_0778:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0778)
+RB_AOT_SYM(aot_kitkat_libz_block_0778):
     .word 0x52800213
     .word 0xb9001b93
     .word 0x52800213
@@ -53547,8 +53552,8 @@ aot_kitkat_libz_block_0778:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0779
-aot_kitkat_libz_block_0779:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0779)
+RB_AOT_SYM(aot_kitkat_libz_block_0779):
     .word 0xb9403b93
     .word 0x112b5a74
     .word 0xaa1403e1
@@ -53583,8 +53588,8 @@ aot_kitkat_libz_block_0779:
     .word 0x17ff3921
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0827
-aot_kitkat_libz_block_0827:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0827)
+RB_AOT_SYM(aot_kitkat_libz_block_0827):
     .word 0xb9403793
     .word 0x11000e74
     .word 0xb9003794
@@ -53625,8 +53630,8 @@ aot_kitkat_libz_block_0827:
     .word 0x17ff38f9
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0829
-aot_kitkat_libz_block_0829:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0829)
+RB_AOT_SYM(aot_kitkat_libz_block_0829):
     .word 0xb9403b93
     .word 0x11005274
     .word 0xaa1403e1
@@ -53809,8 +53814,8 @@ aot_kitkat_libz_block_0829:
     .word 0x17ff3843
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0874
-aot_kitkat_libz_block_0874:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0874)
+RB_AOT_SYM(aot_kitkat_libz_block_0874):
     .word 0xb9405393
     .word 0xaa1303e1
     .word 0x97ff35f0
@@ -53863,8 +53868,8 @@ aot_kitkat_libz_block_0874:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0864
-aot_kitkat_libz_block_0864:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0864)
+RB_AOT_SYM(aot_kitkat_libz_block_0864):
     .word 0xb9402393
     .word 0xb9402f94
     .word 0x6b140275
@@ -53891,8 +53896,8 @@ aot_kitkat_libz_block_0864:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0890
-aot_kitkat_libz_block_0890:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0890)
+RB_AOT_SYM(aot_kitkat_libz_block_0890):
     .word 0xb9402393
     .word 0xb9402794
     .word 0xb9404b95
@@ -54085,8 +54090,8 @@ aot_kitkat_libz_block_0890:
     .word 0x17ff3735
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0880
-aot_kitkat_libz_block_0880:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0880)
+RB_AOT_SYM(aot_kitkat_libz_block_0880):
     .word 0xb9402b93
     .word 0xb9402f94
     .word 0x6b140275
@@ -54113,8 +54118,8 @@ aot_kitkat_libz_block_0880:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0356
-aot_kitkat_libz_block_0356:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0356)
+RB_AOT_SYM(aot_kitkat_libz_block_0356):
     .word 0xb9402b93
     .word 0x11002274
     .word 0xaa1403e1
@@ -54173,8 +54178,8 @@ aot_kitkat_libz_block_0356:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0608
-aot_kitkat_libz_block_0608:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0608)
+RB_AOT_SYM(aot_kitkat_libz_block_0608):
     .word 0xb9403793
     .word 0xb9401f94
     .word 0x4b140275
@@ -54219,8 +54224,8 @@ aot_kitkat_libz_block_0608:
     .word 0x17ff36b5
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0629
-aot_kitkat_libz_block_0629:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0629)
+RB_AOT_SYM(aot_kitkat_libz_block_0629):
     .word 0xb9401f93
     .word 0xb9403794
     .word 0x4b140275
@@ -54253,8 +54258,8 @@ aot_kitkat_libz_block_0629:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0624
-aot_kitkat_libz_block_0624:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0624)
+RB_AOT_SYM(aot_kitkat_libz_block_0624):
     .word 0xb9403793
     .word 0x71004274
     .word 0xd53b4213
@@ -54279,8 +54284,8 @@ aot_kitkat_libz_block_0624:
     .word 0x17ff367d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0637
-aot_kitkat_libz_block_0637:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0637)
+RB_AOT_SYM(aot_kitkat_libz_block_0637):
     .word 0xb9403f93
     .word 0xb9004b93
     .word 0xb9402f93
@@ -54307,8 +54312,8 @@ aot_kitkat_libz_block_0637:
     .word 0x17ff3663
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0717
-aot_kitkat_libz_block_0717:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0717)
+RB_AOT_SYM(aot_kitkat_libz_block_0717):
     .word 0xb9401b93
     .word 0xaa1303e1
     .word 0x97ff3410
@@ -54351,8 +54356,8 @@ aot_kitkat_libz_block_0717:
     .word 0x17ff3639
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0719
-aot_kitkat_libz_block_0719:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0719)
+RB_AOT_SYM(aot_kitkat_libz_block_0719):
     .word 0xb9403b93
     .word 0x11005274
     .word 0xaa1403e1
@@ -54381,8 +54386,8 @@ aot_kitkat_libz_block_0719:
     .word 0x17ff361d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0720
-aot_kitkat_libz_block_0720:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0720)
+RB_AOT_SYM(aot_kitkat_libz_block_0720):
     .word 0x12800053
     .word 0xb9001b93
     .word 0xd1000b5a
@@ -54395,8 +54400,8 @@ aot_kitkat_libz_block_0720:
     .word 0x17ff3611
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0836
-aot_kitkat_libz_block_0836:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0836)
+RB_AOT_SYM(aot_kitkat_libz_block_0836):
     .word 0xb9403b93
     .word 0x11049274
     .word 0xaa1403e1
@@ -54425,8 +54430,8 @@ aot_kitkat_libz_block_0836:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0806
-aot_kitkat_libz_block_0806:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0806)
+RB_AOT_SYM(aot_kitkat_libz_block_0806):
     .word 0xb9402393
     .word 0x53037e74
     .word 0xb9002794
@@ -54455,8 +54460,8 @@ aot_kitkat_libz_block_0806:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0780
-aot_kitkat_libz_block_0780:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0780)
+RB_AOT_SYM(aot_kitkat_libz_block_0780):
     .word 0x528001f3
     .word 0xb9001b93
     .word 0x528001f3
@@ -54477,8 +54482,8 @@ aot_kitkat_libz_block_0780:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0781
-aot_kitkat_libz_block_0781:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0781)
+RB_AOT_SYM(aot_kitkat_libz_block_0781):
     .word 0xb9403b93
     .word 0x112c0a74
     .word 0xaa1403e1
@@ -54513,8 +54518,8 @@ aot_kitkat_libz_block_0781:
     .word 0x17ff35a3
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0830
-aot_kitkat_libz_block_0830:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0830)
+RB_AOT_SYM(aot_kitkat_libz_block_0830):
     .word 0xb9403b93
     .word 0x11039274
     .word 0xb9003794
@@ -54529,11 +54534,11 @@ aot_kitkat_libz_block_0830:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0831
-    add x17, x17, :lo12:aot_kitkat_libz_block_0831
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0831)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0831)
 #else
-    adrp x17, aot_kitkat_libz_block_0831@PAGE
-    add x17, x17, aot_kitkat_libz_block_0831@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0831)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0831)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x529eeeb3
@@ -54550,8 +54555,8 @@ aot_kitkat_libz_block_0830:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0865
-aot_kitkat_libz_block_0865:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0865)
+RB_AOT_SYM(aot_kitkat_libz_block_0865):
     .word 0xb9402393
     .word 0x32000274
     .word 0xb9002f94
@@ -54634,8 +54639,8 @@ aot_kitkat_libz_block_0865:
     .word 0x17ff3533
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0869
-aot_kitkat_libz_block_0869:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0869)
+RB_AOT_SYM(aot_kitkat_libz_block_0869):
     .word 0xb9402393
     .word 0xb9003393
     .word 0xb9402794
@@ -54704,8 +54709,8 @@ aot_kitkat_libz_block_0869:
     .word 0x17ff34ef
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0881
-aot_kitkat_libz_block_0881:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0881)
+RB_AOT_SYM(aot_kitkat_libz_block_0881):
     .word 0xb9402b93
     .word 0x32000274
     .word 0xb9002f94
@@ -54788,8 +54793,8 @@ aot_kitkat_libz_block_0881:
     .word 0x17ff349d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0885
-aot_kitkat_libz_block_0885:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0885)
+RB_AOT_SYM(aot_kitkat_libz_block_0885):
     .word 0xb9402b93
     .word 0xb9002393
     .word 0xb9402794
@@ -54858,8 +54863,8 @@ aot_kitkat_libz_block_0885:
     .word 0x17ff3459
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0357
-aot_kitkat_libz_block_0357:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0357)
+RB_AOT_SYM(aot_kitkat_libz_block_0357):
     .word 0xd100075a
     .word 0xf100035f
     .word 0x5400004d
@@ -54870,8 +54875,8 @@ aot_kitkat_libz_block_0357:
     .word 0x17ff344f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0609
-aot_kitkat_libz_block_0609:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0609)
+RB_AOT_SYM(aot_kitkat_libz_block_0609):
     .word 0xb9402b93
     .word 0xb9002393
     .word 0x71004274
@@ -54898,8 +54903,8 @@ aot_kitkat_libz_block_0609:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0630
-aot_kitkat_libz_block_0630:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0630)
+RB_AOT_SYM(aot_kitkat_libz_block_0630):
     .word 0xb9403793
     .word 0x71004274
     .word 0xd53b4213
@@ -54924,8 +54929,8 @@ aot_kitkat_libz_block_0630:
     .word 0x17ff341d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0625
-aot_kitkat_libz_block_0625:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0625)
+RB_AOT_SYM(aot_kitkat_libz_block_0625):
     .word 0xb9404f93
     .word 0x1101c274
     .word 0xaa1403e1
@@ -54966,8 +54971,8 @@ aot_kitkat_libz_block_0625:
     .word 0x17ff33f5
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0626
-aot_kitkat_libz_block_0626:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0626)
+RB_AOT_SYM(aot_kitkat_libz_block_0626):
     .word 0xb9403f93
     .word 0xb9403794
     .word 0xb9403395
@@ -55020,8 +55025,8 @@ aot_kitkat_libz_block_0626:
     .word 0x17ff33c1
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0635
-aot_kitkat_libz_block_0635:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0635)
+RB_AOT_SYM(aot_kitkat_libz_block_0635):
     .word 0xb9404b93
     .word 0xb9003f93
     .word 0xb9403393
@@ -55074,8 +55079,8 @@ aot_kitkat_libz_block_0635:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0638
-aot_kitkat_libz_block_0638:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0638)
+RB_AOT_SYM(aot_kitkat_libz_block_0638):
     .word 0xb9402f93
     .word 0x51000e74
     .word 0xb9001b94
@@ -55102,8 +55107,8 @@ aot_kitkat_libz_block_0638:
     .word 0x17ff3373
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0782
-aot_kitkat_libz_block_0782:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0782)
+RB_AOT_SYM(aot_kitkat_libz_block_0782):
     .word 0x528001d3
     .word 0xb9001b93
     .word 0x528001d3
@@ -55124,8 +55129,8 @@ aot_kitkat_libz_block_0782:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0783
-aot_kitkat_libz_block_0783:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0783)
+RB_AOT_SYM(aot_kitkat_libz_block_0783):
     .word 0xb9403b93
     .word 0x112b6a74
     .word 0xaa1403e1
@@ -55160,8 +55165,8 @@ aot_kitkat_libz_block_0783:
     .word 0x17ff333d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0831
-aot_kitkat_libz_block_0831:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0831)
+RB_AOT_SYM(aot_kitkat_libz_block_0831):
     .word 0xb9403b93
     .word 0x11276274
     .word 0xb9002f94
@@ -55178,11 +55183,11 @@ aot_kitkat_libz_block_0831:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0832
-    add x17, x17, :lo12:aot_kitkat_libz_block_0832
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0832)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0832)
 #else
-    adrp x17, aot_kitkat_libz_block_0832@PAGE
-    add x17, x17, aot_kitkat_libz_block_0832@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0832)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0832)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x529ef073
@@ -55199,8 +55204,8 @@ aot_kitkat_libz_block_0831:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0866
-aot_kitkat_libz_block_0866:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0866)
+RB_AOT_SYM(aot_kitkat_libz_block_0866):
     .word 0xb9402f93
     .word 0xb9003393
     .word 0xd1000b5a
@@ -55213,8 +55218,8 @@ aot_kitkat_libz_block_0866:
     .word 0x17ff3311
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0867
-aot_kitkat_libz_block_0867:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0867)
+RB_AOT_SYM(aot_kitkat_libz_block_0867):
     .word 0xd100075a
     .word 0xb9400390
     .word 0xd51b4210
@@ -55235,8 +55240,8 @@ aot_kitkat_libz_block_0867:
     .word 0x17ff32fd
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0859
-aot_kitkat_libz_block_0859:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0859)
+RB_AOT_SYM(aot_kitkat_libz_block_0859):
     .word 0xb9402b93
     .word 0xb9003393
     .word 0xb9404794
@@ -55279,8 +55284,8 @@ aot_kitkat_libz_block_0859:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0871
-aot_kitkat_libz_block_0871:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0871)
+RB_AOT_SYM(aot_kitkat_libz_block_0871):
     .word 0xd100075a
     .word 0xb9400390
     .word 0xd51b4210
@@ -55301,8 +55306,8 @@ aot_kitkat_libz_block_0871:
     .word 0x17ff32bf
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0882
-aot_kitkat_libz_block_0882:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0882)
+RB_AOT_SYM(aot_kitkat_libz_block_0882):
     .word 0xb9402f93
     .word 0xb9002393
     .word 0xd1000b5a
@@ -55315,8 +55320,8 @@ aot_kitkat_libz_block_0882:
     .word 0x17ff32b3
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0883
-aot_kitkat_libz_block_0883:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0883)
+RB_AOT_SYM(aot_kitkat_libz_block_0883):
     .word 0xd100075a
     .word 0xb9400390
     .word 0xd51b4210
@@ -55337,8 +55342,8 @@ aot_kitkat_libz_block_0883:
     .word 0x17ff329f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0887
-aot_kitkat_libz_block_0887:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0887)
+RB_AOT_SYM(aot_kitkat_libz_block_0887):
     .word 0xd100075a
     .word 0xb9400390
     .word 0xd51b4210
@@ -55359,8 +55364,8 @@ aot_kitkat_libz_block_0887:
     .word 0x17ff328b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0889
-aot_kitkat_libz_block_0889:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0889)
+RB_AOT_SYM(aot_kitkat_libz_block_0889):
     .word 0xb9403393
     .word 0xb9402794
     .word 0xb9404b95
@@ -55553,8 +55558,8 @@ aot_kitkat_libz_block_0889:
     .word 0x17ff31cb
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0610
-aot_kitkat_libz_block_0610:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0610)
+RB_AOT_SYM(aot_kitkat_libz_block_0610):
     .word 0xb9404f93
     .word 0x1101a274
     .word 0xaa1403e1
@@ -55595,8 +55600,8 @@ aot_kitkat_libz_block_0610:
     .word 0x17ff31a3
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0611
-aot_kitkat_libz_block_0611:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0611)
+RB_AOT_SYM(aot_kitkat_libz_block_0611):
     .word 0x52800013
     .word 0xb9002b93
     .word 0xb9403f93
@@ -55655,8 +55660,8 @@ aot_kitkat_libz_block_0611:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0631
-aot_kitkat_libz_block_0631:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0631)
+RB_AOT_SYM(aot_kitkat_libz_block_0631):
     .word 0xb9404f93
     .word 0x1101b274
     .word 0xaa1403e1
@@ -55697,8 +55702,8 @@ aot_kitkat_libz_block_0631:
     .word 0x17ff3141
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0632
-aot_kitkat_libz_block_0632:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0632)
+RB_AOT_SYM(aot_kitkat_libz_block_0632):
     .word 0xb9403f93
     .word 0xb9403794
     .word 0xb9403395
@@ -55751,8 +55756,8 @@ aot_kitkat_libz_block_0632:
     .word 0x17ff310d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0649
-aot_kitkat_libz_block_0649:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0649)
+RB_AOT_SYM(aot_kitkat_libz_block_0649):
     .word 0xb9403793
     .word 0x121c6e74
     .word 0xb9002b94
@@ -56225,8 +56230,8 @@ aot_kitkat_libz_block_0649:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0627
-aot_kitkat_libz_block_0627:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0627)
+RB_AOT_SYM(aot_kitkat_libz_block_0627):
     .word 0xb9401f93
     .word 0x11000674
     .word 0xaa1303e1
@@ -56279,8 +56284,8 @@ aot_kitkat_libz_block_0627:
     .word 0x17ff2f01
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0628
-aot_kitkat_libz_block_0628:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0628)
+RB_AOT_SYM(aot_kitkat_libz_block_0628):
     .word 0xd100075a
     .word 0xf100035f
     .word 0x5400004d
@@ -56291,8 +56296,8 @@ aot_kitkat_libz_block_0628:
     .word 0x17ff2ef7
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0636
-aot_kitkat_libz_block_0636:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0636)
+RB_AOT_SYM(aot_kitkat_libz_block_0636):
     .word 0xd100075a
     .word 0xf100035f
     .word 0x5400004d
@@ -56303,8 +56308,8 @@ aot_kitkat_libz_block_0636:
     .word 0x17ff2eed
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0643
-aot_kitkat_libz_block_0643:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0643)
+RB_AOT_SYM(aot_kitkat_libz_block_0643):
     .word 0xb9403f93
     .word 0x11000674
     .word 0xb9001b94
@@ -56355,8 +56360,8 @@ aot_kitkat_libz_block_0643:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0639
-aot_kitkat_libz_block_0639:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0639)
+RB_AOT_SYM(aot_kitkat_libz_block_0639):
     .word 0xb9403393
     .word 0x31000674
     .word 0xb9003794
@@ -56429,8 +56434,8 @@ aot_kitkat_libz_block_0639:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0640
-aot_kitkat_libz_block_0640:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0640)
+RB_AOT_SYM(aot_kitkat_libz_block_0640):
     .word 0xb9403393
     .word 0xb9404b94
     .word 0x11000e75
@@ -56529,8 +56534,8 @@ aot_kitkat_libz_block_0640:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0784
-aot_kitkat_libz_block_0784:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0784)
+RB_AOT_SYM(aot_kitkat_libz_block_0784):
     .word 0x528001b3
     .word 0xb9001b93
     .word 0x528001b3
@@ -56551,8 +56556,8 @@ aot_kitkat_libz_block_0784:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0785
-aot_kitkat_libz_block_0785:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0785)
+RB_AOT_SYM(aot_kitkat_libz_block_0785):
     .word 0xb9403b93
     .word 0x112bfa74
     .word 0xaa1403e1
@@ -56587,8 +56592,8 @@ aot_kitkat_libz_block_0785:
     .word 0x17ff2ddb
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0832
-aot_kitkat_libz_block_0832:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0832)
+RB_AOT_SYM(aot_kitkat_libz_block_0832):
     .word 0xb9403b93
     .word 0xb9001b93
     .word 0xb9403793
@@ -56604,11 +56609,11 @@ aot_kitkat_libz_block_0832:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0833
-    add x17, x17, :lo12:aot_kitkat_libz_block_0833
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0833)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0833)
 #else
-    adrp x17, aot_kitkat_libz_block_0833@PAGE
-    add x17, x17, aot_kitkat_libz_block_0833@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0833)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0833)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x529ef1b3
@@ -56624,8 +56629,8 @@ aot_kitkat_libz_block_0832:
     .word 0x17ff2dbd
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0870
-aot_kitkat_libz_block_0870:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0870)
+RB_AOT_SYM(aot_kitkat_libz_block_0870):
     .word 0xb9403393
     .word 0xb9402794
     .word 0x531e7675
@@ -56694,8 +56699,8 @@ aot_kitkat_libz_block_0870:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0868
-aot_kitkat_libz_block_0868:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0868)
+RB_AOT_SYM(aot_kitkat_libz_block_0868):
     .word 0xb9404393
     .word 0xb9403394
     .word 0x0b140275
@@ -56738,8 +56743,8 @@ aot_kitkat_libz_block_0868:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0863
-aot_kitkat_libz_block_0863:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0863)
+RB_AOT_SYM(aot_kitkat_libz_block_0863):
     .word 0xb9402b93
     .word 0xb9402794
     .word 0xb9402395
@@ -56794,8 +56799,8 @@ aot_kitkat_libz_block_0863:
     .word 0x17ff2d19
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0872
-aot_kitkat_libz_block_0872:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0872)
+RB_AOT_SYM(aot_kitkat_libz_block_0872):
     .word 0xb9404393
     .word 0xb9402394
     .word 0x0b140275
@@ -56846,8 +56851,8 @@ aot_kitkat_libz_block_0872:
     .word 0x17ff2ce7
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0886
-aot_kitkat_libz_block_0886:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0886)
+RB_AOT_SYM(aot_kitkat_libz_block_0886):
     .word 0xb9402393
     .word 0xb9402794
     .word 0x531e7675
@@ -56916,8 +56921,8 @@ aot_kitkat_libz_block_0886:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0884
-aot_kitkat_libz_block_0884:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0884)
+RB_AOT_SYM(aot_kitkat_libz_block_0884):
     .word 0xb9404793
     .word 0xb9402394
     .word 0x0b140275
@@ -56960,8 +56965,8 @@ aot_kitkat_libz_block_0884:
     .word 0x17ff2c79
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0879
-aot_kitkat_libz_block_0879:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0879)
+RB_AOT_SYM(aot_kitkat_libz_block_0879):
     .word 0xb9403393
     .word 0xb9402794
     .word 0xb9402b95
@@ -57016,8 +57021,8 @@ aot_kitkat_libz_block_0879:
     .word 0x17ff2c43
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0888
-aot_kitkat_libz_block_0888:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0888)
+RB_AOT_SYM(aot_kitkat_libz_block_0888):
     .word 0xb9404793
     .word 0xb9402b94
     .word 0x0b140275
@@ -57068,8 +57073,8 @@ aot_kitkat_libz_block_0888:
     .word 0x17ff2c11
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0653
-aot_kitkat_libz_block_0653:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0653)
+RB_AOT_SYM(aot_kitkat_libz_block_0653):
     .word 0xb9402393
     .word 0x121c6e74
     .word 0xb9002b94
@@ -57554,8 +57559,8 @@ aot_kitkat_libz_block_0653:
     .word 0x17ff2a2d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0613
-aot_kitkat_libz_block_0613:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0613)
+RB_AOT_SYM(aot_kitkat_libz_block_0613):
     .word 0xb9403393
     .word 0x11000674
     .word 0xaa1303e1
@@ -57608,8 +57613,8 @@ aot_kitkat_libz_block_0613:
     .word 0x17ff29f9
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0614
-aot_kitkat_libz_block_0614:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0614)
+RB_AOT_SYM(aot_kitkat_libz_block_0614):
     .word 0xb9404b93
     .word 0xb9402f94
     .word 0x4b130295
@@ -57662,8 +57667,8 @@ aot_kitkat_libz_block_0614:
     .word 0x17ff29c5
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0657
-aot_kitkat_libz_block_0657:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0657)
+RB_AOT_SYM(aot_kitkat_libz_block_0657):
     .word 0xb9403793
     .word 0x121c6e74
     .word 0xb9002b94
@@ -58136,8 +58141,8 @@ aot_kitkat_libz_block_0657:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0633
-aot_kitkat_libz_block_0633:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0633)
+RB_AOT_SYM(aot_kitkat_libz_block_0633):
     .word 0xb9401f93
     .word 0x11000674
     .word 0xaa1303e1
@@ -58190,8 +58195,8 @@ aot_kitkat_libz_block_0633:
     .word 0x17ff27b9
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0634
-aot_kitkat_libz_block_0634:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0634)
+RB_AOT_SYM(aot_kitkat_libz_block_0634):
     .word 0xb9405393
     .word 0xb9404b94
     .word 0x4b130295
@@ -58224,8 +58229,8 @@ aot_kitkat_libz_block_0634:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0650
-aot_kitkat_libz_block_0650:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0650)
+RB_AOT_SYM(aot_kitkat_libz_block_0650):
     .word 0xb9403393
     .word 0xaa1303e1
     .word 0x97ff2542
@@ -58678,8 +58683,8 @@ aot_kitkat_libz_block_0650:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0651
-aot_kitkat_libz_block_0651:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0651)
+RB_AOT_SYM(aot_kitkat_libz_block_0651):
     .word 0xb9403793
     .word 0xb9402b94
     .word 0x6b140275
@@ -58706,8 +58711,8 @@ aot_kitkat_libz_block_0651:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0646
-aot_kitkat_libz_block_0646:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0646)
+RB_AOT_SYM(aot_kitkat_libz_block_0646):
     .word 0xb9404f93
     .word 0x11021274
     .word 0xaa1403e1
@@ -58730,8 +58735,8 @@ aot_kitkat_libz_block_0646:
     .word 0x17ff25a5
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0644
-aot_kitkat_libz_block_0644:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0644)
+RB_AOT_SYM(aot_kitkat_libz_block_0644):
     .word 0xb9401f93
     .word 0x11000674
     .word 0xaa1403e1
@@ -58770,8 +58775,8 @@ aot_kitkat_libz_block_0644:
     .word 0x17ff257f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0645
-aot_kitkat_libz_block_0645:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0645)
+RB_AOT_SYM(aot_kitkat_libz_block_0645):
     .word 0xb9401b93
     .word 0xb9003f93
     .word 0xb9404f93
@@ -58796,8 +58801,8 @@ aot_kitkat_libz_block_0645:
     .word 0x17ff2567
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0641
-aot_kitkat_libz_block_0641:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0641)
+RB_AOT_SYM(aot_kitkat_libz_block_0641):
     .word 0xb9401f93
     .word 0x11000e74
     .word 0xaa1303e1
@@ -58896,8 +58901,8 @@ aot_kitkat_libz_block_0641:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0642
-aot_kitkat_libz_block_0642:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0642)
+RB_AOT_SYM(aot_kitkat_libz_block_0642):
     .word 0xb9404f93
     .word 0x1101f274
     .word 0xaa1403e1
@@ -58944,8 +58949,8 @@ aot_kitkat_libz_block_0642:
     .word 0x17ff24d7
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0786
-aot_kitkat_libz_block_0786:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0786)
+RB_AOT_SYM(aot_kitkat_libz_block_0786):
     .word 0x52800193
     .word 0xb9001b93
     .word 0x52800193
@@ -58966,8 +58971,8 @@ aot_kitkat_libz_block_0786:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0787
-aot_kitkat_libz_block_0787:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0787)
+RB_AOT_SYM(aot_kitkat_libz_block_0787):
     .word 0xb9403b93
     .word 0x112b7a74
     .word 0xaa1403e1
@@ -59002,8 +59007,8 @@ aot_kitkat_libz_block_0787:
     .word 0x17ff24a1
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0833
-aot_kitkat_libz_block_0833:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0833)
+RB_AOT_SYM(aot_kitkat_libz_block_0833):
     .word 0xb9404393
     .word 0xb9002b93
     .word 0xb9403b93
@@ -59017,11 +59022,11 @@ aot_kitkat_libz_block_0833:
     .word 0xf2a34010
     .word 0xf2c00030
 #ifdef __ELF__
-    adrp x17, aot_kitkat_libz_block_0834
-    add x17, x17, :lo12:aot_kitkat_libz_block_0834
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0834)
+    add x17, x17, :lo12:RB_AOT_SYM(aot_kitkat_libz_block_0834)
 #else
-    adrp x17, aot_kitkat_libz_block_0834@PAGE
-    add x17, x17, aot_kitkat_libz_block_0834@PAGEOFF
+    adrp x17, RB_AOT_SYM(aot_kitkat_libz_block_0834)@PAGE
+    add x17, x17, RB_AOT_SYM(aot_kitkat_libz_block_0834)@PAGEOFF
 #endif
     .word 0xa90047d0
     .word 0x529ef2b3
@@ -59037,8 +59042,8 @@ aot_kitkat_libz_block_0833:
     .word 0x17ff2485
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0873
-aot_kitkat_libz_block_0873:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0873)
+RB_AOT_SYM(aot_kitkat_libz_block_0873):
     .word 0xd100075a
     .word 0xf100035f
     .word 0x5400004d
@@ -59049,8 +59054,8 @@ aot_kitkat_libz_block_0873:
     .word 0x17ff247b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0654
-aot_kitkat_libz_block_0654:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0654)
+RB_AOT_SYM(aot_kitkat_libz_block_0654):
     .word 0xb9403393
     .word 0xaa1303e1
     .word 0x97ff2224
@@ -59503,8 +59508,8 @@ aot_kitkat_libz_block_0654:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0655
-aot_kitkat_libz_block_0655:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0655)
+RB_AOT_SYM(aot_kitkat_libz_block_0655):
     .word 0xb9404b93
     .word 0xb9402b94
     .word 0x6b140275
@@ -59531,8 +59536,8 @@ aot_kitkat_libz_block_0655:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0616
-aot_kitkat_libz_block_0616:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0616)
+RB_AOT_SYM(aot_kitkat_libz_block_0616):
     .word 0xb9402393
     .word 0x71004274
     .word 0xd53b4213
@@ -59557,8 +59562,8 @@ aot_kitkat_libz_block_0616:
     .word 0x17ff2285
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0647
-aot_kitkat_libz_block_0647:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0647)
+RB_AOT_SYM(aot_kitkat_libz_block_0647):
     .word 0xb9403793
     .word 0xb9004b93
     .word 0xb9402f93
@@ -59585,8 +59590,8 @@ aot_kitkat_libz_block_0647:
     .word 0x17ff226b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0658
-aot_kitkat_libz_block_0658:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0658)
+RB_AOT_SYM(aot_kitkat_libz_block_0658):
     .word 0xb9403393
     .word 0xaa1303e1
     .word 0x97ff2014
@@ -60039,8 +60044,8 @@ aot_kitkat_libz_block_0658:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0659
-aot_kitkat_libz_block_0659:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0659)
+RB_AOT_SYM(aot_kitkat_libz_block_0659):
     .word 0xb9403793
     .word 0xb9402b94
     .word 0x6b140275
@@ -60067,8 +60072,8 @@ aot_kitkat_libz_block_0659:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0652
-aot_kitkat_libz_block_0652:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0652)
+RB_AOT_SYM(aot_kitkat_libz_block_0652):
     .word 0xd100075a
     .word 0xf100035f
     .word 0x5400004d
@@ -60079,8 +60084,8 @@ aot_kitkat_libz_block_0652:
     .word 0x17ff2083
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0585
-aot_kitkat_libz_block_0585:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0585)
+RB_AOT_SYM(aot_kitkat_libz_block_0585):
     .word 0xb9404f93
     .word 0x1102b274
     .word 0xaa1403e1
@@ -60117,8 +60122,8 @@ aot_kitkat_libz_block_0585:
     .word 0x17ff205f
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0788
-aot_kitkat_libz_block_0788:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0788)
+RB_AOT_SYM(aot_kitkat_libz_block_0788):
     .word 0x52800173
     .word 0xb9001b93
     .word 0x52800173
@@ -60139,8 +60144,8 @@ aot_kitkat_libz_block_0788:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0789
-aot_kitkat_libz_block_0789:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0789)
+RB_AOT_SYM(aot_kitkat_libz_block_0789):
     .word 0xb9403b93
     .word 0x112bea74
     .word 0xaa1403e1
@@ -60175,8 +60180,8 @@ aot_kitkat_libz_block_0789:
     .word 0x17ff2029
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0834
-aot_kitkat_libz_block_0834:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0834)
+RB_AOT_SYM(aot_kitkat_libz_block_0834):
     .word 0xb9402b93
     .word 0x71000274
     .word 0xd53b4213
@@ -60201,8 +60206,8 @@ aot_kitkat_libz_block_0834:
     .word 0x17ff2011
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0656
-aot_kitkat_libz_block_0656:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0656)
+RB_AOT_SYM(aot_kitkat_libz_block_0656):
     .word 0xb9404b93
     .word 0xb9002393
     .word 0xb9402b93
@@ -60221,8 +60226,8 @@ aot_kitkat_libz_block_0656:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0665
-aot_kitkat_libz_block_0665:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0665)
+RB_AOT_SYM(aot_kitkat_libz_block_0665):
     .word 0xb9404f93
     .word 0x11016274
     .word 0xaa1403e1
@@ -60245,8 +60250,8 @@ aot_kitkat_libz_block_0665:
     .word 0x17ff1fe9
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0617
-aot_kitkat_libz_block_0617:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0617)
+RB_AOT_SYM(aot_kitkat_libz_block_0617):
     .word 0xb9403393
     .word 0xb9403f94
     .word 0x4b130295
@@ -60277,8 +60282,8 @@ aot_kitkat_libz_block_0617:
     .word 0x17ff1fcb
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0618
-aot_kitkat_libz_block_0618:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0618)
+RB_AOT_SYM(aot_kitkat_libz_block_0618):
     .word 0xb9403793
     .word 0xb9402394
     .word 0xb9403395
@@ -60331,8 +60336,8 @@ aot_kitkat_libz_block_0618:
     .word 0x17ff1f97
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0648
-aot_kitkat_libz_block_0648:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0648)
+RB_AOT_SYM(aot_kitkat_libz_block_0648):
     .word 0xd100075a
     .word 0xf100035f
     .word 0x5400004d
@@ -60343,8 +60348,8 @@ aot_kitkat_libz_block_0648:
     .word 0x17ff1f8d
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0660
-aot_kitkat_libz_block_0660:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0660)
+RB_AOT_SYM(aot_kitkat_libz_block_0660):
     .word 0xd100075a
     .word 0xf100035f
     .word 0x5400004d
@@ -60355,8 +60360,8 @@ aot_kitkat_libz_block_0660:
     .word 0x17ff1f83
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0790
-aot_kitkat_libz_block_0790:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0790)
+RB_AOT_SYM(aot_kitkat_libz_block_0790):
     .word 0x52800153
     .word 0xb9001b93
     .word 0x52800153
@@ -60377,8 +60382,8 @@ aot_kitkat_libz_block_0790:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0791
-aot_kitkat_libz_block_0791:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0791)
+RB_AOT_SYM(aot_kitkat_libz_block_0791):
     .word 0xb9403b93
     .word 0x112b8a74
     .word 0xaa1403e1
@@ -60415,8 +60420,8 @@ aot_kitkat_libz_block_0791:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0615
-aot_kitkat_libz_block_0615:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0615)
+RB_AOT_SYM(aot_kitkat_libz_block_0615):
     .word 0xb9402f93
     .word 0xb9402394
     .word 0x4b140275
@@ -60469,8 +60474,8 @@ aot_kitkat_libz_block_0615:
     .word 0x17ff1f17
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0612
-aot_kitkat_libz_block_0612:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0612)
+RB_AOT_SYM(aot_kitkat_libz_block_0612):
     .word 0xb9401b93
     .word 0xb9402b94
     .word 0x0b140275
@@ -60527,8 +60532,8 @@ aot_kitkat_libz_block_0612:
     .word 0x17ff1edf
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0661
-aot_kitkat_libz_block_0661:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0661)
+RB_AOT_SYM(aot_kitkat_libz_block_0661):
     .word 0xb9404f93
     .word 0x11019274
     .word 0xaa1403e1
@@ -60995,8 +61000,8 @@ aot_kitkat_libz_block_0661:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0619
-aot_kitkat_libz_block_0619:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0619)
+RB_AOT_SYM(aot_kitkat_libz_block_0619):
     .word 0xb9403393
     .word 0x11000674
     .word 0xaa1303e1
@@ -61049,8 +61054,8 @@ aot_kitkat_libz_block_0619:
     .word 0x17ff1cd9
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0620
-aot_kitkat_libz_block_0620:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0620)
+RB_AOT_SYM(aot_kitkat_libz_block_0620):
     .word 0xb9404f93
     .word 0x11025274
     .word 0xaa1403e1
@@ -61093,8 +61098,8 @@ aot_kitkat_libz_block_0620:
     .word 0x17ff1caf
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0792
-aot_kitkat_libz_block_0792:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0792)
+RB_AOT_SYM(aot_kitkat_libz_block_0792):
     .word 0x52800133
     .word 0xb9001b93
     .word 0xb9404793
@@ -61153,8 +61158,8 @@ aot_kitkat_libz_block_0792:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0837
-aot_kitkat_libz_block_0837:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0837)
+RB_AOT_SYM(aot_kitkat_libz_block_0837):
     .word 0xb9403b93
     .word 0x112bda74
     .word 0xaa1403e1
@@ -61189,8 +61194,8 @@ aot_kitkat_libz_block_0837:
     .word 0x17ff1c53
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0662
-aot_kitkat_libz_block_0662:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0662)
+RB_AOT_SYM(aot_kitkat_libz_block_0662):
     .word 0xb9403393
     .word 0xaa1303e1
     .word 0x97ff19fc
@@ -61643,8 +61648,8 @@ aot_kitkat_libz_block_0662:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0663
-aot_kitkat_libz_block_0663:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0663)
+RB_AOT_SYM(aot_kitkat_libz_block_0663):
     .word 0xb9404f93
     .word 0x11019274
     .word 0xaa1403e1
@@ -61695,8 +61700,8 @@ aot_kitkat_libz_block_0663:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0621
-aot_kitkat_libz_block_0621:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0621)
+RB_AOT_SYM(aot_kitkat_libz_block_0621):
     .word 0xd100075a
     .word 0xf100035f
     .word 0x5400004d
@@ -61707,8 +61712,8 @@ aot_kitkat_libz_block_0621:
     .word 0x17ff1a53
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0838
-aot_kitkat_libz_block_0838:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0838)
+RB_AOT_SYM(aot_kitkat_libz_block_0838):
     .word 0x52800113
     .word 0xb9001b93
     .word 0x52800113
@@ -61729,8 +61734,8 @@ aot_kitkat_libz_block_0838:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0839
-aot_kitkat_libz_block_0839:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0839)
+RB_AOT_SYM(aot_kitkat_libz_block_0839):
     .word 0xb9403b93
     .word 0x112b9a74
     .word 0xaa1403e1
@@ -61767,8 +61772,8 @@ aot_kitkat_libz_block_0839:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0664
-aot_kitkat_libz_block_0664:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0664)
+RB_AOT_SYM(aot_kitkat_libz_block_0664):
     .word 0xd100075a
     .word 0xf100035f
     .word 0x5400004d
@@ -61779,8 +61784,8 @@ aot_kitkat_libz_block_0664:
     .word 0x17ff1a11
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0772
-aot_kitkat_libz_block_0772:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0772)
+RB_AOT_SYM(aot_kitkat_libz_block_0772):
     .word 0xb9404f93
     .word 0x11001274
     .word 0xaa1403e1
@@ -61807,8 +61812,8 @@ aot_kitkat_libz_block_0772:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0840
-aot_kitkat_libz_block_0840:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0840)
+RB_AOT_SYM(aot_kitkat_libz_block_0840):
     .word 0x528000f3
     .word 0xb9001b93
     .word 0x528000f3
@@ -61829,8 +61834,8 @@ aot_kitkat_libz_block_0840:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0841
-aot_kitkat_libz_block_0841:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0841)
+RB_AOT_SYM(aot_kitkat_libz_block_0841):
     .word 0xb9403b93
     .word 0x112bca74
     .word 0xaa1403e1
@@ -61865,8 +61870,8 @@ aot_kitkat_libz_block_0841:
     .word 0x17ff19c1
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0842
-aot_kitkat_libz_block_0842:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0842)
+RB_AOT_SYM(aot_kitkat_libz_block_0842):
     .word 0x528000d3
     .word 0xb9001b93
     .word 0x528000d3
@@ -61887,8 +61892,8 @@ aot_kitkat_libz_block_0842:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0843
-aot_kitkat_libz_block_0843:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0843)
+RB_AOT_SYM(aot_kitkat_libz_block_0843):
     .word 0xb9403b93
     .word 0x112baa74
     .word 0xaa1403e1
@@ -61923,8 +61928,8 @@ aot_kitkat_libz_block_0843:
     .word 0x17ff198b
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0844
-aot_kitkat_libz_block_0844:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0844)
+RB_AOT_SYM(aot_kitkat_libz_block_0844):
     .word 0x528000b3
     .word 0xb9001b93
     .word 0x528000b3
@@ -61945,8 +61950,8 @@ aot_kitkat_libz_block_0844:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0845
-aot_kitkat_libz_block_0845:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0845)
+RB_AOT_SYM(aot_kitkat_libz_block_0845):
     .word 0xb9403b93
     .word 0x112bba74
     .word 0xaa1403e1
@@ -61981,8 +61986,8 @@ aot_kitkat_libz_block_0845:
     .word 0x17ff1955
     .word 0xd4200000
     .word 0xd4200000
-.globl aot_kitkat_libz_block_0846
-aot_kitkat_libz_block_0846:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0846)
+RB_AOT_SYM(aot_kitkat_libz_block_0846):
     .word 0x52800093
     .word 0xb9001b93
     .word 0x52800093
@@ -62003,8 +62008,8 @@ aot_kitkat_libz_block_0846:
     .word 0xd4200000
     .word 0xd4200000
     .word 0xd503201f
-.globl aot_kitkat_libz_block_0847
-aot_kitkat_libz_block_0847:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_0847)
+RB_AOT_SYM(aot_kitkat_libz_block_0847):
     .word 0xb9403b93
     .word 0x112b3a74
     .word 0xaa1403e1
@@ -62039,3764 +62044,3764 @@ aot_kitkat_libz_block_0847:
     .section __DATA,__data
 #endif
     .p2align 3
-.globl aot_kitkat_libz_blocks
-aot_kitkat_libz_blocks:
+.globl RB_AOT_SYM(aot_kitkat_libz_blocks)
+RB_AOT_SYM(aot_kitkat_libz_blocks):
     .word 0x00000000
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0000
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0000)
     .word 0x00000008
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0001
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0001)
     .word 0x0000000c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0002
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0002)
     .word 0x00000016
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0003
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0003)
     .word 0x00000022
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0004
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0004)
     .word 0x00000052
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0005
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0005)
     .word 0x00000054
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0006
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0006)
     .word 0x00000058
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0007
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0007)
     .word 0x0000005a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0008
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0008)
     .word 0x00000066
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0009
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0009)
     .word 0x00000092
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0010
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0010)
     .word 0x000000a2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0011
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0011)
     .word 0x000000aa
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0012
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0012)
     .word 0x000000b6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0013
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0013)
     .word 0x000000bc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0014
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0014)
     .word 0x00000132
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0015
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0015)
     .word 0x00000150
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0016
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0016)
     .word 0x00000154
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0017
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0017)
     .word 0x00000158
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0018
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0018)
     .word 0x000001ea
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0019
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0019)
     .word 0x000001ec
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0020
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0020)
     .word 0x000001f8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0021
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0021)
     .word 0x00000218
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0022
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0022)
     .word 0x00000222
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0023
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0023)
     .word 0x00000226
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0024
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0024)
     .word 0x0000022c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0025
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0025)
     .word 0x000002a2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0026
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0026)
     .word 0x000002a8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0027
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0027)
     .word 0x000002ae
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0028
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0028)
     .word 0x00000324
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0029
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0029)
     .word 0x000006cc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0030
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0030)
     .word 0x000006e0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0031
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0031)
     .word 0x000006f4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0032
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0032)
     .word 0x000006fc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0033
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0033)
     .word 0x00000714
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0034
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0034)
     .word 0x00000720
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0035
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0035)
     .word 0x0000072a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0036
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0036)
     .word 0x00000736
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0037
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0037)
     .word 0x00000746
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0038
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0038)
     .word 0x00000758
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0039
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0039)
     .word 0x00000762
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0040
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0040)
     .word 0x00000766
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0041
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0041)
     .word 0x000007d6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0042
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0042)
     .word 0x00000804
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0043
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0043)
     .word 0x00000826
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0044
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0044)
     .word 0x00000940
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0045
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0045)
     .word 0x00000950
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0046
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0046)
     .word 0x0000095e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0047
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0047)
     .word 0x00000a50
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0048
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0048)
     .word 0x00000a56
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0049
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0049)
     .word 0x00000a5a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0050
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0050)
     .word 0x00000af4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0051
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0051)
     .word 0x00000afa
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0052
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0052)
     .word 0x00000afe
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0053
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0053)
     .word 0x00000b16
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0054
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0054)
     .word 0x00000b34
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0055
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0055)
     .word 0x00000b38
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0056
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0056)
     .word 0x00000b42
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0057
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0057)
     .word 0x00000b52
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0058
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0058)
     .word 0x00000b5e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0059
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0059)
     .word 0x00000b6c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0060
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0060)
     .word 0x00000b7c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0061
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0061)
     .word 0x00000b8c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0062
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0062)
     .word 0x00000b94
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0063
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0063)
     .word 0x00000b98
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0064
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0064)
     .word 0x00000baa
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0065
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0065)
     .word 0x00000bb8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0066
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0066)
     .word 0x00000bbc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0067
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0067)
     .word 0x00000bc4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0068
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0068)
     .word 0x00000bc6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0069
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0069)
     .word 0x00000bca
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0070
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0070)
     .word 0x00000bd2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0071
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0071)
     .word 0x00000be0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0072
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0072)
     .word 0x00000be4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0073
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0073)
     .word 0x00000bec
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0074
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0074)
     .word 0x00000bf8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0075
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0075)
     .word 0x00000c08
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0076
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0076)
     .word 0x00000c18
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0077
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0077)
     .word 0x00000c20
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0078
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0078)
     .word 0x00000c24
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0079
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0079)
     .word 0x00000c36
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0080
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0080)
     .word 0x00000c44
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0081
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0081)
     .word 0x00000c48
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0082
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0082)
     .word 0x00000c50
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0083
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0083)
     .word 0x00000c52
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0084
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0084)
     .word 0x00000c56
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0085
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0085)
     .word 0x00000c5e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0086
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0086)
     .word 0x00000c6c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0087
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0087)
     .word 0x00000c70
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0088
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0088)
     .word 0x00000c78
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0089
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0089)
     .word 0x00000c84
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0090
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0090)
     .word 0x00000c88
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0091
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0091)
     .word 0x00000ca0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0092
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0092)
     .word 0x00000ca8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0093
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0093)
     .word 0x00000cac
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0094
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0094)
     .word 0x00000cbe
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0095
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0095)
     .word 0x00000ccc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0096
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0096)
     .word 0x00000cd0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0097
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0097)
     .word 0x00000cd8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0098
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0098)
     .word 0x00000cda
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0099
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0099)
     .word 0x00000cde
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0100
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0100)
     .word 0x00000ce8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0101
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0101)
     .word 0x00000cec
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0102
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0102)
     .word 0x00000d04
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0103
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0103)
     .word 0x00000d0c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0104
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0104)
     .word 0x00000d10
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0105
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0105)
     .word 0x00000d22
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0106
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0106)
     .word 0x00000d30
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0107
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0107)
     .word 0x00000d34
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0108
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0108)
     .word 0x00000d3c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0109
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0109)
     .word 0x00000d3e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0110
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0110)
     .word 0x00000d42
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0111
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0111)
     .word 0x00000d4c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0112
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0112)
     .word 0x00000d60
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0113
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0113)
     .word 0x00000d6e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0114
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0114)
     .word 0x00000d72
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0115
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0115)
     .word 0x00000d7c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0116
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0116)
     .word 0x00000d82
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0117
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0117)
     .word 0x00000d8a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0118
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0118)
     .word 0x00000d92
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0119
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0119)
     .word 0x00000d94
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0120
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0120)
     .word 0x00000da4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0121
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0121)
     .word 0x00000da6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0122
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0122)
     .word 0x00000db2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0123
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0123)
     .word 0x00000dba
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0124
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0124)
     .word 0x00000dbe
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0125
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0125)
     .word 0x00000dcc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0126
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0126)
     .word 0x00000dd6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0127
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0127)
     .word 0x00000de0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0128
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0128)
     .word 0x00000f48
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0129
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0129)
     .word 0x00000f64
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0130
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0130)
     .word 0x00000f68
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0131
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0131)
     .word 0x00000f7a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0132
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0132)
     .word 0x00000f7e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0133
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0133)
     .word 0x00000f94
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0134
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0134)
     .word 0x00001164
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0135
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0135)
     .word 0x00001240
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0136
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0136)
     .word 0x00001248
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0137
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0137)
     .word 0x000012d4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0138
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0138)
     .word 0x000012e0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0139
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0139)
     .word 0x000012e8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0140
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0140)
     .word 0x000012f0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0141
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0141)
     .word 0x000012fc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0142
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0142)
     .word 0x00001304
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0143
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0143)
     .word 0x00001310
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0144
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0144)
     .word 0x00001320
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0145
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0145)
     .word 0x0000135e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0146
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0146)
     .word 0x000013c0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0147
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0147)
     .word 0x000017f0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0148
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0148)
     .word 0x000018b0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0149
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0149)
     .word 0x00001980
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0150
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0150)
     .word 0x00001a10
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0151
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0151)
     .word 0x00001ab8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0152
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0152)
     .word 0x00001ba8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0153
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0153)
     .word 0x00001bb2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0154
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0154)
     .word 0x00001bba
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0155
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0155)
     .word 0x00001bc2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0156
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0156)
     .word 0x00001bca
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0157
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0157)
     .word 0x00001bd0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0158
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0158)
     .word 0x00001bda
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0159
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0159)
     .word 0x00001be8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0160
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0160)
     .word 0x00001c26
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0161
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0161)
     .word 0x00001cb0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0162
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0162)
     .word 0x00001d44
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0163
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0163)
     .word 0x00001d4c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0164
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0164)
     .word 0x00001d50
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0165
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0165)
     .word 0x00001d54
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0166
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0166)
     .word 0x00001d58
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0167
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0167)
     .word 0x00001d5e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0168
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0168)
     .word 0x00001d6a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0169
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0169)
     .word 0x00001d76
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0170
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0170)
     .word 0x00001d84
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0171
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0171)
     .word 0x00001dc2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0172
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0172)
     .word 0x0000275c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0173
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0173)
     .word 0x00002770
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0174
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0174)
     .word 0x000027b0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0175
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0175)
     .word 0x00002824
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0176
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0176)
     .word 0x000028bc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0177
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0177)
     .word 0x00002a52
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0178
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0178)
     .word 0x00002ef4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0179
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0179)
     .word 0x00002f1a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0180
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0180)
     .word 0x00002f20
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0181
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0181)
     .word 0x00002f26
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0182
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0182)
     .word 0x00002f2e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0183
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0183)
     .word 0x00002f80
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0184
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0184)
     .word 0x00002fea
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0185
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0185)
     .word 0x00002ff2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0186
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0186)
     .word 0x00002ffc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0187
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0187)
     .word 0x00003078
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0188
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0188)
     .word 0x0000307e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0189
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0189)
     .word 0x000030ee
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0190
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0190)
     .word 0x000030f0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0191
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0191)
     .word 0x00003100
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0192
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0192)
     .word 0x0000312e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0193
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0193)
     .word 0x00003138
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0194
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0194)
     .word 0x0000313e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0195
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0195)
     .word 0x00003144
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0196
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0196)
     .word 0x0000314c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0197
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0197)
     .word 0x00003152
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0198
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0198)
     .word 0x0000315e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0199
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0199)
     .word 0x00003160
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0200
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0200)
     .word 0x00003162
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0201
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0201)
     .word 0x0000316c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0202
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0202)
     .word 0x0000317c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0203
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0203)
     .word 0x00003188
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0204
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0204)
     .word 0x000031d2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0205
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0205)
     .word 0x0000333e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0206
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0206)
     .word 0x00003348
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0207
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0207)
     .word 0x000033c4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0208
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0208)
     .word 0x000033ca
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0209
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0209)
     .word 0x0000343a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0210
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0210)
     .word 0x00003442
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0211
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0211)
     .word 0x00003454
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0212
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0212)
     .word 0x00003648
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0213
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0213)
     .word 0x00003678
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0214
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0214)
     .word 0x00003682
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0215
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0215)
     .word 0x00003688
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0216
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0216)
     .word 0x00003690
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0217
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0217)
     .word 0x00003698
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0218
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0218)
     .word 0x0000369e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0219
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0219)
     .word 0x000036a2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0220
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0220)
     .word 0x000036de
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0221
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0221)
     .word 0x000036f2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0222
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0222)
     .word 0x000036fc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0223
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0223)
     .word 0x000037f8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0224
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0224)
     .word 0x000037fe
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0225
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0225)
     .word 0x00003808
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0226
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0226)
     .word 0x0000385c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0227
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0227)
     .word 0x000038fe
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0228
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0228)
     .word 0x00003a0e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0229
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0229)
     .word 0x00003a20
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0230
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0230)
     .word 0x00003a3e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0231
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0231)
     .word 0x00003a5e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0232
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0232)
     .word 0x00003a68
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0233
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0233)
     .word 0x00003a6e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0234
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0234)
     .word 0x00003a76
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0235
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0235)
     .word 0x00003a7e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0236
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0236)
     .word 0x00003a84
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0237
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0237)
     .word 0x00003a88
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0238
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0238)
     .word 0x00003ad8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0239
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0239)
     .word 0x00003ae0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0240
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0240)
     .word 0x00003af4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0241
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0241)
     .word 0x00003af6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0242
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0242)
     .word 0x00003afe
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0243
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0243)
     .word 0x00003b00
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0244
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0244)
     .word 0x00003b12
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0245
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0245)
     .word 0x00003b16
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0246
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0246)
     .word 0x00003b1a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0247
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0247)
     .word 0x00003bf2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0248
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0248)
     .word 0x00003bfc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0249
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0249)
     .word 0x00003c3e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0250
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0250)
     .word 0x00003d50
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0251
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0251)
     .word 0x00003d68
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0252
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0252)
     .word 0x00003d6e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0253
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0253)
     .word 0x00003d78
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0254
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0254)
     .word 0x00003d80
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0255
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0255)
     .word 0x00003d88
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0256
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0256)
     .word 0x00003d8e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0257
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0257)
     .word 0x00003d9a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0258
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0258)
     .word 0x00003d9e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0259
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0259)
     .word 0x00003da4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0260
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0260)
     .word 0x00003dde
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0261
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0261)
     .word 0x00003eee
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0262
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0262)
     .word 0x00003f00
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0263
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0263)
     .word 0x00004090
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0264
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0264)
     .word 0x000040ac
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0265
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0265)
     .word 0x000040b8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0266
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0266)
     .word 0x000040c4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0267
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0267)
     .word 0x000040d0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0268
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0268)
     .word 0x000040d8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0269
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0269)
     .word 0x000040f6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0270
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0270)
     .word 0x00004112
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0271
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0271)
     .word 0x00004114
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0272
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0272)
     .word 0x0000411e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0273
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0273)
     .word 0x00004126
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0274
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0274)
     .word 0x0000412c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0275
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0275)
     .word 0x000041be
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0276
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0276)
     .word 0x00004224
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0277
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0277)
     .word 0x00004228
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0278
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0278)
     .word 0x000042f0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0279
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0279)
     .word 0x000042fc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0280
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0280)
     .word 0x00004306
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0281
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0281)
     .word 0x0000430e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0282
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0282)
     .word 0x00004310
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0283
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0283)
     .word 0x00004320
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0284
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0284)
     .word 0x0000432a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0285
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0285)
     .word 0x00004332
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0286
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0286)
     .word 0x00004338
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0287
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0287)
     .word 0x00004344
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0288
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0288)
     .word 0x00004366
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0289
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0289)
     .word 0x00004384
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0290
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0290)
     .word 0x00004386
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0291
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0291)
     .word 0x000043b2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0292
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0292)
     .word 0x000043b8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0293
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0293)
     .word 0x000043bc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0294
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0294)
     .word 0x000043c6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0295
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0295)
     .word 0x000043fe
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0296
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0296)
     .word 0x0000442c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0297
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0297)
     .word 0x00004430
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0298
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0298)
     .word 0x00004452
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0299
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0299)
     .word 0x00004520
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0300
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0300)
     .word 0x0000452c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0301
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0301)
     .word 0x00004532
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0302
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0302)
     .word 0x00004538
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0303
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0303)
     .word 0x0000453a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0304
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0304)
     .word 0x0000453e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0305
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0305)
     .word 0x000045b4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0306
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0306)
     .word 0x000045b8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0307
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0307)
     .word 0x000045ba
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0308
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0308)
     .word 0x000045dc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0309
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0309)
     .word 0x000045e2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0310
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0310)
     .word 0x000045e4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0311
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0311)
     .word 0x00004606
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0312
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0312)
     .word 0x0000460c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0313
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0313)
     .word 0x00004610
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0314
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0314)
     .word 0x00004642
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0315
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0315)
     .word 0x00004648
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0316
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0316)
     .word 0x0000464c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0317
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0317)
     .word 0x0000467e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0318
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0318)
     .word 0x00004684
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0319
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0319)
     .word 0x00004686
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0320
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0320)
     .word 0x00004694
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0321
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0321)
     .word 0x00004698
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0322
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0322)
     .word 0x0000469a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0323
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0323)
     .word 0x000046be
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0324
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0324)
     .word 0x000046d8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0325
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0325)
     .word 0x000046dc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0326
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0326)
     .word 0x000046e6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0327
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0327)
     .word 0x000046f6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0328
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0328)
     .word 0x000046fa
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0329
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0329)
     .word 0x00004700
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0330
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0330)
     .word 0x00004708
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0331
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0331)
     .word 0x0000470a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0332
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0332)
     .word 0x0000470e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0333
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0333)
     .word 0x00004712
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0334
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0334)
     .word 0x00004714
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0335
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0335)
     .word 0x00004718
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0336
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0336)
     .word 0x00004722
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0337
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0337)
     .word 0x0000475a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0338
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0338)
     .word 0x00004764
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0339
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0339)
     .word 0x0000476a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0340
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0340)
     .word 0x00004774
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0341
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0341)
     .word 0x0000477c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0342
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0342)
     .word 0x0000479a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0343
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0343)
     .word 0x0000479c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0344
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0344)
     .word 0x000047a2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0345
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0345)
     .word 0x000047a6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0346
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0346)
     .word 0x000047aa
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0347
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0347)
     .word 0x000047b0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0348
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0348)
     .word 0x000047b4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0349
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0349)
     .word 0x000047ba
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0350
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0350)
     .word 0x000047c8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0351
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0351)
     .word 0x000047ce
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0352
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0352)
     .word 0x000047d2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0353
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0353)
     .word 0x000047d6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0354
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0354)
     .word 0x000047da
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0355
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0355)
     .word 0x000047f6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0356
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0356)
     .word 0x00004806
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0357
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0357)
     .word 0x00004808
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0358
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0358)
     .word 0x0000480c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0359
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0359)
     .word 0x00004810
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0360
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0360)
     .word 0x00004816
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0361
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0361)
     .word 0x0000481e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0362
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0362)
     .word 0x00004822
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0363
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0363)
     .word 0x00004848
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0364
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0364)
     .word 0x00004852
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0365
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0365)
     .word 0x00004856
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0366
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0366)
     .word 0x00004868
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0367
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0367)
     .word 0x0000486e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0368
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0368)
     .word 0x00004894
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0369
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0369)
     .word 0x00004898
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0370
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0370)
     .word 0x000048a4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0371
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0371)
     .word 0x000048e6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0372
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0372)
     .word 0x000048f0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0373
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0373)
     .word 0x00004900
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0374
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0374)
     .word 0x0000490a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0375
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0375)
     .word 0x00004934
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0376
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0376)
     .word 0x00004970
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0377
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0377)
     .word 0x00004980
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0378
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0378)
     .word 0x0000498a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0379
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0379)
     .word 0x000049b4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0380
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0380)
     .word 0x000049f0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0381
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0381)
     .word 0x000049f6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0382
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0382)
     .word 0x00004a02
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0383
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0383)
     .word 0x00004a86
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0384
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0384)
     .word 0x00004ae0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0385
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0385)
     .word 0x00004be8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0386
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0386)
     .word 0x00004bec
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0387
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0387)
     .word 0x00004bf0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0388
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0388)
     .word 0x00004bf4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0389
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0389)
     .word 0x00004bf8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0390
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0390)
     .word 0x00004bfa
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0391
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0391)
     .word 0x00004c0a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0392
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0392)
     .word 0x00004c0e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0393
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0393)
     .word 0x00004c10
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0394
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0394)
     .word 0x00004c16
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0395
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0395)
     .word 0x00004c1a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0396
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0396)
     .word 0x00004c1e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0397
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0397)
     .word 0x00004c22
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0398
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0398)
     .word 0x00004c28
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0399
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0399)
     .word 0x00004c2e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0400
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0400)
     .word 0x00004c32
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0401
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0401)
     .word 0x00004c38
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0402
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0402)
     .word 0x00004c9c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0403
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0403)
     .word 0x00004ca0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0404
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0404)
     .word 0x00004caa
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0405
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0405)
     .word 0x00004cb6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0406
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0406)
     .word 0x00004cba
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0407
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0407)
     .word 0x00004ccc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0408
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0408)
     .word 0x00004cda
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0409
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0409)
     .word 0x00004ce0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0410
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0410)
     .word 0x00004ce6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0411
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0411)
     .word 0x00004cea
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0412
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0412)
     .word 0x00004cee
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0413
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0413)
     .word 0x00004cf2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0414
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0414)
     .word 0x00004d00
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0415
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0415)
     .word 0x00004d06
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0416
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0416)
     .word 0x00004d10
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0417
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0417)
     .word 0x00004d1e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0418
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0418)
     .word 0x00004d24
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0419
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0419)
     .word 0x00004d2c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0420
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0420)
     .word 0x00004d36
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0421
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0421)
     .word 0x00004d98
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0422
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0422)
     .word 0x00004da8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0423
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0423)
     .word 0x00004dd4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0424
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0424)
     .word 0x00004dd8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0425
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0425)
     .word 0x00004de2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0426
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0426)
     .word 0x00004de6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0427
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0427)
     .word 0x00004df2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0428
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0428)
     .word 0x00004df8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0429
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0429)
     .word 0x00004dfe
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0430
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0430)
     .word 0x00004e00
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0431
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0431)
     .word 0x00004e0c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0432
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0432)
     .word 0x00004e12
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0433
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0433)
     .word 0x00004e18
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0434
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0434)
     .word 0x00004e20
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0435
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0435)
     .word 0x00004e32
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0436
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0436)
     .word 0x00004e38
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0437
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0437)
     .word 0x00004e48
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0438
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0438)
     .word 0x00004e52
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0439
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0439)
     .word 0x00004e56
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0440
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0440)
     .word 0x00004e5c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0441
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0441)
     .word 0x00004e60
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0442
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0442)
     .word 0x00004e64
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0443
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0443)
     .word 0x00004e6c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0444
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0444)
     .word 0x00004e74
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0445
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0445)
     .word 0x00004eb0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0446
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0446)
     .word 0x00004eb8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0447
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0447)
     .word 0x00004ec6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0448
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0448)
     .word 0x00004ef4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0449
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0449)
     .word 0x00004fc8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0450
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0450)
     .word 0x00004fcc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0451
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0451)
     .word 0x00004fde
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0452
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0452)
     .word 0x00005004
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0453
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0453)
     .word 0x0000500a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0454
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0454)
     .word 0x00005014
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0455
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0455)
     .word 0x0000501a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0456
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0456)
     .word 0x0000501e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0457
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0457)
     .word 0x00005022
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0458
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0458)
     .word 0x0000502e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0459
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0459)
     .word 0x00005032
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0460
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0460)
     .word 0x00005038
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0461
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0461)
     .word 0x0000507e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0462
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0462)
     .word 0x00005084
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0463
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0463)
     .word 0x0000508a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0464
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0464)
     .word 0x0000508e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0465
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0465)
     .word 0x00005098
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0466
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0466)
     .word 0x0000509c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0467
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0467)
     .word 0x000050ae
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0468
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0468)
     .word 0x000050c4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0469
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0469)
     .word 0x000050c8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0470
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0470)
     .word 0x000050da
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0471
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0471)
     .word 0x0000511c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0472
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0472)
     .word 0x0000512c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0473
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0473)
     .word 0x00005136
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0474
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0474)
     .word 0x0000513a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0475
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0475)
     .word 0x00005154
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0476
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0476)
     .word 0x00005158
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0477
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0477)
     .word 0x00005168
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0478
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0478)
     .word 0x00005172
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0479
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0479)
     .word 0x00005176
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0480
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0480)
     .word 0x000051a2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0481
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0481)
     .word 0x000051b4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0482
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0482)
     .word 0x000051cc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0483
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0483)
     .word 0x000051d6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0484
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0484)
     .word 0x000051de
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0485
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0485)
     .word 0x000051e2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0486
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0486)
     .word 0x000051e4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0487
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0487)
     .word 0x00005244
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0488
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0488)
     .word 0x00005248
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0489
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0489)
     .word 0x00005250
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0490
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0490)
     .word 0x00005254
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0491
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0491)
     .word 0x00005264
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0492
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0492)
     .word 0x000052ac
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0493
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0493)
     .word 0x000052b2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0494
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0494)
     .word 0x000052c2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0495
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0495)
     .word 0x00005394
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0496
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0496)
     .word 0x000053a2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0497
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0497)
     .word 0x000053a6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0498
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0498)
     .word 0x000053aa
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0499
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0499)
     .word 0x000053ac
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0500
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0500)
     .word 0x000053ae
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0501
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0501)
     .word 0x000053b2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0502
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0502)
     .word 0x000053ba
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0503
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0503)
     .word 0x000053be
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0504
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0504)
     .word 0x000053e8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0505
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0505)
     .word 0x000053ea
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0506
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0506)
     .word 0x000053f0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0507
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0507)
     .word 0x000053f4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0508
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0508)
     .word 0x000053f6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0509
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0509)
     .word 0x000053fa
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0510
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0510)
     .word 0x00005408
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0511
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0511)
     .word 0x00005410
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0512
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0512)
     .word 0x0000541e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0513
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0513)
     .word 0x00005430
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0514
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0514)
     .word 0x0000543c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0515
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0515)
     .word 0x00005442
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0516
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0516)
     .word 0x00005446
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0517
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0517)
     .word 0x0000544a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0518
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0518)
     .word 0x0000544e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0519
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0519)
     .word 0x00005478
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0520
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0520)
     .word 0x0000547a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0521
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0521)
     .word 0x00005480
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0522
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0522)
     .word 0x00005488
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0523
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0523)
     .word 0x00005490
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0524
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0524)
     .word 0x00005496
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0525
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0525)
     .word 0x00005498
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0526
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0526)
     .word 0x0000549c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0527
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0527)
     .word 0x0000549e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0528
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0528)
     .word 0x000054b6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0529
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0529)
     .word 0x000054be
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0530
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0530)
     .word 0x000054e8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0531
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0531)
     .word 0x000054ea
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0532
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0532)
     .word 0x000054f4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0533
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0533)
     .word 0x000054fc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0534
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0534)
     .word 0x00005500
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0535
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0535)
     .word 0x00005508
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0536
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0536)
     .word 0x00005532
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0537
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0537)
     .word 0x0000553c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0538
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0538)
     .word 0x0000554a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0539
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0539)
     .word 0x00005558
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0540
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0540)
     .word 0x00005574
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0541
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0541)
     .word 0x00005598
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0542
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0542)
     .word 0x0000559c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0543
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0543)
     .word 0x000055a6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0544
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0544)
     .word 0x000055ae
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0545
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0545)
     .word 0x000055b2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0546
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0546)
     .word 0x000055b6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0547
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0547)
     .word 0x000055c6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0548
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0548)
     .word 0x000055d0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0549
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0549)
     .word 0x000055d6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0550
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0550)
     .word 0x000055d8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0551
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0551)
     .word 0x000055da
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0552
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0552)
     .word 0x000055de
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0553
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0553)
     .word 0x000055e4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0554
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0554)
     .word 0x000055e8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0555
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0555)
     .word 0x000055f2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0556
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0556)
     .word 0x000055fe
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0557
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0557)
     .word 0x00005674
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0558
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0558)
     .word 0x00005678
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0559
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0559)
     .word 0x00005684
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0560
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0560)
     .word 0x0000568a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0561
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0561)
     .word 0x00005694
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0562
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0562)
     .word 0x0000569a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0563
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0563)
     .word 0x000056a2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0564
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0564)
     .word 0x000056ec
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0565
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0565)
     .word 0x000056f4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0566
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0566)
     .word 0x000056fa
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0567
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0567)
     .word 0x00005710
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0568
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0568)
     .word 0x00005798
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0569
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0569)
     .word 0x000057b4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0570
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0570)
     .word 0x000057c0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0571
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0571)
     .word 0x00006298
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0572
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0572)
     .word 0x000062e0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0573
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0573)
     .word 0x00006330
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0574
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0574)
     .word 0x00006334
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0575
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0575)
     .word 0x00006340
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0576
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0576)
     .word 0x00006354
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0577
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0577)
     .word 0x000063ea
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0578
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0578)
     .word 0x000063ee
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0579
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0579)
     .word 0x00006406
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0580
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0580)
     .word 0x0000641e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0581
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0581)
     .word 0x00006422
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0582
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0582)
     .word 0x00006428
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0583
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0583)
     .word 0x0000644a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0584
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0584)
     .word 0x00006450
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0585
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0585)
     .word 0x00006458
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0586
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0586)
     .word 0x0000645c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0587
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0587)
     .word 0x0000645e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0588
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0588)
     .word 0x00006468
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0589
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0589)
     .word 0x0000646c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0590
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0590)
     .word 0x00006478
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0591
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0591)
     .word 0x0000647a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0592
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0592)
     .word 0x0000648a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0593
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0593)
     .word 0x00006494
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0594
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0594)
     .word 0x000064b0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0595
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0595)
     .word 0x000064b2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0596
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0596)
     .word 0x000064ce
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0597
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0597)
     .word 0x000064d4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0598
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0598)
     .word 0x000064f4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0599
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0599)
     .word 0x00006504
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0600
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0600)
     .word 0x00006518
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0601
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0601)
     .word 0x0000652a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0602
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0602)
     .word 0x0000652e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0603
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0603)
     .word 0x0000654a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0604
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0604)
     .word 0x00006554
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0605
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0605)
     .word 0x0000655e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0606
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0606)
     .word 0x00006566
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0607
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0607)
     .word 0x0000656e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0608
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0608)
     .word 0x00006580
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0609
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0609)
     .word 0x00006586
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0610
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0610)
     .word 0x00006592
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0611
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0611)
     .word 0x0000659a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0612
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0612)
     .word 0x0000659e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0613
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0613)
     .word 0x000065aa
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0614
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0614)
     .word 0x000065ac
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0615
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0615)
     .word 0x000065b8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0616
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0616)
     .word 0x000065bc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0617
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0617)
     .word 0x000065ca
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0618
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0618)
     .word 0x000065ce
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0619
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0619)
     .word 0x000065da
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0620
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0620)
     .word 0x000065e8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0621
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0621)
     .word 0x000065ea
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0622
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0622)
     .word 0x00006834
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0623
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0623)
     .word 0x00006844
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0624
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0624)
     .word 0x00006848
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0625
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0625)
     .word 0x00006854
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0626
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0626)
     .word 0x0000685a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0627
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0627)
     .word 0x00006866
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0628
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0628)
     .word 0x00006868
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0629
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0629)
     .word 0x00006872
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0630
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0630)
     .word 0x00006876
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0631
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0631)
     .word 0x00006882
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0632
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0632)
     .word 0x00006888
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0633
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0633)
     .word 0x00006894
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0634
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0634)
     .word 0x0000689e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0635
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0635)
     .word 0x000068ae
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0636
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0636)
     .word 0x000068b0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0637
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0637)
     .word 0x000068b6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0638
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0638)
     .word 0x000068be
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0639
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0639)
     .word 0x00006a76
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0640
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0640)
     .word 0x00006a7a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0641
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0641)
     .word 0x00006a98
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0642
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0642)
     .word 0x00006aa0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0643
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0643)
     .word 0x00006aae
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0644
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0644)
     .word 0x00006aba
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0645
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0645)
     .word 0x00006abc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0646
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0646)
     .word 0x00006ac0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0647
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0647)
     .word 0x00006ac8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0648
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0648)
     .word 0x00006aca
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0649
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0649)
     .word 0x00006ada
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0650
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0650)
     .word 0x00006ae6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0651
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0651)
     .word 0x00006aec
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0652
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0652)
     .word 0x00006aee
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0653
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0653)
     .word 0x00006b04
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0654
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0654)
     .word 0x00006b10
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0655
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0655)
     .word 0x00006b14
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0656
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0656)
     .word 0x00006b1a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0657
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0657)
     .word 0x00006b2a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0658
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0658)
     .word 0x00006b36
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0659
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0659)
     .word 0x00006b3c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0660
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0660)
     .word 0x00006b3e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0661
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0661)
     .word 0x00006b44
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0662
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0662)
     .word 0x00006b50
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0663
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0663)
     .word 0x00006b5c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0664
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0664)
     .word 0x00006b5e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0665
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0665)
     .word 0x00006c22
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0666
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0666)
     .word 0x00006c26
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0667
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0667)
     .word 0x00006c2c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0668
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0668)
     .word 0x00006c32
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0669
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0669)
     .word 0x00006c3c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0670
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0670)
     .word 0x00006c44
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0671
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0671)
     .word 0x00006c48
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0672
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0672)
     .word 0x00006c7e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0673
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0673)
     .word 0x00006c94
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0674
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0674)
     .word 0x00006d16
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0675
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0675)
     .word 0x00006dc0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0676
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0676)
     .word 0x00006e54
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0677
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0677)
     .word 0x00006e60
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0678
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0678)
     .word 0x00006e6a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0679
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0679)
     .word 0x00006f84
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0680
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0680)
     .word 0x00006f8e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0681
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0681)
     .word 0x0000700c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0682
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0682)
     .word 0x00008840
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0683
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0683)
     .word 0x00008850
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0684
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0684)
     .word 0x00008860
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0685
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0685)
     .word 0x00008866
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0686
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0686)
     .word 0x0000886a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0687
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0687)
     .word 0x0000886e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0688
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0688)
     .word 0x000088a4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0689
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0689)
     .word 0x000088b6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0690
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0690)
     .word 0x000088be
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0691
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0691)
     .word 0x000088e8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0692
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0692)
     .word 0x000088ee
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0693
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0693)
     .word 0x00008940
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0694
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0694)
     .word 0x000089ae
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0695
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0695)
     .word 0x00008a46
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0696
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0696)
     .word 0x00008a84
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0697
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0697)
     .word 0x00008a96
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0698
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0698)
     .word 0x00008a9a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0699
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0699)
     .word 0x00008a9e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0700
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0700)
     .word 0x00008aa8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0701
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0701)
     .word 0x00008ab0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0702
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0702)
     .word 0x00008abe
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0703
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0703)
     .word 0x00008ac2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0704
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0704)
     .word 0x00008aca
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0705
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0705)
     .word 0x00008ad0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0706
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0706)
     .word 0x00008ad4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0707
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0707)
     .word 0x00008aec
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0708
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0708)
     .word 0x00008af4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0709
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0709)
     .word 0x00008afa
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0710
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0710)
     .word 0x00008b10
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0711
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0711)
     .word 0x00008b1c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0712
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0712)
     .word 0x00008b2c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0713
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0713)
     .word 0x00008b60
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0714
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0714)
     .word 0x00008b6c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0715
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0715)
     .word 0x00008b70
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0716
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0716)
     .word 0x00008b74
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0717
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0717)
     .word 0x00008b9e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0718
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0718)
     .word 0x00008bba
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0719
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0719)
     .word 0x00008bee
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0720
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0720)
     .word 0x00008bfc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0721
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0721)
     .word 0x00008c3e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0722
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0722)
     .word 0x00008d38
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0723
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0723)
     .word 0x00008d74
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0724
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0724)
     .word 0x00008dc0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0725
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0725)
     .word 0x00008e26
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0726
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0726)
     .word 0x00009384
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0727
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0727)
     .word 0x000093e0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0728
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0728)
     .word 0x000093f0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0729
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0729)
     .word 0x000093fc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0730
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0730)
     .word 0x000094d6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0731
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0731)
     .word 0x000094ea
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0732
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0732)
     .word 0x0000952c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0733
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0733)
     .word 0x00009530
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0734
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0734)
     .word 0x0000953a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0735
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0735)
     .word 0x00009548
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0736
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0736)
     .word 0x0000955e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0737
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0737)
     .word 0x00009568
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0738
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0738)
     .word 0x000095b6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0739
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0739)
     .word 0x000095c2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0740
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0740)
     .word 0x000095cc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0741
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0741)
     .word 0x000095da
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0742
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0742)
     .word 0x00009606
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0743
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0743)
     .word 0x0000962a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0744
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0744)
     .word 0x0000964a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0745
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0745)
     .word 0x0000967a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0746
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0746)
     .word 0x00009682
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0747
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0747)
     .word 0x000096a0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0748
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0748)
     .word 0x000096a8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0749
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0749)
     .word 0x000096d4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0750
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0750)
     .word 0x000096f4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0751
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0751)
     .word 0x00009712
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0752
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0752)
     .word 0x0000971e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0753
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0753)
     .word 0x00009724
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0754
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0754)
     .word 0x0000972a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0755
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0755)
     .word 0x00009730
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0756
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0756)
     .word 0x00009736
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0757
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0757)
     .word 0x0000973c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0758
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0758)
     .word 0x00009742
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0759
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0759)
     .word 0x00009748
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0760
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0760)
     .word 0x0000974e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0761
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0761)
     .word 0x00009758
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0762
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0762)
     .word 0x0000975c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0763
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0763)
     .word 0x00009768
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0764
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0764)
     .word 0x00009772
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0765
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0765)
     .word 0x0000978e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0766
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0766)
     .word 0x00009846
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0767
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0767)
     .word 0x0000985a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0768
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0768)
     .word 0x00009908
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0769
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0769)
     .word 0x00009912
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0770
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0770)
     .word 0x00009918
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0771
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0771)
     .word 0x0000991a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0772
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0772)
     .word 0x00009920
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0773
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0773)
     .word 0x0000992c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0774
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0774)
     .word 0x0000992e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0775
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0775)
     .word 0x00009938
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0776
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0776)
     .word 0x0000993c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0777
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0777)
     .word 0x00009942
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0778
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0778)
     .word 0x00009946
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0779
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0779)
     .word 0x0000994c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0780
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0780)
     .word 0x00009950
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0781
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0781)
     .word 0x00009956
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0782
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0782)
     .word 0x0000995a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0783
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0783)
     .word 0x00009960
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0784
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0784)
     .word 0x00009964
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0785
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0785)
     .word 0x0000996a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0786
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0786)
     .word 0x0000996e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0787
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0787)
     .word 0x00009974
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0788
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0788)
     .word 0x00009978
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0789
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0789)
     .word 0x0000997e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0790
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0790)
     .word 0x00009982
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0791
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0791)
     .word 0x0000998c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0792
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0792)
     .word 0x0000998e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0793
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0793)
     .word 0x000099ae
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0794
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0794)
     .word 0x000099b6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0795
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0795)
     .word 0x000099ba
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0796
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0796)
     .word 0x000099c2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0797
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0797)
     .word 0x000099cc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0798
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0798)
     .word 0x000099d2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0799
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0799)
     .word 0x000099d8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0800
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0800)
     .word 0x000099e0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0801
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0801)
     .word 0x000099fa
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0802
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0802)
     .word 0x000099fe
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0803
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0803)
     .word 0x00009a0a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0804
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0804)
     .word 0x00009a16
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0805
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0805)
     .word 0x00009a26
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0806
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0806)
     .word 0x00009a2c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0807
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0807)
     .word 0x00009a34
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0808
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0808)
     .word 0x00009a3a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0809
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0809)
     .word 0x00009a82
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0810
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0810)
     .word 0x00009a88
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0811
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0811)
     .word 0x00009acc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0812
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0812)
     .word 0x00009ada
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0813
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0813)
     .word 0x00009aec
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0814
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0814)
     .word 0x00009af2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0815
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0815)
     .word 0x00009af8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0816
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0816)
     .word 0x00009afa
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0817
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0817)
     .word 0x00009b04
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0818
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0818)
     .word 0x00009b18
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0819
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0819)
     .word 0x00009b5e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0820
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0820)
     .word 0x00009b68
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0821
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0821)
     .word 0x00009b76
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0822
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0822)
     .word 0x00009bb6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0823
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0823)
     .word 0x00009bc6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0824
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0824)
     .word 0x00009c08
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0825
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0825)
     .word 0x00009c0e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0826
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0826)
     .word 0x00009c1e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0827
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0827)
     .word 0x00009c28
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0828
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0828)
     .word 0x00009c42
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0829
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0829)
     .word 0x00009c80
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0830
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0830)
     .word 0x00009c8c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0831
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0831)
     .word 0x00009c9a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0832
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0832)
     .word 0x00009ca4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0833
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0833)
     .word 0x00009cac
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0834
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0834)
     .word 0x00009cb2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0835
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0835)
     .word 0x00009cb8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0836
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0836)
     .word 0x00009cd0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0837
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0837)
     .word 0x00009cd6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0838
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0838)
     .word 0x00009cda
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0839
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0839)
     .word 0x00009ce2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0840
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0840)
     .word 0x00009d60
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0841
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0841)
     .word 0x00009d66
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0842
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0842)
     .word 0x00009d6a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0843
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0843)
     .word 0x00009d70
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0844
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0844)
     .word 0x00009d74
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0845
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0845)
     .word 0x00009d7a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0846
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0846)
     .word 0x00009d7e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0847
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0847)
     .word 0x00009db4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0848
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0848)
     .word 0x00009df6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0849
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0849)
     .word 0x00009e04
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0850
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0850)
     .word 0x00009e12
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0851
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0851)
     .word 0x00009e1a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0852
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0852)
     .word 0x00009e34
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0853
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0853)
     .word 0x00009e3c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0854
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0854)
     .word 0x00009e3e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0855
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0855)
     .word 0x00009e44
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0856
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0856)
     .word 0x00009e9e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0857
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0857)
     .word 0x00009eac
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0858
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0858)
     .word 0x00009ebc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0859
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0859)
     .word 0x00009ebe
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0860
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0860)
     .word 0x00009ec8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0861
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0861)
     .word 0x00009ed8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0862
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0862)
     .word 0x00009ee0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0863
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0863)
     .word 0x00009ef2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0864
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0864)
     .word 0x00009ef6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0865
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0865)
     .word 0x00009f0e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0866
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0866)
     .word 0x00009f12
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0867
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0867)
     .word 0x00009f14
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0868
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0868)
     .word 0x00009f26
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0869
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0869)
     .word 0x00009f28
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0870
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0870)
     .word 0x00009f38
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0871
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0871)
     .word 0x00009f3a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0872
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0872)
     .word 0x00009f46
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0873
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0873)
     .word 0x00009f48
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0874
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0874)
     .word 0x00009f4c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0875
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0875)
     .word 0x00009f70
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0876
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0876)
     .word 0x00009f8a
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0877
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0877)
     .word 0x00009f8e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0878
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0878)
     .word 0x00009f94
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0879
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0879)
     .word 0x00009fa6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0880
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0880)
     .word 0x00009faa
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0881
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0881)
     .word 0x00009fc2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0882
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0882)
     .word 0x00009fc6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0883
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0883)
     .word 0x00009fc8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0884
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0884)
     .word 0x00009fda
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0885
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0885)
     .word 0x00009fdc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0886
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0886)
     .word 0x00009fec
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0887
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0887)
     .word 0x00009fee
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0888
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0888)
     .word 0x00009ffa
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0889
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0889)
     .word 0x00009ffc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0890
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0890)
     .word 0x0000a39c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0891
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0891)
     .word 0x0000a3b2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0892
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0892)
     .word 0x0000a3b8
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0893
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0893)
     .word 0x0000a3ba
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0894
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0894)
     .word 0x0000a3cc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0895
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0895)
     .word 0x0000a3de
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0896
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0896)
     .word 0x0000a40c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0897
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0897)
     .word 0x0000a444
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0898
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0898)
     .word 0x0000a468
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0899
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0899)
     .word 0x0000a49e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0900
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0900)
     .word 0x0000a4a0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0901
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0901)
     .word 0x0000a4b6
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0902
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0902)
     .word 0x0000a4ce
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0903
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0903)
     .word 0x0000a502
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0904
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0904)
     .word 0x0000a506
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0905
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0905)
     .word 0x0000a50e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0906
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0906)
     .word 0x0000a5ee
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0907
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0907)
     .word 0x0000a5f2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0908
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0908)
     .word 0x0000a610
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0909
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0909)
     .word 0x0000a642
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0910
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0910)
     .word 0x0000a664
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0911
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0911)
     .word 0x0000a690
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0912
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0912)
     .word 0x0000a6ce
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0913
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0913)
     .word 0x0000a6f0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0914
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0914)
     .word 0x0000a6fc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0915
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0915)
     .word 0x0000aa66
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0916
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0916)
     .word 0x0000aa6c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0917
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0917)
     .word 0x0000aa90
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0918
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0918)
     .word 0x0000ab74
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0919
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0919)
     .word 0x0000ab8e
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0920
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0920)
     .word 0x0000ab92
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0921
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0921)
     .word 0x0000abb0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0922
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0922)
     .word 0x0000abbc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0923
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0923)
     .word 0x0000abc0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0924
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0924)
     .word 0x0000abe2
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0925
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0925)
     .word 0x0000abe4
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0926
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0926)
     .word 0x0000abf0
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0927
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0927)
     .word 0x0000abfc
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0928
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0928)
     .word 0x0000ac08
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0929
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0929)
     .word 0x0000ac14
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0930
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0930)
     .word 0x0000ac20
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0931
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0931)
     .word 0x0000ac2c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0932
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0932)
     .word 0x0000ac38
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0933
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0933)
     .word 0x0000ac44
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0934
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0934)
     .word 0x0000ac50
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0935
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0935)
     .word 0x0000ac5c
     .byte 1
     .zero 3
-    .quad aot_kitkat_libz_block_0936
+    .quad RB_AOT_SYM(aot_kitkat_libz_block_0936)
 
 // The table carries these two numbers; rb_aot_tests asserts they agree.
     .p2align 2
-.globl aot_kitkat_libz_code_bytes
-aot_kitkat_libz_code_bytes:
+.globl RB_AOT_SYM(aot_kitkat_libz_code_bytes)
+RB_AOT_SYM(aot_kitkat_libz_code_bytes):
     .word 238780
-.globl aot_kitkat_libz_block_count
-aot_kitkat_libz_block_count:
+.globl RB_AOT_SYM(aot_kitkat_libz_block_count)
+RB_AOT_SYM(aot_kitkat_libz_block_count):
     .word 937
 #ifdef __ELF__
     .section .note.GNU-stack,"",%progbits
