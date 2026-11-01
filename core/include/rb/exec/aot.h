@@ -57,6 +57,12 @@ struct AotBlock {
   AotCode entry = nullptr;      ///< assembly label from `aot_<game>.S`
 };
 
+// The generated `.S` writes the table itself as 16-byte records (`.word off; .byte flags; .zero 3;
+// .quad entry`), so this layout is a contract with the emitter, not an implementation detail.
+static_assert(sizeof(AotBlock) == 16, "the emitted table record is 16 bytes");
+static_assert(offsetof(AotBlock, flags) == 4, "the emitted record puts flags at byte 4");
+static_assert(offsetof(AotBlock, entry) == 8, "the emitted record puts the entry pointer at byte 8");
+
 /**
  * The dispatch environment.
  *

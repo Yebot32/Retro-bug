@@ -974,6 +974,34 @@ struct Emitter {
       }
     }
     code_bytes = total;
+    // The block table is data in this object. Built as 74,800 cross-object function pointers it made the
+    // app's linker refuse every symbol even though the objects were present, global and listed; a `.quad`
+    // on a label in the same file resolves at assembly time on ELF and Mach-O alike, so the C++ side only
+    // needs the one array symbol. The record layout is AotBlock (16 bytes); aot.h static_asserts it.
+    std::vector<std::size_t> sorted(blocks.size());
+    for (std::size_t i = 0; i < sorted.size(); ++i) sorted[i] = i;
+    std::sort(sorted.begin(), sorted.end(), [&](std::size_t a, std::size_t b) {
+      if (blocks[a].off != blocks[b].off) return blocks[a].off < blocks[b].off;
+      return blocks[a].thumb < blocks[b].thumb;
+    });
+    out << "\n";
+    // Absolute pointers are data, not text: ELF's PIE link refuses R_AARCH64_ABS64 in `.text`, and both
+    // linkers want the relocations against a writable section. (`.S` is preprocessed on both toolchains.)
+    out << "#ifdef __ELF__\n";
+    out << "    .section .data.rel.ro,\"aw\",%progbits\n";
+    out << "#else\n";
+    out << "    .section __DATA,__data\n";
+    out << "#endif\n";
+    out << "    .p2align 3\n";
+    out << ".globl " << prefix << "_blocks\n";
+    out << prefix << "_blocks:\n";
+    for (const std::size_t i : sorted) {
+      const BlockRecord& b = blocks[i];
+      out << "    .word " << Hex32(b.off) << "\n";
+      out << "    .byte " << static_cast<unsigned>(b.thumb ? kThumb : kArm) << "\n";
+      out << "    .zero 3\n";
+      out << "    .quad " << prefix << "_block_" << Pad(b.symbol) << "\n";
+    }
     // The trailer is the `.S` half of the pairing check. It is data, not a label after the code: the
     // table carries the same two numbers, and rb_aot_tests asserts this pair agrees with it.
     //
@@ -1113,36 +1141,16 @@ bool EmitImage(const std::string& elf_path, const std::string& out_prefix, std::
   table << "// Do not edit; the fixture test's header carries the full regeneration command.\n";
   table << "#include \"rb/exec/aot.h\"\n\n";
   table << "extern \"C\" {\n";
-  for (std::size_t i = 0; i < em.blocks.size(); ++i) {
-    table << "std::uint32_t " << em.prefix << "_block_" << Emitter::Pad(em.blocks[i].symbol)
-          << "(rb::exec::AotState*);\n";
-  }
+  table << "extern const rb::exec::AotBlock " << em.prefix << "_blocks[];\n";
   table << "extern const std::uint32_t " << em.prefix << "_code_bytes;\n";
   table << "extern const std::uint32_t " << em.prefix << "_block_count;\n";
   table << "Dynarmic::HaltReason " << em.prefix
         << "_run_code(void*, void*, volatile std::uint32_t*);\n";
   table << "}\n\n";
-  table << "namespace {\n";
-  table << "const rb::exec::AotBlock kAotBlocks[] = {\n";
-  std::vector<std::size_t> sorted(em.blocks.size());
-  for (std::size_t i = 0; i < sorted.size(); ++i) sorted[i] = i;
-  std::sort(sorted.begin(), sorted.end(), [&](std::size_t a, std::size_t b) {
-    const auto& x = em.blocks[a];
-    const auto& y = em.blocks[b];
-    if (x.off != y.off) return x.off < y.off;
-    return x.thumb < y.thumb;
-  });
-  for (const std::size_t i : sorted) {
-    const BlockRecord& b = em.blocks[i];
-    table << "    {" << Hex32(b.off) << "u, rb::exec::" << (b.thumb ? "kAotThumb" : "kAotArm")
-          << ", &" << em.prefix << "_block_" << Emitter::Pad(b.symbol) << "},\n";
-  }
-  table << "};\n";
-  table << "}  // namespace\n\n";
   table << "extern const rb::exec::AotImageInfo " << table_name << ";\n";
   table << "const rb::exec::AotImageInfo " << table_name << " = {\n";
-  table << "    kAotBlocks,\n";
-  table << "    sizeof(kAotBlocks) / sizeof(kAotBlocks[0]),\n";
+  table << "    " << em.prefix << "_blocks,\n";
+  table << "    " << em.blocks.size() << "u,\n";
   table << "    " << Hex32(map.text_vaddr) << "u,\n";
   table << "    " << Hex32(map.text_len) << "u,\n";
   table << "    " << Hex32(load_bias) << "u,\n";
