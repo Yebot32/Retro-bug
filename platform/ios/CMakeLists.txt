@@ -15,16 +15,29 @@ target_include_directories(rb_ios PUBLIC
 target_link_libraries(rb_ios PUBLIC rb_runtime rb_java rb_gfx rb_audio rb_abi
   "-framework OpenGLES" "-framework QuartzCore" "-framework CoreText" "-framework CoreGraphics" "-framework Foundation")
 
-# A per-game AOT profile (AOT task 5): the emitted assembly, its per-library tables and the profile table,
-# compiled straight into the engine archive. The sources live under build/aot/<game>/ and are never in
-# git — they are translation derived from the game's bytes; rb_aotgen --profile writes them.
+# A per-game AOT profile (AOT task 5): the emitted assembly, its per-library tables and the profile table.
+# The sources live under build/aot/<game>/ and are never in git — they are translation derived from the
+# game's bytes; rb_aotgen --profile writes them.
+#
+# They are an OBJECT library fed to the archive merge as plain object files, not sources of `rb_ios`: the
+# first AOT IPA built them, but `libtool -static` merging members out of `librb_ios.a` dropped every `.S`
+# member, so the app link could not find a single translated block. Passing the objects directly is the
+# path libtool is designed for. `rb_ios` still gets the define, because `ios_session.cpp` references
+# `rb_aot_builtin_profile` and must compile that reference in.
+set(RB_AOT_MERGE_OBJECTS "")
+set(RB_AOT_MERGE_DEPENDS "")
 if(RB_AOT_PROFILE_DIR)
   file(GLOB RB_AOT_PROFILE_SOURCES "${RB_AOT_PROFILE_DIR}/*.S" "${RB_AOT_PROFILE_DIR}/*_table.cpp"
        "${RB_AOT_PROFILE_DIR}/*_profile.cpp")
   if(NOT RB_AOT_PROFILE_SOURCES)
     message(FATAL_ERROR "RB_AOT_PROFILE_DIR=${RB_AOT_PROFILE_DIR} has no generated sources")
   endif()
-  target_sources(rb_ios PRIVATE ${RB_AOT_PROFILE_SOURCES})
+  add_library(rb_aot_profile OBJECT ${RB_AOT_PROFILE_SOURCES})
+  target_compile_features(rb_aot_profile PRIVATE cxx_std_20)
+  # aot.h includes the vendored A32JitState and the guard types; inherit the engine's include path.
+  target_link_libraries(rb_aot_profile PRIVATE rb_exec)
+  set(RB_AOT_MERGE_OBJECTS "$<TARGET_OBJECTS:rb_aot_profile>")
+  set(RB_AOT_MERGE_DEPENDS rb_aot_profile)
   target_compile_definitions(rb_ios PRIVATE RB_AOT_PROFILE=1)
   message(STATUS "AOT profile: ${RB_AOT_PROFILE_SOURCES}")
 endif()
@@ -44,8 +57,8 @@ add_custom_command(
           $<TARGET_FILE:rb_abi> $<TARGET_FILE:rb_syscall> $<TARGET_FILE:rb_guest_thread> $<TARGET_FILE:rb_exec>
           $<TARGET_FILE:rb_isa> $<TARGET_FILE:rb_linker> $<TARGET_FILE:rb_loader> $<TARGET_FILE:rb_mem>
           $<TARGET_FILE:rb_platform> $<TARGET_FILE:rb_diag> $<TARGET_FILE:rb_crypto> $<TARGET_FILE:dynarmic> $<TARGET_FILE:mcl>
-          $<TARGET_FILE:fmt>
+          $<TARGET_FILE:fmt> ${RB_AOT_MERGE_OBJECTS}
   DEPENDS rb_ios rb_host rb_java rb_gfx rb_audio rb_inbound rb_runtime rb_abi rb_syscall rb_guest_thread rb_exec
-          rb_isa rb_linker rb_loader rb_mem rb_platform rb_diag rb_crypto dynarmic mcl fmt
+          rb_isa rb_linker rb_loader rb_mem rb_platform rb_diag rb_crypto dynarmic mcl fmt ${RB_AOT_MERGE_DEPENDS}
   COMMENT "Merging the engine into librbengine.a")
 add_custom_target(rb_engine_ios DEPENDS "${RB_IOS_ENGINE_OUT}")
