@@ -44,10 +44,25 @@ fi
 ( cd "$ROOT/ios" && xcodegen generate )
 
 COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+set +e
 xcodebuild -project "$ROOT/ios/RetroBug.xcodeproj" -scheme RetroBug -configuration Release \
   -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath "$BUILD/dd" \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO RB_ENGINE_DIR="$BUILD/ios-engine" \
   RB_GIT_COMMIT="$COMMIT" build
+XCODE_STATUS=$?
+set -e
+if [ "$XCODE_STATUS" -ne 0 ] && [ -n "${RB_AOT_PROFILE:-}" ]; then
+  # Name the state of the app's own assembled object: an object with local symbols, or one the link
+  # file list omits, both look like "undefined symbols" from the linker.
+  asm_object="$(find "$BUILD/dd" -name 'aot_kitkat_libz.o' | head -1)"
+  echo "aot: assembled object: ${asm_object:-missing}"
+  if [ -n "$asm_object" ]; then
+    echo "aot: $(nm -g "$asm_object" | grep -c ' T .*_block_' || true) global block symbols in the app object"
+    nm -g "$asm_object" | grep '_block_0000$' | head -2
+  fi
+  grep -c 'aot_kitkat_libz.o' "$BUILD/dd/Build/Intermediates.noindex/RetroBug.build/Release-iphoneos/RetroBug.build/Objects-normal/arm64/RetroBug.LinkFileList" 2>/dev/null | sed 's/^/aot: link-file-list mentions of the libz object: /' || true
+fi
+[ "$XCODE_STATUS" -eq 0 ]
 
 APP="$BUILD/dd/Build/Products/Release-iphoneos/RetroBug.app"
 [ -d "$APP" ] || { echo "no app at $APP" >&2; exit 1; }
