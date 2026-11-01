@@ -19,6 +19,7 @@
 #include "rb/exec/aot.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -291,6 +292,11 @@ void AotExecutor::SetFault(std::string detail, GuestAddr addr, bool write) {
 
 void* AotExecutor::Dispatch() {
   const std::uint32_t pc = state_.jit.regs[15];
+  // One-shot tracing for a device that dies in translated code: the first few dispatches name the pc and
+  // whether it resolved or fell back, which is what the crash log cannot tell us afterwards.
+  static std::atomic<int> traced{0};
+  const int n = traced.fetch_add(1, std::memory_order_relaxed);
+  if (n < 8) std::fprintf(stderr, "aot-dispatch #%d pc=%08x\n", n, pc);
   const bool thumb = (state_.jit.upper_location_descriptor & 1u) != 0;
 
   if (pc == return_address_) {

@@ -254,3 +254,12 @@ target_link_libraries(rb_apk_assets_tests PRIVATE rb_loader)
 # SHA-256 (AOT task 5): FIPS vectors, fixture-free, so it runs on every host lane and the device.
 add_executable(rb_sha256_tests sha256_test.cpp)
 target_link_libraries(rb_sha256_tests PRIVATE rb_crypto)
+
+# Diagnostic (build 22): boot the KitKat scope with the libc AOT image and reproduce the load-time crash
+# on Android, where adb can name the faulting instruction. Only built when the pulled image is present.
+if(RB_AARCH64_HOST AND EXISTS "${CMAKE_SOURCE_DIR}/build/aot/kitkat-full/aot_kitkat_libc.S")
+  add_executable(rb_aot_scope_tests aot_scope_test.cpp
+    "${CMAKE_SOURCE_DIR}/build/aot/kitkat-full/aot_kitkat_libc.S"
+    "${CMAKE_SOURCE_DIR}/build/aot/kitkat-full/aot_kitkat_libc_table.cpp")
+  target_link_libraries(rb_aot_scope_tests PRIVATE rb_runtime rb_exec)
+endif()

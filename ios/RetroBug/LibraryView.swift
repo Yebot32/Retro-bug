@@ -70,7 +70,11 @@ struct LibraryView: View {
                         Circle()
                             .fill(jitAvailable ? Color.green : Color.red)
                             .frame(width: 10, height: 10)
-                        Text(jitAvailable ? "JIT available" : "No JIT — Tier I interpreter")
+                        // The dot is the *probe* (can this build map executable memory), not the switch; a
+                        // green dot with the switch off is a JIT that is available and not in use.
+                        Text(jitAvailable
+                             ? (useJIT ? "JIT available — on" : "JIT available — off")
+                             : "No JIT — Tier I interpreter")
                             .font(.subheadline)
                         Spacer()
                     }
@@ -79,8 +83,9 @@ struct LibraryView: View {
                 } header: {
                     Text("Performance")
                 } footer: {
-                    Text("Applies to the next game you start. JIT is never forced: if the game cannot have "
-                         + "executable memory, it runs on the Tier I interpreter and the dot stays red.")
+                    Text("Applies to the next game you start. The dot reports whether this build can map "
+                         + "executable memory; with the switch off (or the dot red) games run on the "
+                         + "interpreter, or on the translated profile when the imported APK matches one.")
                         .font(.caption)
                 }
                 if !notice.isEmpty {

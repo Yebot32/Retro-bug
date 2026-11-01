@@ -2958,6 +2958,67 @@ bool BlockRunner::Step(const Inst* inst) {
     // (`emit_x64_vector_floating_point.cpp:949-1010`): an unordered pair takes the default NaN, and the
     // equal case is `a & b` for max and `a | b` for min — the signed-zero rule `FpMax`/`FpMin` already
     // encode, so the equal case needs no separate branch here.
+    case Opcode::FPVectorAdd32: case Opcode::FPVectorSub32:
+    case Opcode::FPVectorMul32: case Opcode::FPVectorDiv32: {
+      // Blocky Roads stopped here (`FPVectorMul32: no Tier I semantics yet`). The scalar forms already
+      // take their rounding and flush mode from FPSCR through FpOpScope; the back end copies the same
+      // fields into FPCR for the vector instruction, so one scope around the whole vector matches it.
+      V a{}, b{}, out{};
+      if (!W128(inst, 0, a) || !W128(inst, 1, b)) return false;
+      FpOpScope op{state_.fpscr};
+      FpOps flags{state_.fpscr};
+      const auto* pa = reinterpret_cast<const std::uint8_t*>(&a);
+      const auto* pb = reinterpret_cast<const std::uint8_t*>(&b);
+      auto* pd = reinterpret_cast<std::uint8_t*>(&out);
+      for (unsigned i = 0; i < 16; i += 4) {
+        std::uint32_t xb = 0, yb = 0;
+        for (unsigned k = 0; k < 4; ++k) {
+          xb |= static_cast<std::uint32_t>(pa[i + k]) << (8 * k);
+          yb |= static_cast<std::uint32_t>(pb[i + k]) << (8 * k);
+        }
+        const float x = op.In(BitsAs<float>(xb)), y = op.In(BitsAs<float>(yb));
+        float r{};
+        switch (inst->GetOpcode()) {
+          case Opcode::FPVectorAdd32: r = x + y; break;
+          case Opcode::FPVectorSub32: r = x - y; break;
+          case Opcode::FPVectorMul32: r = x * y; break;
+          default: r = x / y; break;
+        }
+        const std::uint32_t rb = AsBits<std::uint32_t>(op.Out(r));
+        for (unsigned k = 0; k < 4; ++k) pd[i + k] = static_cast<std::uint8_t>(rb >> (8 * k));
+      }
+      Put(inst, out);
+      return true;
+    }
+    case Opcode::FPVectorAdd64: case Opcode::FPVectorSub64:
+    case Opcode::FPVectorMul64: case Opcode::FPVectorDiv64: {
+      V a{}, b{}, out{};
+      if (!W128(inst, 0, a) || !W128(inst, 1, b)) return false;
+      FpOpScope op{state_.fpscr};
+      FpOps flags{state_.fpscr};
+      const auto* pa = reinterpret_cast<const std::uint8_t*>(&a);
+      const auto* pb = reinterpret_cast<const std::uint8_t*>(&b);
+      auto* pd = reinterpret_cast<std::uint8_t*>(&out);
+      for (unsigned i = 0; i < 16; i += 8) {
+        std::uint64_t xb = 0, yb = 0;
+        for (unsigned k = 0; k < 8; ++k) {
+          xb |= static_cast<std::uint64_t>(pa[i + k]) << (8 * k);
+          yb |= static_cast<std::uint64_t>(pb[i + k]) << (8 * k);
+        }
+        const double x = op.In(BitsAs<double>(xb)), y = op.In(BitsAs<double>(yb));
+        double r{};
+        switch (inst->GetOpcode()) {
+          case Opcode::FPVectorAdd64: r = x + y; break;
+          case Opcode::FPVectorSub64: r = x - y; break;
+          case Opcode::FPVectorMul64: r = x * y; break;
+          default: r = x / y; break;
+        }
+        const std::uint64_t rb = AsBits<std::uint64_t>(op.Out(r));
+        for (unsigned k = 0; k < 8; ++k) pd[i + k] = static_cast<std::uint8_t>(rb >> (8 * k));
+      }
+      Put(inst, out);
+      return true;
+    }
     case Opcode::FPVectorMax32: case Opcode::FPVectorMin32: {
       FpOps flags{state_.fpscr};
       V a{}, b{}, out{};

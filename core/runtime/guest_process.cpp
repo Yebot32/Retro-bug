@@ -517,7 +517,10 @@ GuestAddr GuestProcess::MapFree(std::size_t bytes, unsigned prot, std::string* e
 
 std::optional<std::uint32_t> GuestProcess::RunIfunc(const loader::IfuncSlot& slot) {
   const std::string name = slot.name.empty() ? "<R_ARM_IRELATIVE>" : slot.name;
-  abi_->set_executor(engine(opts_.ctor_tier));
+  // Resolvers run while the module that owns them is only half-loaded, and after a profile they would be
+  // the first AOT code in the process (build 22 dies there on iOS). They are tiny and run once, so the
+  // conservative tier is the right one: the interpreter, never the JIT and never the AOT executor.
+  abi_->set_executor(*interp_);
   exec::RunResult rr{};
   exec::MachineState exit{};
   const abi::Ret32 ret = abi_->CallGuest(slot.resolver.tagged(), {abi::Value32::U32(slot.slot_value)},
