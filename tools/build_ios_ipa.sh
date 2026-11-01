@@ -30,6 +30,15 @@ else
 fi
 cmake --build "$BUILD" --target rb_engine_ios -j "$(sysctl -n hw.ncpu)"
 
+# A profile build has to prove its translated code reached the engine archive: a member that libtool
+# dropped or an assembler object with no symbols is an app link that cannot resolve a single block.
+if [ -n "${RB_AOT_PROFILE:-}" ]; then
+  ENGINE="$BUILD/ios-engine/librbengine.a"
+  echo "aot: engine archive $(ar -t "$ENGINE" | wc -l | tr -d ' ') members, $(ar -t "$ENGINE" | grep -c '\.S\.o$' || true) assembly members"
+  echo "aot: $(nm -g "$ENGINE" 2>/dev/null | grep -c '_aot_kitkat_.*_block_' || true) global block symbols"
+  ar -t "$ENGINE" | grep '\.S\.o$' | head -2
+fi
+
 ( cd "$ROOT/ios" && xcodegen generate )
 
 COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
