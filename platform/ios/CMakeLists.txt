@@ -60,5 +60,8 @@ add_custom_command(
           $<TARGET_FILE:fmt> ${RB_AOT_MERGE_OBJECTS}
   DEPENDS rb_ios rb_host rb_java rb_gfx rb_audio rb_inbound rb_runtime rb_abi rb_syscall rb_guest_thread rb_exec
           rb_isa rb_linker rb_loader rb_mem rb_platform rb_diag rb_crypto dynarmic mcl fmt ${RB_AOT_MERGE_DEPENDS}
+  # $<TARGET_OBJECTS:...> is a semicolon list; without this it reaches the shell as one argument and the
+  # shell tries to execute each object path.
+  COMMAND_EXPAND_LISTS
   COMMENT "Merging the engine into librbengine.a")
 add_custom_target(rb_engine_ios DEPENDS "${RB_IOS_ENGINE_OUT}")
