@@ -58,6 +58,10 @@ add_custom_command(
           $<TARGET_FILE:rb_isa> $<TARGET_FILE:rb_linker> $<TARGET_FILE:rb_loader> $<TARGET_FILE:rb_mem>
           $<TARGET_FILE:rb_platform> $<TARGET_FILE:rb_diag> $<TARGET_FILE:rb_crypto> $<TARGET_FILE:dynarmic> $<TARGET_FILE:mcl>
           $<TARGET_FILE:fmt> ${RB_AOT_MERGE_OBJECTS}
+  # `nm -g` finds the object members' symbols, but the app's ld could not: the archive's `__.SYMDEF`
+  # table came out of the merge without them, and ld resolves through that table rather than scanning.
+  # Rebuilding it from the finished archive is authoritative and cheap.
+  COMMAND ${CMAKE_RANLIB} "${RB_IOS_ENGINE_OUT}"
   DEPENDS rb_ios rb_host rb_java rb_gfx rb_audio rb_inbound rb_runtime rb_abi rb_syscall rb_guest_thread rb_exec
           rb_isa rb_linker rb_loader rb_mem rb_platform rb_diag rb_crypto dynarmic mcl fmt ${RB_AOT_MERGE_DEPENDS}
   # $<TARGET_OBJECTS:...> is a semicolon list; without this it reaches the shell as one argument and the
