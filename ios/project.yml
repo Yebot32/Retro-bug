@@ -25,6 +25,15 @@ targets:
         SWIFT_OBJC_BRIDGING_HEADER: RetroBug/Retrobug-Bridging-Header.h
         HEADER_SEARCH_PATHS:
           - "$(SRCROOT)/../platform/ios"
+          # The generated AOT profile (copied into RetroBug/AotProfile by tools/build_ios_ipa.sh) includes
+          # rb/exec/aot.h, which includes the vendored A32JitState and mcl.
+          - "$(SRCROOT)/../core/include"
+          - "$(SRCROOT)/../external/dynarmic/src"
+          - "$(SRCROOT)/../external/dynarmic/externals/mcl/include"
+          - "$(SRCROOT)/../external/dynarmic/externals/fmt/include"
+          - "$(SRCROOT)/../external/dynarmic/externals/oaknut/include"
+          - "$(SRCROOT)/../compat"
+        CLANG_CXX_LANGUAGE_STANDARD: "c++20"
         LIBRARY_SEARCH_PATHS:
           - "$(RB_ENGINE_DIR)"
         OTHER_LDFLAGS:

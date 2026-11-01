@@ -30,13 +30,15 @@ else
 fi
 cmake --build "$BUILD" --target rb_engine_ios -j "$(sysctl -n hw.ncpu)"
 
-# A profile build has to prove its translated code reached the engine archive: a member that libtool
-# dropped or an assembler object with no symbols is an app link that cannot resolve a single block.
+# The profile is compiled by the app target, not merged into the engine archive (libtool's merged
+# members were invisible to ld). Copy it into the app's sources before XcodeGen reads the project.
 if [ -n "${RB_AOT_PROFILE:-}" ]; then
-  ENGINE="$BUILD/ios-engine/librbengine.a"
-  echo "aot: engine archive $(ar -t "$ENGINE" | wc -l | tr -d ' ') members, $(ar -t "$ENGINE" | grep -c '\.S\.o$' || true) assembly members"
-  echo "aot: $(nm -g "$ENGINE" 2>/dev/null | grep -c '_aot_kitkat_.*_block_' || true) global block symbols"
-  ar -t "$ENGINE" | grep '\.S\.o$' | head -2
+  PROFILE_DIR="$(cd "$RB_AOT_PROFILE" && pwd)"
+  AOT_SOURCES="$ROOT/ios/RetroBug/AotProfile"
+  rm -rf "$AOT_SOURCES"
+  mkdir -p "$AOT_SOURCES"
+  cp "$PROFILE_DIR"/*.S "$PROFILE_DIR"/*_table.cpp "$PROFILE_DIR"/*_profile.cpp "$AOT_SOURCES/"
+  echo "aot: app target compiles $(ls "$AOT_SOURCES" | wc -l | tr -d ' ') profile files from $PROFILE_DIR"
 fi
 
 ( cd "$ROOT/ios" && xcodegen generate )

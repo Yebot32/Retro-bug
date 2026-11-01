@@ -38,3 +38,6 @@ tools/bin/
 tools/cecil/
 tools/ilspy/
 .workbuddy-ai/
+
+# Per-game AOT profile sources copied in by tools/build_ios_ipa.sh (translation of the game bytes).
+ios/RetroBug/AotProfile/

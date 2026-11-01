@@ -19,27 +19,15 @@ target_link_libraries(rb_ios PUBLIC rb_runtime rb_java rb_gfx rb_audio rb_abi
 # The sources live under build/aot/<game>/ and are never in git — they are translation derived from the
 # game's bytes; rb_aotgen --profile writes them.
 #
-# They are an OBJECT library fed to the archive merge as plain object files, not sources of `rb_ios`: the
-# first AOT IPA built them, but `libtool -static` merging members out of `librb_ios.a` dropped every `.S`
-# member, so the app link could not find a single translated block. Passing the objects directly is the
-# path libtool is designed for. `rb_ios` still gets the define, because `ios_session.cpp` references
-# `rb_aot_builtin_profile` and must compile that reference in.
-set(RB_AOT_MERGE_OBJECTS "")
-set(RB_AOT_MERGE_DEPENDS "")
+# They are **not** compiled into the engine archive. `libtool -static` merged the members but the app's ld
+# still reported every block undefined, even with the objects passed directly and `ranlib` rebuilding the
+# index. The app target compiles them instead: tools/build_ios_ipa.sh copies the directory into
+# ios/RetroBug/AotProfile before XcodeGen runs, so Xcode assembles them as ordinary app sources and links
+# them without an archive in between. This define is what makes `ios_session.cpp` reference
+# `rb_aot_builtin_profile`; the definition arrives from the app.
 if(RB_AOT_PROFILE_DIR)
-  file(GLOB RB_AOT_PROFILE_SOURCES "${RB_AOT_PROFILE_DIR}/*.S" "${RB_AOT_PROFILE_DIR}/*_table.cpp"
-       "${RB_AOT_PROFILE_DIR}/*_profile.cpp")
-  if(NOT RB_AOT_PROFILE_SOURCES)
-    message(FATAL_ERROR "RB_AOT_PROFILE_DIR=${RB_AOT_PROFILE_DIR} has no generated sources")
-  endif()
-  add_library(rb_aot_profile OBJECT ${RB_AOT_PROFILE_SOURCES})
-  target_compile_features(rb_aot_profile PRIVATE cxx_std_20)
-  # aot.h includes the vendored A32JitState and the guard types; inherit the engine's include path.
-  target_link_libraries(rb_aot_profile PRIVATE rb_exec)
-  set(RB_AOT_MERGE_OBJECTS "$<TARGET_OBJECTS:rb_aot_profile>")
-  set(RB_AOT_MERGE_DEPENDS rb_aot_profile)
   target_compile_definitions(rb_ios PRIVATE RB_AOT_PROFILE=1)
-  message(STATUS "AOT profile: ${RB_AOT_PROFILE_SOURCES}")
+  message(STATUS "AOT profile: app target compiles ${RB_AOT_PROFILE_DIR}")
 endif()
 
 # One archive for the Xcode app to link: `libtool -static` merges the component libraries (a static library
@@ -57,15 +45,10 @@ add_custom_command(
           $<TARGET_FILE:rb_abi> $<TARGET_FILE:rb_syscall> $<TARGET_FILE:rb_guest_thread> $<TARGET_FILE:rb_exec>
           $<TARGET_FILE:rb_isa> $<TARGET_FILE:rb_linker> $<TARGET_FILE:rb_loader> $<TARGET_FILE:rb_mem>
           $<TARGET_FILE:rb_platform> $<TARGET_FILE:rb_diag> $<TARGET_FILE:rb_crypto> $<TARGET_FILE:dynarmic> $<TARGET_FILE:mcl>
-          $<TARGET_FILE:fmt> ${RB_AOT_MERGE_OBJECTS}
-  # `nm -g` finds the object members' symbols, but the app's ld could not: the archive's `__.SYMDEF`
-  # table came out of the merge without them, and ld resolves through that table rather than scanning.
-  # Rebuilding it from the finished archive is authoritative and cheap.
-  COMMAND ${CMAKE_RANLIB} "${RB_IOS_ENGINE_OUT}"
+          $<TARGET_FILE:fmt>
+  # $<TARGET_OBJECTS:...> would be a semicolon list; if a profile ever returns to the archive path, keep
+  # COMMAND_EXPAND_LISTS. (No profile sources are merged today; see the block above.)
   DEPENDS rb_ios rb_host rb_java rb_gfx rb_audio rb_inbound rb_runtime rb_abi rb_syscall rb_guest_thread rb_exec
-          rb_isa rb_linker rb_loader rb_mem rb_platform rb_diag rb_crypto dynarmic mcl fmt ${RB_AOT_MERGE_DEPENDS}
-  # $<TARGET_OBJECTS:...> is a semicolon list; without this it reaches the shell as one argument and the
-  # shell tries to execute each object path.
-  COMMAND_EXPAND_LISTS
+          rb_isa rb_linker rb_loader rb_mem rb_platform rb_diag rb_crypto dynarmic mcl fmt
   COMMENT "Merging the engine into librbengine.a")
 add_custom_target(rb_engine_ios DEPENDS "${RB_IOS_ENGINE_OUT}")
