@@ -473,6 +473,15 @@ std::unique_ptr<GuestProcess> GuestProcess::Create(const GuestProcessOptions& op
       p->Log("aot: profile " + std::string(options.aot->name ? options.aot->name : "?") + " loaded (" +
              std::to_string(p->aot_->library_count()) + " librar" +
              (p->aot_->library_count() == 1 ? "y" : "ies") + ")");
+      for (std::size_t i = 0; i < options.aot->count; ++i) {
+        const exec::AotLibrary& lib = options.aot->libraries[i];
+        if (lib.image == nullptr) continue;
+        p->Log("aot:   " + std::string(lib.soname ? lib.soname : "?") + " bias 0x" +
+               Hex(lib.image->load_bias) + " text 0x" +
+               Hex(lib.image->load_bias + lib.image->text_vaddr) + "+0x" + Hex(lib.image->text_len) +
+               " blocks " + std::to_string(lib.image->count) + " sha " +
+               (lib.sha256 ? std::string(lib.sha256).substr(0, 12) : "?"));
+      }
     }
   }
   p->abi_->set_executor(p->engine(options.ctor_tier));
@@ -517,6 +526,7 @@ GuestAddr GuestProcess::MapFree(std::size_t bytes, unsigned prot, std::string* e
 
 std::optional<std::uint32_t> GuestProcess::RunIfunc(const loader::IfuncSlot& slot) {
   const std::string name = slot.name.empty() ? "<R_ARM_IRELATIVE>" : slot.name;
+  Log("ifunc-start: " + name + " resolver 0x" + Hex(slot.resolver.addr));
   // Resolvers run while the module that owns them is only half-loaded, and after a profile they would be
   // the first AOT code in the process (build 22 dies there on iOS). They are tiny and run once, so the
   // conservative tier is the right one: the interpreter, never the JIT and never the AOT executor.
@@ -608,6 +618,9 @@ loader::GuestModule* GuestProcess::LoadOne(const std::vector<std::uint8_t>& imag
       }
     }
   }
+  // Before the loader runs: the last line a crash can lose is the one *after* this, so name the step,
+  // the bias asked for and whether the profile covers this module.
+  Log("load-start: " + soname + (aot_library != nullptr ? " (profile bias 0x" + Hex(aot_library->image->load_bias) + ")" : " (no profile entry)") + (scope ? " [scope]" : ""));
   // A real libc carries TLS relocations this loader cannot apply; the scope tolerates them (they stay
   // recorded in `unsupported_relocs`). An app does not: a refused relocation fails its load by name.
   opts.tolerate_unresolved_relocs = scope;
@@ -921,6 +934,7 @@ bool GuestProcess::RunConstructors(std::string* failed) {
     return false;
   }
   const auto run = [&](loader::GuestModule& m, loader::CodeAddress fn, const std::string& what) {
+    Log("constructor-start: " + what + " at 0x" + Hex(fn.addr) + " on tier " + std::to_string(opts_.ctor_tier));
     abi_->set_executor(engine(opts_.ctor_tier));
     exec::RunResult rr{};
     exec::MachineState exit{};
