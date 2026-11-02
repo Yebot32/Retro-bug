@@ -881,9 +881,12 @@ bool GuestProcess::SetUpMainThread(std::string* err) {
   if (!mem_->Write(bionic_tls + kBtTempBuffers, &scratch, 4)) return fail("writing bionic_tls + 0x414");
 
   // bionic's own code fills the tcb's thread and DTV slots, exactly as pthread_create does.
+  Log("thread-setup: __init_tcb at 0x" + Hex(tcb) + " on tier " + std::to_string(opts_.ctor_tier));
   if (!CallSetup("__init_tcb", {abi::Value32::Ptr(tcb), abi::Value32::Ptr(thread_)}, &e)) return fail(e);
+  Log("thread-setup: __init_tcb_dtv");
   if (!CallSetup("__init_tcb_dtv", {abi::Value32::Ptr(tcb)}, &e)) return fail(e);
   // libc's TLS block gets its initialization image, by libc's own code, as pthread_create does for a new thread.
+  Log("thread-setup: __init_static_tls");
   if (l.libc_tls_offset != 0 && !CallSetup("__init_static_tls", {abi::Value32::Ptr(static_tls)}, &e)) return fail(e);
   // TLS_SLOT_BIONIC_TLS and the stack guard (the linker's: from AT_RANDOM; libc's __libc_preinit copies
   // TP+0x14 into __stack_chk_guard).

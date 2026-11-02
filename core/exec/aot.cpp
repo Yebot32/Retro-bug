@@ -465,6 +465,12 @@ RunResult AotExecutor::Run(MachineState& state, unsigned max_instructions) {
   state_.switch_image = nullptr;
   state_.switch_entry = nullptr;
 
+  {
+    static std::atomic<int> runs{0};
+    if (runs.fetch_add(1, std::memory_order_relaxed) < 8) {
+      std::fprintf(stderr, "aot-run: enter pc=%08x\n", state.pc);
+    }
+  }
   SyncIn(state);
 
   for (;;) {

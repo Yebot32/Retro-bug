@@ -269,6 +269,9 @@ void InstallBlockyroads(TableJava& j, const AndroidEnv& env) {
   FalseVirtual(j, unity, "showInterstitial");
   FalseVirtual(j, unity, "hasCachedRewardedAd");
   NoOpVirtual(j, unity, "showRewardedAd", "()V");
+  // The game calls this once at startup; without the row the bridge hands back a null jmethodID and the
+  // first CallVoidMethodV on it stops the render thread (build 24's Blocky log, slot 702).
+  NoOpVirtual(j, unity, "nativeInit", "(Ljava/lang/String;Ljava/lang/String;)V");
 
   const std::string admob = "com/utils/Admob";
   GetInstance(j, admob);

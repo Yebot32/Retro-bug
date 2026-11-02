@@ -46,7 +46,7 @@ int main(int argc, char** argv) {
     return 0;
   }
   rb::runtime::GuestProcessOptions o;
-  o.window_bytes = std::size_t{1} << 30;
+  o.window_bytes = std::size_t{4} << 30;
   o.unresolved_trap = 0xfffe'0000u;
   o.ctor_tier = 1;
   o.enable_jit = false;
