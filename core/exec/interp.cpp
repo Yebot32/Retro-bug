@@ -3019,6 +3019,214 @@ bool BlockRunner::Step(const Inst* inst) {
       Put(inst, out);
       return true;
     }
+    /**
+     * ARMv7's NEON compares (VCEQ/VCGT/VCGE): all-ones in a true lane, zero in a false one, and any NaN
+     * operand compares false in all three. The A32 front end emits them *not* FPCR-controlled, so the
+     * back end runs its host FCMEQ/FCMGT/FCMGE with the standard FPCR — denormals are compared as they
+     * are, no flush — and a signalling NaN raises the invalid-operation flag. That flag is the part a
+     * value-only comparison misses: the state diff compares FPSR too, and Blocky Roads stopped on this
+     * family in `nativeRender` before the masks could even be wrong.
+     */
+    case Opcode::FPVectorEqual32: case Opcode::FPVectorGreater32:
+    case Opcode::FPVectorGreaterEqual32: {
+      FpOps flags{state_.fpscr};
+      V a{}, b{}, out{};
+      if (!W128(inst, 0, a) || !W128(inst, 1, b)) return false;
+      const auto op = inst->GetOpcode();
+      const auto is_snan = [](std::uint32_t bits) {
+        return (bits & 0x7f80'0000u) == 0x7f80'0000u && (bits & 0x007f'ffffu) != 0 &&
+               (bits & 0x0040'0000u) == 0;
+      };
+      const auto* pa = reinterpret_cast<const std::uint8_t*>(&a);
+      const auto* pb = reinterpret_cast<const std::uint8_t*>(&b);
+      auto* pd = reinterpret_cast<std::uint8_t*>(&out);
+      for (unsigned i = 0; i < 16; i += 4) {
+        std::uint32_t xb = 0, yb = 0;
+        for (unsigned k = 0; k < 4; ++k) {
+          xb |= static_cast<std::uint32_t>(pa[i + k]) << (8 * k);
+          yb |= static_cast<std::uint32_t>(pb[i + k]) << (8 * k);
+        }
+        if (is_snan(xb) || is_snan(yb)) flags.Raise(kIoc);
+        const float x = BitsAs<float>(xb), y = BitsAs<float>(yb);
+        bool r = false;
+        switch (op) {
+          case Opcode::FPVectorEqual32: r = x == y; break;
+          case Opcode::FPVectorGreater32: r = x > y; break;
+          default: r = x >= y; break;
+        }
+        const std::uint32_t rb = r ? 0xffff'ffffu : 0u;
+        for (unsigned k = 0; k < 4; ++k) pd[i + k] = static_cast<std::uint8_t>(rb >> (8 * k));
+      }
+      Put(inst, out);
+      return true;
+    }
+    case Opcode::FPVectorEqual64: case Opcode::FPVectorGreater64:
+    case Opcode::FPVectorGreaterEqual64: {
+      FpOps flags{state_.fpscr};
+      V a{}, b{}, out{};
+      if (!W128(inst, 0, a) || !W128(inst, 1, b)) return false;
+      const auto op = inst->GetOpcode();
+      const auto is_snan = [](std::uint64_t bits) {
+        return (bits & 0x7ff0'0000'0000'0000ull) == 0x7ff0'0000'0000'0000ull &&
+               (bits & 0x000f'ffff'ffff'ffffull) != 0 &&
+               (bits & 0x0008'0000'0000'0000ull) == 0;
+      };
+      const auto* pa = reinterpret_cast<const std::uint8_t*>(&a);
+      const auto* pb = reinterpret_cast<const std::uint8_t*>(&b);
+      auto* pd = reinterpret_cast<std::uint8_t*>(&out);
+      for (unsigned i = 0; i < 16; i += 8) {
+        std::uint64_t xb = 0, yb = 0;
+        for (unsigned k = 0; k < 8; ++k) {
+          xb |= static_cast<std::uint64_t>(pa[i + k]) << (8 * k);
+          yb |= static_cast<std::uint64_t>(pb[i + k]) << (8 * k);
+        }
+        if (is_snan(xb) || is_snan(yb)) flags.Raise(kIoc);
+        const double x = BitsAs<double>(xb), y = BitsAs<double>(yb);
+        bool r = false;
+        switch (op) {
+          case Opcode::FPVectorEqual64: r = x == y; break;
+          case Opcode::FPVectorGreater64: r = x > y; break;
+          default: r = x >= y; break;
+        }
+        const std::uint64_t rb = r ? 0xffff'ffff'ffff'ffffull : 0ull;
+        for (unsigned k = 0; k < 8; ++k) pd[i + k] = static_cast<std::uint8_t>(rb >> (8 * k));
+      }
+      Put(inst, out);
+      return true;
+    }
+    // VMLA/VMLS (VMLS is the same IR with a negated addend), VABS and VNEG. The multiply-add is fused —
+    // the back end lowers this IR to FMLA under the standard FPCR — and the sign operations touch only
+    // the sign bit, raising no flag even for a NaN operand.
+    case Opcode::FPVectorMulAdd32: {
+      V acc{}, n{}, m{}, out{};
+      if (!W128(inst, 0, acc) || !W128(inst, 1, n) || !W128(inst, 2, m)) return false;
+      const auto* pa = reinterpret_cast<const std::uint8_t*>(&acc);
+      const auto* pn = reinterpret_cast<const std::uint8_t*>(&n);
+      const auto* pm = reinterpret_cast<const std::uint8_t*>(&m);
+      auto* pd = reinterpret_cast<std::uint8_t*>(&out);
+      for (unsigned i = 0; i < 16; i += 4) {
+        std::uint32_t ab = 0, nb = 0, mb = 0;
+        for (unsigned k = 0; k < 4; ++k) {
+          ab |= static_cast<std::uint32_t>(pa[i + k]) << (8 * k);
+          nb |= static_cast<std::uint32_t>(pn[i + k]) << (8 * k);
+          mb |= static_cast<std::uint32_t>(pm[i + k]) << (8 * k);
+        }
+        const float r = std::fma(BitsAs<float>(nb), BitsAs<float>(mb), BitsAs<float>(ab));
+        const std::uint32_t rb = AsBits<std::uint32_t>(r);
+        for (unsigned k = 0; k < 4; ++k) pd[i + k] = static_cast<std::uint8_t>(rb >> (8 * k));
+      }
+      Put(inst, out);
+      return true;
+    }
+    case Opcode::FPVectorAbs32: case Opcode::FPVectorNeg32: {
+      V a{}, out{};
+      if (!W128(inst, 0, a)) return false;
+      const std::uint32_t mask = inst->GetOpcode() == Opcode::FPVectorAbs32 ? 0x7fff'ffffu : 0x8000'0000u;
+      const auto* pa = reinterpret_cast<const std::uint8_t*>(&a);
+      auto* pd = reinterpret_cast<std::uint8_t*>(&out);
+      for (unsigned i = 0; i < 16; i += 4) {
+        std::uint32_t xb = 0;
+        for (unsigned k = 0; k < 4; ++k) xb |= static_cast<std::uint32_t>(pa[i + k]) << (8 * k);
+        const std::uint32_t rb = xb ^ mask;
+        for (unsigned k = 0; k < 4; ++k) pd[i + k] = static_cast<std::uint8_t>(rb >> (8 * k));
+      }
+      Put(inst, out);
+      return true;
+    }
+    // VPADD.F32 of the lower halves: [a0+a1, b0+b1, 0, 0] — the shape the back end's ZIP1/FADDP pair
+    // produces, with the upper half zeroed.
+    case Opcode::FPVectorPairedAddLower32: {
+      V a{}, b{}, out{};
+      if (!W128(inst, 0, a) || !W128(inst, 1, b)) return false;
+      const auto* pa = reinterpret_cast<const std::uint8_t*>(&a);
+      const auto* pb = reinterpret_cast<const std::uint8_t*>(&b);
+      auto* pd = reinterpret_cast<std::uint8_t*>(&out);
+      const auto lane = [](const std::uint8_t* p) {
+        std::uint32_t v = 0;
+        for (unsigned k = 0; k < 4; ++k) v |= static_cast<std::uint32_t>(p[k]) << (8 * k);
+        return BitsAs<float>(v);
+      };
+      const float r0 = lane(pa) + lane(pa + 4);
+      const float r1 = lane(pb) + lane(pb + 4);
+      const std::uint32_t words[4] = {AsBits<std::uint32_t>(r0), AsBits<std::uint32_t>(r1), 0u, 0u};
+      for (unsigned i = 0; i < 4; ++i) {
+        for (unsigned k = 0; k < 4; ++k) pd[i * 4 + k] = static_cast<std::uint8_t>(words[i] >> (8 * k));
+      }
+      Put(inst, out);
+      return true;
+    }
+    /**
+     * VCVT between float and integer/fixed lanes. The arithmetic is the scalar conversion's, lane for
+     * lane: scale by 2^fbits in double, round per the IR's mode, then saturate with `ToFixed` (which
+     * raises IOC on NaN/out-of-range exactly as ARM does); the reverse scales the integer and rounds to
+     * the destination float. VCVT raises IXC when the conversion was inexact.
+     */
+    case Opcode::FPVectorToSignedFixed32: case Opcode::FPVectorToUnsignedFixed32: {
+      V a{}, out{};
+      std::uint8_t fbits = 0, rm = 0;
+      if (!W128(inst, 0, a) || !ByteArg(inst, 1, fbits) || !ByteArg(inst, 2, rm)) return false;
+      const bool uns = inst->GetOpcode() == Opcode::FPVectorToUnsignedFixed32;
+      FpOps flags{state_.fpscr};
+      const auto* pa = reinterpret_cast<const std::uint8_t*>(&a);
+      auto* pd = reinterpret_cast<std::uint8_t*>(&out);
+      for (unsigned i = 0; i < 16; i += 4) {
+        std::uint32_t xb = 0;
+        for (unsigned k = 0; k < 4; ++k) xb |= static_cast<std::uint32_t>(pa[i + k]) << (8 * k);
+        const double scaled =
+            std::ldexp(static_cast<double>(BitsAs<float>(xb)), static_cast<int>(fbits));
+        bool inexact = false;
+        const double rounded = RoundToInt(scaled, rm, &inexact);
+        std::uint32_t raised = inexact ? kIxc : 0u;
+        const std::uint64_t v = ToFixed(rounded, !uns, 32, &raised);
+        flags.Raise(raised);
+        const std::uint32_t rb = static_cast<std::uint32_t>(v);
+        for (unsigned k = 0; k < 4; ++k) pd[i + k] = static_cast<std::uint8_t>(rb >> (8 * k));
+      }
+      Put(inst, out);
+      return true;
+    }
+    case Opcode::FPVectorFromSignedFixed32: case Opcode::FPVectorFromUnsignedFixed32: {
+      V a{}, out{};
+      std::uint8_t fbits = 0, rm = 0;
+      if (!W128(inst, 0, a) || !ByteArg(inst, 1, fbits) || !ByteArg(inst, 2, rm)) return false;
+      const bool uns = inst->GetOpcode() == Opcode::FPVectorFromUnsignedFixed32;
+      FpOps flags{state_.fpscr};
+      const auto* pa = reinterpret_cast<const std::uint8_t*>(&a);
+      auto* pd = reinterpret_cast<std::uint8_t*>(&out);
+      for (unsigned i = 0; i < 16; i += 4) {
+        std::uint32_t xb = 0;
+        for (unsigned k = 0; k < 4; ++k) xb |= static_cast<std::uint32_t>(pa[i + k]) << (8 * k);
+        const double scaled = std::ldexp(
+            uns ? static_cast<double>(xb) : static_cast<double>(static_cast<std::int32_t>(xb)),
+            -static_cast<int>(fbits));
+        bool inexact = false;
+        const float r = RoundToInt(static_cast<float>(scaled), rm, &inexact);
+        if (inexact) flags.Raise(kIxc);
+        const std::uint32_t rb = AsBits<std::uint32_t>(r);
+        for (unsigned k = 0; k < 4; ++k) pd[i + k] = static_cast<std::uint8_t>(rb >> (8 * k));
+      }
+      Put(inst, out);
+      return true;
+    }
+    case Opcode::FPVectorRoundInt32: {
+      V a{}, out{};
+      std::uint8_t rm = 0, exact = 0;
+      if (!W128(inst, 0, a) || !ByteArg(inst, 1, rm) || !ByteArg(inst, 2, exact)) return false;
+      FpOps flags{state_.fpscr};
+      const auto* pa = reinterpret_cast<const std::uint8_t*>(&a);
+      auto* pd = reinterpret_cast<std::uint8_t*>(&out);
+      for (unsigned i = 0; i < 16; i += 4) {
+        std::uint32_t xb = 0;
+        for (unsigned k = 0; k < 4; ++k) xb |= static_cast<std::uint32_t>(pa[i + k]) << (8 * k);
+        bool inexact = false;
+        const float r = RoundToInt(BitsAs<float>(xb), rm, &inexact);
+        if (exact != 0 && inexact) flags.Raise(kIxc);
+        const std::uint32_t rb = AsBits<std::uint32_t>(r);
+        for (unsigned k = 0; k < 4; ++k) pd[i + k] = static_cast<std::uint8_t>(rb >> (8 * k));
+      }
+      Put(inst, out);
+      return true;
+    }
     case Opcode::FPVectorMax32: case Opcode::FPVectorMin32: {
       FpOps flags{state_.fpscr};
       V a{}, b{}, out{};

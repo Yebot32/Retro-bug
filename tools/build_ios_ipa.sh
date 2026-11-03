@@ -17,6 +17,10 @@ command -v cmake >/dev/null || { echo "no cmake" >&2; exit 1; }
 PROFILE_ARG="-DRB_AOT_PROFILE_DIR="
 if [ -n "${RB_AOT_PROFILE:-}" ]; then
   PROFILE_ROOT="$(cd "$RB_AOT_PROFILE" && pwd)"
+  # The engine needs this define even though the app target compiles the profile: without it
+  # `ios_session.cpp` compiles the "carries no profile" branch and every game runs Tier I, which is
+  # exactly what happened from the multi-profile refactor until this line was restored.
+  PROFILE_ARG="-DRB_AOT_PROFILE_DIR=$PROFILE_ROOT"
   AOT_SOURCES="$ROOT/ios/RetroBug/AotProfile"
   rm -rf "$AOT_SOURCES"
   mkdir -p "$AOT_SOURCES"
