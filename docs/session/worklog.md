@@ -1316,3 +1316,16 @@ assembled into the app like any other source.
   seven taps for developer) and a Developer section (engine line, library to boot, log share). Trade-off:
   on the M1 iPad the probe passes, so games now boot on Tier J; the AOT path runs where executable memory
   is refused (stock/App Store builds), where build 28's switch fix is the one that matters.
+- **Build 29's crash, and build 30** (`0deb8b1`, profiles ref `aot/profiles`), 17,543,651 bytes, SHA-256
+  `12544185d20891b50371a7533c1377c68bea74e537a1afec58b86dcb6cc5f9ba`. Build 29 crashed both games on
+  launch: its automatic Tier J trusted `rb_ios_jit_available`'s R|X mapping, which iOS grants a
+  home-screen launch but never the write access oaknut's iOS code block needs (it flips R|X -> R|W ->
+  R|X), so the first store inside the engine killed the process. The probe now requires a
+  debugger-attached launch (how AltStore/SideStore's "Enable JIT" works) and the full flip, and a
+  `jit-attempt` marker holding the build number keeps a build that died in Tier J from trying it again.
+  The launcher's tiles are plain gestures again — a Button swallowed the long press, so the game page was
+  unreachable — the grid gets Holo's fade-rise and the app the Android BootScreen wordmark sweep (Roboto
+  Light 56, accent band, 1.5 s, tap skips), Share log sits in About, and uncaught exceptions write to the
+  log synchronously. With Tier J gated, a home-screen launch runs the translated profile: the first time
+  emitted code runs on iOS, with `jit:`, `aot: profile ... matches`, `call-setup:`, `aot-run:` and
+  `aot-dispatch` lines naming each step.
