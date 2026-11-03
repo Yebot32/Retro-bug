@@ -8,6 +8,13 @@
 import Foundation
 import UIKit
 
+/// A file-scope function, not a closure: `NSSetUncaughtExceptionHandler` takes a C function pointer, and a
+/// closure Swift considers context-capturing cannot become one.
+private func rbLogUncaughtException(_ exception: NSException) {
+    AppLog.writeNow("CRASH: uncaught \(exception.name.rawValue): \(exception.reason ?? "no reason")")
+    AppLog.writeNow("CRASH: \(exception.callStackSymbols.joined(separator: " | "))")
+}
+
 enum AppLog {
     static let url: URL = {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -35,10 +42,7 @@ enum AppLog {
         write("Documents: \(fm.urls(for: .documentDirectory, in: .userDomainMask)[0].path)")
         // A SwiftUI/UIKit crash terminates the process before the async writer runs; this handler writes
         // synchronously, so the next log says what threw instead of ending at the last ordinary line.
-        NSSetUncaughtExceptionHandler { exception in
-            writeNow("CRASH: uncaught \(exception.name.rawValue): \(exception.reason ?? "no reason")")
-            writeNow("CRASH: \(exception.callStackSymbols.joined(separator: " | "))")
-        }
+        NSSetUncaughtExceptionHandler(rbLogUncaughtException)
     }
 
     static func write(_ message: String) {
