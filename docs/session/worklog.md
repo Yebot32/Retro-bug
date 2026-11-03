@@ -1347,3 +1347,12 @@ assembled into the app like any other source.
   fixture pair was re-emitted. Tablet gates with the new code: aot 178/0 (0 fallbacks), the libc scope
   image runs its constructors through the inline path to the expected unanswered-dlopen endpoint, interp
   1112/0, tier diff 1039/0, NEON 11/0, aotgen 48/0.
+- **Build 33** (`ad535ae`), 20,993,240 bytes, SHA-256
+  `7d3d22e756c15a5babb154effee9865bfffe126492aeafd1d7753298a96ed82e`: the measurement build on top of 32.
+  Every 10 s the log now opens with `render: N frames in 10 s (F fps)`, follows with the `aot-runtime`
+  line and the six hottest `aot-fallback Nx at lib+0x…` sites, so a slow game's log names its rate, how
+  much of the dispatch is cached, and the refused code it keeps landing on. The dispatch counters are
+  local to the guest thread and published every 16k dispatches and at every Run exit — two relaxed
+  read-modify-writes per translated block were a real tax — and the one-shot trace check is a relaxed
+  load. Tablet gate re-run with the final code: aot 178/0, interp 1112/0, tier diff 1039/0, and the
+  scope image through the fastmem path.
