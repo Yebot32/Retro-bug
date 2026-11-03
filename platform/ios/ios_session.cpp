@@ -255,7 +255,8 @@ void InstallCrashLog(std::FILE* file) {
   struct sigaction sa {};
   sa.sa_handler = CrashSignal;
   sa.sa_flags = SA_ONSTACK;
-  (void)::sigemptyset(&sa.sa_mask);
+  // `sa_mask` is zero-initialised, which is the empty set on Darwin (sigemptyset is not declared at
+  // this SDK's feature level).
   for (const int sig : {SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGSEGV, SIGTRAP}) (void)::sigaction(sig, &sa, nullptr);
   // A stderr write to a closed pipe kills the process with no report; logging must never be fatal.
   std::signal(SIGPIPE, SIG_IGN);
