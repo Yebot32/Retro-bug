@@ -1294,3 +1294,25 @@ assembled into the app like any other source.
   redirected to the log (stdio buffer); the traces now go through `write(2)`, so the next log will name
   the entry pc or the step. Blocky stopped at frame 33 on a null `jmethodID` for
   `com/utils/UnityAds.nativeInit(String,String)V`; the row is added.
+- **Build 28** (`75e44d5`, profiles ref `aot/profiles`), 16,601,823 bytes, SHA-256
+  `7a9257cc9a68684222f1cd1c1d349cac8859d62a11b66ee6cfd35ad9694f523b`. Build 27 never compiled: its new
+  `call-setup` line added a `const char[11]` to a `const char*`. Build 28 carries the KitKat fix: the
+  6b00f41 review had moved cross-library switch consumption to the top of `AotExecutor::Run` and dropped
+  both `continue`s that return to it, so `Run` reported `Suspended` for an ordinary cross-library call.
+  KitKat's first libc call is exactly that path (`libandroidkitkat.so` holds profile slot 0, `libc.so`
+  slot 1): `__init_tcb` suspended the boot thread before any emitted code ran, and Blocky's first libgame
+  call was next in line. The fix continues after `Dispatch` names a switch and after `run_code` returns
+  with one pending. All four lanes green; the arm64 `rb_aot_tests` on the tablet are pending (no device
+  attached).
+- **Build 29** (`318d38c`, profiles ref `aot/profiles`), 17,522,806 bytes, SHA-256
+  `e1c50a1354e86d6d78c442d8ac084eb1b6318544a96132f0ec54996ace8896d7`. Tier selection is automatic: Tier J
+  when the probe passes, then the AOT profile, then Tier I; the toggle and `rb_ios_set_jit_enabled` are
+  gone. The launcher is rebuilt on the Android app's HoloTheme values — #101010/#1B1B1B/#262626, the four
+  Holo accents, bundled Roboto (OFL, four faces), the 56 pt action bar with its 3 pt accent underline and
+  ADD APK/SETTINGS text actions, the 128 pt app-drawer grid with 72 pt icons (the APK's own launcher image
+  through `rb_ios_apk_icon` over the engine's zip reader, the robot as fallback) and caps state badges, the
+  40 %-accent pressed tile, Holo preference rows and section rules, a dimmed game dialog (icon, name, PLAY,
+  details, log, remove) and Holo toast/confirm shapes. Settings keeps LOOK (accent cycle), ABOUT (version,
+  seven taps for developer) and a Developer section (engine line, library to boot, log share). Trade-off:
+  on the M1 iPad the probe passes, so games now boot on Tier J; the AOT path runs where executable memory
+  is refused (stock/App Store builds), where build 28's switch fix is the one that matters.
