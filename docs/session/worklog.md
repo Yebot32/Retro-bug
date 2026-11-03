@@ -1283,3 +1283,14 @@ assembled into the app like any other source.
   1039/0, aot 178/0). A new `rb_aot_scope_tests` repro boots the KitKat scope with the libc image on the
   tablet and passes, which points the remaining iOS-only crash at the executor path rather than the
   loader. The JIT dot now reads "JIT available — on/off" (the dot is the probe, not the switch).
+- **Build 26** (`e5ccca2`, profiles ref `aot/profiles`), 16,609,960 bytes, SHA-256
+  `a3c6f946e80b4a7121efacf74a16f3b23a6fc0b81581815a5c4c34f83afb3583`. One app now carries **both**
+  games' profiles (`rb_aot_profile_kitkat`, `rb_aot_profile_blocky`); the session walks a generated
+  registry and hash-matches the imported APK, so Blocky Roads runs translated code instead of the
+  interpreter that was spending ~22 s per frame in its intro. libgame's 110 MiB assembly is stored gzipped
+  on the profile ref and expanded at build time. Build 25's blocks are now link-visible in the app
+  (`_aot_blocky_libgame_blocks`). KitKat's death is still open: build 25's log ends at
+  `thread-setup: __init_tcb` with no crash banner, and its AOT traces were lost because stderr is
+  redirected to the log (stdio buffer); the traces now go through `write(2)`, so the next log will name
+  the entry pc or the step. Blocky stopped at frame 33 on a null `jmethodID` for
+  `com/utils/UnityAds.nativeInit(String,String)V`; the row is added.
