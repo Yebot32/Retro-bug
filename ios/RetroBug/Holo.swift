@@ -183,7 +183,6 @@ struct HoloRow<Trailing: View>: View {
         .padding(.horizontal, 20)
         .padding(.vertical, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Holo.bg)
 
         Group {
             if let action = action, enabled {
