@@ -17,6 +17,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -46,6 +47,10 @@ class AotExecutor;
 /// the prelude, which branches to it. The function-pointer type is the table's way of naming a code
 /// address without inventing a second pointer type.
 using AotCode = std::uint32_t (*)(AotState*);
+
+/// Where the executor's one-shot traces go. On iOS fd 2 is not the session log, so a trace printed to
+/// stderr is invisible; the runtime passes the same sink every other boot line uses.
+using AotLog = std::function<void(const std::string&)>;
 
 /// The ISA bits in `AotBlock::flags`; exactly one is set. They match `rb::aotgen::kThumb`/`kArm` by
 /// value and by intent, but the runtime does not depend on the tool's header.
@@ -181,11 +186,11 @@ class AotImage {
 class AotExecutor final : public Executor {
  public:
   AotExecutor(mem::GuestMemory& memory, GuestAddr return_address, const AotImageInfo& info,
-              const HostDispatch* dispatch = nullptr);
+              const HostDispatch* dispatch = nullptr, AotLog log = nullptr);
   /// A per-game profile (AOT task 5): every translated library the boot may enter. Blocks in one image
   /// may jump to another's; the dispatcher returns to C++ and `Run` re-enters that image's prelude.
   AotExecutor(mem::GuestMemory& memory, GuestAddr return_address, const AotProfile& profile,
-              const HostDispatch* dispatch = nullptr);
+              const HostDispatch* dispatch = nullptr, AotLog log = nullptr);
   ~AotExecutor() override;
 
   RunResult Run(MachineState& state, unsigned max_instructions) override;
@@ -274,6 +279,7 @@ class AotExecutor final : public Executor {
   std::vector<Library> libraries_;
   std::size_t current_ = 0;
   AotState state_{};
+  AotLog log_;
   /// One core. The monitor is still required: Dynarmic's trampolines call it unconditionally, and
   /// AOT's exclusive callbacks use the same ReadAndMark/DoExclusiveOperation pairing.
   Dynarmic::ExclusiveMonitor monitor_{1};

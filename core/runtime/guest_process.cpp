@@ -464,7 +464,8 @@ std::unique_ptr<GuestProcess> GuestProcess::Create(const GuestProcessOptions& op
     if (options.ctor_tier == 2 && !p->jit_->ok()) return fail("Tier J is unavailable: " + p->jit_->error());
   }
   if (options.aot != nullptr) {
-    p->aot_ = std::make_unique<exec::AotExecutor>(m, kReturnAddress, *options.aot, p->abi_.get());
+    p->aot_ = std::make_unique<exec::AotExecutor>(m, kReturnAddress, *options.aot, p->abi_.get(),
+                                                        [self = p.get()](const std::string& line) { self->Log(line); });
     if (!p->aot_->ok()) {
       p->Log("aot: the profile was refused (" + p->aot_->error() + "); using Tier I");
       p->aot_.reset();
@@ -772,8 +773,12 @@ bool GuestProcess::CallSetup(const char* fn, const abi::Args32& args, std::strin
     return false;
   }
   abi_->set_executor(engine(opts_.ctor_tier));
+  Log(std::string{"call-setup: "} + fn + " at 0x" + Hex(s->addr));
   exec::RunResult rr{};
   abi_->CallGuest(s->addr | (s->thumb ? 1u : 0u), args, abi::Shorty::For("V"), kCallBudget, &rr);
+  Log(std::string{"call-setup: "} + fn + (rr.reason == exec::StopReason::Returned
+                                              ? std::string{" returned"}
+                                              : " stopped: " + ReasonName(rr.reason) + " " + rr.detail));
   if (rr.reason != exec::StopReason::Returned) {
     if (err) *err = std::string{fn} + " did not return: " + ReasonName(rr.reason) + " " + rr.detail;
     return false;

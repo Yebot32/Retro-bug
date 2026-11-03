@@ -26,6 +26,7 @@
 #include <thread>
 #include <vector>
 
+#include <pthread.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -214,6 +215,8 @@ void InstallCrashLog(std::FILE* file) {
   g_crash_fd.store(fd, std::memory_order_release);
   if (g_crash_handlers_installed.exchange(true)) return;
   for (const int sig : {SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGSEGV, SIGTRAP}) std::signal(sig, CrashSignal);
+  // A stderr write to a closed pipe kills the process with no report; logging must never be fatal.
+  std::signal(SIGPIPE, SIG_IGN);
   std::set_terminate(CrashTerminate);
 }
 
@@ -460,6 +463,28 @@ bool RbIosSession::Boot(std::string* err) {
   self->Log("aot: this app carries no profile — Tier I");
 #endif
 
+  // A boot that dies without a signal (SIGKILL, a hung thread holding the log mutex) writes nothing;
+  // this heartbeat writes straight to the log fd, so the log shows whether the process was alive.
+  std::atomic<bool> beat_stop{false};
+  // The fd is taken once: the heartbeat must not wait on the log mutex a hung thread may hold.
+  const int beat_fd = self->log_file != nullptr ? ::fileno(self->log_file) : -1;
+  std::thread beat([&beat_stop, beat_fd] {
+    for (int tick = 1; !beat_stop.load(std::memory_order_relaxed); ++tick) {
+      for (int i = 0; i < 20 && !beat_stop.load(std::memory_order_relaxed); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      }
+      if (beat_stop.load(std::memory_order_relaxed) || beat_fd < 0) break;
+      char line[64];
+      const int n = std::snprintf(line, sizeof line, "boot: %d s\n", tick);
+      if (n > 0) (void)::write(beat_fd, line, static_cast<std::size_t>(n));
+    }
+  });
+  {
+    char stack[96];
+    const int n = std::snprintf(stack, sizeof stack, "boot: thread stack %.1f MiB\n",
+                                static_cast<double>(pthread_get_stacksize_np(pthread_self())) / (1024.0 * 1024.0));
+    if (n > 0) self->Log(std::string(stack, static_cast<std::size_t>(n - 1)));
+  }
   std::string boot_error;
   enum class Engine { Jit, Aot, TierI };
   std::vector<Engine> attempts;
@@ -500,6 +525,8 @@ bool RbIosSession::Boot(std::string* err) {
                          " boot failed (" + boot_error + "); retrying on " +
                          (attempts[attempt + 1] == Engine::Aot ? "AOT" : "Tier I"));
   }
+  beat_stop.store(true, std::memory_order_relaxed);
+  if (beat.joinable()) beat.join();
   if (boot == nullptr) {
     *err = boot_error.empty() ? std::string{"the boot failed"} : boot_error;
     return false;
