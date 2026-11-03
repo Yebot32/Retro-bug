@@ -317,6 +317,13 @@ class AotExecutor final : public Executor {
   std::atomic<std::uint64_t> cache_hits_{0};
   std::atomic<std::uint64_t> switches_{0};
 
+  /// The inline page-table fastmem the emitted blocks use: one host pointer per guest page, null where an
+  /// access must take the checked callbacks (unmapped, guard, out-of-line, misaligned). Mirrors
+  /// `JitExecutor`'s table, and is what makes AOT memory access a load instead of a C++ call.
+  std::vector<std::uint8_t*> page_table_;
+  std::uint64_t page_observer_ = 0;
+  void RefreshPages(std::uint32_t at, std::size_t len);
+
   Pending pending_ = Pending::None;
   std::string pending_detail_;
   std::uint32_t pending_slot_ = 0;

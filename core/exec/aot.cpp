@@ -26,6 +26,7 @@
 #include <type_traits>
 #include <utility>
 
+#include "dynarmic/interface/A32/config.h"
 #include "rb/isa/front_end.h"
 
 namespace rb::exec {
@@ -33,6 +34,12 @@ namespace rb::exec {
 namespace {
 
 constexpr std::uint32_t kCpsrTFlag = 1u << 5;
+
+/// The page table the current `Run` installs for the emitted blocks; the prelude asks for it once per
+/// `run_code` entry (`rb_aot_page_table_ptr`), because the host address is only known at run time and the
+/// emitted code must not bake it. Set at the top of every `Run`, so two executors never see each other's
+/// table even when used from one process.
+std::atomic<void*> g_aot_page_table{nullptr};
 
 /// The prelude uses Dynarmic's own `A32JitState` offsets. `AotState` holds that struct first, so a
 /// callback receives the same address as the `jit_state` the prelude was entered with, and every
@@ -157,6 +164,11 @@ AotExecutor::AotExecutor(mem::GuestMemory& memory, GuestAddr return_address,
   if (!AddImage(info, &err_)) return;
   state_.exec = this;
   fallback_interp_ = std::make_unique<InterpExecutor>(memory_, return_address_, dispatch_);
+  page_table_.assign(Dynarmic::A32::UserConfig::NUM_PAGE_TABLE_ENTRIES, nullptr);
+  RefreshPages(0, memory_.window_bytes());
+  page_observer_ = memory_.AddObserver([this](std::uint32_t at, std::size_t len) {
+    RefreshPages(at, len);
+  });
 #else
   (void)info;
   err_ = "AOT execution requires an AArch64 host";
@@ -182,6 +194,11 @@ AotExecutor::AotExecutor(mem::GuestMemory& memory, GuestAddr return_address,
   }
   state_.exec = this;
   fallback_interp_ = std::make_unique<InterpExecutor>(memory_, return_address_, dispatch_);
+  page_table_.assign(Dynarmic::A32::UserConfig::NUM_PAGE_TABLE_ENTRIES, nullptr);
+  RefreshPages(0, memory_.window_bytes());
+  page_observer_ = memory_.AddObserver([this](std::uint32_t at, std::size_t len) {
+    RefreshPages(at, len);
+  });
 #else
   (void)profile;
   err_ = "AOT execution requires an AArch64 host";
@@ -219,7 +236,20 @@ bool AotExecutor::AddImage(const AotImageInfo& info, std::string* err) {
   return true;
 }
 
-AotExecutor::~AotExecutor() = default;
+AotExecutor::~AotExecutor() {
+  if (page_observer_ != 0) memory_.RemoveObserver(page_observer_);
+}
+
+void AotExecutor::RefreshPages(std::uint32_t at, std::size_t len) {
+  // The same rule as JitExecutor's table: only pages readable right now get a host pointer; everything
+  // else is null and the emitted access takes the checked callback path (which records the fault).
+  const std::uint64_t end = std::min<std::uint64_t>(std::uint64_t{at} + len, memory_.window_bytes());
+  for (std::uint64_t a = at & ~std::uint64_t{mem::kGuestPage - 1}; a < end; a += mem::kGuestPage) {
+    const auto g = static_cast<std::uint32_t>(a);
+    void* host = (memory_.ProtAt(g) & mem::kRead) != 0 ? memory_.Host(g) : nullptr;
+    page_table_[a >> mem::kGuestPageShift] = static_cast<std::uint8_t*>(host);
+  }
+}
 
 std::string AotExecutor::StatsLine() const {
   const std::uint64_t dispatches = dispatches_.load(std::memory_order_relaxed);
@@ -479,6 +509,9 @@ RunResult AotExecutor::Run(MachineState& state, unsigned max_instructions) {
     return out;
   }
 
+  // The emitted prelude asks for this once per run-code entry and keeps it in Xpagetable for every inline
+  // memory access in the blocks.
+  g_aot_page_table.store(page_table_.data(), std::memory_order_relaxed);
   live_ = &state;
   budget_ = max_instructions;
   executed_ = 0;
@@ -884,6 +917,9 @@ std::uint64_t rb_aot_get_ticks_remaining(AotState* state) {
 }
 void* rb_aot_dispatch(AotState* state) {
   return state->exec->Dispatch();
+}
+void* rb_aot_page_table_ptr() {
+  return g_aot_page_table.load(std::memory_order_relaxed);
 }
 
 }  // extern "C"

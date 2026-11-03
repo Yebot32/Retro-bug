@@ -5,10 +5,11 @@
 //
 // Why assembly text and not bytes: the blocks are position-independent instructions with two kinds of
 // fixups (branches between blocks and calls into the C++ runtime), and the prelude is Dynarmic's
-// `EmitPrelude` logic with the page table/fastmem setup removed and the dispatcher call replacing
-// `GetOrEmit`. Emitting `.word` lines plus symbolic branches lets the assembler and linker resolve the
-// final addresses; the tool bakes no host address into anything it writes, so the result is a normal
-// object file the app can link, not an executable blob.
+// `EmitPrelude` logic with the page-table pointer fetched from the runtime (AOT does not use the JIT's
+// signal-based fastmem) and the dispatcher call replacing `GetOrEmit`. Emitting `.word` lines plus
+// symbolic branches lets the assembler and linker resolve the final addresses; the tool bakes no host
+// address into anything it writes, so the result is a normal object file the app can link, not an
+// executable blob.
 //
 // Everything here is offline. The shipping runtime (`core/exec/aot.cpp`) contains no emitter and does
 // not allocate executable memory.
@@ -519,8 +520,15 @@ struct Emitter {
       code->MOV(util::X19, util::X0);
       code->MOV(Backend::Xstate, util::X1);
       code->MOV(Backend::Xhalt, util::X2);
-      // Xpagetable/Xfastmem are deliberately not set: the tool config has neither, so no emitted
-      // memory access reads them. (The JIT's prelude only sets them when the config asks for them.)
+      // The inline page-table fastmem every emitted memory access uses: the table lives at a host address
+      // only the runtime knows, so it is fetched once per run-code entry and kept in the reserved register.
+      // (Xfastmem is the JIT's signal-based fastmem, which AOT does not use.)
+      {
+        const std::ptrdiff_t page_table_at = code->offset();
+        code->dw(0x9400'0000u);  // bl rb_aot_page_table_ptr (replaced by the external fixup below)
+        externals.push_back(ExternalFixup{page_table_at, "bl " + Sym("rb_aot_page_table_ptr")});
+        code->MOV(Backend::Xpagetable, util::X0);
+      }
       if (conf_.HasOptimization(OptimizationFlag::ReturnStackBuffer)) {
         code->ADR(Backend::Xscratch0, ret_dispatch_label);
         for (std::size_t i = 0; i < Backend::RSBCount; ++i) {
@@ -550,6 +558,12 @@ struct Emitter {
       code->MOV(util::X19, util::X0);
       code->MOV(Backend::Xstate, util::X1);
       code->MOV(Backend::Xhalt, util::X2);
+      {
+        const std::ptrdiff_t page_table_at = code->offset();
+        code->dw(0x9400'0000u);
+        externals.push_back(ExternalFixup{page_table_at, "bl " + Sym("rb_aot_page_table_ptr")});
+        code->MOV(Backend::Xpagetable, util::X0);
+      }
       if (conf_.HasOptimization(OptimizationFlag::ReturnStackBuffer)) {
         code->ADR(Backend::Xscratch0, ret_dispatch_label);
         for (std::size_t i = 0; i < Backend::RSBCount; ++i) {
@@ -1105,7 +1119,16 @@ bool EmitImage(const std::string& elf_path, const std::string& out_prefix, std::
   em.conf_.check_halt_on_memory_access = true;
   em.conf_.enable_cycle_counting = true;
   em.conf_.very_verbose_debugging_output = false;
-  em.conf_.page_table = nullptr;
+  // Inline page-table fastmem — the JIT's memory-access path. The blocks load and store mapped guest
+  // pages directly through the table the runtime installs, and branch to the checked callbacks for
+  // anything the table does not cover (unmapped, guard, out-of-line, page-boundary straddles). The
+  // pointer is a tool-time dummy: only its non-nullness selects the inline path, and the prelude fetches
+  // the real table at run time through rb_aot_page_table_ptr.
+  static std::array<std::uint8_t*, A32::UserConfig::NUM_PAGE_TABLE_ENTRIES> tool_page_table{};
+  em.conf_.page_table = &tool_page_table;
+  em.conf_.absolute_offset_page_table = false;
+  em.conf_.detect_misaligned_access_via_page_table = 16 | 32 | 64 | 128;
+  em.conf_.only_detect_misalignment_via_page_table_on_page_boundary = true;
   em.conf_.fastmem_pointer = std::nullopt;
   em.conf_.code_cache_size = 1u << 20;
   em.address_space = std::make_unique<Backend::A32AddressSpace>(em.conf_);
