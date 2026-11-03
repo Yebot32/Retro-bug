@@ -778,7 +778,8 @@ bool GuestProcess::CallSetup(const char* fn, const abi::Args32& args, std::strin
   abi_->CallGuest(s->addr | (s->thumb ? 1u : 0u), args, abi::Shorty::For("V"), kCallBudget, &rr);
   Log(std::string{"call-setup: "} + fn + (rr.reason == exec::StopReason::Returned
                                               ? std::string{" returned"}
-                                              : " stopped: " + ReasonName(rr.reason) + " " + rr.detail));
+                                              : std::string{" stopped: "} + ReasonName(rr.reason) + " " +
+                                                    rr.detail));
   if (rr.reason != exec::StopReason::Returned) {
     if (err) *err = std::string{fn} + " did not return: " + ReasonName(rr.reason) + " " + rr.detail;
     return false;
