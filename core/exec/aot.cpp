@@ -488,6 +488,12 @@ RunResult AotExecutor::Run(MachineState& state, unsigned max_instructions) {
     } else if ((entry = Dispatch()) != nullptr) {
       running = libraries_[current_].info;
     }
+    if (entry == nullptr && state_.switch_entry != nullptr) {
+      // Dispatch named another library's block. Its prelude needs a frame of its own, so the switch is
+      // taken at the top of the next iteration; returning here would report a `Suspended` stop for what
+      // is an ordinary cross-library call (the first libc call of any multi-library profile).
+      continue;
+    }
     if (entry != nullptr) {
       const Dynarmic::HaltReason hr = running->run_code(entry, &state_.jit, &state_.halt_reason);
       SyncOut(state);
@@ -496,6 +502,9 @@ RunResult AotExecutor::Run(MachineState& state, unsigned max_instructions) {
         state.r[15] = pending_pc_;
       }
       if (state_.fallback_pending == 0) {
+        // A block called into another translated library: the prelude exits so the target image can
+        // be entered from C++ with a fresh frame of its own (the switch is taken at the loop top).
+        if (state_.switch_entry != nullptr) continue;
         return Exit(MapHalt(hr));
       }
       state_.fallback_pending = 0;
