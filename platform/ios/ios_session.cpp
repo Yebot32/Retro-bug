@@ -695,18 +695,29 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
 
   s->monitor = std::thread([s] {
     int last = -1;
+    int frames_at_last_report = 0;
+    int ticks = 0;
     while (s->running.load()) {
       for (int i = 0; i < 20 && s->running.load(); ++i) {  // leaves within 250 ms of a stop
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
       }
       if (!s->running.load()) break;
-      if (!s->want_run.load()) continue;  // paused by the app, not stalled
-      static int ticks = 0;
+      if (!s->want_run.load()) {  // paused by the app, not stalled: frames do not accumulate
+        frames_at_last_report = s->frames.load();
+        continue;
+      }
       ++ticks;
       if (rb::runtime::GuestProcess* p = s->process.load(std::memory_order_acquire)) {
-        // Every other tick (10 s): the profile and the host-call volumes, which is where a slow load's time
-        // actually goes. The stall block below adds the per-thread state when frames are not advancing.
+        // Every other tick (10 s): the frame rate, the profile and the host-call volumes, which is where a
+        // slow load's time actually goes. The stall block below adds the per-thread state when frames are
+        // not advancing.
         if (ticks % 2 == 0) {
+          const int frames_now = s->frames.load();
+          const int delta = frames_now - frames_at_last_report;
+          frames_at_last_report = frames_now;
+          char rate[96];
+          std::snprintf(rate, sizeof rate, "render: %d frames in 10 s (%.1f fps)", delta, delta / 10.0);
+          s->Log(rate);
           for (const std::string& line : p->ProfileReport()) s->Log(line);
           if (s->host) {
             for (const std::string& line : s->host->CallCountLines()) s->Log(line);

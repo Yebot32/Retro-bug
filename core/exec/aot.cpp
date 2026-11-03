@@ -251,6 +251,29 @@ void AotExecutor::RefreshPages(std::uint32_t at, std::size_t len) {
   }
 }
 
+void AotExecutor::NoteFallback(std::uint32_t pc) {
+  FallbackSite& site = fallback_sites_[(pc >> 2) & (kFallbackSites - 1u)];
+  if (site.pc.load(std::memory_order_relaxed) == pc) {
+    site.count.fetch_add(1, std::memory_order_relaxed);
+  } else {
+    site.pc.store(pc, std::memory_order_relaxed);
+    site.count.store(1, std::memory_order_relaxed);
+  }
+}
+
+std::vector<std::pair<std::uint32_t, std::uint32_t>> AotExecutor::TopFallbacks(
+    std::size_t n) const {
+  std::vector<std::pair<std::uint32_t, std::uint32_t>> sites;
+  for (const FallbackSite& site : fallback_sites_) {
+    const std::uint32_t count = site.count.load(std::memory_order_relaxed);
+    if (count != 0) sites.emplace_back(site.pc.load(std::memory_order_relaxed), count);
+  }
+  std::sort(sites.begin(), sites.end(),
+            [](const auto& a, const auto& b) { return a.second > b.second; });
+  if (sites.size() > n) sites.resize(n);
+  return sites;
+}
+
 std::string AotExecutor::StatsLine() const {
   const std::uint64_t dispatches = dispatches_.load(std::memory_order_relaxed);
   const std::uint64_t hits = cache_hits_.load(std::memory_order_relaxed);
@@ -420,6 +443,7 @@ void* AotExecutor::Dispatch() {
     }
   }
   if (entry == nullptr) {
+    NoteFallback(pc);
     state_.fallback_pending = 1;
     Halt(Dynarmic::HaltReason::UserDefined1);
     return nullptr;

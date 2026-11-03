@@ -22,6 +22,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "dynarmic/backend/arm64/a32_jitstate.h"
@@ -207,6 +208,9 @@ class AotExecutor final : public Executor {
   /// Dispatch accounting for the device log: blocks dispatched, direct-mapped hits, Tier I fallbacks and
   /// cross-image switches. Relaxed atomics — the stall monitor reads this without the GGL.
   [[nodiscard]] std::string StatsLine() const;
+  /// The `n` most frequent Tier I fallback sites (guest pc, count), highest first: the code the emitter
+  /// refused, so a slow game names its fallback hotspots instead of only counting them.
+  [[nodiscard]] std::vector<std::pair<std::uint32_t, std::uint32_t>> TopFallbacks(std::size_t n) const;
   /// The first translated library (the fixture carries exactly one). Empty for a failed load, so a
   /// caller that ignored `ok()` gets an empty image rather than undefined behaviour.
   [[nodiscard]] const AotImage& image() const {
@@ -316,6 +320,16 @@ class AotExecutor final : public Executor {
   std::atomic<std::uint64_t> dispatches_{0};
   std::atomic<std::uint64_t> cache_hits_{0};
   std::atomic<std::uint64_t> switches_{0};
+
+  /// Where fallbacks land, direct-mapped by pc. Approximate under races with the report reader, which is
+  /// what a diagnostic needs; the counts are exact for the common single-writer case (the GGL).
+  struct FallbackSite {
+    std::atomic<std::uint32_t> pc{0xffff'ffffu};
+    std::atomic<std::uint32_t> count{0};
+  };
+  static constexpr std::size_t kFallbackSites = 256;
+  std::array<FallbackSite, kFallbackSites> fallback_sites_{};
+  void NoteFallback(std::uint32_t pc);
 
   /// The inline page-table fastmem the emitted blocks use: one host pointer per guest page, null where an
   /// access must take the checked callbacks (unmapped, guard, out-of-line, misaligned). Mirrors

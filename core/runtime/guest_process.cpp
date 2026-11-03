@@ -1228,7 +1228,14 @@ std::vector<std::string> GuestProcess::ProfileReport() {
     out.emplace_back(line);
   }
   if (const std::string cache = CacheStats(); !cache.empty()) out.push_back("profile: " + cache);
-  if (aot_ != nullptr && aot_usable_) out.push_back("profile: " + aot_->StatsLine());
+  if (aot_ != nullptr && aot_usable_) {
+    out.push_back("profile: " + aot_->StatsLine());
+    // The fallback sites, named against the module map: the next log says which code the emitter refused
+    // and how often a game actually lands there.
+    for (const auto& [pc, count] : aot_->TopFallbacks(6)) {
+      out.push_back("profile: aot-fallback " + std::to_string(count) + "x at " + NameAddress(pc));
+    }
+  }
   return out;
 }
 
