@@ -1,0 +1,10 @@
+{
+  "format": 1,
+  "name": "aot_blocky",
+  "libraries": [
+    {"soname": "libc.so", "sha256": "8fc841e8568caf228e7fca49076991ae8c8e693d81c525fadf1ac888c5b152b4", "load_bias": 268435456, "text_vaddr": 260288, "text_len": 593228, "blocks": 18590, "refused": 2507, "code_bytes": 3649400, "symbol": "kAotBlockyLibcImage"},
+    {"soname": "libgame.so", "sha256": "79a402dd1e1a0bcce5f5a8633fa56c606f5decddf6e2f261b73ec0f7248e7e66", "load_bias": 301989888, "text_vaddr": 2412784, "text_len": 1977848, "blocks": 74904, "refused": 8422, "code_bytes": 17837608, "symbol": "kAotBlockyLibgameImage"},
+    {"soname": "libm.so", "sha256": "32d06ce18013f9d81595569a83e73b7fe527b7727811fd243088d3ec256e082d", "load_bias": 335544320, "text_vaddr": 37144, "text_len": 94104, "blocks": 812, "refused": 248, "code_bytes": 116412, "symbol": "kAotBlockyLibmImage"},
+    {"soname": "libz.so", "sha256": "b2bcbc707c36d2147f70de6a135d588ffe98543635a745447d35d46993324181", "load_bias": 402653184, "text_vaddr": 23272, "text_len": 44136, "blocks": 937, "refused": 147, "code_bytes": 238780, "symbol": "kAotBlockyLibzImage"}
+  ]
+}
