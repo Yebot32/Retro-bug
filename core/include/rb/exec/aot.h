@@ -317,9 +317,15 @@ class AotExecutor final : public Executor {
   };
   static constexpr std::size_t kDispatchCacheSize = 1u << 13;
   std::array<DispatchEntry, kDispatchCacheSize> dispatch_cache_{};
+  /// Dispatch counters: the guest thread keeps plain locals (an atomic read-modify-write per block was a
+  /// measurable tax) and publishes them to the atomics the monitor reads, every 16k dispatches and at
+  /// every `Run` exit. A 10 s report may lag by less than one publish window, which is invisible there.
+  std::uint64_t dispatches_local_ = 0;
+  std::uint64_t cache_hits_local_ = 0;
   std::atomic<std::uint64_t> dispatches_{0};
   std::atomic<std::uint64_t> cache_hits_{0};
   std::atomic<std::uint64_t> switches_{0};
+  void PublishCounters();
 
   /// Where fallbacks land, direct-mapped by pc. Approximate under races with the report reader, which is
   /// what a diagnostic needs; the counts are exact for the common single-writer case (the GGL).

@@ -274,6 +274,11 @@ std::vector<std::pair<std::uint32_t, std::uint32_t>> AotExecutor::TopFallbacks(
   return sites;
 }
 
+void AotExecutor::PublishCounters() {
+  dispatches_.store(dispatches_local_, std::memory_order_relaxed);
+  cache_hits_.store(cache_hits_local_, std::memory_order_relaxed);
+}
+
 std::string AotExecutor::StatsLine() const {
   const std::uint64_t dispatches = dispatches_.load(std::memory_order_relaxed);
   const std::uint64_t hits = cache_hits_.load(std::memory_order_relaxed);
@@ -363,8 +368,10 @@ void* AotExecutor::Dispatch() {
   // One-shot tracing for a device that dies in translated code: the first few dispatches name the pc and
   // whether it resolved or fell back, which is what the crash log cannot tell us afterwards.
   static std::atomic<int> traced{0};
-  const int n = traced.fetch_add(1, std::memory_order_relaxed);
-  if (n < 8 && log_) log_("aot-dispatch #" + std::to_string(n) + " pc=0x" + Hex(pc));
+  if (traced.load(std::memory_order_relaxed) < 8) {
+    const int n = traced.fetch_add(1, std::memory_order_relaxed);
+    if (n < 8 && log_) log_("aot-dispatch #" + std::to_string(n) + " pc=0x" + Hex(pc));
+  }
   const bool thumb = (state_.jit.upper_location_descriptor & 1u) != 0;
 
   if (pc == return_address_) {
@@ -381,7 +388,8 @@ void* AotExecutor::Dispatch() {
     Halt(Dynarmic::HaltReason::UserDefined1);
     return nullptr;
   }
-  dispatches_.fetch_add(1, std::memory_order_relaxed);
+  ++dispatches_local_;
+  if ((dispatches_local_ & 0x3fffu) == 0) PublishCounters();
   /**
    * `Descriptor()` is the PC plus exactly the CPSR/FPSCR mode bits the guard below compares (the
    * descriptor constructor masks them), so a slot that matches it on a hit has already passed the
@@ -393,7 +401,7 @@ void* AotExecutor::Dispatch() {
   std::size_t image_index = libraries_.size();
   AotCode entry = nullptr;
   if (cached.entry != nullptr && cached.descriptor == descriptor) {
-    cache_hits_.fetch_add(1, std::memory_order_relaxed);
+    ++cache_hits_local_;
     image_index = cached.image;
     entry = cached.entry;
   } else {
@@ -469,6 +477,7 @@ RunResult AotExecutor::Exit(RunResult r) {
   // One exit for every path: an AOT halt, a fallback terminal, or the budget. Tier I's terminal
   // `RunResult` already carries its own IR-step count, which is a different unit; the AOT tier reports
   // guest instructions, so it is replaced rather than added to.
+  PublishCounters();
   r.instructions_executed = executed_ + fallback_steps_;
   live_ = nullptr;
   return r;
