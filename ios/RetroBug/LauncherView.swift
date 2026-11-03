@@ -33,6 +33,7 @@ struct LauncherView: View {
     @State private var playing: ImportedGame?
     @State private var libName = ""
     @State private var toast: String?
+    @State private var booting = true
 
     private var gamesDir: URL {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -54,9 +55,20 @@ struct LauncherView: View {
                 }
                 if games.isEmpty {
                     empty
-                } else {
+                } else if !booting {
+                    // The tiles enter after the wordmark sweep, as the Android library does when its scan
+                    // finishes: their fade-rise runs where it can be seen, not behind the boot screen.
                     grid
+                } else {
+                    Color.clear
                 }
+            }
+            if booting {
+                HoloBootScreen(accent: holo.accent) {
+                    withAnimation(.easeOut(duration: 0.2)) { booting = false }
+                }
+                .transition(.opacity)
+                .zIndex(1)
             }
             if showSettings {
                 SettingsView(holo: holo, libName: $libName,

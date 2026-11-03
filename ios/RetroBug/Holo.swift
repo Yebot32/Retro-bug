@@ -239,6 +239,47 @@ struct HoloSection: View {
     }
 }
 
+// MARK: - Boot animation
+
+/// The launcher's intro, ported from the Android app's BootScreen: the wordmark in Roboto Light, dim, with a
+/// band of the accent sweeping across it — Ice Cream Sandwich's logo sweep — about 1.5 s, a tap skips it.
+struct HoloBootScreen: View {
+    let accent: Color
+    let onFinished: () -> Void
+
+    @State private var band: CGFloat = -150
+    @State private var finished = false
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            ZStack {
+                Text("RetroBug")
+                    .font(Holo.light(56))
+                    .foregroundColor(Color(rgb: 0x4A4A4A))
+                LinearGradient(colors: [accent.opacity(0), accent, .white, accent, accent.opacity(0)],
+                               startPoint: .leading, endPoint: .trailing)
+                    .frame(width: 150, height: 72)
+                    .offset(x: band)
+                    .frame(width: 340, height: 80)
+                    .mask(Text("RetroBug").font(Holo.light(56)).foregroundColor(.black))
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { finish() }
+        .onAppear {
+            withAnimation(.linear(duration: 1.5)) { band = 360 }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { finish() }
+        }
+    }
+
+    private func finish() {
+        guard !finished else { return }
+        finished = true
+        onFinished()
+    }
+}
+
 // MARK: - Toast and confirm dialog (Holo shapes, not UIAlertController's)
 
 struct HoloToast: View {
