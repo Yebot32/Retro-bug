@@ -20,6 +20,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdarg>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -57,6 +61,24 @@ static_assert(sizeof(std::declval<A32JitState>().ext_regs) == 64 * sizeof(std::u
 
 [[nodiscard]] constexpr bool HaltHas(Dynarmic::HaltReason got, Dynarmic::HaltReason want) {
   return (static_cast<std::uint32_t>(got) & static_cast<std::uint32_t>(want)) != 0;
+}
+
+/// Trace that survives process death: a direct write(2), not stdio. stderr is redirected to the session
+/// log, where a buffered line is exactly what a crash loses — build 25's traces never appeared.
+void Trace(const char* fmt, ...) {
+  char buf[256];
+  va_list ap;
+  va_start(ap, fmt);
+  const int n = std::vsnprintf(buf, sizeof buf, fmt, ap);
+  va_end(ap);
+  if (n <= 0) return;
+  const std::size_t len = static_cast<std::size_t>(std::min<int>(n, sizeof buf - 1));
+#if defined(_WIN32)
+  std::fwrite(buf, 1, len, stderr);
+  std::fflush(stderr);
+#else
+  (void)::write(2, buf, len);
+#endif
 }
 
 std::string Hex(std::uint32_t v) {
@@ -296,7 +318,7 @@ void* AotExecutor::Dispatch() {
   // whether it resolved or fell back, which is what the crash log cannot tell us afterwards.
   static std::atomic<int> traced{0};
   const int n = traced.fetch_add(1, std::memory_order_relaxed);
-  if (n < 8) std::fprintf(stderr, "aot-dispatch #%d pc=%08x\n", n, pc);
+  if (n < 8) Trace("aot-dispatch #%d pc=%08x\n", n, pc);
   const bool thumb = (state_.jit.upper_location_descriptor & 1u) != 0;
 
   if (pc == return_address_) {
@@ -468,7 +490,7 @@ RunResult AotExecutor::Run(MachineState& state, unsigned max_instructions) {
   {
     static std::atomic<int> runs{0};
     if (runs.fetch_add(1, std::memory_order_relaxed) < 8) {
-      std::fprintf(stderr, "aot-run: enter pc=%08x\n", state.pc);
+      Trace("aot-run: enter pc=%08x\n", state.pc);
     }
   }
   SyncIn(state);

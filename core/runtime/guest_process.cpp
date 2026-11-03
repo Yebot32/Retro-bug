@@ -476,7 +476,7 @@ std::unique_ptr<GuestProcess> GuestProcess::Create(const GuestProcessOptions& op
       for (std::size_t i = 0; i < options.aot->count; ++i) {
         const exec::AotLibrary& lib = options.aot->libraries[i];
         if (lib.image == nullptr) continue;
-        p->Log("aot:   " + std::string(lib.soname ? lib.soname : "?") + " bias 0x" +
+        p->Log("aot:   " + std::string(lib.soname ? lib.soname : "?") + " bias " +
                Hex(lib.image->load_bias) + " text 0x" +
                Hex(lib.image->load_bias + lib.image->text_vaddr) + "+0x" + Hex(lib.image->text_len) +
                " blocks " + std::to_string(lib.image->count) + " sha " +

@@ -473,10 +473,18 @@ int RunProfile(const std::string& dir, const std::string& out_prefix, const std:
     cpp << "    {\"" << e.soname << "\", \"" << e.sha256 << "\", &" << e.symbol << "},\n";
   }
   cpp << "};\n}  // namespace\n\n";
-  cpp << "extern \"C\" const rb::exec::AotProfile rb_aot_builtin_profile = {\""
+  // One symbol per profile, so several can live in one app. The session walks the registry the build
+  // script generates from these names; a fixed symbol would collide the moment two games share an app.
+  std::string profile_name = Sanitize(fs::path(out_prefix).filename().string());
+  if (profile_name.rfind("aot_", 0) == 0) profile_name = profile_name.substr(4);
+  const std::string profile_symbol = "rb_aot_profile_" + profile_name;
+  cpp << "extern \"C\" const rb::exec::AotProfile " << profile_symbol << " = {\""
       << Sanitize(fs::path(out_prefix).filename().string()) << "\", kAotProfileLibraries, "
       << emitted.size() << "};\n";
   cpp.close();
+  std::ofstream meta(out_prefix + "_profile.symbol", std::ios::binary);
+  meta << profile_symbol << "\n";
+  meta.close();
   std::printf("aotgen: profile wrote %s and %s (%zu libraries)\n", json_path.c_str(), cpp_path.c_str(),
               emitted.size());
   return 0;

@@ -16,7 +16,44 @@ command -v cmake >/dev/null || { echo "no cmake" >&2; exit 1; }
 
 PROFILE_ARG="-DRB_AOT_PROFILE_DIR="
 if [ -n "${RB_AOT_PROFILE:-}" ]; then
-  PROFILE_ARG="-DRB_AOT_PROFILE_DIR=$(cd "$RB_AOT_PROFILE" && pwd)"
+  PROFILE_ROOT="$(cd "$RB_AOT_PROFILE" && pwd)"
+  AOT_SOURCES="$ROOT/ios/RetroBug/AotProfile"
+  rm -rf "$AOT_SOURCES"
+  mkdir -p "$AOT_SOURCES"
+  registry="$AOT_SOURCES/aot_registry.cpp"
+  echo '#include "rb/exec/aot.h"' > "$registry"
+  entries=""
+  count=0
+  # One profile per subdirectory; a directory of generated files directly is the single-profile layout.
+  for dir in "$PROFILE_ROOT" "$PROFILE_ROOT"/*/; do
+    [ -d "$dir" ] || continue
+    if ! ls "$dir"/*_profile.cpp >/dev/null 2>&1; then continue; fi
+    name="$(basename "$dir")"
+    dest="$AOT_SOURCES/$name"
+    mkdir -p "$dest"
+    cp "$dir"/*.S "$dir"/*_table.cpp "$dir"/*_profile.cpp "$dest"/
+    # A translated image can exceed the ref host close file limit (libgame's .S is 110 MiB); the ref
+    # stores it gzipped and the app compiles the expanded copy.
+    cp "$dir"/*.S.gz "$dest"/ 2>/dev/null || true
+    for gz in "$dest"/*.S.gz; do
+      [ -e "$gz" ] || continue
+      gunzip -c "$gz" > "${gz%.gz}"
+      rm -f "$gz"
+    done
+    symbol="$(head -1 "$dir"/*_profile.symbol 2>/dev/null || true)"
+    if [ -z "$symbol" ]; then symbol="rb_aot_profile_${name#aot_}"; fi
+    echo "extern \"C\" const rb::exec::AotProfile $symbol;" >> "$registry"
+    entries="${entries}    &${symbol},\n"
+    count=$((count + 1))
+    echo "aot: profile $name -> $symbol"
+  done
+  if [ "$count" -eq 0 ]; then echo "aot: no *_profile.cpp under $PROFILE_ROOT" >&2; exit 1; fi
+  echo >> "$registry"
+  echo 'extern "C" const rb::exec::AotProfile* const rb_aot_profiles[] = {' >> "$registry"
+  printf "%b" "$entries" >> "$registry"
+  echo '    nullptr,' >> "$registry"
+  echo '};' >> "$registry"
+  echo "aot: app target compiles $count profile(s) from $PROFILE_ROOT"
 fi
 if [ ! -f "$BUILD/CMakeCache.txt" ]; then
   cmake -S "$ROOT" -B "$BUILD" \
@@ -32,14 +69,6 @@ cmake --build "$BUILD" --target rb_engine_ios -j "$(sysctl -n hw.ncpu)"
 
 # The profile is compiled by the app target, not merged into the engine archive (libtool's merged
 # members were invisible to ld). Copy it into the app's sources before XcodeGen reads the project.
-if [ -n "${RB_AOT_PROFILE:-}" ]; then
-  PROFILE_DIR="$(cd "$RB_AOT_PROFILE" && pwd)"
-  AOT_SOURCES="$ROOT/ios/RetroBug/AotProfile"
-  rm -rf "$AOT_SOURCES"
-  mkdir -p "$AOT_SOURCES"
-  cp "$PROFILE_DIR"/*.S "$PROFILE_DIR"/*_table.cpp "$PROFILE_DIR"/*_profile.cpp "$AOT_SOURCES/"
-  echo "aot: app target compiles $(ls "$AOT_SOURCES" | wc -l | tr -d ' ') profile files from $PROFILE_DIR"
-fi
 
 ( cd "$ROOT/ios" && xcodegen generate )
 
