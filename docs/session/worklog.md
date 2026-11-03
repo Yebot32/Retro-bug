@@ -1356,3 +1356,17 @@ assembled into the app like any other source.
   read-modify-writes per translated block were a real tax — and the one-shot trace check is a relaxed
   load. Tablet gate re-run with the final code: aot 178/0, interp 1112/0, tier diff 1039/0, and the
   scope image through the fastmem path.
+- **Build 34** (`11675c9`, profiles ref `aot/profiles` @ `8b83764`), 20,999,672 bytes, SHA-256
+  `ccbfa2a2ab854dcdd85a9c98a4d70c87656456820361507452fadf7f40acc9b6`: **the AOT profile actually reaches
+  the engine again.** The build-26 multi-profile refactor moved the profile sources into the app target
+  but never restored `PROFILE_ARG` in `tools/build_ios_ipa.sh`, so every build from 26 through 33
+  compiled the app-side registry and simultaneously told `ios_session.cpp` it had no profile — the log's
+  `aot: this app carries no profile — Tier I` — and every game ran the interpreter. Build 33's log shows
+  what that cost: Blocky at 3–60 fps with 20 s hitches, then `FPVectorGreater32: no Tier I semantics yet`
+  in nativeRender; KitKat at ~0.1 fps. Build 34 sets the argument again; the delivered binary no longer
+  contains the "carries no profile" branch and does reference `rb_aot_profiles`. Tier I also gained the
+  ARMv7 NEON FP compare family (VCEQ/VCGT/VCGE: lane masks, NaN false, IOC on sNaN) and the rest of the
+  encodable family — VMLA/VMLS (fused, matching the back end's FMLA), VABS/VNEG, VPADD.F32's lower form,
+  VCVT to/from signed and unsigned fixed point (reusing the scalar `RoundToInt`/`ToFixed` saturation and
+  IXC), VRINT. The tablet was unplugged before the arm64 gate could re-run; the Linux lane compiled the
+  interpreter and the host lanes stayed green, and the tablet gate is owed.
