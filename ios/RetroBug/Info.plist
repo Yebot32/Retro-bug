@@ -15,7 +15,14 @@
 	<key>CFBundleShortVersionString</key>
 	<string>0.1</string>
 	<key>CFBundleVersion</key>
-	<string>28</string>
+	<string>29</string>
+	<key>UIAppFonts</key>
+	<array>
+		<string>Roboto-Light.ttf</string>
+		<string>Roboto-Regular.ttf</string>
+		<string>Roboto-Medium.ttf</string>
+		<string>RobotoCondensed-Regular.ttf</string>
+	</array>
 	<key>RBGitCommit</key>
 	<string>$(RB_GIT_COMMIT)</string>
 	<key>LSRequiresIPhoneOS</key>

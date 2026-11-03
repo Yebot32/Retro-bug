@@ -10,6 +10,7 @@ import QuartzCore
 struct GameView: View {
     let apk: URL
     let lib: String
+    let accent: Color
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -19,13 +20,14 @@ struct GameView: View {
             Button {
                 dismiss()
             } label: {
-                Label("Exit", systemImage: "xmark")
-                    .font(.caption)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(Color.black.opacity(0.55))
-                    .foregroundColor(.white)
-                    .clipShape(Capsule())
+                Text("EXIT")
+                    .font(Holo.medium(13))
+                    .kerning(0.5)
+                    .foregroundColor(Holo.text)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .background(Holo.panel.opacity(0.92))
+                    .overlay(alignment: .bottom) { Rectangle().fill(accent).frame(height: 2) }
             }
             .padding(16)
         }
@@ -52,7 +54,7 @@ final class GameUIView: UIView {
     private var lastSize = CGSize.zero
 
     private let errorLabel = UILabel()
-    private let statusLabel = UILabel()
+    private let bootLabel = UILabel()
     private var timer: Timer?
 
     private var touchIds: [ObjectIdentifier: Int32] = [:]
@@ -72,7 +74,7 @@ final class GameUIView: UIView {
                 kEAGLDrawablePropertyColorFormat: kEAGLColorFormatRGBA8,
             ]
         }
-        for label in [errorLabel, statusLabel] {
+        for label in [errorLabel, bootLabel] {
             label.numberOfLines = 0
             label.textColor = .white
             label.font = .systemFont(ofSize: 12, weight: .regular)
@@ -82,12 +84,15 @@ final class GameUIView: UIView {
             label.layer.shadowRadius = 3
             addSubview(label)
         }
+        bootLabel.text = "STARTING…"
+        bootLabel.font = .systemFont(ofSize: 15, weight: .medium)
+        bootLabel.textColor = UIColor.white.withAlphaComponent(0.55)
         NSLayoutConstraint.activate([
             errorLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             errorLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
             errorLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            statusLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            statusLabel.topAnchor.constraint(equalTo: topAnchor, constant: 44),
+            bootLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
+            bootLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
         boot()
         // The render thread stops drawing and calls the game's nativeOnPause/Resume itself; this only
@@ -152,7 +157,6 @@ final class GameUIView: UIView {
         }
         AppLog.write("game: session created")
         session = created
-        statusLabel.text = "booting…"
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             self?.refreshStatus()
         }
@@ -169,9 +173,9 @@ final class GameUIView: UIView {
             lastError = text
             AppLog.write("game: error: \(text)")
             errorLabel.text = text
+            bootLabel.isHidden = true
         }
-        let frames = rb_ios_frame_count(s)
-        statusLabel.text = started ? "\(frames) frames" : "starting…"
+        bootLabel.isHidden = started || !(errorLabel.text ?? "").isEmpty
     }
 
     override func layoutSubviews() {

@@ -69,9 +69,6 @@ std::atomic<bool> g_crash_handlers_installed{false};
 /// actually needs (an anonymous R|X mapping — oaknut's iOS path), so a device that only *claims* to allow
 /// JIT still reads red.
 std::atomic<int> g_jit_available{-1};
-/// The user's choice: use Tier J when the probe says it can. Default no — the interpreter is the shipping
-/// path and JIT is opt-in; the toggle in the app persists it.
-std::atomic<bool> g_jit_enabled{false};
 
 bool ProbeExecutableMemory() {
   constexpr std::size_t kLen = 1u << 20;
@@ -434,14 +431,12 @@ bool RbIosSession::Boot(std::string* err) {
     if (!self->host->OpenApk(self->apk, &why)) self->Log("assets: " + why);
   };
 
-  // Tier selection: Tier J when the process can map executable memory and the user has not turned it off,
-  // Tier I otherwise. Never forced — no executable memory means Tier I, and a Tier J boot that fails
-  // retries on Tier I with the reason in the log, so the game starts either way.
-  const bool jit_wanted = g_jit_enabled.load(std::memory_order_relaxed) && JitAvailable();
+  // Tier selection is automatic: Tier J when the process can map executable memory, then AOT, then
+  // Tier I. Never forced — no executable memory means the next engine, and a Tier J boot that fails
+  // retries with the reason in the log, so the game starts either way.
+  const bool jit_wanted = JitAvailable();
   self->Log(jit_wanted ? "jit: executable memory available — trying Tier J"
-                       : (g_jit_enabled.load(std::memory_order_relaxed)
-                              ? "jit: no executable memory on this build — Tier I"
-                              : "jit: switched off in the app — Tier I"));
+                       : "jit: no executable memory on this build — next engine");
     // The AOT profile is compiled into this app; it runs only when every profiled library's digest matches
   // the imported APK, so an APK from another build keeps the interpreter.
 #if defined(RB_AOT_PROFILE)
@@ -843,10 +838,6 @@ extern "C" int rb_ios_log_tail(RbIosSession* s, char* out, int out_len) {
 }
 
 extern "C" int rb_ios_jit_available(void) { return JitAvailable() ? 1 : 0; }
-
-extern "C" void rb_ios_set_jit_enabled(int enabled) {
-  g_jit_enabled.store(enabled != 0, std::memory_order_relaxed);
-}
 
 extern "C" int rb_ios_session_jit(RbIosSession* s) {
   return s != nullptr && s->engine.load(std::memory_order_relaxed) == 2 ? 1 : 0;
