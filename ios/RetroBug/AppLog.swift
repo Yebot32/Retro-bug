@@ -33,6 +33,12 @@ enum AppLog {
         write("=== RetroBug \(version) (\(build)) commit \(commit) ===")
         write("iOS \(device.systemVersion) \(device.model) scale \(UIScreen.main.scale)")
         write("Documents: \(fm.urls(for: .documentDirectory, in: .userDomainMask)[0].path)")
+        // A SwiftUI/UIKit crash terminates the process before the async writer runs; this handler writes
+        // synchronously, so the next log says what threw instead of ending at the last ordinary line.
+        NSSetUncaughtExceptionHandler { exception in
+            writeNow("CRASH: uncaught \(exception.name.rawValue): \(exception.reason ?? "no reason")")
+            writeNow("CRASH: \(exception.callStackSymbols.joined(separator: " | "))")
+        }
     }
 
     static func write(_ message: String) {
@@ -49,6 +55,22 @@ enum AppLog {
             } else {
                 try? data.write(to: url)
             }
+        }
+    }
+
+    /// Synchronous, for a path that is about to end the process.
+    static func writeNow(_ message: String) {
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        let line = "\(stamp) \(message)\n"
+        print("retrobug: \(line)", terminator: "")
+        guard let data = line.data(using: .utf8) else { return }
+        if let handle = try? FileHandle(forWritingTo: url) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+            try? handle.synchronize()
+        } else {
+            try? data.write(to: url)
         }
     }
 }

@@ -49,15 +49,21 @@ struct SettingsView: View {
                         HoloValue(text: versionLine, accent: holo.accent)
                     }
                     HoloDivider()
+                    HoloRow(title: "Share log",
+                            subtitle: "retrobug.log — the last run's log, for a bug report",
+                            accent: holo.accent,
+                            action: onShareLog)
+                    HoloDivider()
 
                     if holo.developer {
                         HoloSection(title: "Developer", accent: holo.accent)
                         HoloRow(title: "Engine",
                                 subtitle: rb_ios_jit_available() != 0
-                                    ? "Automatic: Tier J when this build can map executable memory, else the "
-                                        + "game's translated profile, else the interpreter"
-                                    : "Automatic: no executable memory in this build, so the game's translated "
-                                        + "profile, else the interpreter")
+                                    ? "Tier J when this launch can run a JIT (a debugger-attached launch, "
+                                        + "e.g. AltStore's Enable JIT); otherwise the translated profile, "
+                                        + "then the interpreter"
+                                    : "The game's translated profile, then the interpreter. JIT needs a "
+                                        + "debugger-attached launch (AltStore's Enable JIT)")
                         HoloDivider()
                         HoloRow(title: "Library to boot",
                                 subtitle: "Empty means auto (the largest library in the APK)",
@@ -70,11 +76,6 @@ struct SettingsView: View {
                                 .textInputAutocapitalization(.never)
                                 .frame(width: 240)
                         }
-                        HoloDivider()
-                        HoloRow(title: "Share log",
-                                subtitle: "retrobug.log, also in On My iPhone › RetroBug",
-                                accent: holo.accent,
-                                action: onShareLog)
                         HoloDivider()
                         HoloRow(title: "Turn off developer tools", accent: holo.accent,
                                 action: { holo.developer = false })

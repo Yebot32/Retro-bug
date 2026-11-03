@@ -123,10 +123,11 @@ struct LauncherView: View {
         ScrollView {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 128), spacing: 4, alignment: .top)],
                       spacing: 4) {
-                ForEach(games) { game in
-                    GameTileView(game: game, icon: icons.icon(for: game.url), accent: holo.accent,
-                                 onTap: { play(game) },
-                                 onLongPress: { menuGame = game })
+                ForEach(games.indices, id: \.self) { index in
+                    GameTileView(game: games[index], icon: icons.icon(for: games[index].url),
+                                 accent: holo.accent, index: index,
+                                 onTap: { play(games[index]) },
+                                 onLongPress: { menuGame = games[index] })
                 }
             }
             .padding(8)
@@ -231,59 +232,73 @@ struct GameTileView: View {
     let game: ImportedGame
     let icon: UIImage?
     let accent: Color
+    let index: Int
     let onTap: () -> Void
     let onLongPress: () -> Void
 
-    /// A long press must not also count as the tap that plays the game. Whichever recognizer SwiftUI lets
-    /// through, the flag makes the pair behave: the long press arms it, the button action spends it.
+    /// A tile is not a Button: the button's own press handling wins arbitration and swallowed the long
+    /// press (build 29's game page was unreachable). A plain view with the two gestures, plus this flag,
+    /// keeps a long press from also playing the game whichever recognizer reports first.
+    @State private var pressed = false
     @State private var suppressTap = false
+    @State private var shown = false
 
     private var badge: (String, Color) {
         game.readable ? ("READY", accent) : ("CAN'T READ THIS FILE", Holo.danger)
     }
 
     var body: some View {
-        Button {
+        VStack(spacing: 0) {
+            Group {
+                if let icon = icon {
+                    Image(uiImage: icon).resizable().scaledToFit()
+                } else {
+                    Image("GameDefault").resizable().scaledToFit()
+                }
+            }
+            .frame(width: 72, height: 72)
+
+            Text(game.name)
+                .font(Holo.regular(14))
+                .foregroundColor(Holo.text)
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .padding(.top, 8)
+
+            Text(badge.0)
+                .font(Holo.condensed(11))
+                .kerning(0.3)
+                .foregroundColor(badge.1)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .padding(.top, 2)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 8)
+        .padding(.top, 14)
+        .padding(.bottom, 12)
+        .background(pressed ? accent.opacity(0.4) : Color.clear)
+        .contentShape(Rectangle())
+        .opacity(shown ? 1 : 0)
+        .offset(y: shown ? 0 : 24)
+        .onAppear {
+            // Holo's card entrance: fade in and rise 24 dp over 220 ms, 40 ms per index (capped at 10).
+            withAnimation(.easeOut(duration: 0.22).delay(Double(min(index, 10)) * 0.04)) {
+                shown = true
+            }
+        }
+        .onTapGesture {
             if suppressTap {
                 suppressTap = false
             } else {
                 onTap()
             }
-        } label: {
-            VStack(spacing: 0) {
-                Group {
-                    if let icon = icon {
-                        Image(uiImage: icon).resizable().scaledToFit()
-                    } else {
-                        Image("GameDefault").resizable().scaledToFit()
-                    }
-                }
-                .frame(width: 72, height: 72)
-
-                Text(game.name)
-                    .font(Holo.regular(14))
-                    .foregroundColor(Holo.text)
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
-                    .padding(.top, 8)
-
-                Text(badge.0)
-                    .font(Holo.condensed(11))
-                    .kerning(0.3)
-                    .foregroundColor(badge.1)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-                    .padding(.top, 2)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.horizontal, 8)
-            .padding(.top, 14)
-            .padding(.bottom, 12)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(HoloTileButtonStyle(accent: accent))
         .onLongPressGesture(minimumDuration: 0.45,
-                            pressing: { down in if down { suppressTap = false } },
+                            pressing: { down in
+                                pressed = down
+                                if down { suppressTap = false }
+                            },
                             perform: {
                                 suppressTap = true
                                 onLongPress()

@@ -14,11 +14,12 @@ extern "C" {
 
 typedef struct RbIosSession RbIosSession;
 
-/// 1 when this process can map executable memory, i.e. a JIT can run: probed once (an R|X mapping of the
-/// shape the code cache needs) and cached. The session selects its tier automatically: Tier J when this
-/// says 1, then the AOT profile, then the interpreter. The probe is deliberately the same permission the
-/// code cache exercises, not a guess from the OS version: a sideloaded build with a JIT entitlement
-/// passes it, a stock one does not.
+/// 1 when this launch can actually run a JIT: a debugger is attached (iOS grants code-page write access to
+/// a traced process — how AltStore/SideStore's "Enable JIT" works) and the JIT's code region can be mapped
+/// and flipped R|X -> R|W -> R|X. A home-screen launch reads 0 even when the R|X mapping alone succeeds,
+/// because the JIT's first store into that page would fault. The session selects its tier automatically:
+/// Tier J when this says 1, then the AOT profile, then the interpreter; a Tier J boot that dies leaves a
+/// marker so the same build does not retry it.
 int rb_ios_jit_available(void);
 
 /// 1 when this session actually booted on Tier J, 0 when it is not on Tier J. The log reports the engine

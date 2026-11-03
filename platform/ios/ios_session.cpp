@@ -19,6 +19,9 @@
 #if defined(__APPLE__) && __has_include(<execinfo.h>)
 #include <execinfo.h>
 #endif
+#if defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
+#endif
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -29,6 +32,8 @@
 #include <pthread.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/proc.h>
+#include <sys/sysctl.h>
 #include <unistd.h>
 
 #include "cocos2dx_bootstrap.h"
@@ -65,23 +70,43 @@ namespace {
 std::atomic<int> g_crash_fd{-1};
 std::atomic<bool> g_crash_handlers_installed{false};
 
-/// Executable memory: -1 unprobed, 0 refused, 1 available. The probe is the permission the JIT's code cache
-/// actually needs (an anonymous R|X mapping — oaknut's iOS path), so a device that only *claims* to allow
-/// JIT still reads red.
+/// JIT viability: -1 unprobed, 0 refused, 1 available.
 std::atomic<int> g_jit_available{-1};
 
 bool ProbeExecutableMemory() {
   constexpr std::size_t kLen = 1u << 20;
   void* const p = ::mmap(nullptr, kLen, PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_ANON, -1, 0);
   if (p == MAP_FAILED) return false;
+  // oaknut's iOS code block maps R|X and emits through an mprotect(RW) / mprotect(RX) flip. A launch the
+  // kernel does not grant code-page write access cannot make the region writable, and the first store
+  // would fault inside the engine; the flip — not the mapping — is the permission that decides. The page
+  // is never written here.
+  const bool writable = ::mprotect(p, kLen, PROT_READ | PROT_WRITE) == 0;
+  const bool executable_again = writable && ::mprotect(p, kLen, PROT_READ | PROT_EXEC) == 0;
   ::munmap(p, kLen);
-  return true;
+  return writable && executable_again;
+}
+
+/// iOS grants JIT to a process launched under a debugger (AltStore/SideStore's "Enable JIT" attaches
+/// one) or signed with dynamic-codesigning, and refuses it to a home-screen launch even though the R|X
+/// mapping alone succeeds. A green "available" that ignored this is what made build 29 take Tier J and
+/// die on the JIT's first store.
+bool DebuggerAttached() {
+#if defined(__APPLE__)
+  int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, ::getpid()};
+  struct kinfo_proc info {};
+  std::size_t size = sizeof(info);
+  if (::sysctl(mib, 4, &info, &size, nullptr, 0) != 0) return false;
+  return (info.kp_proc.p_flag & P_TRACED) != 0;
+#else
+  return false;
+#endif
 }
 
 bool JitAvailable() {
   int v = g_jit_available.load(std::memory_order_relaxed);
   if (v < 0) {
-    v = ProbeExecutableMemory() ? 1 : 0;
+    v = (DebuggerAttached() && ProbeExecutableMemory()) ? 1 : 0;
     g_jit_available.store(v, std::memory_order_relaxed);
   }
   return v == 1;
@@ -431,12 +456,49 @@ bool RbIosSession::Boot(std::string* err) {
     if (!self->host->OpenApk(self->apk, &why)) self->Log("assets: " + why);
   };
 
-  // Tier selection is automatic: Tier J when the process can map executable memory, then AOT, then
-  // Tier I. Never forced — no executable memory means the next engine, and a Tier J boot that fails
-  // retries with the reason in the log, so the game starts either way.
-  const bool jit_wanted = JitAvailable();
-  self->Log(jit_wanted ? "jit: executable memory available — trying Tier J"
-                       : "jit: no executable memory on this build — next engine");
+  // Tier selection is automatic: Tier J when this launch can actually run a JIT (a debugger-attached
+  // launch; see DebuggerAttached), then AOT, then Tier I. A JIT that dies hard leaves no log line, so a
+  // marker is written before the attempt and removed after it; if it is still there for the same build,
+  // Tier J is not attempted again until the app is updated.
+  std::string build = "?";
+#if defined(__APPLE__)
+  if (CFBundleRef bundle = CFBundleGetMainBundle()) {
+    if (CFStringRef v = static_cast<CFStringRef>(
+            CFBundleGetValueForInfoDictionaryKey(bundle, CFSTR("CFBundleVersion")))) {
+      char buf[64] = {};
+      if (CFStringGetCString(v, buf, sizeof buf, kCFStringEncodingUTF8)) build = buf;
+    }
+  }
+#endif
+  const std::string jit_marker = self->data_dir + "/jit-attempt";
+  std::string marker_build;
+  if (FILE* f = std::fopen(jit_marker.c_str(), "r")) {
+    char buf[64] = {};
+    if (std::fgets(buf, sizeof buf, f) != nullptr) marker_build = buf;
+    std::fclose(f);
+    while (!marker_build.empty() && (marker_build.back() == '\n' || marker_build.back() == '\r')) {
+      marker_build.pop_back();
+    }
+  }
+  bool jit_wanted = JitAvailable();
+  const bool jit_crashed_this_build = marker_build == build;
+  if (jit_wanted && jit_crashed_this_build) {
+    self->Log("jit: the previous Tier J attempt in build " + build +
+              " did not finish — staying on the next engine for this build");
+    jit_wanted = false;
+  } else if (!jit_crashed_this_build) {
+    ::remove(jit_marker.c_str());
+  }
+  if (jit_crashed_this_build && !jit_wanted) {
+    // the marker explains it; no second line
+  } else if (jit_wanted) {
+    self->Log("jit: this launch can run a JIT — trying Tier J");
+  } else {
+    self->Log(DebuggerAttached()
+                  ? "jit: debugger attached but the code region cannot be made writable — next engine"
+                  : "jit: no debugger attached (iOS refuses JIT to a home-screen launch; AltStore's "
+                    "Enable JIT attaches one) — next engine");
+  }
     // The AOT profile is compiled into this app; it runs only when every profiled library's digest matches
   // the imported APK, so an APK from another build keeps the interpreter.
 #if defined(RB_AOT_PROFILE)
@@ -496,8 +558,17 @@ bool RbIosSession::Boot(std::string* err) {
 #if defined(RB_AOT_PROFILE)
     attempt_cfg.aot = mode == Engine::Aot ? aot_selected : nullptr;
 #endif
+    if (mode == Engine::Jit) {
+      // Written before the JIT is constructed: a crash inside it never reaches the code below, and this
+      // file is what tells the next launch to stay on the next engine.
+      if (FILE* f = std::fopen(jit_marker.c_str(), "w")) {
+        std::fputs(build.c_str(), f);
+        std::fclose(f);
+      }
+    }
     boot = std::make_unique<rb::host::Boot>(std::move(attempt_cfg));
     const rb::host::BootResult result = boot->BootJavaLibraries(apk, lib);
+    if (mode == Engine::Jit) ::remove(jit_marker.c_str());
     if (result.ok && java != nullptr) {
       const bool aot_really = mode == Engine::Aot && boot->process() != nullptr &&
                               boot->process()->aot_active();
