@@ -26,6 +26,10 @@
 #include <type_traits>
 #include <utility>
 
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
+
 #include "dynarmic/interface/A32/config.h"
 #include "rb/isa/front_end.h"
 
@@ -40,6 +44,28 @@ constexpr std::uint32_t kCpsrTFlag = 1u << 5;
 /// emitted code must not bake it. Set at the top of every `Run`, so two executors never see each other's
 /// table even when used from one process.
 std::atomic<void*> g_aot_page_table{nullptr};
+
+/// Crash-proof breadcrumbs for the first AOT entries on a device: raw `write` to the session log's fd, no
+/// stdio, no mutex, no allocation — a step that dies before the crash handler can run still leaves its
+/// last marker. `rb_aot_set_debug_fd` arms it from the session; the budget keeps a healthy run silent.
+std::atomic<int> g_aot_dbg_fd{-1};
+std::atomic<int> g_aot_dbg_left{0};
+
+void AotDbg(const char* tag, std::uint32_t pc) {
+#if !defined(_WIN32)
+  int left = g_aot_dbg_left.load(std::memory_order_relaxed);
+  if (left <= 0) return;
+  if (!g_aot_dbg_left.compare_exchange_strong(left, left - 1, std::memory_order_relaxed)) return;
+  const int fd = g_aot_dbg_fd.load(std::memory_order_relaxed);
+  if (fd < 0) return;
+  char line[64];
+  const int n = std::snprintf(line, sizeof line, "aot-dbg: %s pc=0x%08x\n", tag, pc);
+  if (n > 0) (void)::write(fd, line, static_cast<std::size_t>(n));
+#else
+  (void)tag;
+  (void)pc;
+#endif
+}
 
 /// The prelude uses Dynarmic's own `A32JitState` offsets. `AotState` holds that struct first, so a
 /// callback receives the same address as the `jit_state` the prelude was entered with, and every
@@ -372,6 +398,7 @@ void* AotExecutor::Dispatch() {
     const int n = traced.fetch_add(1, std::memory_order_relaxed);
     if (n < 8 && log_) log_("aot-dispatch #" + std::to_string(n) + " pc=0x" + Hex(pc));
   }
+  AotDbg("dispatch", pc);
   const bool thumb = (state_.jit.upper_location_descriptor & 1u) != 0;
 
   if (pc == return_address_) {
@@ -450,6 +477,7 @@ void* AotExecutor::Dispatch() {
       }
     }
   }
+  AotDbg(entry != nullptr ? "entry" : "miss", pc);
   if (entry == nullptr) {
     NoteFallback(pc);
     state_.fallback_pending = 1;
@@ -570,7 +598,9 @@ RunResult AotExecutor::Run(MachineState& state, unsigned max_instructions) {
       if (log_) log_("aot-run: enter pc=0x" + Hex(state.pc));
     }
   }
+  AotDbg("run", state.pc);
   SyncIn(state);
+  AotDbg("synced", state.pc);
 
   for (;;) {
     state_.halt_reason = 0;
@@ -593,7 +623,9 @@ RunResult AotExecutor::Run(MachineState& state, unsigned max_instructions) {
       continue;
     }
     if (entry != nullptr) {
+      AotDbg("code-enter", state_.jit.regs[15]);
       const Dynarmic::HaltReason hr = running->run_code(entry, &state_.jit, &state_.halt_reason);
+      AotDbg("code-exit", state_.jit.regs[15]);
       SyncOut(state);
       if (pending_pc_ != 0 && pending_ != Pending::Syscall && pending_ != Pending::None) {
         state.pc = pending_pc_;
@@ -953,6 +985,10 @@ void* rb_aot_dispatch(AotState* state) {
 }
 void* rb_aot_page_table_ptr() {
   return g_aot_page_table.load(std::memory_order_relaxed);
+}
+void rb_aot_set_debug_fd(int fd, int budget) {
+  g_aot_dbg_fd.store(fd, std::memory_order_relaxed);
+  g_aot_dbg_left.store(budget, std::memory_order_relaxed);
 }
 
 }  // extern "C"

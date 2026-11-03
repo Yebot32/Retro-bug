@@ -13,6 +13,7 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <signal.h>
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -54,6 +55,9 @@
 #include "rb/runtime/guest_thread.h"
 #include "rb/runtime/inbound.h"
 #include "text_render.h"
+
+/// Defined by the AOT runtime: arms the raw-fd entry breadcrumbs (aot.cpp).
+extern "C" void rb_aot_set_debug_fd(int fd, int budget);
 
 // Defined by the generated profile table when the app is built with RB_AOT_PROFILE=1. Declared at file
 // scope (C linkage) so both helpers below and the boot path can name it.
@@ -174,8 +178,12 @@ bool MatchAotProfile(const rb::exec::AotProfile& profile, const std::string& apk
 #endif
 
 void CrashWrite(const char* text) {
+  if (text == nullptr) return;
+  const std::size_t len = std::strlen(text);
   const int fd = g_crash_fd.load(std::memory_order_relaxed);
-  if (fd >= 0 && text != nullptr) (void)::write(fd, text, std::strlen(text));
+  // stderr second: an fd that could not be duplicated must not make a crash report invisible.
+  if (fd >= 0) (void)::write(fd, text, len);
+  (void)::write(2, text, len);
 }
 
 void CrashHex(std::uint32_t value) {
@@ -236,10 +244,45 @@ void InstallCrashLog(std::FILE* file) {
   if (fd < 0) return;
   g_crash_fd.store(fd, std::memory_order_release);
   if (g_crash_handlers_installed.exchange(true)) return;
-  for (const int sig : {SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGSEGV, SIGTRAP}) std::signal(sig, CrashSignal);
+  // A fault on an exhausted stack cannot run a handler that needs the same stack: the alternate stack is
+  // what turns a silent death into a report (the AOT entry crash produced no report at all).
+  alignas(16) static char alt_stack[64 * 1024];
+  stack_t ss{};
+  ss.ss_sp = alt_stack;
+  ss.ss_size = sizeof alt_stack;
+  ss.ss_flags = 0;
+  (void)::sigaltstack(&ss, nullptr);
+  struct sigaction sa {};
+  sa.sa_handler = CrashSignal;
+  sa.sa_flags = SA_ONSTACK;
+  (void)::sigemptyset(&sa.sa_mask);
+  for (const int sig : {SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGSEGV, SIGTRAP}) (void)::sigaction(sig, &sa, nullptr);
   // A stderr write to a closed pipe kills the process with no report; logging must never be fatal.
   std::signal(SIGPIPE, SIG_IGN);
   std::set_terminate(CrashTerminate);
+  // Arm the AOT entry breadcrumbs with the same descriptor, so a death inside the dispatcher leaves the
+  // step it reached even when no handler runs.
+  rb_aot_set_debug_fd(fd, 64);
+}
+
+/// A one-line marker file: the build number whose attempt did not finish. A crash cannot write its own log
+/// line, but this file survives it, and the next launch of the same build stays off that engine.
+std::string ReadMarker(const std::string& path) {
+  std::string out;
+  if (FILE* f = std::fopen(path.c_str(), "r")) {
+    char buf[64] = {};
+    if (std::fgets(buf, sizeof buf, f) != nullptr) out = buf;
+    std::fclose(f);
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
+  }
+  return out;
+}
+
+void WriteMarker(const std::string& path, const std::string& value) {
+  if (FILE* f = std::fopen(path.c_str(), "w")) {
+    std::fputs(value.c_str(), f);
+    std::fclose(f);
+  }
 }
 
 }  // namespace
@@ -519,6 +562,21 @@ bool RbIosSession::Boot(std::string* err) {
 #else
   self->Log("aot: this app carries no profile — Tier I");
 #endif
+  // The same crash marker as Tier J's: written before an AOT boot, cleared by the first frame. A build
+  // whose AOT launch died therefore runs Tier I on the next launch instead of dying again, and the log's
+  // breadcrumbs name the step it reached.
+  const std::string aot_marker = self->data_dir + "/aot-attempt";
+  const bool aot_crashed_this_build = ReadMarker(aot_marker) == build;
+  if (aot_crashed_this_build) {
+#if defined(RB_AOT_PROFILE)
+    if (aot_selected != nullptr) {
+      self->Log("aot: the previous AOT launch in build " + build +
+                " did not finish — Tier I for this build (update the app to retry)");
+    }
+#endif
+    // The marker stays: this build keeps the working engine. A new build number changes the content the
+    // next attempt writes, so an update retries AOT once.
+  }
 
   // A boot that dies without a signal (SIGKILL, a hung thread holding the log mutex) writes nothing;
   // this heartbeat writes straight to the log fd, so the log shows whether the process was alive.
@@ -547,7 +605,7 @@ bool RbIosSession::Boot(std::string* err) {
   std::vector<Engine> attempts;
   if (jit_wanted) attempts.push_back(Engine::Jit);
 #if defined(RB_AOT_PROFILE)
-  if (aot_selected != nullptr) attempts.push_back(Engine::Aot);
+  if (aot_selected != nullptr && !aot_crashed_this_build) attempts.push_back(Engine::Aot);
 #endif
   attempts.push_back(Engine::TierI);
   for (std::size_t attempt = 0; attempt < attempts.size(); ++attempt) {
@@ -561,14 +619,19 @@ bool RbIosSession::Boot(std::string* err) {
     if (mode == Engine::Jit) {
       // Written before the JIT is constructed: a crash inside it never reaches the code below, and this
       // file is what tells the next launch to stay on the next engine.
-      if (FILE* f = std::fopen(jit_marker.c_str(), "w")) {
-        std::fputs(build.c_str(), f);
-        std::fclose(f);
-      }
+      WriteMarker(jit_marker, build);
+    }
+    if (mode == Engine::Aot) {
+      // Cleared by the first drawn frame, not by a returned boot: a crash after the boot but before the
+      // first pixel is still a launch that did not finish.
+      WriteMarker(aot_marker, build);
     }
     boot = std::make_unique<rb::host::Boot>(std::move(attempt_cfg));
     const rb::host::BootResult result = boot->BootJavaLibraries(apk, lib);
     if (mode == Engine::Jit) ::remove(jit_marker.c_str());
+    // A graceful AOT failure is not a crash: the retry chain below handles it, and the marker must not
+    // disable AOT for the whole build.
+    if (mode == Engine::Aot && !result.ok) ::remove(aot_marker.c_str());
     if (result.ok && java != nullptr) {
       const bool aot_really = mode == Engine::Aot && boot->process() != nullptr &&
                               boot->process()->aot_active();
@@ -834,6 +897,13 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
           break;
         }
         ++s->frames;
+        if (s->frames.load(std::memory_order_relaxed) == 1 &&
+            s->engine.load(std::memory_order_relaxed) == 1) {
+          // The AOT launch reached its first drawn frame, which is what "this launch finished" means for
+          // the crash marker; until here a death leaves the next launch on Tier I.
+          ::remove((s->data_dir + "/aot-attempt").c_str());
+          s->Log("aot: the first frame is drawn — AOT is marked good for this build");
+        }
         // A cheap heartbeat past the sampled frames: it dates the log during a long run without a pixel
         // readback every time (~1 line per 10 s at 30 fps).
         if (next_frame > 300 && next_frame % 300 == 0) s->Log("frame " + std::to_string(next_frame));
