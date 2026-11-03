@@ -1370,3 +1370,16 @@ assembled into the app like any other source.
   VCVT to/from signed and unsigned fixed point (reusing the scalar `RoundToInt`/`ToFixed` saturation and
   IXC), VRINT. The tablet was unplugged before the arm64 gate could re-run; the Linux lane compiled the
   interpreter and the host lanes stayed green, and the tablet gate is owed.
+- **Build 35** (`c839210`, profiles ref `aot/profiles` @ `8b83764`), 21,003,153 bytes, SHA-256
+  `8ac72a1771826cc72a68b5a1e1b2b8fc43d5b822eab35ac55bb8bb6375398cd6`: the AOT entry probe. Build 34's log
+  shows the profile matching and loading, then `call-setup: __init_tcb` → `aot-run: enter pc=0x…` → the
+  app dies before the first `aot-dispatch`, with no crash report. The same entry at the same address
+  (0x12095ad8) runs and returns in the tablet's AOT scope harness, including under a 512 KiB stack, so
+  the fault is iOS-specific. Build 35 writes raw-fd breadcrumbs through the entry (`aot-dbg:
+  run/synced/dispatch/entry/code-enter/code-exit`), runs the crash handlers on a 64 KiB alternate signal
+  stack with a stderr fallback (a stack-exhausted fault could not report before), and adds an
+  `aot-attempt` marker — the build number, cleared by the first drawn frame — so a build whose AOT
+  launch died runs Tier I on the next launch instead of dying again; a graceful AOT boot failure clears
+  the marker. The arm64 compile lane caught `sigemptyset` not being declared at the iOS SDK's feature
+  level (fixed by relying on the zero-initialised mask), and the tablet gate stayed green: aot 178/0,
+  interp 1112/0, tier diff 1039/0, the scope image through `__init_tcb` and the constructors.
