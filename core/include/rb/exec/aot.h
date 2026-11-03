@@ -15,6 +15,8 @@
  */
 #pragma once
 
+#include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -201,7 +203,10 @@ class AotExecutor final : public Executor {
   [[nodiscard]] const std::string& error() const { return err_; }
 
   /// Fallback hand-backs since construction. Zero for a fully covered run; the fixture asserts it.
-  [[nodiscard]] std::size_t fallback_count() const { return fallbacks_; }
+  [[nodiscard]] std::size_t fallback_count() const { return fallbacks_.load(std::memory_order_relaxed); }
+  /// Dispatch accounting for the device log: blocks dispatched, direct-mapped hits, Tier I fallbacks and
+  /// cross-image switches. Relaxed atomics — the stall monitor reads this without the GGL.
+  [[nodiscard]] std::string StatsLine() const;
   /// The first translated library (the fixture carries exactly one). Empty for a failed load, so a
   /// caller that ignored `ok()` gets an empty image rather than undefined behaviour.
   [[nodiscard]] const AotImage& image() const {
@@ -292,7 +297,26 @@ class AotExecutor final : public Executor {
   /// Guest instructions the Tier I fallback executed, in the same unit as `executed_` and added to it
   /// for both the budget and the reported count.
   unsigned fallback_steps_ = 0;
-  std::size_t fallbacks_ = 0;
+  std::atomic<std::size_t> fallbacks_{0};
+
+  /// The dispatcher runs once per translated block, and a game's block table is a 1.2 MB binary search;
+  /// on the device the search, not the emitted code, is what a slow game spends its time on. This
+  /// direct-mapped cache holds the answer for the last block at each slot, keyed by the PC and the raw
+  /// location descriptor the guard compares. A hit is one indexed load and two compares; a miss takes
+  /// the full lookup and fills the slot. Images are immutable, so a slot never goes stale.
+  struct DispatchEntry {
+    /// `A32JitState::GetLocationDescriptor().Value()`: the PC plus the CPSR/FPSCR mode bits the guard
+    /// compares, and nothing else — so keying on it is the guard, exactly.
+    std::uint64_t descriptor = ~std::uint64_t{0};
+    std::uint32_t image = 0;
+    AotCode entry = nullptr;
+  };
+  static constexpr std::size_t kDispatchCacheSize = 1u << 13;
+  std::array<DispatchEntry, kDispatchCacheSize> dispatch_cache_{};
+  std::atomic<std::uint64_t> dispatches_{0};
+  std::atomic<std::uint64_t> cache_hits_{0};
+  std::atomic<std::uint64_t> switches_{0};
+
   Pending pending_ = Pending::None;
   std::string pending_detail_;
   std::uint32_t pending_slot_ = 0;

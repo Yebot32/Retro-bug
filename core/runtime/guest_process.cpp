@@ -1228,6 +1228,7 @@ std::vector<std::string> GuestProcess::ProfileReport() {
     out.emplace_back(line);
   }
   if (const std::string cache = CacheStats(); !cache.empty()) out.push_back("profile: " + cache);
+  if (aot_ != nullptr && aot_usable_) out.push_back("profile: " + aot_->StatsLine());
   return out;
 }
 

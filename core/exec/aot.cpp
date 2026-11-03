@@ -221,6 +221,20 @@ bool AotExecutor::AddImage(const AotImageInfo& info, std::string* err) {
 
 AotExecutor::~AotExecutor() = default;
 
+std::string AotExecutor::StatsLine() const {
+  const std::uint64_t dispatches = dispatches_.load(std::memory_order_relaxed);
+  const std::uint64_t hits = cache_hits_.load(std::memory_order_relaxed);
+  char line[224];
+  std::snprintf(line, sizeof line,
+                "aot-runtime: %llu dispatches, %llu cache hits (%.1f%%), %zu fallbacks, %llu image switches",
+                static_cast<unsigned long long>(dispatches), static_cast<unsigned long long>(hits),
+                dispatches == 0 ? 0.0
+                                : 100.0 * static_cast<double>(hits) / static_cast<double>(dispatches),
+                fallbacks_.load(std::memory_order_relaxed),
+                static_cast<unsigned long long>(switches_.load(std::memory_order_relaxed)));
+  return line;
+}
+
 #if defined(__aarch64__)
 
 void AotExecutor::SyncIn(const MachineState& state) {
@@ -314,48 +328,65 @@ void* AotExecutor::Dispatch() {
     Halt(Dynarmic::HaltReason::UserDefined1);
     return nullptr;
   }
-  // The image that owns `pc`, if any. The vector is sorted by text base; the profile's images do not
-  // overlap (AddImage rejects that), so one range check decides membership.
+  dispatches_.fetch_add(1, std::memory_order_relaxed);
+  /**
+   * `Descriptor()` is the PC plus exactly the CPSR/FPSCR mode bits the guard below compares (the
+   * descriptor constructor masks them), so a slot that matches it on a hit has already passed the
+   * guard. The block tables are up to 1.2 MB and a game dispatches once per translated block; the
+   * binary search per block was the tier's dominant cost.
+   */
+  const std::uint64_t descriptor = state_.jit.GetLocationDescriptor().Value();
+  DispatchEntry& cached = dispatch_cache_[(pc >> 1) & (kDispatchCacheSize - 1u)];
   std::size_t image_index = libraries_.size();
-  {
-    std::size_t lo = 0;
-    std::size_t hi = libraries_.size();
-    while (lo < hi) {
-      const std::size_t mid = lo + (hi - lo) / 2;
-      if (libraries_[mid].text_base <= pc) {
-        lo = mid + 1;
-      } else {
-        hi = mid;
-      }
-    }
-    if (lo != 0) {
-      const std::size_t candidate = lo - 1;
-      if (pc - libraries_[candidate].text_base < libraries_[candidate].info->text_len) {
-        image_index = candidate;
-      }
-    }
-  }
   AotCode entry = nullptr;
-  if (image_index != libraries_.size()) {
-    entry = libraries_[image_index].image.Resolve(pc - libraries_[image_index].text_base, thumb);
-  }
-  if (entry != nullptr) {
-    /**
-     * The generated table is keyed on `(guest_off, thumb)` only, so it cannot distinguish two blocks
-     * at one address translated for different IT/FPSCR descriptors. Every block is emitted for
-     * `A32::LocationDescriptor{pc}.SetTFlag(thumb)` — IT=0 and the default FPCR — because the emitter
-     * refuses any other descriptor at the target (see `EmitQueued`). A live descriptor that differs
-     * (entering mid-IT, or with a rounding/flush mode baked into the block's FP immediates) must not
-     * resolve into that code: it is the same case as a missing block, so it becomes a Tier I fallback
-     * rather than executing predicated instructions unconditionally.
-     */
-    const Dynarmic::A32::LocationDescriptor live{state_.jit.GetLocationDescriptor()};
-    const Dynarmic::A32::LocationDescriptor emitted =
-        Dynarmic::A32::LocationDescriptor{pc, Dynarmic::A32::PSR{}, Dynarmic::A32::FPSCR{}, false}
-            .SetTFlag(thumb);
-    if (live.CPSR().Value() != emitted.CPSR().Value() ||
-        live.FPSCR().Value() != emitted.FPSCR().Value()) {
-      entry = nullptr;
+  if (cached.entry != nullptr && cached.descriptor == descriptor) {
+    cache_hits_.fetch_add(1, std::memory_order_relaxed);
+    image_index = cached.image;
+    entry = cached.entry;
+  } else {
+    // The image that owns `pc`, if any. The vector is sorted by text base; the profile's images do not
+    // overlap (AddImage rejects that), so one range check decides membership.
+    {
+      std::size_t lo = 0;
+      std::size_t hi = libraries_.size();
+      while (lo < hi) {
+        const std::size_t mid = lo + (hi - lo) / 2;
+        if (libraries_[mid].text_base <= pc) {
+          lo = mid + 1;
+        } else {
+          hi = mid;
+        }
+      }
+      if (lo != 0) {
+        const std::size_t candidate = lo - 1;
+        if (pc - libraries_[candidate].text_base < libraries_[candidate].info->text_len) {
+          image_index = candidate;
+        }
+      }
+    }
+    if (image_index != libraries_.size()) {
+      entry = libraries_[image_index].image.Resolve(pc - libraries_[image_index].text_base, thumb);
+    }
+    if (entry != nullptr) {
+      /**
+       * The generated table is keyed on `(guest_off, thumb)` only, so it cannot distinguish two blocks
+       * at one address translated for different IT/FPSCR descriptors. Every block is emitted for
+       * `A32::LocationDescriptor{pc}.SetTFlag(thumb)` — IT=0 and the default FPCR — because the emitter
+       * refuses any other descriptor at the target (see `EmitQueued`). A live descriptor that differs
+       * (entering mid-IT, or with a rounding/flush mode baked into the block's FP immediates) must not
+       * resolve into that code: it is the same case as a missing block, so it becomes a Tier I fallback
+       * rather than executing predicated instructions unconditionally.
+       */
+      const Dynarmic::A32::LocationDescriptor live{state_.jit.GetLocationDescriptor()};
+      const Dynarmic::A32::LocationDescriptor emitted =
+          Dynarmic::A32::LocationDescriptor{pc, Dynarmic::A32::PSR{}, Dynarmic::A32::FPSCR{}, false}
+              .SetTFlag(thumb);
+      if (live.CPSR().Value() != emitted.CPSR().Value() ||
+          live.FPSCR().Value() != emitted.FPSCR().Value()) {
+        entry = nullptr;
+      } else {
+        cached = DispatchEntry{descriptor, static_cast<std::uint32_t>(image_index), entry};
+      }
     }
   }
   if (entry == nullptr) {
@@ -371,6 +402,7 @@ void* AotExecutor::Dispatch() {
      * `run_code` — so this image's prelude exits and `Run` re-enters with the recorded entry.
      */
     current_ = image_index;
+    switches_.fetch_add(1, std::memory_order_relaxed);
     state_.switch_image = libraries_[image_index].info;
     state_.switch_entry = reinterpret_cast<void*>(reinterpret_cast<std::uintptr_t>(entry));
     Halt(Dynarmic::HaltReason::UserDefined1);
