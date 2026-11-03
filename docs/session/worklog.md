@@ -1329,3 +1329,21 @@ assembled into the app like any other source.
   log synchronously. With Tier J gated, a home-screen launch runs the translated profile: the first time
   emitted code runs on iOS, with `jit:`, `aot: profile ... matches`, `call-setup:`, `aot-run:` and
   `aot-dispatch` lines naming each step.
+- **Build 31** (`63089ba`): the dispatcher's direct-mapped block cache (keyed by the exact location
+  descriptor the IT/FPSCR guard compares) and the `aot-runtime` counters. Superseded before delivery by
+  build 32, which carries the same cache.
+- **Build 32** (`a1e2109`, profiles ref `aot/profiles` @ `8b83764`), 20,981,603 bytes, SHA-256
+  `54087232a0d9e92740606b6bf19e9dcf7755aa7ceacf2a68f6307f1cd8f9cbcd`. **AOT now uses the JIT's inline
+  page-table fastmem.** Until this build every guest load and store in the AOT tier was a C++ callback
+  (`rb_aot_mem_read*/write*`) while Tier J loaded and stored inline through Dynarmic's page table — the
+  largest structural gap between the tiers on a memory-heavy game. The offline emitter now selects the
+  inline path (the same config as the JIT: absolute offsets off, 16/32/64/128 misalignment detection) and
+  its prelude fetches the table pointer once per run-code entry via `rb_aot_page_table_ptr`, so no host
+  address is baked into the assembly; `AotExecutor` keeps the same table as `JitExecutor` (one host
+  pointer per guest page, null where `Host()` says out-of-line) and refreshes it from the GuestMemory
+  observer. Unmapped, guard, out-of-line and page-boundary-straddling accesses still take the checked
+  callbacks, so faults are still recorded and named. Both profiles were regenerated on the tablet with
+  the new emitter (the ref now carries the fastmem code; libgame stays gzipped at 9.2 MB), and the
+  fixture pair was re-emitted. Tablet gates with the new code: aot 178/0 (0 fallbacks), the libc scope
+  image runs its constructors through the inline path to the expected unanswered-dlopen endpoint, interp
+  1112/0, tier diff 1039/0, NEON 11/0, aotgen 48/0.
