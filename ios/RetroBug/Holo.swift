@@ -131,7 +131,6 @@ struct HoloSlabButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(Holo.medium(16))
-            .kerning(0.5)
             .foregroundColor(primary ? Holo.darkOnAccent : Holo.text)
             .padding(.horizontal, 20)
             .padding(.vertical, 12)
