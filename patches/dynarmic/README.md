@@ -193,3 +193,17 @@ arrive as ordinary signals and name themselves. macOS keeps the port.
 
 **Retire when:** the vendored backend's page-table fastmem no longer coexists with an unconditional Mach
 port, or the port learns to forward unhandled faults to the signal handlers.
+
+## 0011-ios-map-jit-code-block.patch (vendored oaknut)
+
+**Why:** on iOS oaknut's `CodeBlock` mapped its code page `PROT_READ|PROT_EXEC` and emitted through
+`mprotect(RW)` → write → `mprotect(RX)`. The kernel accepts the flip, strips the page's code signature,
+and kills the process the first time that page executes — an uncatchable SIGKILL, so the Tier J boot died
+at its first guest call with no crash report (builds 36–38; `call-setup: __init_tcb` was the last line).
+iOS now maps `MAP_JIT | R|W|X` like macOS and toggles `pthread_jit_write_protect_np`, which is the
+documented JIT path and fails the `mmap` with EPERM when the launch holds no grant. That failure is also
+the honest capability test: mapping a code block, not a successful `mprotect`, is what
+`ios_session.cpp` asks before it offers Tier J. An `mmap` failure is now `bad_alloc` instead of a buffer
+at `MAP_FAILED`.
+
+**Retire when:** upstream oaknut maps MAP_JIT on iOS and toggles the write-protect itself.
