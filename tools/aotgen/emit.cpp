@@ -25,6 +25,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -210,9 +211,13 @@ enum class Refusal {
   OutOfRange,
   LocationDescriptor,
   UnsupportedRelocation,
+  /// The front end or an emitter asserted on the block (an encoding Dynarmic does not implement). Only
+  /// reachable for a target static closure followed into data; the runtime can never execute such a
+  /// block either, so refusing it costs nothing.
+  Asserted,
 };
 
-constexpr std::size_t kRefusalKinds = 7;
+constexpr std::size_t kRefusalKinds = 8;
 
 struct BlockRecord {
   IR::LocationDescriptor desc{0};
@@ -269,7 +274,6 @@ std::uint32_t EncodeBranch(std::ptrdiff_t site, std::ptrdiff_t target, bool link
 bool IsThumb32(std::uint16_t hw) {
   return (hw & 0xe000u) == 0xe000u && (hw & 0x1800u) != 0;
 }
-
 /// The refusal rule's byte half: a coprocessor instruction that is *not* VFP. ARM bits 27-25 = 110 and
 /// Thumb 0xEC/0xED/0xEE cover VFP (cp10/cp11) as well as the debug and system coprocessors, and only the
 /// latter bake host callbacks: VFP is lowered to ordinary FP IR by the front end and translated like any
@@ -675,6 +679,8 @@ struct Emitter {
                   std::map<std::uint64_t, std::size_t>* by_desc,
                   std::map<std::pair<std::uint32_t, std::uint8_t>, std::size_t>* by_key,
                   std::map<std::pair<std::uint32_t, std::uint8_t>, Refusal>* refused) {
+    const std::size_t refusal_log_cap =
+        std::getenv("RB_AOTGEN_TRACE_BLOCKS") != nullptr ? static_cast<std::size_t>(-1) : 32;
     while (!queue->empty()) {
       const IR::LocationDescriptor desc = queue->front();
       queue->pop_front();
@@ -692,7 +698,7 @@ struct Emitter {
          * different block and is still emittable.
          */
         ++refused_counts[static_cast<int>(Refusal::LocationDescriptor)];
-        if (refused_log.size() < 32) {
+        if (refused_log.size() < refusal_log_cap) {
           refused_log.push_back("non-default IT/FPSCR entry (IT=" + Hex32(loc.IT().Value()) +
                                 " FPSCR=" + Hex32(loc.FPSCR().Value()) + ") at " + Hex32(pc));
         }
@@ -722,7 +728,21 @@ struct Emitter {
       if (std::getenv("RB_AOTGEN_TRACE_BLOCKS") != nullptr) {
         std::fprintf(stderr, "aotgen: translate pc=%08x thumb=%d\n", pc, thumb ? 1 : 0);
       }
-      IR::Block block = address_space->GenerateIR(desc);
+      std::optional<IR::Block> block_holder;
+      try {
+        block_holder.emplace(address_space->GenerateIR(desc));
+      } catch (const std::exception& e) {
+        // A target that static closure followed into data. The runtime cannot execute it either — the
+        // engine's own front end would assert on the same encoding — so refusing the block is exact.
+        (*refused)[key] = Refusal::Asserted;
+        ++refused_counts[static_cast<int>(Refusal::Asserted)];
+        if (refused_log.size() < refusal_log_cap) {
+          refused_log.push_back(std::string{"front-end assertion at "} + Hex32(pc) + ": " + e.what());
+        }
+        (*by_desc)[desc.Value()] = static_cast<std::size_t>(-1);
+        continue;
+      }
+      IR::Block& block = *block_holder;
       const A32::LocationDescriptor end_loc{block.EndLocation()};
       const std::uint32_t end = end_loc.PC();
       if (end <= pc || end - callbacks.text_base() > map_.text_len) {
@@ -735,14 +755,14 @@ struct Emitter {
       if (CoprocessorRefusal(callbacks, pc, end, thumb, &detail)) {
         (*refused)[key] = Refusal::Coprocessor;
         ++refused_counts[static_cast<int>(Refusal::Coprocessor)];
-        if (refused_log.size() < 32) refused_log.push_back(detail);
+        if (refused_log.size() < refusal_log_cap) refused_log.push_back(detail);
         (*by_desc)[desc.Value()] = static_cast<std::size_t>(-1);
         continue;
       }
       if (block.GetTerminal().which() == kTerminalInterpret) {
         (*refused)[key] = Refusal::Interpret;
         ++refused_counts[static_cast<int>(Refusal::Interpret)];
-        if (refused_log.size() < 32) refused_log.push_back("Term::Interpret at " + Hex32(pc));
+        if (refused_log.size() < refusal_log_cap) refused_log.push_back("Term::Interpret at " + Hex32(pc));
         (*by_desc)[desc.Value()] = static_cast<std::size_t>(-1);
         continue;
       }
@@ -750,7 +770,7 @@ struct Emitter {
       if (forbidden != Refusal::None) {
         (*refused)[key] = forbidden;
         ++refused_counts[static_cast<int>(forbidden)];
-        if (refused_log.size() < 32) refused_log.push_back(detail + " at " + Hex32(pc));
+        if (refused_log.size() < refusal_log_cap) refused_log.push_back(detail + " at " + Hex32(pc));
         (*by_desc)[desc.Value()] = static_cast<std::size_t>(-1);
         continue;
       }
@@ -773,7 +793,38 @@ struct Emitter {
        * pools are relative to its own entry, and both streams start at an 8-byte-aligned offset.
        */
       oak::CodeGenerator probe{reinterpret_cast<std::uint32_t*>(probe_.get())};
-      Backend::EmittedBlockInfo info = address_space->EmitForAot(block, probe);
+      const IR::Cond debug_cond = block.GetCondition();
+      const int debug_terminal = static_cast<int>(block.GetTerminal().which());
+      /**
+       * A hooked hint (PLD, PLDW, WFE, YIELD, SEV, …) ends the block with an `A32ExceptionRaised` and a
+       * `ReturnToDispatch` terminal. That terminal carries no target descriptor, so the instruction
+       * after the hint was never queued — and at run time the dispatcher is entered exactly there.
+       * memcpy's hot loops are full of `pld`, so every pass fell back to Tier I at the instruction
+       * after the hint (build 39: 2.5 M fallbacks in the first 10 s, top sites inside __memcpy_a15).
+       * The hint continues at the next instruction, so that location is a block start like any branch
+       * target. Only blocks that actually raise an exception do this; an indirect branch's "next
+       * instruction" is dead code and is not followed.
+       */
+      bool raises_exception = false;
+      for (const IR::Inst& inst : block) {
+        if (inst.GetOpcode() == IR::Opcode::A32ExceptionRaised) {
+          raises_exception = true;
+          break;
+        }
+      }
+      std::optional<Backend::EmittedBlockInfo> info_holder;
+      try {
+        info_holder.emplace(address_space->EmitForAot(block, probe));
+      } catch (const std::exception& e) {
+        (*refused)[key] = Refusal::Asserted;
+        ++refused_counts[static_cast<int>(Refusal::Asserted)];
+        if (refused_log.size() < refusal_log_cap) {
+          refused_log.push_back(std::string{"emitter assertion at "} + Hex32(pc) + ": " + e.what());
+        }
+        (*by_desc)[desc.Value()] = static_cast<std::size_t>(-1);
+        continue;
+      }
+      const Backend::EmittedBlockInfo& info = *info_holder;
       if (info.size > kProbeBytes || probe.offset() != static_cast<std::ptrdiff_t>(info.size) ||
           info.size % sizeof(std::uint32_t) != 0) {
         *err = "emitted block size disagrees with EmitForAot";
@@ -784,7 +835,7 @@ struct Emitter {
         if (IsSupportedTarget(r.target)) continue;
         (*refused)[key] = Refusal::UnsupportedRelocation;
         ++refused_counts[static_cast<int>(Refusal::UnsupportedRelocation)];
-        if (refused_log.size() < 32) {
+        if (refused_log.size() < refusal_log_cap) {
           refused_log.push_back(
               std::string{"relocation target the AOT prelude does not emit (link target "} +
               std::to_string(static_cast<int>(r.target)) + ") at " + Hex32(pc));
@@ -823,11 +874,31 @@ struct Emitter {
         }
         targets.push_back(target_desc);
       }
+      if (raises_exception) {
+        const std::uint32_t end_pc = end_loc.PC();
+        if (end_pc >= callbacks.text_base() && end_pc - callbacks.text_base() < map_.text_len) {
+          targets.push_back(IR::LocationDescriptor{end_loc});
+        }
+      }
       std::sort(targets.begin(), targets.end(), [](const IR::LocationDescriptor& a,
                                                     const IR::LocationDescriptor& b) {
         return a.Value() < b.Value();
       });
+      if (const char* want = std::getenv("RB_AOTGEN_TRACE_PC"); want != nullptr &&
+          pc == static_cast<std::uint32_t>(std::strtoul(want, nullptr, 16))) {
+        std::fprintf(stderr,
+                     "aotgen: block %08x: cond=%d terminal=%d end=%08x relocs=%zu block_targets=%zu\n",
+                     pc, static_cast<int>(debug_cond), debug_terminal,
+                     static_cast<std::uint32_t>(end_loc.PC()), info.relocations.size(),
+                     info.block_relocations.size());
+        for (const IR::LocationDescriptor& t : targets) {
+          const A32::LocationDescriptor td{t};
+          std::fprintf(stderr, "aotgen:   target %08x thumb=%d it=%08x fpscr=%08x\n", td.PC(),
+                       td.TFlag() ? 1 : 0, td.IT().Value(), td.FPSCR().Value());
+        }
+      }
       for (const IR::LocationDescriptor& target : targets) queue->push_back(target);
+      targets_enqueued += targets.size();
       std::sort(rec.block_rels.begin(), rec.block_rels.end(),
                 [](const auto& a, const auto& b) { return a.first.Value() < b.first.Value(); });
       by_key->emplace(key, blocks.size());
@@ -1101,6 +1172,7 @@ struct Emitter {
   Prelude prelude;
   std::ptrdiff_t prelude_end = 0;
   std::vector<BlockRecord> blocks;
+  std::size_t targets_enqueued = 0;
   std::map<std::pair<std::uint32_t, std::uint8_t>, std::size_t> by_key;
   std::vector<std::string> refused_log;
   std::array<int, kRefusalKinds> refused_counts{};
@@ -1214,14 +1286,20 @@ bool EmitImage(const std::string& elf_path, const std::string& out_prefix, std::
   table << "};\n";
   if (!table) return fail("write failed for " + out_prefix + "_table.cpp");
 
+  if (std::getenv("RB_AOTGEN_TRACE_BLOCKS") != nullptr) {
+    std::fprintf(stderr, "aotgen: queue: %zu blocks emitted, %zu branch targets enqueued\n",
+                 em.blocks.size(), em.targets_enqueued);
+  }
   std::printf(
       "aotgen: %s: emitted %zu blocks, refused %zu (coprocessor %d, vector-fp %d, untranslated %d, "
-      "outside-text %d, location %d, relocation %d), .text %u bytes, prelude %lld bytes, code %lld bytes\n",
+      "outside-text %d, location %d, relocation %d, asserted %d), .text %u bytes, prelude %lld bytes, "
+      "code %lld bytes\n",
       map.soname.empty() ? BaseName(elf_path).c_str() : map.soname.c_str(), em.blocks.size(),
       static_cast<std::size_t>(em.refused_counts[1] + em.refused_counts[2] + em.refused_counts[3] +
-                               em.refused_counts[4] + em.refused_counts[5] + em.refused_counts[6]),
+                               em.refused_counts[4] + em.refused_counts[5] + em.refused_counts[6] +
+                               em.refused_counts[7]),
       em.refused_counts[1], em.refused_counts[2], em.refused_counts[3], em.refused_counts[4],
-      em.refused_counts[5], em.refused_counts[6], map.text_len,
+      em.refused_counts[5], em.refused_counts[6], em.refused_counts[7], map.text_len,
       static_cast<long long>(em.prelude_end),
       static_cast<long long>(em.blocks.empty() ? em.prelude_end : em.blocks.back().end));
   for (const auto& line : em.refused_log) std::printf("aotgen: refused: %s\n", line.c_str());
@@ -1232,7 +1310,8 @@ bool EmitImage(const std::string& elf_path, const std::string& out_prefix, std::
     facts->blocks = em.blocks.size();
     facts->refused = static_cast<std::size_t>(em.refused_counts[1] + em.refused_counts[2] +
                                               em.refused_counts[3] + em.refused_counts[4] +
-                                              em.refused_counts[5] + em.refused_counts[6]);
+                                              em.refused_counts[5] + em.refused_counts[6] +
+                                              em.refused_counts[7]);
     facts->code_bytes = em.code_bytes;
     facts->symbol = table_name;
   }

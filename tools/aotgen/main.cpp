@@ -17,6 +17,10 @@
 #ifdef RB_AOTGEN_EMIT
 #include "emit.h"
 #include "sha256.h"
+
+#include <mcl/assert.hpp>
+
+#include <stdexcept>
 #endif
 #if !defined(_WIN32)
 #include <sys/wait.h>
@@ -24,6 +28,17 @@
 #endif
 
 namespace {
+
+#ifdef RB_AOTGEN_EMIT
+/// Dynarmic's front end and emitters assert on instructions they do not implement. Offline translation
+/// follows reachable code, and a path that walks off a function into a literal pool reaches encodings a
+/// guest never executes; losing the whole library to one such block would shrink the profile to nothing.
+/// The emitter catches this exception per block and refuses that block instead. Installed only by this
+/// tool — nothing in the engine sets a hook, so an engine assertion still terminates the process.
+[[noreturn]] void ThrowOnDynarmicAssert(const char* message) {
+  throw std::runtime_error(message);
+}
+#endif
 
 using rb::aotgen::CodeMap;
 using rb::aotgen::CodeMapEntry;
@@ -494,6 +509,9 @@ int RunProfile(const std::string& dir, const std::string& out_prefix, const std:
 }  // namespace
 
 int main(int argc, char** argv) {
+#ifdef RB_AOTGEN_EMIT
+  mcl::detail::set_assert_hook(&ThrowOnDynarmicAssert);
+#endif
   std::string path;
   std::string trace_path;
   std::string out_prefix;

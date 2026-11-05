@@ -477,7 +477,7 @@ void LibGame(const std::vector<std::uint8_t>& bytes) {
   Check(map.entries.size() >= 16000, "libgame starts >= 16000");
   // 16,789 dynsym ∪ exidx starts, 1,633 veneer stubs inside .text, and 8,761 PLT entries (the .plt is
   // 0x223a0 bytes of 16-byte stubs behind .text). The upper bound keeps the "no runaway merge" intent.
-  Check(map.entries.size() <= 29000, "libgame starts <= 29000 (16,789 + 1,633 veneers + 8,761 PLT)");
+  Check(map.entries.size() <= 31000, "libgame starts <= 31000 (16,789 + 1,633 veneers + 8,761 PLT + TBH cases)");
   Check(CountSource(map, kFromExidx) >= 14000, "libgame exidx is the main source");
   Check(CountSource(map, kFromVeneer) >= 9000, "libgame veneer scan found the movw/movt and PLT stubs");
   Check(CountSource(map, kFromExport) >= 14000, "libgame exports are present");

@@ -640,6 +640,51 @@ bool PltStubAt(const Image& img, const Section& plt, std::uint32_t off) {
 /// the build-38 AOT log showed exactly that: hundreds of thousands of misses in libc's `.plt` range
 /// (0x120d0xxx), just past the end of `.text`. The section's first entry is the lazy-binding resolver and
 /// is a block as well; it carries a literal word after its final branch, which the block never reaches.
+/// Thumb `tbb`/`tbh` jump tables. A case label is a block entry that no symbol, exidx entry or
+/// relocation names, and static closure cannot follow the branch because the target is computed. The
+/// table is inline right after the instruction and the index is bounded by the `cmp rN, #imm` that
+/// guards the dispatch, so both the table and its length are readable from the file.
+///
+/// Measured need: Brotli's decoder (Blocky's asset decompressor) is one such state machine, and every
+/// case that was not in the map cost a Tier I fallback per dispatch — build 39's top fallbacks were all
+/// cases of a single table (libgame+0x31bf86 and the loop boundaries after it).
+void AddJumpTables(const Image& img, Merged* merged) {
+  const std::uint8_t* text = img.bytes->data() + img.text.offset;
+  const std::uint64_t length = img.text.size;
+  constexpr std::uint32_t kMaxEntries = 64;
+  for (std::uint64_t i = 0; i + 4 <= length; i += 2) {
+    if (Le16(text + i) != 0xe8dfu) continue;
+    const std::uint16_t second = Le16(text + i + 2);
+    const bool halfword_entries = (second & 0xfff0u) == 0xf010u;  // tbh [pc, rN, lsl #1]
+    if (!halfword_entries && (second & 0xfff0u) != 0xf000u) continue;  // tbb [pc, rN]
+    std::uint32_t count = 0;
+    for (std::uint32_t back = 2; back <= 24 && i >= back; back += 2) {
+      const std::uint16_t hw = Le16(text + i - back);
+      if ((hw & 0xf800u) != 0x2800u) continue;  // cmp rN, #imm8
+      if ((hw & 0xffu) < kMaxEntries) count = (hw & 0xffu) + 1;
+      break;
+    }
+    if (count == 0) continue;
+    const std::uint32_t at = img.text.addr + static_cast<std::uint32_t>(i);
+    const std::uint32_t table = at + 4;  // the instruction's PC
+    for (std::uint32_t entry = 0; entry < count; ++entry) {
+      std::uint32_t target = 0;
+      if (halfword_entries) {
+        const std::optional<std::uint32_t> off = FileOffset(img, table + entry * 2);
+        std::uint16_t v = 0;
+        if (!off.has_value() || !Read16(img, *off, &v)) break;
+        target = table + 2u * v;
+      } else {
+        const std::optional<std::uint32_t> off = FileOffset(img, table + entry);
+        if (!off.has_value() || !InBounds(img, *off, 1)) break;
+        const std::uint8_t v = (*img.bytes)[*off];
+        target = table + 2u * v;
+      }
+      AddStart(img, merged, target, kFromVeneer, true, true, 0);
+    }
+  }
+}
+
 void AddPlt(const Image& img, Merged* merged) {
   const Section* sections[2] = {img.has_plt ? &img.plt : nullptr,
                                 img.has_iplt ? &img.iplt : nullptr};
@@ -711,6 +756,7 @@ CodeMap DiscoverCodeMap(const std::vector<std::uint8_t>& elf, const CodeMap* tra
   if (!AddExidx(img, &merged, err)) return map;
   AddVeneers(img, &merged);
   AddPlt(img, &merged);
+  AddJumpTables(img, &merged);
   MergeTrace(img, trace, &merged);
 
   map.soname = ReadSoname(img, dynamic);

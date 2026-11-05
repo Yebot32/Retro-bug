@@ -53,6 +53,11 @@ int rb_ios_start(RbIosSession* s, void* layer, int width, int height, char* err,
 /// Stops and joins the render thread (the boot and its guest process stay alive; start may be called again).
 void rb_ios_stop(RbIosSession* s);
 
+/// Stops, joins and destroys on a detached thread. The caller returns immediately: a guest in the middle
+/// of a long nativeRender (a level load) cannot be interrupted, and joining it on the main thread froze
+/// the launcher for as long as the load took. The session must not be touched after this call.
+void rb_ios_stop_async(RbIosSession* s);
+
 /// The app moved to the background/foreground: the render thread stops drawing and calls the game's
 /// nativeOnPause/nativeOnResume on itself (never on the caller's thread).
 void rb_ios_pause(RbIosSession* s);

@@ -966,6 +966,17 @@ extern "C" void rb_ios_stop(RbIosSession* s) {
   if (s->render.joinable()) s->render.join();
 }
 
+extern "C" void rb_ios_stop_async(RbIosSession* s) {
+  if (s == nullptr) return;
+  // The EXIT button used to call rb_ios_stop on the main thread, which joins a render thread that can be
+  // minutes inside one nativeRender while a level loads — the launcher froze with no overlay and looked
+  // crashed. The stop is the same; only the thread it runs on changed. Detach is safe against a session
+  // starting before this finishes: each session retains its own layer/context and Detach only clears the
+  // calling thread's current context.
+  s->running.store(false);
+  std::thread([s] { rb_ios_destroy(s); }).detach();
+}
+
 extern "C" void rb_ios_pause(RbIosSession* s) {
   if (s != nullptr) s->want_run.store(false);
 }

@@ -111,8 +111,7 @@ final class GameUIView: UIView {
         NotificationCenter.default.removeObserver(self)
         timer?.invalidate()
         if let s = session {
-            rb_ios_stop(s)
-            rb_ios_destroy(s)
+            rb_ios_stop_async(s)
         }
     }
 
@@ -207,9 +206,14 @@ final class GameUIView: UIView {
     override func willMove(toWindow newWindow: UIWindow?) {
         super.willMove(toWindow: newWindow)
         if newWindow == nil, let s = session {
-            rb_ios_stop(s)
+            // EXIT dismisses the game; the guest may be inside a long load, so the stop and teardown run
+            // off the main thread. Touching the session after this is a use-after-free by design.
+            session = nil
+            AppLog.write("game: exit requested (background shutdown)")
+            rb_ios_stop_async(s)
             started = false
             lastSize = .zero
+            timer?.invalidate()
         }
     }
 

@@ -211,3 +211,15 @@ at `MAP_FAILED`.
 **iOS note:** the public SDK marks `pthread_jit_write_protect_np` unavailable (the arm64 compile lane
 caught it), although libsystem exports it and Apple's own frameworks call it. The patch resolves the
 symbol with `dlsym` in the iOS branch and keeps the declared call on macOS.
+
+## 0012-mcl-assert-hook.patch (vendored mcl)
+
+**Why:** `rb_aotgen` follows reachable code, and a path that runs off the end of a function into a
+literal pool feeds data to Dynarmic's front end or an emitter, which asserts (`ASSERT_FALSE` in
+`emit_arm64_*`) and terminates the whole translation — one such block cost the entire library's profile.
+mcl now offers `set_assert_hook`; the tool installs a hook that throws, and the emitter catches it per
+block and refuses that block (refusal kind `asserted`). No hook is installed by the engine, so an engine
+assertion still ends the process exactly as before.
+
+**Retire when:** the tool never follows a computed or fall-through path into data (a full trace-driven
+map), or Dynarmic's offline emission gains a per-block "unsupported" answer instead of an assertion.
