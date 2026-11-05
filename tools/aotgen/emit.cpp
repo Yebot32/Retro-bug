@@ -219,6 +219,15 @@ enum class Refusal {
 
 constexpr std::size_t kRefusalKinds = 8;
 
+/// The table's second key component: the descriptor's upper half — the Thumb bit, the live IT state and
+/// the FPSCR mode — with the single-stepping bit cleared (no AOT block is emitted for a single-stepping
+/// descriptor). Two blocks at one address that differ in any of those bits are different code: the first
+/// keyed blocks on ISA alone and every mid-IT entry was refused, which sent every Thumb IT continuation
+/// to Tier I on every execution (build 40: 35 M Blocky fallbacks, every top site such an entry).
+std::uint32_t KeyHi(const IR::LocationDescriptor& desc) {
+  return static_cast<std::uint32_t>(desc.Value() >> 32) & ~std::uint32_t{4};
+}
+
 struct BlockRecord {
   IR::LocationDescriptor desc{0};
   std::uint32_t off = 0;
@@ -677,8 +686,8 @@ struct Emitter {
 
   bool EmitQueued(std::deque<IR::LocationDescriptor>* queue, std::string* err,
                   std::map<std::uint64_t, std::size_t>* by_desc,
-                  std::map<std::pair<std::uint32_t, std::uint8_t>, std::size_t>* by_key,
-                  std::map<std::pair<std::uint32_t, std::uint8_t>, Refusal>* refused) {
+                  std::map<std::pair<std::uint32_t, std::uint32_t>, std::size_t>* by_key,
+                  std::map<std::pair<std::uint32_t, std::uint32_t>, Refusal>* refused) {
     const std::size_t refusal_log_cap =
         std::getenv("RB_AOTGEN_TRACE_BLOCKS") != nullptr ? static_cast<std::size_t>(-1) : 32;
     while (!queue->empty()) {
@@ -688,32 +697,15 @@ struct Emitter {
       const A32::LocationDescriptor loc{desc};
       const std::uint32_t pc = loc.PC();
       const bool thumb = loc.TFlag();
-      if (loc.IT().Value() != 0 || loc.FPSCR().Value() != 0) {
-        /**
-         * The table is keyed on `(off, thumb)` only, so a block emitted for a non-default IT/FPSCR
-         * descriptor could be selected for an IT=0 dispatch — exactly the mismatch the runtime now
-         * refuses, but refusing it at run time would only turn a wrong block into a fallback. The
-         * honest statement is that this target has no emittable block: leave it on Tier I and do not
-         * poison the `(off, thumb)` refusal map, because an IT=0 descriptor at the same offset is a
-         * different block and is still emittable.
-         */
-        ++refused_counts[static_cast<int>(Refusal::LocationDescriptor)];
-        if (refused_log.size() < refusal_log_cap) {
-          refused_log.push_back("non-default IT/FPSCR entry (IT=" + Hex32(loc.IT().Value()) +
-                                " FPSCR=" + Hex32(loc.FPSCR().Value()) + ") at " + Hex32(pc));
-        }
-        (*by_desc)[desc.Value()] = static_cast<std::size_t>(-1);
-        continue;
-      }
       if (pc < callbacks.text_base() || pc - callbacks.text_base() >= map_.text_len) {
-        const std::pair<std::uint32_t, std::uint8_t> key{pc - callbacks.text_base(), thumb ? kThumb : kArm};
+        const std::pair<std::uint32_t, std::uint32_t> key{pc - callbacks.text_base(), KeyHi(desc)};
         (*refused)[key] = Refusal::OutOfRange;
         ++refused_counts[static_cast<int>(Refusal::OutOfRange)];
         (*by_desc)[desc.Value()] = static_cast<std::size_t>(-1);
         continue;
       }
       const std::uint32_t off = pc - callbacks.text_base();
-      const std::pair<std::uint32_t, std::uint8_t> key{off, static_cast<std::uint8_t>(thumb ? kThumb : kArm)};
+      const std::pair<std::uint32_t, std::uint32_t> key{off, KeyHi(desc)};
       if (const auto r = refused->find(key); r != refused->end()) {
         (*by_desc)[desc.Value()] = static_cast<std::size_t>(-1);
         continue;
@@ -983,14 +975,10 @@ struct Emitter {
         const std::uint32_t target_pc = target.PC();
         const std::uint32_t target_off =
             target_pc >= callbacks.text_base() ? target_pc - callbacks.text_base() : 0xffff'ffffu;
-        auto target_key = std::make_pair(target_off, static_cast<std::uint8_t>(
-                                                           target.TFlag() ? kThumb : kArm));
+        const auto target_key = std::make_pair(target_off, KeyHi(target_desc));
         const auto target_block = by_key.find(target_key);
-        // `by_key` is (offset, ISA); a location descriptor also carries IT and the FPSCR mode. A block
-        // emitted for the default descriptor (IT=0, round-to-nearest) must not be entered through an
-        // IT leg or under another rounding mode: the emitted instructions are not predicated and its
-        // FP immediates were folded for the default FPCR. Such a target is treated exactly like a
-        // missing block, so the dispatcher's descriptor check owns the decision at run time.
+        // The key carries IT and the FPSCR mode, so a match is the exact descriptor the target was
+        // emitted for (compared again below, which also covers the single-stepping bit the key masks).
         const bool linked =
             target_block != by_key.end() && blocks[target_block->second].desc == target_desc;
         for (const auto& br : list) {
@@ -1113,8 +1101,7 @@ struct Emitter {
     for (const std::size_t i : sorted) {
       const BlockRecord& b = blocks[i];
       out << "    .word " << Hex32(b.off) << "\n";
-      out << "    .byte " << static_cast<unsigned>(b.thumb ? kThumb : kArm) << "\n";
-      out << "    .zero 3\n";
+      out << "    .word " << Hex32(KeyHi(b.desc)) << "\n";
       out << "    .quad " << Sym(prefix + "_block_" + Pad(b.symbol)) << "\n";
     }
     // The trailer is the `.S` half of the pairing check. It is data, not a label after the code: the
@@ -1173,7 +1160,7 @@ struct Emitter {
   std::ptrdiff_t prelude_end = 0;
   std::vector<BlockRecord> blocks;
   std::size_t targets_enqueued = 0;
-  std::map<std::pair<std::uint32_t, std::uint8_t>, std::size_t> by_key;
+  std::map<std::pair<std::uint32_t, std::uint32_t>, std::size_t> by_key;
   std::vector<std::string> refused_log;
   std::array<int, kRefusalKinds> refused_counts{};
 };
@@ -1244,7 +1231,7 @@ bool EmitImage(const std::string& elf_path, const std::string& out_prefix, std::
   em.EmitPrelude();
 
   std::map<std::uint64_t, std::size_t> by_desc;
-  std::map<std::pair<std::uint32_t, std::uint8_t>, Refusal> refused;
+  std::map<std::pair<std::uint32_t, std::uint32_t>, Refusal> refused;
   std::string emit_err;
   if (!em.EmitQueued(&queue, &emit_err, &by_desc, &em.by_key, &refused)) return fail(emit_err);
   if (em.blocks.empty()) return fail("no block could be emitted");

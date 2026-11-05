@@ -321,10 +321,12 @@ void table_and_assembly_are_one_emission() {
                 std::to_string(image.block_count));
 }
 
-/// A live IT state or FPSCR mode is part of a block's identity in Dynarmic's `LocationDescriptor`, but
-/// the AOT table is deliberately keyed on `(offset, thumb)` only. Every emitted block is for IT=0 and
-/// the default FPCR, so an entry carrying either other fact must not resolve into that code — it has to
-/// fall back and let Tier I, which keys blocks on the descriptor, predicate and round correctly.
+/// The AOT table is keyed on the full block identity: offset plus the descriptor's upper half (Thumb
+/// bit, live IT state, FPSCR mode). A block emitted for one descriptor must not resolve under another,
+/// because its instructions are predicated for that IT state and its FP immediates were folded for that
+/// rounding mode — the same rule Tier I and Tier J apply per descriptor. The negative half below proves
+/// that a descriptor nobody emitted still falls back; the positive half proves the key really carries
+/// the bits (the fixture emits IT continuations, so such blocks exist).
 void non_default_descriptors_fall_back() {
   Rig rig = Build(kAotFixtureImage);
   if (!rig.ok) return;
@@ -332,10 +334,21 @@ void non_default_descriptors_fall_back() {
   CHECK_CTX(it.has_value(), "the fixture exports it_probe");
   if (!it) return;
   const std::uint32_t text_base = kAotFixtureImage.load_bias + kAotFixtureImage.text_vaddr;
-  // The point of this case is the descriptor check, not a missing block: the entry must resolve.
+  // The point of this case is the descriptor key, not a missing block: the entry must resolve.
   CHECK_CTX(rig.aot->image().Resolve(it->addr - text_base, it->thumb) != nullptr,
             "it_probe's entry has no emitted block, so this case would not test the descriptor");
   if (rig.aot->image().Resolve(it->addr - text_base, it->thumb) == nullptr) return;
+
+  // Every block emitted for a live IT state must resolve under exactly that key and under no other.
+  std::size_t it_blocks = 0;
+  for (std::size_t i = 0; i < kAotFixtureImage.count; ++i) {
+    const exec::AotBlock& block = kAotFixtureImage.blocks[i];
+    if (((block.key_hi >> 8) & 0xffu) == 0) continue;  // IT bits are byte 1 of the upper word
+    ++it_blocks;
+    CHECK_CTX(rig.aot->image().Resolve(block.guest_off, block.key_hi) == block.entry,
+              "an IT-keyed block does not resolve under its own key");
+  }
+  CHECK_CTX(it_blocks > 0, "the fixture emitted no IT-keyed block, so the key is not exercised");
 
   const auto run_both = [&](const exec::MachineState& start, std::int32_t expected, const char* what) {
     exec::MachineState si = start;
@@ -407,7 +420,7 @@ void a_missing_block_falls_back_and_is_counted() {
     bool removed = false;
     for (std::size_t i = 0; i < image.count; ++i) {
       if (image.blocks[i].guest_off == fib_off &&
-          (image.blocks[i].flags & (fib_full->thumb ? exec::kAotThumb : exec::kAotArm)) != 0) {
+          (image.blocks[i].key_hi & (fib_full->thumb ? exec::kAotThumb : exec::kAotArm)) != 0) {
         removed = true;
         continue;
       }

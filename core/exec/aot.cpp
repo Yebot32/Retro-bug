@@ -141,30 +141,26 @@ bool AotImage::Load(const AotBlock* blocks, std::size_t n, const AotImageInfo* i
   rows.reserve(n);
   for (std::size_t i = 0; i < n; ++i) {
     const AotBlock& block = blocks[i];
-    const unsigned isa = block.flags & (kAotThumb | kAotArm);
-    if (isa != kAotThumb && isa != kAotArm) {
-      return fail("AOT block " + std::to_string(i) + " has no single ISA flag");
-    }
     if (block.entry == nullptr) {
       return fail("AOT block " + std::to_string(i) + " has a null entry");
     }
     if (block.guest_off >= info->text_len) {
       return fail("AOT block " + std::to_string(i) + " lies outside .text");
     }
-    rows.push_back(Row{block.guest_off, block.flags, block.entry});
+    rows.push_back(Row{block.guest_off, block.key_hi, block.entry});
   }
   std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) {
     if (a.off != b.off) return a.off < b.off;
-    return a.flags < b.flags;
+    return a.key_hi < b.key_hi;
   });
   for (std::size_t i = 1; i < rows.size(); ++i) {
-    if (rows[i].off == rows[i - 1].off && rows[i].flags == rows[i - 1].flags &&
+    if (rows[i].off == rows[i - 1].off && rows[i].key_hi == rows[i - 1].key_hi &&
         rows[i].entry != rows[i - 1].entry) {
       return fail("AOT image has two entries for one guest offset");
     }
   }
   rows.erase(std::unique(rows.begin(), rows.end(), [](const Row& a, const Row& b) {
-               return a.off == b.off && a.flags == b.flags;
+               return a.off == b.off && a.key_hi == b.key_hi;
              }),
              rows.end());
   rows_ = std::move(rows);
@@ -173,12 +169,11 @@ bool AotImage::Load(const AotBlock* blocks, std::size_t n, const AotImageInfo* i
   return true;
 }
 
-AotCode AotImage::Resolve(std::uint32_t guest_off, bool thumb) const {
-  const std::uint8_t want = thumb ? kAotThumb : kAotArm;
+AotCode AotImage::Resolve(std::uint32_t guest_off, std::uint32_t key_hi) const {
   const auto it = std::lower_bound(rows_.begin(), rows_.end(), guest_off,
                                    [](const Row& row, std::uint32_t off) { return row.off < off; });
   for (auto cur = it; cur != rows_.end() && cur->off == guest_off; ++cur) {
-    if ((cur->flags & want) != 0) return cur->entry;
+    if (cur->key_hi == key_hi) return cur->entry;
   }
   return nullptr;
 }
@@ -399,7 +394,6 @@ void* AotExecutor::Dispatch() {
     if (n < 8 && log_) log_("aot-dispatch #" + std::to_string(n) + " pc=0x" + Hex(pc));
   }
   AotDbg("dispatch", pc);
-  const bool thumb = (state_.jit.upper_location_descriptor & 1u) != 0;
 
   if (pc == return_address_) {
     SetPending(Pending::Returned);
@@ -453,28 +447,15 @@ void* AotExecutor::Dispatch() {
       }
     }
     if (image_index != libraries_.size()) {
-      entry = libraries_[image_index].image.Resolve(pc - libraries_[image_index].text_base, thumb);
+      // The block's identity is the descriptor: T, IT and the FPSCR mode bits are baked into what was
+      // emitted, so the lookup must carry them. A live descriptor with no emitted match is a missing
+      // block (Tier I), never a near match.
+      const std::uint32_t key_hi =
+          static_cast<std::uint32_t>(descriptor >> 32) & ~std::uint32_t{4};
+      entry = libraries_[image_index].image.Resolve(pc - libraries_[image_index].text_base, key_hi);
     }
     if (entry != nullptr) {
-      /**
-       * The generated table is keyed on `(guest_off, thumb)` only, so it cannot distinguish two blocks
-       * at one address translated for different IT/FPSCR descriptors. Every block is emitted for
-       * `A32::LocationDescriptor{pc}.SetTFlag(thumb)` — IT=0 and the default FPCR — because the emitter
-       * refuses any other descriptor at the target (see `EmitQueued`). A live descriptor that differs
-       * (entering mid-IT, or with a rounding/flush mode baked into the block's FP immediates) must not
-       * resolve into that code: it is the same case as a missing block, so it becomes a Tier I fallback
-       * rather than executing predicated instructions unconditionally.
-       */
-      const Dynarmic::A32::LocationDescriptor live{state_.jit.GetLocationDescriptor()};
-      const Dynarmic::A32::LocationDescriptor emitted =
-          Dynarmic::A32::LocationDescriptor{pc, Dynarmic::A32::PSR{}, Dynarmic::A32::FPSCR{}, false}
-              .SetTFlag(thumb);
-      if (live.CPSR().Value() != emitted.CPSR().Value() ||
-          live.FPSCR().Value() != emitted.FPSCR().Value()) {
-        entry = nullptr;
-      } else {
-        cached = DispatchEntry{descriptor, static_cast<std::uint32_t>(image_index), entry};
-      }
+      cached = DispatchEntry{descriptor, static_cast<std::uint32_t>(image_index), entry};
     }
   }
   AotDbg(entry != nullptr ? "entry" : "miss", pc);

@@ -55,20 +55,31 @@ using AotCode = std::uint32_t (*)(AotState*);
 /// stderr is invisible; the runtime passes the same sink every other boot line uses.
 using AotLog = std::function<void(const std::string&)>;
 
-/// The ISA bits in `AotBlock::flags`; exactly one is set. They match `rb::aotgen::kThumb`/`kArm` by
+/// The ISA bits in `AotBlock::key_hi`; exactly one is set. They match `rb::aotgen::kThumb`/`kArm` by
 /// value and by intent, but the runtime does not depend on the tool's header.
 enum : std::uint8_t { kAotThumb = 1, kAotArm = 2 };
 
+/**
+ * One emitted block. The key is `(guest_off, key_hi)`, where `key_hi` is the upper half of Dynarmic's
+ * `LocationDescriptor` — the Thumb bit, the IT state and the FPSCR mode bits. Those bits are part of a
+ * block's identity: a Thumb IT block's instructions are predicated, and an FP block's immediates were
+ * folded for a rounding mode, so a block emitted for one descriptor must not run under another.
+ *
+ * The first version keyed blocks on `(off, isa)` only and refused every entry with a live IT state. That
+ * sent every mid-IT entry — the instruction after an `it`/`itt` in Thumb-2 — back to Tier I on every
+ * execution, and those entries are hot: build 40's Blocky fallbacks were 35 M, every top site an IT
+ * continuation (`it hi` at 0x2ff186, `itt eq` at 0x348fd6, and so on).
+ */
 struct AotBlock {
   std::uint32_t guest_off = 0;  ///< file-relative to `.text`, the code map's unit
-  std::uint8_t flags = 0;       ///< kAotThumb or kAotArm
+  std::uint32_t key_hi = 0;     ///< descriptor upper half: T, IT, FPSCR mode (single-step clear)
   AotCode entry = nullptr;      ///< assembly label from `aot_<game>.S`
 };
 
-// The generated `.S` writes the table itself as 16-byte records (`.word off; .byte flags; .zero 3;
-// .quad entry`), so this layout is a contract with the emitter, not an implementation detail.
+// The generated `.S` writes the table itself as 16-byte records (`.word off; .word key_hi; .quad
+// entry`), so this layout is a contract with the emitter, not an implementation detail.
 static_assert(sizeof(AotBlock) == 16, "the emitted table record is 16 bytes");
-static_assert(offsetof(AotBlock, flags) == 4, "the emitted record puts flags at byte 4");
+static_assert(offsetof(AotBlock, key_hi) == 4, "the emitted record puts key_hi at byte 4");
 static_assert(offsetof(AotBlock, entry) == 8, "the emitted record puts the entry pointer at byte 8");
 
 /**
@@ -161,8 +172,15 @@ struct AotProfile {
 class AotImage {
  public:
   bool Load(const AotBlock* blocks, std::size_t n, const AotImageInfo* info, std::string* err);
-  /// nullptr means "no translated block at this offset" — the dispatcher's Tier I fallback.
-  AotCode Resolve(std::uint32_t guest_off, bool thumb) const;
+  /// nullptr means "no translated block for this descriptor" — the dispatcher's Tier I fallback.
+  /// `key_hi` is the live `LocationDescriptor`'s upper half (T, IT, FPSCR mode); a block emitted for
+  /// another descriptor is a different block and must not match.
+  AotCode Resolve(std::uint32_t guest_off, std::uint32_t key_hi) const;
+  /// The default-descriptor spelling of the same lookup (Thumb/ARM entry with no live IT state), which
+  /// is what the tests and the fixture's direct calls use.
+  AotCode Resolve(std::uint32_t guest_off, bool thumb) const {
+    return Resolve(guest_off, static_cast<std::uint32_t>(thumb ? kAotThumb : kAotArm));
+  }
 
   [[nodiscard]] const AotImageInfo& info() const { return info_; }
   [[nodiscard]] std::size_t size() const { return rows_.size(); }
@@ -170,7 +188,7 @@ class AotImage {
  private:
   struct Row {
     std::uint32_t off = 0;
-    std::uint8_t flags = 0;
+    std::uint32_t key_hi = 0;
     AotCode entry = nullptr;
   };
   std::vector<Row> rows_;
