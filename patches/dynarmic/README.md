@@ -179,3 +179,17 @@ shipping tier is the JIT.
 
 **Retire when:** the pinned upstream gains a non-code-generating lock, or a platform admits code pages to
 non-JIT launches (it will not).
+
+## 0010-ios-no-mach-exception-port.patch
+
+**Why:** the first `ExceptionHandler::Register` (every JIT construction) installs a Mach port for
+`EXC_BAD_ACCESS` and a message-pump thread. That port takes every bad access in the process; with
+page-table fastmem there are no fake-call sites registered, so a fault is answered `KERN_FAILURE` — an
+unhandled Mach exception the kernel turns into a silent process death, before RetroBug's SIGSEGV/SIGBUS
+handlers can log it. Measured on the iPad (build 37): the Tier J boot died at its first guest call with no
+crash block in retrobug.log. On iOS the handler now registers nothing, `SupportsFastmem` is false (which
+selects the page-table fastmem path the JIT actually uses) and the callback setter is a no-op, so faults
+arrive as ordinary signals and name themselves. macOS keeps the port.
+
+**Retire when:** the vendored backend's page-table fastmem no longer coexists with an unconditional Mach
+port, or the port learns to forward unhandled faults to the signal handlers.

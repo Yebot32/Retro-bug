@@ -703,10 +703,18 @@ unsigned LaneBits(Dynarmic::IR::Opcode op) {
       return 64;
     case Opcode::VectorBroadcast8: return 8;
     case Opcode::VectorBroadcast16: return 16;
-    case Opcode::VectorLogicalShiftRight8: case Opcode::VectorLogicalShiftLeft8: return 8;
-    case Opcode::VectorLogicalShiftRight16: case Opcode::VectorLogicalShiftLeft16: return 16;
-    case Opcode::VectorLogicalShiftRight32: case Opcode::VectorLogicalShiftLeft32: return 32;
-    case Opcode::VectorLogicalShiftRight64: case Opcode::VectorLogicalShiftLeft64: return 64;
+    case Opcode::VectorLogicalShiftRight8: case Opcode::VectorLogicalShiftLeft8:
+    case Opcode::VectorLogicalVShift8: case Opcode::VectorArithmeticVShift8:
+      return 8;
+    case Opcode::VectorLogicalShiftRight16: case Opcode::VectorLogicalShiftLeft16:
+    case Opcode::VectorLogicalVShift16: case Opcode::VectorArithmeticVShift16:
+      return 16;
+    case Opcode::VectorLogicalShiftRight32: case Opcode::VectorLogicalShiftLeft32:
+    case Opcode::VectorLogicalVShift32: case Opcode::VectorArithmeticVShift32:
+      return 32;
+    case Opcode::VectorLogicalShiftRight64: case Opcode::VectorLogicalShiftLeft64:
+    case Opcode::VectorLogicalVShift64: case Opcode::VectorArithmeticVShift64:
+      return 64;
     default: return 0;
   }
 }
@@ -2812,6 +2820,55 @@ bool BlockRunner::Step(const Inst* inst) {
         return r;
       };
       Put(inst, V{shl(a.lo), shl(a.hi)});
+      return true;
+    }
+
+    /**
+     * VSHL/VQSHL by a register (USHL/SSHL): every lane of the address operand is a *signed* shift count.
+     * A positive count shifts the data lane left (a count of the lane width or more clears it); a negative
+     * count shifts right, logically for the `VectorLogical` form and with the sign replicated for the
+     * `VectorArithmetic` one (VQSHL's saturating forms are separate IR and are not emitted for A32).
+     * Blocky Roads stopped on the logical 32-bit form in nativeRender.
+     */
+    case Opcode::VectorLogicalVShift8: case Opcode::VectorLogicalVShift16:
+    case Opcode::VectorLogicalVShift32: case Opcode::VectorLogicalVShift64:
+    case Opcode::VectorArithmeticVShift8: case Opcode::VectorArithmeticVShift16:
+    case Opcode::VectorArithmeticVShift32: case Opcode::VectorArithmeticVShift64: {
+      const unsigned bits = LaneBits(inst->GetOpcode());
+      const auto op = inst->GetOpcode();
+      const bool arithmetic = op == Opcode::VectorArithmeticVShift8 ||
+                              op == Opcode::VectorArithmeticVShift16 ||
+                              op == Opcode::VectorArithmeticVShift32 ||
+                              op == Opcode::VectorArithmeticVShift64;
+      V a{}, b{}, out{};
+      if (!W128(inst, 0, a) || !W128(inst, 1, b)) return false;
+      if (bits == 0 || bits > 64) return Fail(inst, "unrecognised lane width in VectorLogicalVShift");
+      const std::uint64_t mask = bits == 64 ? ~0ull : ((1ull << bits) - 1ull);
+      const auto shifted = [&](std::uint64_t wa, std::uint64_t wb) {
+        std::uint64_t r = 0;
+        for (unsigned off = 0; off < 64; off += bits) {
+          const std::uint64_t av = (wa >> off) & mask;
+          const std::int64_t count = SignedAt((wb >> off) & mask, bits);
+          std::uint64_t lane = 0;
+          if (count >= 0) {
+            if (static_cast<std::uint64_t>(count) < bits) {
+              lane = (av << static_cast<unsigned>(count)) & mask;
+            }
+          } else {
+            // `|count|` without overflow at INT64_MIN.
+            const std::uint64_t right = static_cast<std::uint64_t>(-(count + 1)) + 1;
+            if (right < bits) {
+              lane = arithmetic ? (static_cast<std::uint64_t>(SignedAt(av, bits) >> right) & mask)
+                                : ((av >> right) & mask);
+            } else if (arithmetic && SignedAt(av, bits) < 0) {
+              lane = mask;  // an arithmetic right shift past the lane keeps only the sign
+            }
+          }
+          r |= lane << off;
+        }
+        return r;
+      };
+      Put(inst, V{shifted(a.lo, b.lo), shifted(a.hi, b.hi)});
       return true;
     }
 

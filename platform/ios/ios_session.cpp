@@ -631,7 +631,10 @@ bool RbIosSession::Boot(std::string* err) {
   std::vector<Engine> attempts;
   if (jit_wanted) attempts.push_back(Engine::Jit);
 #if defined(RB_AOT_PROFILE)
-  if (aot_selected != nullptr && !aot_crashed_this_build && !jit_probe_ok) {
+  // AOT is the fallback for a launch without JIT permission, and for one whose JIT attempt died in this
+  // build (the marker): a Tier J crash must not cost the translated profile that is standing right there.
+  if (aot_selected != nullptr && !aot_crashed_this_build &&
+      (!jit_probe_ok || jit_crashed_this_build)) {
     attempts.push_back(Engine::Aot);
   }
 #endif
