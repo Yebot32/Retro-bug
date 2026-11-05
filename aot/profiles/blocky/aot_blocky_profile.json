@@ -2,10 +2,10 @@
   "format": 1,
   "name": "aot_blocky",
   "libraries": [
-    {"soname": "libc.so", "sha256": "8fc841e8568caf228e7fca49076991ae8c8e693d81c525fadf1ac888c5b152b4", "load_bias": 268435456, "text_vaddr": 260288, "text_len": 602704, "blocks": 55552, "refused": 155, "code_bytes": 14779308, "symbol": "kAotBlockyLibcImage"},
-    {"soname": "libgame.so", "sha256": "79a402dd1e1a0bcce5f5a8633fa56c606f5decddf6e2f261b73ec0f7248e7e66", "load_bias": 301989888, "text_vaddr": 2412784, "text_len": 2118048, "blocks": 178274, "refused": 141, "code_bytes": 58394844, "symbol": "kAotBlockyLibgameImage"},
+    {"soname": "libc.so", "sha256": "8fc841e8568caf228e7fca49076991ae8c8e693d81c525fadf1ac888c5b152b4", "load_bias": 268435456, "text_vaddr": 260288, "text_len": 602704, "blocks": 55893, "refused": 157, "code_bytes": 14844460, "symbol": "kAotBlockyLibcImage"},
+    {"soname": "libgame.so", "sha256": "79a402dd1e1a0bcce5f5a8633fa56c606f5decddf6e2f261b73ec0f7248e7e66", "load_bias": 301989888, "text_vaddr": 2412784, "text_len": 2118048, "blocks": 178785, "refused": 145, "code_bytes": 58526620, "symbol": "kAotBlockyLibgameImage"},
     {"soname": "libm.so", "sha256": "32d06ce18013f9d81595569a83e73b7fe527b7727811fd243088d3ec256e082d", "load_bias": 335544320, "text_vaddr": 37144, "text_len": 96520, "blocks": 6213, "refused": 26, "code_bytes": 1626072, "symbol": "kAotBlockyLibmImage"},
     {"soname": "libstdc++.so", "sha256": "f5b04cffc34c6dc438e273caeeac5449470d87ae36143b2d106e8e01d842b76f", "load_bias": 369098752, "text_vaddr": 6672, "text_len": 5232, "blocks": 511, "refused": 3, "code_bytes": 111024, "symbol": "kAotBlockyLibstdcImage"},
-    {"soname": "libz.so", "sha256": "b2bcbc707c36d2147f70de6a135d588ffe98543635a745447d35d46993324181", "load_bias": 402653184, "text_vaddr": 23272, "text_len": 44824, "blocks": 4529, "refused": 0, "code_bytes": 1296472, "symbol": "kAotBlockyLibzImage"}
+    {"soname": "libz.so", "sha256": "b2bcbc707c36d2147f70de6a135d588ffe98543635a745447d35d46993324181", "load_bias": 402653184, "text_vaddr": 23272, "text_len": 44824, "blocks": 4530, "refused": 0, "code_bytes": 1296728, "symbol": "kAotBlockyLibzImage"}
   ]
 }
