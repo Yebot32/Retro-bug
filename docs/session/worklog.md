@@ -1475,3 +1475,15 @@ assembled into the app like any other source.
   MB (app `__TEXT` 161 MB). Tablet gate: `rb_aot_tests` 217/0, `rb_aotgen_tests` 80/0, scope image loads
   with `aot_active=1`. Log 29 also confirms the exit fix: `game: exit requested (background shutdown)` →
   `destroy` two seconds later, with no freeze.
+- **Build 42** (`f696221`, profiles ref `aot/profiles` @ `1593d95`), 43,429,398 bytes, SHA-256
+  `4809170fba5d581233595975a0ade35e8ed25834ad3cf0f2f0f26b37e96f631f`. Logs 30/31 (build 41): Blocky's
+  IT fix landed — 219.8 fps, then 864.9 and 910.4 fps on the menu screens, fallbacks 35 M → ~3 M. KitKat
+  stayed at 0.1 fps with the same libdlgl+0x394f6/0x3956e loop on top, and that loop is entered through
+  libgcc's `__gnu_thumb1_case_uqi` (a `bl` whose helper returns to a computed case label). The helpers
+  are unnamed in a stripped image, so they are found by their bodies; each call site's inline table is
+  decoded with the count from the guarding `cmp`. Two more gaps fixed with it: Thumb jump tables whose
+  bound is the wide `cmp.w rN, #imm12` (Blocky's stb loader switches on r9) were decoded as nothing, and
+  a block ending in a call now queues its end location (the callee returns through `bx lr`; libgame
+  +0x30027a and neighbours). libdlgl 35,170 → 37,498 blocks, libgame 178,274 → 178,785; every measured
+  hot site is now in the table. Tablet gate: `rb_aotgen_tests` 80/0, `rb_aot_tests` 217/0 (fixture
+  unchanged), scope image loads with `aot_active=1`.
