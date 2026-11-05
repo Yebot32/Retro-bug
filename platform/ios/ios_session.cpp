@@ -127,7 +127,10 @@ bool MapJitWorks() {
 bool JitAvailable() {
   int v = g_jit_available.load(std::memory_order_relaxed);
   if (v < 0) {
-    v = ((DebuggerAttached() || MapJitWorks()) && ProbeExecutableMemory()) ? 1 : 0;
+    // The flip is the permission oaknut's iOS code block actually uses, so it is the answer: it fails on
+    // a launch without a JIT grant (the untraced AOT crash proves writes to the R|X page fault there) and
+    // succeeds wherever a real grant exists, whatever form that grant took.
+    v = ProbeExecutableMemory() ? 1 : 0;
     g_jit_available.store(v, std::memory_order_relaxed);
   }
   return v == 1;
@@ -557,13 +560,13 @@ bool RbIosSession::Boot(std::string* err) {
   if (jit_crashed_this_build && !jit_wanted) {
     // the marker explains it; no second line
   } else if (jit_wanted) {
-    self->Log("jit: this launch can run a JIT — trying Tier J");
+    self->Log("jit: the code region can be made writable — trying Tier J");
   } else {
-    self->Log(DebuggerAttached() || MapJitWorks()
-                  ? "jit: this launch has JIT permission but the code region cannot be made writable — "
-                    "next engine"
-                  : "jit: no debugger and no JIT grant — a home-screen launch cannot run a JIT "
-                    "(AltStore's Enable JIT attaches a debugger) — next engine");
+    // The flip is what failed; the two capability facts are printed beside it so a log says which kind of
+    // launch this was (a debugger, a signed grant, or neither).
+    self->Log("jit: the code region cannot be made writable — next engine (debugger=" +
+              std::to_string(DebuggerAttached() ? 1 : 0) + " map_jit=" +
+              std::to_string(MapJitWorks() ? 1 : 0) + ")");
   }
     // The AOT profile is compiled into this app; it runs only when every profiled library's digest matches
   // the imported APK, so an APK from another build keeps the interpreter.

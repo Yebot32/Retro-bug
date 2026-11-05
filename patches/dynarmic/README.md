@@ -165,3 +165,17 @@ table and the fastmem pointer: with fastmem on, the memory emitter records a `Fa
 **Retire when:** upstream exposes an offline emission API — IR generation and block emission into a
 caller-owned buffer, with relocation records, reachable without an `AddressSpace` code cache or its block
 maps (compare `address_space.h`'s `EmitForAot` at re-import).
+
+## 0009-apple-atomic-spin-lock.patch
+
+**Why:** `Dynarmic::SpinLock` emitted its own lock/unlock code into an oaknut `CodeBlock` the first time it
+was taken — a runtime `mprotect(RW)` followed by a write into an R|X page. iOS refuses both to a launch
+without a JIT grant, and the AOT tier takes that lock through `ExclusiveMonitor::ClearProcessor` on its
+first call, so every interpreter-only boot died with SIGBUS at `__init_tcb` before any translated block
+ran (the crash report's frames: CrashSignal ← SpinLock::Lock ← ClearProcessor ← AotExecutor::SyncIn;
+builds 22–36). On Apple the lock is now an atomic test-and-set with the same mutual exclusion and no
+executable memory; elsewhere the generated WFE spin stays, because it is measurably cheaper and Android's
+shipping tier is the JIT.
+
+**Retire when:** the pinned upstream gains a non-code-generating lock, or a platform admits code pages to
+non-JIT launches (it will not).
