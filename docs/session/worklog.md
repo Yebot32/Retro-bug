@@ -1383,3 +1383,11 @@ assembled into the app like any other source.
   the marker. The arm64 compile lane caught `sigemptyset` not being declared at the iOS SDK's feature
   level (fixed by relying on the zero-initialised mask), and the tablet gate stayed green: aot 178/0,
   interp 1112/0, tier diff 1039/0, the scope image through `__init_tcb` and the constructors.
+- **Build 36** (`32a983a`, profiles ref `aot/profiles` @ `8b83764`), 21,003,392 bytes, SHA-256
+  `48d3b7b6c639a86e45ad9992599482259bc1dc4eb19d5c5b350d4700f7c8b7f4`: the JIT-first build for the owner's
+  working iPad JIT. The probe accepts a debugger-attached launch (AltStore/SideStore "Enable JIT") or a
+  signed JIT grant, tested safely with a MAP_JIT R|W|X mapping that fails with EPERM where the grant is
+  absent (the first attempt used the macOS-only `SecTask*` API, which the iOS SDK does not declare, and
+  the arm64 lane caught it). A launch that can run a JIT now takes Tier J and then Tier I and never the
+  AOT entry; only a launch without JIT permission falls back to AOT. The AOT entry crash on iOS remains
+  open for non-JIT installs, with the marker keeping them on Tier I after one attempt.
