@@ -269,6 +269,43 @@ void fib_matches_tier_one_for_every_n() {
               rig.aot->fallback_count());
 }
 
+/// The fixture's `wide` function is VFP code. The emitter used to refuse every coprocessor-space block,
+/// which kept this function on Tier I; it now translates VFP to ordinary FP IR, so the emitted code has
+/// to produce the same answer, FPSCR and D registers as the interpreter for each argument. The expected
+/// results (52, 50, 55) come from `abi_call_test.cpp`'s table for the same export.
+void vfp_blocks_match_tier_one() {
+  Rig rig = Build(kAotFixtureImage);
+  if (!rig.ok) return;
+  const auto wide = rig.mod->FindExport("Java_com_retrobug_fixture_MainActivity_wide");
+  CHECK_CTX(wide.has_value(), "the fixture exports wide");
+  if (!wide) return;
+  const std::uint32_t text_base = kAotFixtureImage.load_bias + kAotFixtureImage.text_vaddr;
+  CHECK_CTX(rig.aot->image().Resolve(wide->addr - text_base, wide->thumb) != nullptr,
+            "wide's entry has no emitted block");
+
+  const std::int32_t args[] = {0, 2, -1};
+  const std::int32_t expected[] = {52, 50, 55};
+  for (std::size_t i = 0; i < 3; ++i) {
+    const exec::MachineState start = EntryState(wide->addr, args[i], wide->thumb);
+    exec::MachineState si = start;
+    exec::MachineState sj = start;
+    const std::size_t before = rig.aot->fallback_count();
+    const exec::RunResult ri = rig.interp->Run(si, 8'000'000);
+    const exec::RunResult rj = rig.aot->Run(sj, 8'000'000);
+    const std::string what = "wide(" + std::to_string(args[i]) + ")";
+    CHECK_CTX(ri.reason == exec::StopReason::Returned, what + " (Tier I) did not return");
+    CHECK_CTX(rj.reason == exec::StopReason::Returned, what + " (AOT) did not return");
+    CHECK_CTX(static_cast<std::int32_t>(sj.r[0]) == expected[i],
+              what + " = " + std::to_string(static_cast<std::int32_t>(sj.r[0])) + ", expected " +
+                  std::to_string(expected[i]));
+    CHECK_CTX(rig.aot->fallback_count() == before, what + " fell back out of translated code");
+    const std::string diff = StateDiff(si, sj);
+    CHECK_CTX(diff.empty(), what + ": " + diff);
+    std::fprintf(stderr, "[aot] %s=%d fallbacks=%zu fpscr=%x\n", what.c_str(),
+                 static_cast<std::int32_t>(sj.r[0]), rig.aot->fallback_count() - before, sj.fpscr);
+  }
+}
+
 /// The `.S` and the table are one emission, not two files that happen to share a fingerprint. The
 /// generated table carries the code size and block count; the assembly repeats both in its header and
 /// in a `.rodata` word pair the table declares. This asserts both halves agree with each other.
@@ -461,13 +498,16 @@ void the_budget_covers_aot_and_fallback_work() {
   CHECK(rest.reason == exec::StopReason::Returned);
   CHECK(state.r[0] == 55);
 
-  // `wide` is one of the fixture functions the emitter refuses (VFP/coprocessor blocks), so this is
-  // the refused-block path: no table entry exists anywhere in it.
+  // `wide` is the fixture's VFP function. It used to be the refused-block path — the byte scan treated
+  // every coprocessor-space encoding as opaque, and VFP lives there — so this check asserted no entry
+  // existed. VFP is translated to ordinary FP IR now, and the assertion is the opposite: the export has
+  // an emitted block. A refused entry is still covered by the all-miss run above (a table with no entry
+  // at all) and by the synthetic guest page below.
   const auto wide = rig.mod->FindExport("Java_com_retrobug_fixture_MainActivity_wide");
   if (wide) {
     const std::uint32_t text_base = kAotFixtureImage.load_bias + kAotFixtureImage.text_vaddr;
-    CHECK_CTX(rig.aot->image().Resolve(wide->addr - text_base, wide->thumb) == nullptr,
-              "wide's entry unexpectedly has an emitted block");
+    CHECK_CTX(rig.aot->image().Resolve(wide->addr - text_base, wide->thumb) != nullptr,
+              "wide's VFP entry has no emitted block");
   }
 
   // A two-encoding loop in guest memory that the image cannot cover: `movs r0, #0; b .-4`. The `b`
@@ -501,6 +541,7 @@ void the_budget_covers_aot_and_fallback_work() {
 int main() {
   fib_matches_tier_one_for_every_n();
   table_and_assembly_are_one_emission();
+  vfp_blocks_match_tier_one();
   non_default_descriptors_fall_back();
   a_missing_block_falls_back_and_is_counted();
   the_budget_covers_aot_and_fallback_work();
