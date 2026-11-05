@@ -1428,3 +1428,17 @@ assembled into the app like any other source.
   so not a PLT regression). Expected device signature: `aot: profile aot_kitkat matches`, then
   `engine: guest code runs on AOT`, a much lower fallback count in `aot-runtime:`, and the fps line.
   Trade-off: the IPA grows by the ~1.5 MB of PLT code; Tier J is skipped on launches without MAP_JIT.
+- **Build 39 delivered** (`9ca9b31`, profiles ref `aot/profiles` @ `179e36b`), 27,637,999 bytes, SHA-256
+  `b2f4d7fc3556c84901a45a4cbdc3f9d9e26e99230f83263ea27b4721811f8059`. Two more coverage fixes landed
+  after the first build-39 attempt: **VFP was refused by the same byte scan** as NEON (cp10/cp11 live in
+  coprocessor space but translate to ordinary FP IR) — libm 962 → 5,859 blocks, libgame 85,095 →
+  107,156, libc 21,514 → 23,447; and **PLT stubs** are now translated (libgame +8,761, libc +591,
+  libdlgl +189). The IPA grew 21.0 → 27.6 MB (+6.6 MB) for the added translated code — the largest
+  trade-off of this build. Tier J also gained a MAP_JIT code block (patch 0011), with the write-protect
+  toggle resolved through `dlsym` because the iOS SDK marks `pthread_jit_write_protect_np` unavailable;
+  and the tier list is now AOT first, Tier J second, Tier I last, with Tier J offered only when a MAP_JIT
+  mapping is actually granted. Tablet gate: `rb_aotgen_tests` 80/0, `rb_aot_tests` 195/0 (including a new
+  differential that runs the VFP export `wide` on both tiers), scope image loads with `aot_active=1`.
+  Device acceptance: launch either game, expect `aot: profile … matches`, `engine: guest code runs on
+  AOT (offline-translated AArch64)`, then an `aot-runtime:` line whose fallback count should be far below
+  build 38's 3.5 M, and the `render: … fps` line.
