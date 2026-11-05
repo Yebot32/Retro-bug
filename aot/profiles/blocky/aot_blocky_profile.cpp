@@ -6,6 +6,7 @@
 extern const rb::exec::AotImageInfo kAotBlockyLibcImage;
 extern const rb::exec::AotImageInfo kAotBlockyLibgameImage;
 extern const rb::exec::AotImageInfo kAotBlockyLibmImage;
+extern const rb::exec::AotImageInfo kAotBlockyLibstdcImage;
 extern const rb::exec::AotImageInfo kAotBlockyLibzImage;
 
 namespace {
@@ -13,8 +14,9 @@ const rb::exec::AotLibrary kAotProfileLibraries[] = {
     {"libc.so", "8fc841e8568caf228e7fca49076991ae8c8e693d81c525fadf1ac888c5b152b4", &kAotBlockyLibcImage},
     {"libgame.so", "79a402dd1e1a0bcce5f5a8633fa56c606f5decddf6e2f261b73ec0f7248e7e66", &kAotBlockyLibgameImage},
     {"libm.so", "32d06ce18013f9d81595569a83e73b7fe527b7727811fd243088d3ec256e082d", &kAotBlockyLibmImage},
+    {"libstdc++.so", "f5b04cffc34c6dc438e273caeeac5449470d87ae36143b2d106e8e01d842b76f", &kAotBlockyLibstdcImage},
     {"libz.so", "b2bcbc707c36d2147f70de6a135d588ffe98543635a745447d35d46993324181", &kAotBlockyLibzImage},
 };
 }  // namespace
 
-extern "C" const rb::exec::AotProfile rb_aot_profile_blocky = {"aot_blocky", kAotProfileLibraries, 4};
+extern "C" const rb::exec::AotProfile rb_aot_profile_blocky = {"aot_blocky", kAotProfileLibraries, 5};

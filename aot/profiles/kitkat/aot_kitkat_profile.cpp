@@ -7,6 +7,7 @@ extern const rb::exec::AotImageInfo kAotKitkatLibandroidkitkatImage;
 extern const rb::exec::AotImageInfo kAotKitkatLibcImage;
 extern const rb::exec::AotImageInfo kAotKitkatLibdlglImage;
 extern const rb::exec::AotImageInfo kAotKitkatLibmImage;
+extern const rb::exec::AotImageInfo kAotKitkatLibstdcImage;
 extern const rb::exec::AotImageInfo kAotKitkatLibzImage;
 
 namespace {
@@ -15,8 +16,9 @@ const rb::exec::AotLibrary kAotProfileLibraries[] = {
     {"libc.so", "8fc841e8568caf228e7fca49076991ae8c8e693d81c525fadf1ac888c5b152b4", &kAotKitkatLibcImage},
     {"libdlgl.so", "58d0c5384ecb77c9b27ee3823e07d264c30d4b86a4318227b32593c1bb3357e0", &kAotKitkatLibdlglImage},
     {"libm.so", "32d06ce18013f9d81595569a83e73b7fe527b7727811fd243088d3ec256e082d", &kAotKitkatLibmImage},
+    {"libstdc++.so", "f5b04cffc34c6dc438e273caeeac5449470d87ae36143b2d106e8e01d842b76f", &kAotKitkatLibstdcImage},
     {"libz.so", "b2bcbc707c36d2147f70de6a135d588ffe98543635a745447d35d46993324181", &kAotKitkatLibzImage},
 };
 }  // namespace
 
-extern "C" const rb::exec::AotProfile rb_aot_profile_kitkat = {"aot_kitkat", kAotProfileLibraries, 5};
+extern "C" const rb::exec::AotProfile rb_aot_profile_kitkat = {"aot_kitkat", kAotProfileLibraries, 6};
