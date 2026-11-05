@@ -1459,3 +1459,7 @@ assembled into the app like any other source.
   minutes inside one nativeRender (a level load) — the launcher looked hung. `rb_ios_stop_async` joins and
   tears down on a detached thread; EXIT returns immediately. Tablet gate: `rb_aotgen_tests` 80/0,
   `rb_aot_tests` 195/0 (168-block fixture), scope image loads with `aot_active=1`.
+- **Build 40 delivered** (`d4982a2`, profiles ref `aot/profiles` @ `8a316ae`), 29,153,659 bytes, SHA-256
+  `6ac21533efba7d2c407e8c6dca0dab52c459f0249ddd23c8b97769f5f76967f9`. Device acceptance: the
+  `aot-runtime:` fallback count in the 10 s report should collapse relative to build 39 (2.58 M in KitKat's
+  first 10 s, 32 M in Blocky), and exiting a game must return to the launcher immediately.
