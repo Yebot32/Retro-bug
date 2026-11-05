@@ -23,9 +23,6 @@
 #if defined(__APPLE__)
 #include <CoreFoundation/CoreFoundation.h>
 #endif
-#if defined(__APPLE__) && __has_include(<Security/Security.h>)
-#include <Security/Security.h>
-#endif
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -110,26 +107,18 @@ bool DebuggerAttached() {
 #endif
 }
 
-/// A JIT can also be granted by signing: the `dynamic-codesigning` entitlement (TrollStore-style
-/// installations) lets a home-screen launch write and run its own code without a debugger, and
-/// `com.apple.security.cs.allow-jit` is the equivalent macOS grant. A launch carrying one of these is as
-/// capable as a traced one, and must not be refused by a probe that only looks for a debugger.
-bool HasJitEntitlement() {
-#if defined(__APPLE__) && __has_include(<Security/Security.h>)
-  SecTaskRef task = SecTaskCreateFromSelf(kCFAllocatorDefault);
-  if (task == nullptr) return false;
-  bool granted = false;
-  for (CFStringRef name : {CFSTR("dynamic-codesigning"), CFSTR("com.apple.security.cs.allow-jit")}) {
-    CFTypeRef value = SecTaskCopyValueForEntitlement(task, name, nullptr);
-    if (value != nullptr) {
-      granted = CFGetTypeID(value) == CFBooleanGetTypeID() &&
-                CFBooleanGetValue(static_cast<CFBooleanRef>(value));
-      CFRelease(value);
-      if (granted) break;
-    }
-  }
-  CFRelease(task);
-  return granted;
+/// A JIT can also be granted by signing rather than by a debugger: a launch holding the
+/// `dynamic-codesigning` entitlement (the TrollStore-style install) may map and run its own code from a
+/// home-screen launch. The safe way to ask is to try a MAP_JIT R|W|X mapping — it succeeds only for a
+/// process the kernel has granted JIT to, and fails with EPERM otherwise, without touching any code page.
+bool MapJitWorks() {
+#if defined(MAP_JIT)
+  constexpr std::size_t kLen = 64 * 1024;
+  void* const p = ::mmap(nullptr, kLen, PROT_READ | PROT_WRITE | PROT_EXEC,
+                         MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
+  if (p == MAP_FAILED) return false;
+  ::munmap(p, kLen);
+  return true;
 #else
   return false;
 #endif
@@ -138,7 +127,7 @@ bool HasJitEntitlement() {
 bool JitAvailable() {
   int v = g_jit_available.load(std::memory_order_relaxed);
   if (v < 0) {
-    v = ((DebuggerAttached() || HasJitEntitlement()) && ProbeExecutableMemory()) ? 1 : 0;
+    v = ((DebuggerAttached() || MapJitWorks()) && ProbeExecutableMemory()) ? 1 : 0;
     g_jit_available.store(v, std::memory_order_relaxed);
   }
   return v == 1;
@@ -570,10 +559,10 @@ bool RbIosSession::Boot(std::string* err) {
   } else if (jit_wanted) {
     self->Log("jit: this launch can run a JIT — trying Tier J");
   } else {
-    self->Log(DebuggerAttached() || HasJitEntitlement()
+    self->Log(DebuggerAttached() || MapJitWorks()
                   ? "jit: this launch has JIT permission but the code region cannot be made writable — "
                     "next engine"
-                  : "jit: no debugger and no JIT entitlement — a home-screen launch cannot run a JIT "
+                  : "jit: no debugger and no JIT grant — a home-screen launch cannot run a JIT "
                     "(AltStore's Enable JIT attaches a debugger) — next engine");
   }
     // The AOT profile is compiled into this app; it runs only when every profiled library's digest matches
