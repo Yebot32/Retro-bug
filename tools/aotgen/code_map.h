@@ -31,10 +31,11 @@ struct CodeMapEntry {
 
 struct CodeMap {
   std::string soname;
-  /// File offset and length of `.text`. `entries[i].off` is relative to `text_vaddr`, which is the
-  /// section's link-time address; the emitter needs it to form the guest PCs Dynarmic translates at
-  /// (it is the one fact the discovery half did not previously publish, because discovery itself only
-  /// ever needed file-relative offsets).
+  /// File offset and length of the executable window: `.text` plus `.plt`/`.iplt`, whose stubs the linker
+  /// places on either side of `.text` and which every call to another library passes through.
+  /// `entries[i].off` is relative to `text_vaddr`, the window's link-time address; the emitter needs it to
+  /// form the guest PCs Dynarmic translates at (it is the one fact the discovery half did not previously
+  /// publish, because discovery itself only ever needed file-relative offsets).
   std::uint32_t text_off;
   std::uint32_t text_len;
   std::uint32_t text_vaddr;
@@ -50,7 +51,7 @@ enum : std::uint8_t {
   kFromInit = 2,     // DT_INIT or a DT_INIT_ARRAY slot
   kFromReloc = 4,    // .rel.dyn/.rel.plt addend (or GLOB_DAT symbol) in .text
   kFromExidx = 8,    // .ARM.exidx function start
-  kFromVeneer = 16,  // a linker veneer stub found inside .text
+  kFromVeneer = 16,  // a linker veneer stub inside .text, or a .plt/.iplt entry
   kFromTrace = 32,   // an indirect target recorded on device (AOT task 4)
 };
 

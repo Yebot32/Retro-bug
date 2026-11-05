@@ -31,7 +31,9 @@ constexpr std::uint32_t kPtLoad = 1;
 constexpr std::uint32_t kPtDynamic = 2;
 constexpr std::uint32_t kPtArmExidx = 0x7000'0001;
 
+constexpr std::uint32_t kShtProgbits = 1;
 constexpr std::uint32_t kShtNobits = 8;
+constexpr std::uint32_t kShfExecInstr = 0x4;
 
 constexpr std::uint32_t kSttFunc = 2;
 constexpr std::uint16_t kShnUndef = 0;
@@ -78,6 +80,17 @@ struct Image {
   std::vector<Segment> segments;
   Section text;
   bool has_text = false;
+  Section plt;
+  Section iplt;
+  bool has_plt = false;
+  bool has_iplt = false;
+  /// One address window over every executable section: `.text` and the PLT stubs, which in these images
+  /// sit either in front of `.text` (libdlgl, libandroidkitkat) or behind it (libc, libgame, libm, libz).
+  /// Starts outside the window are dropped, and `CodeMap::text_vaddr/text_len` describe this window, not
+  /// `.text` alone — a PLT stub that the profile skipped costs a Tier I fallback on every call through it.
+  std::uint32_t code_addr = 0;
+  std::uint32_t code_off = 0;
+  std::uint32_t code_size = 0;
 };
 
 struct Dynamic {
@@ -280,6 +293,61 @@ bool ParseImage(const std::vector<std::uint8_t>& elf, Image* img, std::string* e
   if (!InBounds(*img, text->offset, text->size)) return Fail(err, "truncated .text section");
   img->text = *text;
   img->has_text = true;
+
+  if (const Section* plt = FindSection(*img, ".plt");
+      plt != nullptr && plt->type == kShtProgbits && plt->size != 0 &&
+      InBounds(*img, plt->offset, plt->size)) {
+    img->plt = *plt;
+    img->has_plt = true;
+  }
+  if (const Section* iplt = FindSection(*img, ".iplt");
+      iplt != nullptr && iplt->type == kShtProgbits && iplt->size != 0 &&
+      InBounds(*img, iplt->offset, iplt->size)) {
+    img->iplt = *iplt;
+    img->has_iplt = true;
+  }
+
+  // The emitter reads every start through one `text_off + (vaddr - text_vaddr)` mapping, so the window is
+  // only widened when the file layout really is that contiguous: each executable section's file offset
+  // must equal the one that mapping gives. An image whose linker laid them out some other way keeps the
+  // old `.text`-only answer rather than reading a block out of an unrelated part of the file.
+  std::uint32_t lo = text->addr;
+  std::uint32_t lo_off = text->offset;
+  std::uint64_t hi = static_cast<std::uint64_t>(text->addr) + text->size;
+  bool contiguous = true;
+  for (const Section& s : img->sections) {
+    if ((s.flags & kShfExecInstr) == 0 || s.type != kShtProgbits || s.size == 0) continue;
+    if (!InBounds(*img, s.offset, s.size)) continue;
+    if (static_cast<std::uint64_t>(s.addr) + s.size > 0x1'0000'0000ull) {
+      contiguous = false;
+      break;
+    }
+    if (s.addr < lo) {
+      lo = s.addr;
+      lo_off = s.offset;
+    }
+    hi = std::max(hi, static_cast<std::uint64_t>(s.addr) + s.size);
+  }
+  if (contiguous) {
+    for (const Section& s : img->sections) {
+      if ((s.flags & kShfExecInstr) == 0 || s.type != kShtProgbits || s.size == 0) continue;
+      if (!InBounds(*img, s.offset, s.size)) continue;
+      if (static_cast<std::uint64_t>(s.offset) !=
+          static_cast<std::uint64_t>(lo_off) + (s.addr - lo)) {
+        contiguous = false;
+        break;
+      }
+    }
+  }
+  if (contiguous) {
+    img->code_addr = lo;
+    img->code_off = lo_off;
+    img->code_size = static_cast<std::uint32_t>(hi - lo);
+  } else {
+    img->code_addr = text->addr;
+    img->code_off = text->offset;
+    img->code_size = text->size;
+  }
   return true;
 }
 
@@ -318,18 +386,18 @@ bool ReadDynamic(const Image& img, Dynamic* dyn, std::string* err) {
 
 bool AddressInText(const Image& img, std::uint32_t address) {
   const std::uint32_t aligned = address & ~1u;
-  return aligned >= img.text.addr &&
+  return aligned >= img.code_addr &&
          static_cast<std::uint64_t>(aligned) <
-             static_cast<std::uint64_t>(img.text.addr) + img.text.size;
+             static_cast<std::uint64_t>(img.code_addr) + img.code_size;
 }
 
-/// `size` ends up in the on-disk row's u16. A start that claims to run past the section is clipped: the
-/// emitter decodes inside `.text`, so a larger size would only invite a read past the buffer. Both a
+/// `size` ends up in the on-disk row's u16. A start that claims to run past the window is clipped: the
+/// emitter decodes inside the window, so a larger size would only invite a read past the buffer. Both a
 /// symbol's `st_size` and a trace's size go through here so the cap cannot be forgotten on one path.
 void WidenSize(const Image& img, std::uint32_t off, std::uint32_t size, CodeMapEntry* entry) {
-  if (size == 0) return;
+  if (size == 0 || off > img.code_size) return;
   const std::uint32_t capped =
-      std::min({size, static_cast<std::uint32_t>(0xffff), img.text.size - off});
+      std::min({size, static_cast<std::uint32_t>(0xffff), img.code_size - off});
   if (capped > entry->size) entry->size = static_cast<std::uint16_t>(capped);
 }
 
@@ -339,7 +407,7 @@ void WidenSize(const Image& img, std::uint32_t off, std::uint32_t size, CodeMapE
 void AddStart(const Image& img, Merged* merged, std::uint32_t address, std::uint8_t source,
               bool arch_known, bool thumb, std::uint32_t size) {
   if (!AddressInText(img, address)) return;
-  const std::uint32_t off = (address & ~1u) - img.text.addr;
+  const std::uint32_t off = (address & ~1u) - img.code_addr;
   CodeMapEntry& entry = (*merged)[off];
   entry.off = off;
   entry.sources |= source;
@@ -551,6 +619,40 @@ void AddVeneers(const Image& img, Merged* merged) {
   }
 }
 
+/// One PLT stub: `add r12, pc, #lo`; `add r12, r12, #hi`; `ldr pc, [r12, #got]!`. Stubs are 12 bytes and
+/// packed 12- or 16-byte apart depending on the image's linker, so they are found by this pattern rather
+/// than by a stride. Nothing else names them: a caller's relocation names the GOT slot, and the call site
+/// branches to the stub directly.
+bool PltStubAt(const Image& img, const Section& plt, std::uint32_t off) {
+  std::uint32_t w0 = 0;
+  std::uint32_t w1 = 0;
+  std::uint32_t w2 = 0;
+  if (!Read32(img, static_cast<std::uint64_t>(plt.offset) + off, &w0)) return false;
+  if (!Read32(img, static_cast<std::uint64_t>(plt.offset) + off + 4, &w1)) return false;
+  if (!Read32(img, static_cast<std::uint64_t>(plt.offset) + off + 8, &w2)) return false;
+  if ((w0 & 0xffff'f000u) != 0xe28f'c000u) return false;
+  if ((w1 & 0xffff'f000u) != 0xe28c'c000u) return false;
+  return (w2 & 0xffff'f000u) == 0xe5bc'f000u;
+}
+
+/// Every PLT entry is a code start. Without these, a translated block's call to an imported function
+/// halts at the stub, misses the dispatch cache and runs the stub through Tier I on every single call —
+/// the build-38 AOT log showed exactly that: hundreds of thousands of misses in libc's `.plt` range
+/// (0x120d0xxx), just past the end of `.text`. The section's first entry is the lazy-binding resolver and
+/// is a block as well; it carries a literal word after its final branch, which the block never reaches.
+void AddPlt(const Image& img, Merged* merged) {
+  const Section* sections[2] = {img.has_plt ? &img.plt : nullptr,
+                                img.has_iplt ? &img.iplt : nullptr};
+  for (const Section* plt : sections) {
+    if (plt == nullptr) continue;
+    AddStart(img, merged, plt->addr, kFromVeneer, true, false, 0);
+    for (std::uint32_t off = 4; off + 12 <= plt->size; off += 4) {
+      if (!PltStubAt(img, *plt, off)) continue;
+      AddStart(img, merged, plt->addr + off, kFromVeneer, true, false, 0);
+    }
+  }
+}
+
 /// A trace is written by a different producer (AOT task 4), so the map's invariants are re-established
 /// here rather than trusted: `off` is a text-relative (even) file offset inside `.text`, `flags` carries
 /// exactly one ISA bit, and `size` obeys the same 0xffff / end-of-`.text` clamp as a symbol.
@@ -560,7 +662,7 @@ void MergeTrace(const Image& img, const CodeMap* trace, Merged* merged) {
     // The Thumb bit never survives into the map's unit: `off` is `(vaddr & ~1) - text_vaddr`. A producer
     // that left the bit in is masked rather than dropped, since the start it names is still real.
     const std::uint32_t off = source.off & ~1u;
-    if (off >= img.text.size) continue;
+    if (off >= img.code_size) continue;
     CodeMapEntry& entry = (*merged)[off];
     entry.off = off;
     entry.sources |= kFromTrace;
@@ -608,12 +710,13 @@ CodeMap DiscoverCodeMap(const std::vector<std::uint8_t>& elf, const CodeMap* tra
   if (!AddRelocations(img, &merged, err)) return map;
   if (!AddExidx(img, &merged, err)) return map;
   AddVeneers(img, &merged);
+  AddPlt(img, &merged);
   MergeTrace(img, trace, &merged);
 
   map.soname = ReadSoname(img, dynamic);
-  map.text_off = img.text.offset;
-  map.text_len = img.text.size;
-  map.text_vaddr = img.text.addr;
+  map.text_off = img.code_off;
+  map.text_len = img.code_size;
+  map.text_vaddr = img.code_addr;
   map.entries.reserve(merged.size());
   for (const auto& [off, entry] : merged) {
     (void)off;

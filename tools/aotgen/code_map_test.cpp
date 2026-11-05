@@ -475,20 +475,21 @@ void LibGame(const std::vector<std::uint8_t>& bytes) {
 
   Check(!map.entries.empty(), "libgame has starts");
   Check(map.entries.size() >= 16000, "libgame starts >= 16000");
-  // 16,789 is dynsym ∪ exidx; the 1,633 veneer stubs are additional starts, so the merged map is
-  // 18,565. The upper bound keeps the "no runaway merge" intent without contradicting that source.
-  Check(map.entries.size() <= 19000, "libgame starts <= 19000 (16,789 + 1,633 veneers)");
+  // 16,789 dynsym ∪ exidx starts, 1,633 veneer stubs inside .text, and 8,761 PLT entries (the .plt is
+  // 0x223a0 bytes of 16-byte stubs behind .text). The upper bound keeps the "no runaway merge" intent.
+  Check(map.entries.size() <= 29000, "libgame starts <= 29000 (16,789 + 1,633 veneers + 8,761 PLT)");
   Check(CountSource(map, kFromExidx) >= 14000, "libgame exidx is the main source");
-  Check(CountSource(map, kFromVeneer) >= 1500, "libgame veneer scan found the movw/movt stubs");
+  Check(CountSource(map, kFromVeneer) >= 9000, "libgame veneer scan found the movw/movt and PLT stubs");
   Check(CountSource(map, kFromExport) >= 14000, "libgame exports are present");
   Check(CountSource(map, kFromReloc) >= 1000, "libgame relocations reach code");
   Check(CountSource(map, kFromInit) >= 40, "libgame constructors are present");
   Check(map.soname == "libgame.so", "libgame soname comes from DT_SONAME");
   Check(map.text_off == 0x24d0f0, "libgame text_off is the .text file offset");
-  Check(NearPage(map.text_len, 1931), "libgame text_len is 1,931 KB ± one page");
+  // 1,931 KB of .text plus the 137 KB .plt behind it: the window covers both.
+  Check(NearPage(map.text_len, 2069), "libgame text_len is 2,069 KB ± one page (text + PLT)");
   Check(static_cast<std::uint64_t>(map.text_off) + map.text_len <= bytes.size(),
-        "libgame text lies inside the file");
-  Check(AllOffsetsInText(map), "every libgame start and size lies inside .text");
+        "libgame code lies inside the file");
+  Check(AllOffsetsInText(map), "every libgame start and size lies inside the code window");
   Check(LargestSize(map) > 0, "libgame symbol sizes were read");
   Check(StrictlyOrdered(map), "libgame entries are strictly ordered by offset");
   Check(OneIsaAndASource(map), "every libgame entry has one ISA and one source");
@@ -507,11 +508,16 @@ void LibDlgl(const std::vector<std::uint8_t>& bytes) {
   Check(CountSource(map, kFromExport) >= 1800, "libdlgl exports are present");
   Check(CountSource(map, kFromVeneer) >= 4, "libdlgl ARM stubs were found");
   Check(map.soname == "libdlgl.so", "libdlgl soname comes from DT_SONAME");
-  Check(map.text_off == 0x2a680, "libdlgl text_off is the .text file offset");
-  Check(NearPage(map.text_len, 364), "libdlgl text_len is 364 KB ± one page");
+  // libdlgl's linker put .plt *before* .text, so the code window starts at the PLT and offset 0 is the
+  // lazy-binding resolver entry.
+  Check(map.text_off == 0x29d98, "libdlgl text_off is the .plt file offset that starts the window");
+  Check(!map.entries.empty() && map.entries.front().off == 0,
+        "libdlgl's code window opens on the PLT resolver entry");
+  // 364 KB of .text plus the 2.3 KB .plt in front of it.
+  Check(NearPage(map.text_len, 367), "libdlgl text_len is 367 KB ± one page (text + PLT)");
   Check(static_cast<std::uint64_t>(map.text_off) + map.text_len <= bytes.size(),
-        "libdlgl text lies inside the file");
-  Check(AllOffsetsInText(map), "every libdlgl start and size lies inside .text");
+        "libdlgl code lies inside the file");
+  Check(AllOffsetsInText(map), "every libdlgl start and size lies inside the code window");
   Check(LargestSize(map) > 0, "libdlgl symbol sizes were read");
   Check(StrictlyOrdered(map), "libdlgl entries are strictly ordered by offset");
   Check(OneIsaAndASource(map), "every libdlgl entry has one ISA and one source");
