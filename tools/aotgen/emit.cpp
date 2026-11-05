@@ -283,6 +283,27 @@ std::uint32_t EncodeBranch(std::ptrdiff_t site, std::ptrdiff_t target, bool link
 bool IsThumb32(std::uint16_t hw) {
   return (hw & 0xe000u) == 0xe000u && (hw & 0x1800u) != 0;
 }
+/// The block's last instruction is a call with a link: the callee returns through a computed `bx lr`,
+/// so the caller continues at the block's end location and that address is a real entry — a block start
+/// no direct branch names. Without it the return from every call fell back (build 41: libgame+0x30027a
+/// and neighbours, the post-call continuations of stb's inner loops).
+bool EndsWithCall(const ElfCallbacks& bytes, std::uint32_t end, bool thumb) {
+  if (end < 4) return false;
+  if (thumb) {
+    std::uint16_t hw1 = 0;
+    std::uint16_t hw2 = 0;
+    if (!bytes.ReadBytes(end - 4, &hw1, 2) || !bytes.ReadBytes(end - 2, &hw2, 2)) return false;
+    // 32-bit bl/blx: 11110... then 11... — B.W carries 10 instead.
+    if ((hw1 & 0xf800u) == 0xf000u && (hw2 & 0xc000u) == 0xc000u) return true;
+    // 16-bit `blx rN` (0x4780 | Rm).
+    return (hw1 & 0xff87u) == 0x4780u;
+  }
+  std::uint32_t word = 0;
+  if (!bytes.ReadBytes(end - 4, &word, 4)) return false;
+  if ((word & 0x0f00'0000u) == 0x0b00'0000u) return true;  // bl <imm24>
+  if ((word & 0xfe00'0000u) == 0xfa00'0000u) return true;  // blx <imm24>
+  return (word & 0x0fff'fff0u) == 0x012f'ff30u;           // blx <Rm>
+}
 /// The refusal rule's byte half: a coprocessor instruction that is *not* VFP. ARM bits 27-25 = 110 and
 /// Thumb 0xEC/0xED/0xEE cover VFP (cp10/cp11) as well as the debug and system coprocessors, and only the
 /// latter bake host callbacks: VFP is lowered to ordinary FP IR by the front end and translated like any
@@ -866,7 +887,7 @@ struct Emitter {
         }
         targets.push_back(target_desc);
       }
-      if (raises_exception) {
+      if (raises_exception || EndsWithCall(callbacks, end, thumb)) {
         const std::uint32_t end_pc = end_loc.PC();
         if (end_pc >= callbacks.text_base() && end_pc - callbacks.text_base() < map_.text_len) {
           targets.push_back(IR::LocationDescriptor{end_loc});

@@ -640,6 +640,28 @@ bool PltStubAt(const Image& img, const Section& plt, std::uint32_t off) {
 /// the build-38 AOT log showed exactly that: hundreds of thousands of misses in libc's `.plt` range
 /// (0x120d0xxx), just past the end of `.text`. The section's first entry is the lazy-binding resolver and
 /// is a block as well; it carries a literal word after its final branch, which the block never reaches.
+/// The case count of a switch dispatch: `cmp rN, #imm` immediately before its branch, in either the
+/// 16-bit form (r0-r7, imm8) or the wide form (any register, imm12). The wide form is what a switch on a
+/// high register uses, and a scan that knew only the 16-bit form silently decoded no table there — the
+/// stb image loaders in Blocky switch on r9 with `cmp.w r9, #6`, which left their loops on Tier I.
+std::uint32_t CaseCountBefore(const std::uint8_t* text, std::uint64_t length, std::uint64_t at) {
+  constexpr std::uint32_t kMaxEntries = 64;
+  for (std::uint32_t back = 2; back <= 24; back += 2) {
+    if (at < back) break;
+    const std::uint16_t hw = Le16(text + at - back);
+    if ((hw & 0xf800u) == 0x2800u) {  // cmp rN, #imm8
+      const std::uint32_t imm = hw & 0xffu;
+      return imm < kMaxEntries ? imm + 1 : 0;
+    }
+    if ((hw & 0xfff0u) == 0xf1b0u && at - back + 4 <= length) {  // cmp.w rN, #imm12
+      const std::uint16_t hw2 = Le16(text + at - back + 2);
+      const std::uint32_t imm = (((hw2 >> 12) & 0x7u) << 8) | (hw2 & 0xffu);
+      return imm < kMaxEntries ? imm + 1 : 0;
+    }
+  }
+  return 0;
+}
+
 /// Thumb `tbb`/`tbh` jump tables. A case label is a block entry that no symbol, exidx entry or
 /// relocation names, and static closure cannot follow the branch because the target is computed. The
 /// table is inline right after the instruction and the index is bounded by the `cmp rN, #imm` that
@@ -651,19 +673,12 @@ bool PltStubAt(const Image& img, const Section& plt, std::uint32_t off) {
 void AddJumpTables(const Image& img, Merged* merged) {
   const std::uint8_t* text = img.bytes->data() + img.text.offset;
   const std::uint64_t length = img.text.size;
-  constexpr std::uint32_t kMaxEntries = 64;
   for (std::uint64_t i = 0; i + 4 <= length; i += 2) {
     if (Le16(text + i) != 0xe8dfu) continue;
     const std::uint16_t second = Le16(text + i + 2);
     const bool halfword_entries = (second & 0xfff0u) == 0xf010u;  // tbh [pc, rN, lsl #1]
     if (!halfword_entries && (second & 0xfff0u) != 0xf000u) continue;  // tbb [pc, rN]
-    std::uint32_t count = 0;
-    for (std::uint32_t back = 2; back <= 24 && i >= back; back += 2) {
-      const std::uint16_t hw = Le16(text + i - back);
-      if ((hw & 0xf800u) != 0x2800u) continue;  // cmp rN, #imm8
-      if ((hw & 0xffu) < kMaxEntries) count = (hw & 0xffu) + 1;
-      break;
-    }
+    const std::uint32_t count = CaseCountBefore(text, length, i);
     if (count == 0) continue;
     const std::uint32_t at = img.text.addr + static_cast<std::uint32_t>(i);
     const std::uint32_t table = at + 4;  // the instruction's PC
@@ -681,6 +696,88 @@ void AddJumpTables(const Image& img, Merged* merged) {
         target = table + 2u * v;
       }
       AddStart(img, merged, target, kFromVeneer, true, true, 0);
+    }
+  }
+}
+
+/// libgcc's Thumb-1 switch helpers (`__gnu_thumb1_case_uqi`, `_uhi`, `_si`). A `bl` to one of them
+/// returns to a *computed* case label: the helper reads an inline table at the return address, adds the
+/// entry and branches there. Static closure cannot follow the return, and the code behind it is often
+/// reachable in no other way — build 41's KitKat hot sites (libdlgl+0x394f6 and 0x3956e, ~3 M fallbacks
+/// per 10 s) sit behind such a switch. The helpers are unnamed in a stripped image, so they are found by
+/// their bodies; each call site's table is decoded from the return address, with the case count from the
+/// `cmp rN, #imm` that guards the call.
+void AddThumbCaseTables(const Image& img, Merged* merged) {
+  const std::uint8_t* text = img.bytes->data() + img.text.offset;
+  const std::uint64_t length = img.text.size;
+  enum Kind { kUqi, kUhi, kSi };
+  struct Helper {
+    std::uint32_t addr;
+    Kind kind;
+  };
+  std::vector<Helper> helpers;
+  for (std::uint64_t i = 0; i + 24 <= length; i += 2) {
+    if (Le16(text + i) != 0x4671u) continue;  // mov r1, lr
+    bool uqi = false;
+    bool uhi = false;
+    bool si = false;
+    for (std::uint64_t k = i + 2; k + 4 <= i + 22 && k + 4 <= length; k += 2) {
+      const std::uint16_t h = Le16(text + k);
+      if (h == 0x5c09u) uqi = true;  // ldrb r1, [r1, r0]
+      if (h == 0x5a09u) uhi = true;  // ldrh r1, [r1, r0]
+      if (h == 0x5808u) si = true;   // ldr r0, [r1, r0]
+    }
+    if (!uqi && !uhi && !si) continue;
+    const Kind kind = uqi ? kUqi : (uhi ? kUhi : kSi);
+    // The body starts with `push {r1}` (uqi/uhi) or `push {r0, r1}` (si); the `mov r1, lr` is one
+    // instruction in. The call's target is the entry, not the mov.
+    const std::uint32_t at = img.text.addr + static_cast<std::uint32_t>(i);
+    const std::uint32_t entry = (i >= 2 && (Le16(text + i - 2) & 0xfffeu) == 0xb402u) ? at - 2 : at;
+    helpers.push_back({entry, kind});
+  }
+  if (helpers.empty()) return;
+
+  for (std::uint64_t i = 0; i + 4 <= length; i += 2) {
+    const std::uint16_t w1 = Le16(text + i);
+    const std::uint16_t w2 = Le16(text + i + 2);
+    if ((w1 & 0xf800u) != 0xf000u || (w2 & 0xd000u) != 0xd000u) continue;  // 32-bit bl
+    const std::uint32_t s = (w1 >> 10) & 1u;
+    const std::uint32_t j1 = (w2 >> 13) & 1u;
+    const std::uint32_t j2 = (w2 >> 11) & 1u;
+    const std::uint32_t i1 = !(j1 ^ s);
+    const std::uint32_t i2 = !(j2 ^ s);
+    std::int64_t delta = static_cast<std::int64_t>((s << 24) | (i1 << 23) | (i2 << 22) |
+                                                   ((w1 & 0x3ffu) << 12) | ((w2 & 0x7ffu) << 1));
+    if (s != 0) delta -= 1 << 25;
+    const std::uint32_t at = img.text.addr + static_cast<std::uint32_t>(i);
+    const std::uint32_t target = static_cast<std::uint32_t>(static_cast<std::int64_t>(at) + 4 + delta);
+    const auto helper = std::find_if(helpers.begin(), helpers.end(),
+                                     [target](const Helper& h) { return h.addr == target; });
+    if (helper == helpers.end()) continue;
+    const std::uint32_t count = CaseCountBefore(text, length, i);
+    if (count == 0) continue;
+    const std::uint32_t lr = at + 4;
+    const std::uint32_t table = helper->kind == kSi ? ((lr + 2) & ~3u) : (lr & ~1u);
+    for (std::uint32_t entry = 0; entry < count; ++entry) {
+      const std::optional<std::uint32_t> off =
+          FileOffset(img, table + entry * (helper->kind == kSi ? 4u : (helper->kind == kUhi ? 2u : 1u)));
+      if (!off.has_value()) break;
+      std::int64_t addend = 0;
+      if (helper->kind == kSi) {
+        std::uint32_t v = 0;
+        if (!Read32(img, *off, &v)) break;
+        addend = static_cast<std::int32_t>(v);
+      } else if (helper->kind == kUhi) {
+        std::uint16_t v = 0;
+        if (!Read16(img, *off, &v)) break;
+        addend = 2 * static_cast<std::int64_t>(v);
+      } else {
+        if (!InBounds(img, *off, 1)) break;
+        addend = 2 * static_cast<std::int64_t>((*img.bytes)[*off]);
+      }
+      const std::int64_t resolved = static_cast<std::int64_t>(table) + addend;
+      if (resolved < 0 || resolved > 0xffff'ffffll) break;
+      AddStart(img, merged, static_cast<std::uint32_t>(resolved), kFromVeneer, true, true, 0);
     }
   }
 }
@@ -757,6 +854,7 @@ CodeMap DiscoverCodeMap(const std::vector<std::uint8_t>& elf, const CodeMap* tra
   AddVeneers(img, &merged);
   AddPlt(img, &merged);
   AddJumpTables(img, &merged);
+  AddThumbCaseTables(img, &merged);
   MergeTrace(img, trace, &merged);
 
   map.soname = ReadSoname(img, dynamic);
