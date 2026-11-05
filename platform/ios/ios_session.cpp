@@ -81,10 +81,9 @@ bool ProbeExecutableMemory() {
   constexpr std::size_t kLen = 1u << 20;
   void* const p = ::mmap(nullptr, kLen, PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_ANON, -1, 0);
   if (p == MAP_FAILED) return false;
-  // oaknut's iOS code block maps R|X and emits through an mprotect(RW) / mprotect(RX) flip. A launch the
-  // kernel does not grant code-page write access cannot make the region writable, and the first store
-  // would fault inside the engine; the flip — not the mapping — is the permission that decides. The page
-  // is never written here.
+  // The flip is no longer the capability test (build 36-38 took Tier J on a successful flip and were
+  // killed at the first execution of the flipped page); it is logged beside the MAP_JIT answer because
+  // the pair identifies the grant. The page is never written or executed here.
   const bool writable = ::mprotect(p, kLen, PROT_READ | PROT_WRITE) == 0;
   const bool executable_again = writable && ::mprotect(p, kLen, PROT_READ | PROT_EXEC) == 0;
   ::munmap(p, kLen);
@@ -127,10 +126,14 @@ bool MapJitWorks() {
 bool JitAvailable() {
   int v = g_jit_available.load(std::memory_order_relaxed);
   if (v < 0) {
-    // The flip is the permission oaknut's iOS code block actually uses, so it is the answer: it fails on
-    // a launch without a JIT grant (the untraced AOT crash proves writes to the R|X page fault there) and
-    // succeeds wherever a real grant exists, whatever form that grant took.
-    v = ProbeExecutableMemory() ? 1 : 0;
+    // MAP_JIT is the permission the engine's code blocks now use (patches/dynarmic/0011), so it is the
+    // answer. The old probe asked whether an R|X page could be made writable with mprotect; on iOS that
+    // flip succeeds and the kernel then kills the process the first time the page executes — build 36-38
+    // took Tier J on that green light and died at the first guest call with no crash report. A MAP_JIT
+    // mapping is granted only to a launch the kernel actually permits to JIT and fails with EPERM
+    // otherwise, without touching any code page. The flip is still measured for the log, because a
+    // disagreement between the two is what says which kind of grant this launch received.
+    v = MapJitWorks() ? 1 : 0;
     g_jit_available.store(v, std::memory_order_relaxed);
   }
   return v == 1;
@@ -520,10 +523,10 @@ bool RbIosSession::Boot(std::string* err) {
     if (!self->host->OpenApk(self->apk, &why)) self->Log("assets: " + why);
   };
 
-  // Tier selection is automatic: Tier J when this launch can actually run a JIT (a debugger-attached
-  // launch; see DebuggerAttached), then AOT, then Tier I. A JIT that dies hard leaves no log line, so a
-  // marker is written before the attempt and removed after it; if it is still there for the same build,
-  // Tier J is not attempted again until the app is updated.
+  // Tier selection is automatic: AOT when a profile matches, then Tier J when this launch holds a real
+  // MAP_JIT grant, then Tier I. A JIT that dies hard leaves no log line, so a marker is written before the
+  // attempt and removed after it; if it is still there for the same build, Tier J is not attempted again
+  // until the app is updated.
   std::string build = "?";
 #if defined(__APPLE__)
   if (CFBundleRef bundle = CFBundleGetMainBundle()) {
@@ -544,9 +547,7 @@ bool RbIosSession::Boot(std::string* err) {
       marker_build.pop_back();
     }
   }
-  // The probe decides whether AOT is this launch's fallback at all: a launch that *can* run a JIT uses
-  // Tier J and then Tier I, never the AOT entry (which is still broken on iOS); a launch without JIT
-  // permission is the one AOT exists for.
+  // A launch holds a JIT only when the kernel grants MAP_JIT; the probe says which engine list to build.
   const bool jit_probe_ok = JitAvailable();
   bool jit_wanted = jit_probe_ok;
   const bool jit_crashed_this_build = marker_build == build;
@@ -560,13 +561,14 @@ bool RbIosSession::Boot(std::string* err) {
   if (jit_crashed_this_build && !jit_wanted) {
     // the marker explains it; no second line
   } else if (jit_wanted) {
-    self->Log("jit: the code region can be made writable — trying Tier J");
+    self->Log("jit: MAP_JIT is granted — Tier J is available (mprotect_flip=" +
+              std::to_string(ProbeExecutableMemory() ? 1 : 0) + ")");
   } else {
-    // The flip is what failed; the two capability facts are printed beside it so a log says which kind of
-    // launch this was (a debugger, a signed grant, or neither).
-    self->Log("jit: the code region cannot be made writable — next engine (debugger=" +
-              std::to_string(DebuggerAttached() ? 1 : 0) + " map_jit=" +
-              std::to_string(MapJitWorks() ? 1 : 0) + ")");
+    // The two facts beside the refusal say which kind of launch this was (a debugger, a signed grant,
+    // or neither) and whether the old, unsafe mprotect path would have looked green here.
+    self->Log("jit: no MAP_JIT grant — Tier J is skipped (debugger=" +
+              std::to_string(DebuggerAttached() ? 1 : 0) + " mprotect_flip=" +
+              std::to_string(ProbeExecutableMemory() ? 1 : 0) + ")");
   }
     // The AOT profile is compiled into this app; it runs only when every profiled library's digest matches
   // the imported APK, so an APK from another build keeps the interpreter.
@@ -597,7 +599,7 @@ bool RbIosSession::Boot(std::string* err) {
 #if defined(RB_AOT_PROFILE)
     if (aot_selected != nullptr) {
       self->Log("aot: the previous AOT launch in build " + build +
-                " did not finish — Tier I for this build (update the app to retry)");
+                " did not finish — AOT is skipped for this build (update the app to retry)");
     }
 #endif
     // The marker stays: this build keeps the working engine. A new build number changes the content the
@@ -628,16 +630,21 @@ bool RbIosSession::Boot(std::string* err) {
   }
   std::string boot_error;
   enum class Engine { Jit, Aot, TierI };
+  const auto engine_name = [](Engine e) {
+    return e == Engine::Jit ? "Tier J" : (e == Engine::Aot ? "AOT" : "Tier I");
+  };
   std::vector<Engine> attempts;
-  if (jit_wanted) attempts.push_back(Engine::Jit);
 #if defined(RB_AOT_PROFILE)
-  // AOT is the fallback for a launch without JIT permission, and for one whose JIT attempt died in this
-  // build (the marker): a Tier J crash must not cost the translated profile that is standing right there.
-  if (aot_selected != nullptr && !aot_crashed_this_build &&
-      (!jit_probe_ok || jit_crashed_this_build)) {
+  // AOT is tried first when a profile matches. It is the one fast path measured running on iOS: Tier J
+  // has never reached its second guest instruction on a device (the mprotect code-page path dies at the
+  // first call), and the translated profile runs the same Dynarmic-emitted AArch64 without a runtime
+  // compile or a per-launch grant. Tier J stays behind it as the fallback for shapes the profile does not
+  // cover, and Tier I is always last.
+  if (aot_selected != nullptr && !aot_crashed_this_build) {
     attempts.push_back(Engine::Aot);
   }
 #endif
+  if (jit_wanted) attempts.push_back(Engine::Jit);
   attempts.push_back(Engine::TierI);
   for (std::size_t attempt = 0; attempt < attempts.size(); ++attempt) {
     const Engine mode = attempts[attempt];
@@ -681,9 +688,8 @@ bool RbIosSession::Boot(std::string* err) {
     host.reset();
     java = nullptr;
     if (attempt + 1 == attempts.size()) break;
-    self->Log(std::string{"engine: the "} + (mode == Engine::Jit ? "Tier J" : (mode == Engine::Aot ? "AOT" : "Tier I")) +
-                         " boot failed (" + boot_error + "); retrying on " +
-                         (attempts[attempt + 1] == Engine::Aot ? "AOT" : "Tier I"));
+    self->Log(std::string{"engine: the "} + engine_name(mode) + " boot failed (" + boot_error +
+                         "); retrying on " + engine_name(attempts[attempt + 1]));
   }
   beat_stop.store(true, std::memory_order_relaxed);
   if (beat.joinable()) beat.join();
