@@ -282,7 +282,10 @@ bool HasCoprocessor(const ElfCallbacks& bytes, std::uint32_t start, std::uint32_
         return true;
       }
       const bool wide = IsThumb32(hw);
-      if (wide && (hw & 0xec00u) == 0xec00u) {
+      // Thumb-2 coprocessor encodings are the 0xEC/0xED/0xEE families; 0xEF is Advanced SIMD (NEON),
+      // which the ASIMD front end turns into ordinary IR and the emitter translates. The old mask
+      // (0xEC00) also matched 0xEF00, so every Thumb NEON block was refused as "coprocessor".
+      if (wide && (hw >> 8) >= 0xecu && (hw >> 8) <= 0xeeu) {
         *detail = "Thumb coprocessor encoding at " + Hex32(pc);
         return true;
       }
@@ -293,7 +296,12 @@ bool HasCoprocessor(const ElfCallbacks& bytes, std::uint32_t start, std::uint32_
         *detail = "instruction bytes outside .text";
         return true;
       }
-      if ((word & 0x0e00'0000u) == 0x0c00'0000u) {
+      // ARM coprocessor: bits 27-25 = 110 **and cond != 1111**. NEON shares the 110 space but always
+      // carries cond = 1111, and refusing it cost every NEON function — `__memcpy_a15`, memset, strlen —
+      // a Tier I fallback per call: the build-38 AOT log showed 52 % of dispatches in libc's memcpy
+      // variants, which is why asset loading ran at 0.1 fps.
+      const std::uint32_t cond = word >> 28;
+      if (cond != 0xfu && (word & 0x0e00'0000u) == 0x0c00'0000u) {
         *detail = "ARM coprocessor encoding at " + Hex32(pc);
         return true;
       }
