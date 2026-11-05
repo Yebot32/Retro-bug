@@ -1403,3 +1403,28 @@ assembled into the app like any other source.
   Tier I gained VSHL/VQSHL by register (USHL/SSHL, logical and arithmetic, all four widths), the op that
   stopped Blocky at frame ~1076. The next-phase plan is
   `docs/superpowers/plans/2026-11-05-ios-full-speed.md`.
+- **Build 38's attached log (27) — read carefully.** The file spans builds 36, 37 and 38, and it both
+  corrects and sharpens the picture. Build 36 (a home-screen launch, no AltStore JIT) confirms the AOT
+  entry SIGBUS in `Dynarmic::SpinLock::Lock` (fixed in 37 by patch 0009) and shows Blocky held on Tier I
+  by the stale `aot-attempt` marker. Build 37/38 launches *with* the JIT grant prove it is real (the
+  mprotect probe passes) and that Tier J never executes a guest instruction: `call-setup: __init_tcb` is
+  the last line and there is still no crash block after patch 0010. The likely cause is now named:
+  oaknut's iOS `CodeBlock` maps R|X and writes through `mprotect`, which the kernel accepts and then
+  kills the first time the page executes — an uncatchable SIGKILL, so nothing can log it. Build 38's AOT
+  launch is the measurement to beat: 6,750,208 dispatches, 3,262,036 cache hits (48.3%), 3,497,838
+  fallbacks, 9,350 image switches, 0.1 fps; the top fallback (835k) is inside libc `__memcpy_a15`.
+- **Build 39** (`b35ebe6`, profiles ref `aot/profiles` @ `df70740`): the first build with the AOT
+  pipeline actually fast. Three fixes on top of the NEON refusal (592e279): **(1) PLT coverage** — the
+  code window now spans `.text` plus `.plt`/`.iplt` (libdlgl's and libandroidkitkat's PLT sit *before*
+  `.text`), and every pattern-matched stub is a start; libgame +8,761 blocks, libc +591, libdlgl +189,
+  ~1.5 MB of extra code. Without it every cross-library call missed the dispatch cache and ran the stub
+  on Tier I — build 38's log shows the misses at libc's `.plt` (0x120d0xxx). **(2) AOT first** when a
+  profile matches; Tier J is now only offered behind a real MAP_JIT grant, so the owner's iPad no longer
+  spends a launch dying in Tier J before reaching AOT. **(3) MAP_JIT code blocks on iOS** (patch 0011,
+  oaknut): MAP_JIT + `pthread_jit_write_protect_np` instead of the mprotect flip, and `MAP_FAILED` is a
+  construction failure rather than a buffer at -1. The tablet gate: `rb_aotgen_tests` 80/0 with libgame
+  and libdlgl, `rb_aot_tests` 178/0 with the regenerated fixture (99 blocks), libc scope test still
+  stops at `dlopen` because that diagnostic has no host resolver (same result with the NEON-only image,
+  so not a PLT regression). Expected device signature: `aot: profile aot_kitkat matches`, then
+  `engine: guest code runs on AOT`, a much lower fallback count in `aot-runtime:`, and the fps line.
+  Trade-off: the IPA grows by the ~1.5 MB of PLT code; Tier J is skipped on launches without MAP_JIT.
