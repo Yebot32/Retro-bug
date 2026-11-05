@@ -207,3 +207,7 @@ the honest capability test: mapping a code block, not a successful `mprotect`, i
 at `MAP_FAILED`.
 
 **Retire when:** upstream oaknut maps MAP_JIT on iOS and toggles the write-protect itself.
+
+**iOS note:** the public SDK marks `pthread_jit_write_protect_np` unavailable (the arm64 compile lane
+caught it), although libsystem exports it and Apple's own frameworks call it. The patch resolves the
+symbol with `dlsym` in the iOS branch and keeps the declared call on macOS.

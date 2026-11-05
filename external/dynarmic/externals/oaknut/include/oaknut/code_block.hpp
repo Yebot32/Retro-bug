@@ -13,6 +13,7 @@
 #    include <windows.h>
 #elif defined(__APPLE__)
 #    include <TargetConditionals.h>
+#    include <dlfcn.h>
 #    include <libkern/OSCacheControl.h>
 #    include <pthread.h>
 #    include <sys/mman.h>
@@ -85,7 +86,7 @@ public:
         // RetroBug (patches/dynarmic/0011): MAP_JIT pages are switched, not mprotect()ed — on iOS the
         // mprotect flip leaves a page the kernel will kill on execution. The toggle is per thread, which
         // is exactly the scope of a code emission.
-        pthread_jit_write_protect_np(1);
+        set_write_protected(true);
 #elif defined(__NetBSD__) || defined(__OpenBSD__)
         mprotect(m_memory, m_size, PROT_READ | PROT_EXEC);
 #endif
@@ -94,7 +95,7 @@ public:
     void unprotect()
     {
 #if defined(__APPLE__)
-        pthread_jit_write_protect_np(0);
+        set_write_protected(false);
 #elif defined(__NetBSD__) || defined(__OpenBSD__)
         mprotect(m_memory, m_size, PROT_READ | PROT_WRITE);
 #endif
@@ -150,6 +151,31 @@ public:
 protected:
     std::uint32_t* m_memory;
     std::size_t m_size = 0;
+
+private:
+    /// RetroBug (patches/dynarmic/0011): the public iOS SDK marks `pthread_jit_write_protect_np`
+    /// unavailable, but libsystem exports it and a MAP_JIT page needs exactly that toggle — without it a
+    /// store to the code page faults. Resolve it at run time (the macOS API is declared, so it is called
+    /// directly there); if the symbol is ever absent, fall back to an mprotect of the mapping.
+    void set_write_protected(bool enabled)
+    {
+#if defined(__APPLE__)
+#    if TARGET_OS_IPHONE
+        using Toggle = void (*)(int);
+        static const Toggle toggle =
+            reinterpret_cast<Toggle>(::dlsym(RTLD_DEFAULT, "pthread_jit_write_protect_np"));
+        if (toggle != nullptr) {
+            toggle(enabled ? 1 : 0);
+            return;
+        }
+        ::mprotect(m_memory, m_size, enabled ? (PROT_READ | PROT_EXEC) : (PROT_READ | PROT_WRITE));
+#    else
+        pthread_jit_write_protect_np(enabled ? 1 : 0);
+#    endif
+#else
+        (void)enabled;
+#endif
+    }
 };
 
 }  // namespace oaknut
