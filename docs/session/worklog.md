@@ -1442,3 +1442,20 @@ assembled into the app like any other source.
   Device acceptance: launch either game, expect `aot: profile … matches`, `engine: guest code runs on
   AOT (offline-translated AArch64)`, then an `aot-runtime:` line whose fallback count should be far below
   build 38's 3.5 M, and the `render: … fps` line.
+- **Build 40** (`d4982a2`, profiles ref `aot/profiles` @ `8a316ae`): closes the last three discovery gaps
+  behind build 39's fallback storm. **(1) Hint fall-throughs.** A hooked hint (PLD/WFE/YIELD) ends a block
+  with a plain dispatch terminal, so the instruction after it was never a map entry — but that is exactly
+  where the runtime resumes. `__memcpy_a15` is full of `pld`, so every pass fell back right after a hint;
+  build 39's KitKat top sites (libc+0x92a84/0x92a74/0x92a2c) were these boundaries. Blocks that raise an
+  exception now queue their end location; the memcpy chain is covered (libc 23,447 → 26,602 blocks).
+  **(2) Thumb `tbb`/`tbh` jump tables.** A case label is a computed branch target no source names. The
+  table is inline and the index bound is the guarding `cmp rN,#imm`, so `AddJumpTables` seeds every case;
+  libgame +1,755 starts, and its Brotli decoder (the top Blocky fallback region) becomes translated code
+  (libgame 107,452 → 113,654 blocks; libgame's 0x31bf86 case is now in the table). **(3) Data follow.** A
+  path that runs off a function into a literal pool used to assert inside Dynarmic and lose the whole
+  library; mcl gains `set_assert_hook` (patch 0012), the tool throws, and the emitter refuses that one
+  block (`asserted`). Profiles grew modestly: IPA-side code ~26.6 MB (KitKat) and ~47 MB (Blocky).
+  **Exit freeze:** the EXIT button joined the render thread on the main thread while the guest could be
+  minutes inside one nativeRender (a level load) — the launcher looked hung. `rb_ios_stop_async` joins and
+  tears down on a detached thread; EXIT returns immediately. Tablet gate: `rb_aotgen_tests` 80/0,
+  `rb_aot_tests` 195/0 (168-block fixture), scope image loads with `aot_active=1`.
