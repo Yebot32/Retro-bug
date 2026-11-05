@@ -23,6 +23,9 @@
 #if defined(__APPLE__)
 #include <CoreFoundation/CoreFoundation.h>
 #endif
+#if defined(__APPLE__) && __has_include(<Security/Security.h>)
+#include <Security/Security.h>
+#endif
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -107,10 +110,35 @@ bool DebuggerAttached() {
 #endif
 }
 
+/// A JIT can also be granted by signing: the `dynamic-codesigning` entitlement (TrollStore-style
+/// installations) lets a home-screen launch write and run its own code without a debugger, and
+/// `com.apple.security.cs.allow-jit` is the equivalent macOS grant. A launch carrying one of these is as
+/// capable as a traced one, and must not be refused by a probe that only looks for a debugger.
+bool HasJitEntitlement() {
+#if defined(__APPLE__) && __has_include(<Security/Security.h>)
+  SecTaskRef task = SecTaskCreateFromSelf(kCFAllocatorDefault);
+  if (task == nullptr) return false;
+  bool granted = false;
+  for (CFStringRef name : {CFSTR("dynamic-codesigning"), CFSTR("com.apple.security.cs.allow-jit")}) {
+    CFTypeRef value = SecTaskCopyValueForEntitlement(task, name, nullptr);
+    if (value != nullptr) {
+      granted = CFGetTypeID(value) == CFBooleanGetTypeID() &&
+                CFBooleanGetValue(static_cast<CFBooleanRef>(value));
+      CFRelease(value);
+      if (granted) break;
+    }
+  }
+  CFRelease(task);
+  return granted;
+#else
+  return false;
+#endif
+}
+
 bool JitAvailable() {
   int v = g_jit_available.load(std::memory_order_relaxed);
   if (v < 0) {
-    v = (DebuggerAttached() && ProbeExecutableMemory()) ? 1 : 0;
+    v = ((DebuggerAttached() || HasJitEntitlement()) && ProbeExecutableMemory()) ? 1 : 0;
     g_jit_available.store(v, std::memory_order_relaxed);
   }
   return v == 1;
@@ -524,7 +552,11 @@ bool RbIosSession::Boot(std::string* err) {
       marker_build.pop_back();
     }
   }
-  bool jit_wanted = JitAvailable();
+  // The probe decides whether AOT is this launch's fallback at all: a launch that *can* run a JIT uses
+  // Tier J and then Tier I, never the AOT entry (which is still broken on iOS); a launch without JIT
+  // permission is the one AOT exists for.
+  const bool jit_probe_ok = JitAvailable();
+  bool jit_wanted = jit_probe_ok;
   const bool jit_crashed_this_build = marker_build == build;
   if (jit_wanted && jit_crashed_this_build) {
     self->Log("jit: the previous Tier J attempt in build " + build +
@@ -538,10 +570,11 @@ bool RbIosSession::Boot(std::string* err) {
   } else if (jit_wanted) {
     self->Log("jit: this launch can run a JIT — trying Tier J");
   } else {
-    self->Log(DebuggerAttached()
-                  ? "jit: debugger attached but the code region cannot be made writable — next engine"
-                  : "jit: no debugger attached (iOS refuses JIT to a home-screen launch; AltStore's "
-                    "Enable JIT attaches one) — next engine");
+    self->Log(DebuggerAttached() || HasJitEntitlement()
+                  ? "jit: this launch has JIT permission but the code region cannot be made writable — "
+                    "next engine"
+                  : "jit: no debugger and no JIT entitlement — a home-screen launch cannot run a JIT "
+                    "(AltStore's Enable JIT attaches a debugger) — next engine");
   }
     // The AOT profile is compiled into this app; it runs only when every profiled library's digest matches
   // the imported APK, so an APK from another build keeps the interpreter.
@@ -606,7 +639,9 @@ bool RbIosSession::Boot(std::string* err) {
   std::vector<Engine> attempts;
   if (jit_wanted) attempts.push_back(Engine::Jit);
 #if defined(RB_AOT_PROFILE)
-  if (aot_selected != nullptr && !aot_crashed_this_build) attempts.push_back(Engine::Aot);
+  if (aot_selected != nullptr && !aot_crashed_this_build && !jit_probe_ok) {
+    attempts.push_back(Engine::Aot);
+  }
 #endif
   attempts.push_back(Engine::TierI);
   for (std::size_t attempt = 0; attempt < attempts.size(); ++attempt) {

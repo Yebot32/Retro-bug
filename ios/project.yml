@@ -55,3 +55,5 @@ targets:
     dependencies:
       - sdk: OpenGLES.framework
       - sdk: QuartzCore.framework
+      # The JIT probe reads this launch's entitlements (dynamic-codesigning / allow-jit).
+      - sdk: Security.framework
