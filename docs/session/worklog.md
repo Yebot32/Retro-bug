@@ -1463,3 +1463,15 @@ assembled into the app like any other source.
   `6ac21533efba7d2c407e8c6dca0dab52c459f0249ddd23c8b97769f5f76967f9`. Device acceptance: the
   `aot-runtime:` fallback count in the 10 s report should collapse relative to build 39 (2.58 M in KitKat's
   first 10 s, 32 M in Blocky), and exiting a game must return to the launcher immediately.
+- **Build 41** (`e71bd4d`, profiles ref `aot/profiles` @ `248d633`), 43,089,555 bytes, SHA-256
+  `93d39ff51babe0b9fe13d9da885ccfea284353d787f2ab9af300a770fe6a3012`. Build 40's log (29) showed the
+  remaining Blocky fallbacks were 35 M and **every top site was a Thumb IT continuation** (`it hi` at
+  libgame+0x2ff186, `itt eq` at 0x348fd6, `it le` at 0x2c0c8e): the AOT table keyed blocks on
+  `(offset, thumb)` and refused any entry with a live IT state, so each instruction after an `it` cost a
+  Tier I fallback on every execution. The second key word is now the `LocationDescriptor`'s upper half
+  (Thumb bit, IT, FPSCR mode), the dispatcher looks up the live descriptor instead of rejecting it, and
+  the emitter no longer refuses those targets. libc 26,602 → 55,552 blocks, libgame 113,654 → 178,274,
+  refusals 155/141; the fixture emits 218 blocks with none refused. Trade-off: the IPA grows 29.2 → 43.1
+  MB (app `__TEXT` 161 MB). Tablet gate: `rb_aot_tests` 217/0, `rb_aotgen_tests` 80/0, scope image loads
+  with `aot_active=1`. Log 29 also confirms the exit fix: `game: exit requested (background shutdown)` →
+  `destroy` two seconds later, with no freeze.
