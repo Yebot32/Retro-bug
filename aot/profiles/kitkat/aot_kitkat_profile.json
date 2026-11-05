@@ -2,10 +2,10 @@
   "format": 1,
   "name": "aot_kitkat",
   "libraries": [
-    {"soname": "libandroidkitkat.so", "sha256": "8d65ad5aaa98846226b02753d0081318fdba9eba4eeede1b131f817624f85533", "load_bias": 268435456, "text_vaddr": 122012, "text_len": 208560, "blocks": 19821, "refused": 14, "code_bytes": 5162568, "symbol": "kAotKitkatLibandroidkitkatImage"},
-    {"soname": "libc.so", "sha256": "8fc841e8568caf228e7fca49076991ae8c8e693d81c525fadf1ac888c5b152b4", "load_bias": 301989888, "text_vaddr": 260288, "text_len": 602704, "blocks": 21514, "refused": 2394, "code_bytes": 5951256, "symbol": "kAotKitkatLibcImage"},
-    {"soname": "libdlgl.so", "sha256": "58d0c5384ecb77c9b27ee3823e07d264c30d4b86a4318227b32593c1bb3357e0", "load_bias": 335544320, "text_vaddr": 171416, "text_len": 375416, "blocks": 35058, "refused": 15, "code_bytes": 9676068, "symbol": "kAotKitkatLibdlglImage"},
-    {"soname": "libm.so", "sha256": "32d06ce18013f9d81595569a83e73b7fe527b7727811fd243088d3ec256e082d", "load_bias": 369098752, "text_vaddr": 37144, "text_len": 96520, "blocks": 962, "refused": 248, "code_bytes": 168924, "symbol": "kAotKitkatLibmImage"},
-    {"soname": "libz.so", "sha256": "b2bcbc707c36d2147f70de6a135d588ffe98543635a745447d35d46993324181", "load_bias": 436207616, "text_vaddr": 23272, "text_len": 44824, "blocks": 1031, "refused": 151, "code_bytes": 361652, "symbol": "kAotKitkatLibzImage"}
+    {"soname": "libandroidkitkat.so", "sha256": "8d65ad5aaa98846226b02753d0081318fdba9eba4eeede1b131f817624f85533", "load_bias": 268435456, "text_vaddr": 122012, "text_len": 208560, "blocks": 19827, "refused": 8, "code_bytes": 5179992, "symbol": "kAotKitkatLibandroidkitkatImage"},
+    {"soname": "libc.so", "sha256": "8fc841e8568caf228e7fca49076991ae8c8e693d81c525fadf1ac888c5b152b4", "load_bias": 301989888, "text_vaddr": 260288, "text_len": 602704, "blocks": 23447, "refused": 2387, "code_bytes": 6599632, "symbol": "kAotKitkatLibcImage"},
+    {"soname": "libdlgl.so", "sha256": "58d0c5384ecb77c9b27ee3823e07d264c30d4b86a4318227b32593c1bb3357e0", "load_bias": 335544320, "text_vaddr": 171416, "text_len": 375416, "blocks": 35064, "refused": 9, "code_bytes": 9693492, "symbol": "kAotKitkatLibdlglImage"},
+    {"soname": "libm.so", "sha256": "32d06ce18013f9d81595569a83e73b7fe527b7727811fd243088d3ec256e082d", "load_bias": 369098752, "text_vaddr": 37144, "text_len": 96520, "blocks": 5859, "refused": 38, "code_bytes": 1530232, "symbol": "kAotKitkatLibmImage"},
+    {"soname": "libz.so", "sha256": "b2bcbc707c36d2147f70de6a135d588ffe98543635a745447d35d46993324181", "load_bias": 436207616, "text_vaddr": 23272, "text_len": 44824, "blocks": 1063, "refused": 157, "code_bytes": 378604, "symbol": "kAotKitkatLibzImage"}
   ]
 }
