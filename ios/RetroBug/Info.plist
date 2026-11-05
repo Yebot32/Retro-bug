@@ -15,7 +15,7 @@
 	<key>CFBundleShortVersionString</key>
 	<string>0.1</string>
 	<key>CFBundleVersion</key>
-	<string>40</string>
+	<string>41</string>
 	<key>UIAppFonts</key>
 	<array>
 		<string>Roboto-Light.ttf</string>
