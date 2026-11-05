@@ -1391,3 +1391,15 @@ assembled into the app like any other source.
   the arm64 lane caught it). A launch that can run a JIT now takes Tier J and then Tier I and never the
   AOT entry; only a launch without JIT permission falls back to AOT. The AOT entry crash on iOS remains
   open for non-JIT installs, with the marker keeping them on Tier I after one attempt.
+- **Build 38** (`4809537`, profiles ref `aot/profiles` @ `8b83764`), 21,004,197 bytes, SHA-256
+  `7c1441a3d466ce65a457da8d61494ff72381f6f88c49653805b08f5706d1585f`: takes AOT after a Tier J death,
+  unswallows Tier J faults, and closes the vector-shift family. Build 37's log proved the owner's JIT is
+  real (the flip probe passed and Tier J started) but the Tier J boot died at its first guest call with
+  no crash block: Dynarmic's Mach exception port takes every EXC_BAD_ACCESS and answers KERN_FAILURE with
+  no fake-call sites registered, so the kernel kills the process before the app's signal handlers can
+  run. On iOS the port is no longer installed (patch 0010; the page-table fastmem the JIT uses does not
+  need it), so a fault names itself. The AOT fallback follows a JIT death in the same build, so the
+  translated profile — working since the spin-lock fix (patch 0009) — runs instead of the interpreter.
+  Tier I gained VSHL/VQSHL by register (USHL/SSHL, logical and arithmetic, all four widths), the op that
+  stopped Blocky at frame ~1076. The next-phase plan is
+  `docs/superpowers/plans/2026-11-05-ios-full-speed.md`.
