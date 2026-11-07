@@ -1487,3 +1487,15 @@ assembled into the app like any other source.
   +0x30027a and neighbours). libdlgl 35,170 → 37,498 blocks, libgame 178,274 → 178,785; every measured
   hot site is now in the table. Tablet gate: `rb_aotgen_tests` 80/0, `rb_aot_tests` 217/0 (fixture
   unchanged), scope image loads with `aot_active=1`.
+- **Build 43** (`1c4b8e4`), 43,439,347 bytes, SHA-256
+  `f3ef85f46bf9d1e61abde81342dd7dcc7215b7f01bee88f02d2c2eb2ed88cb73`. Build 42's log (32): KitKat is
+  playable — 16.1 → 61.0 fps, 99.6 % AOT cache hits, 112 k fallbacks (one stale site, libc+0x82ca6).
+  Blocky reached 52–61 fps while loading, but **crashed in `AAsset_read` ~30 s in** (SIGBUS, frame
+  `ApkFile::Read+80`). Root cause: the iOS asset table was an unsynchronised `std::map<ApkFile*,
+  unique_ptr<ApkFile>>` — a close on one guest thread freed a file another was reading, and concurrent
+  insert/erase raced the map itself; Blocky reads its 31 MB `data.xpk` from several loader threads.
+  Fixed with shared ownership (an in-flight read holds a reference; close only drops the map's), a locked
+  map, and a per-handle cursor mutex. The crash report now prints `si_addr` + `si_code`, separating a
+  guest-window store from a host-heap access if a fault recurs. The cloud screen: the game's cloud sync
+  uses a network path the port does not provide (no guest DNS/HTTP; `HttpGet.download` is a stub and
+  `isActiveNetworkConnection` answers false), times out after ~30 s, and the title continues offline.
