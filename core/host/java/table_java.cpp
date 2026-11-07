@@ -216,6 +216,21 @@ TableJava::Ref TableJava::FindClass(const std::string& jni_name) {
   for (const auto& [id, k] : classes_) {
     if (k.name == jni_name) return MakeRefLocked(id);
   }
+  if (define_unknown_) {
+    // A stock APK's own class. Defining it as a plain Object keeps JNI_OnLoad working; every method
+    // the game later looks up here fails by name, which is the row the profile still needs.
+    objects_.push_back(Object{});
+    const int self = static_cast<int>(objects_.size()) - 1;
+    Class c;
+    c.name = jni_name;
+    c.self = self;
+    for (const auto& [id, k] : classes_) {
+      if (k.name == "java/lang/Object") c.super = id;
+    }
+    classes_[self] = c;
+    if (trace_) trace_("java: defined " + jni_name + " on demand (stock APK)");
+    return MakeRefLocked(self);
+  }
   if (trace_) trace_("Java: FindClass miss " + jni_name);
   ThrowLocked("java/lang/NoClassDefFoundError", jni_name);
   return 0;

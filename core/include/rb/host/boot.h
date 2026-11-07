@@ -169,6 +169,10 @@ class Boot {
   std::map<std::string, rb::runtime::InboundTarget> native_targets_;
   std::map<std::string, const rb::loader::GuestModule*> loaded_;
   std::set<std::string> booted_;
+  /// Where this APK's 32-bit libraries live, decided once from the zip: the repack layout's
+  /// `assets/rb32/` or a stock APK's `lib/armeabi-v7a/` (its `lib/armeabi/` only when v7a is absent,
+  /// which is what the platform would load). Empty until the first boot reads the APK.
+  std::string lib_dir_;
 
   std::mutex report_mu_;   ///< leaf: held to append a line or swap the pointer
   std::string* report_ = nullptr;

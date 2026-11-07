@@ -225,6 +225,30 @@ bool Boot::BootScope(const std::string& apk, rb::loader::ZipReader& zip, std::st
   return true;
 }
 
+namespace {
+
+/// Where a game's 32-bit libraries live. The repack layout keeps them in `assets/rb32/`; a stock store
+/// APK keeps them where the platform looks — `lib/armeabi-v7a/`, and `lib/armeabi/` only when the APK
+/// carries no v7a build (the same choice the Android launcher makes). Nothing else about the boot
+/// changes: DT_NEEDED siblings, guest dlopen and the dlgl load order all read from this one answer.
+std::string LibDirOf(const rb::loader::ZipReader& zip) {
+  const auto has = [&zip](const std::string& dir) {
+    for (const std::string& n : zip.Names()) {
+      if (n.rfind(dir, 0) == 0 && n.size() > dir.size() + 3 &&
+          n.compare(n.size() - 3, 3, ".so") == 0) {
+        return true;
+      }
+    }
+    return false;
+  };
+  if (has("assets/rb32/")) return "assets/rb32/";
+  if (has("lib/armeabi-v7a/")) return "lib/armeabi-v7a/";
+  if (has("lib/armeabi/")) return "lib/armeabi/";
+  return "assets/rb32/";
+}
+
+}  // namespace
+
 const rb::loader::GuestModule* Boot::LoadWithNeeded(rb::loader::ZipReader& zip, const std::string& lib,
                                                     std::set<std::string>& in_progress, std::string* out) {
   (void)out;
@@ -234,12 +258,12 @@ const rb::loader::GuestModule* Boot::LoadWithNeeded(rb::loader::ZipReader& zip, 
     return nullptr;
   }
   std::string err;
-  auto image = zip.Read("assets/rb32/" + lib, &err);
+  auto image = zip.Read(lib_dir_ + lib, &err);
   if (!image) {
-    Say("FATAL: rb_runtime_boot: assets/rb32/" + lib + ": " + err);
+    Say("FATAL: rb_runtime_boot: " + lib_dir_ + lib + ": " + err);
     return nullptr;
   }
-  Say("rb_runtime_boot: assets/rb32/" + lib + " = " + std::to_string(image->size()) + " bytes");
+  Say("rb_runtime_boot: " + lib_dir_ + lib + " = " + std::to_string(image->size()) + " bytes");
   std::string host_side;
   for (const std::string& n : rb::loader::NeededSonames(*image)) {
     if (n == "libc.so" || n == "libm.so" || n == "libz.so" || loaded_.count(n) != 0) continue;
@@ -256,8 +280,8 @@ const rb::loader::GuestModule* Boot::LoadWithNeeded(rb::loader::ZipReader& zip, 
       }
       loaded_[n] = m;
       Say("needs: " + lib + " -> libstdc++.so, loaded from assets/rb32sys/ on demand");
-    } else if (zip.Has("assets/rb32/" + n)) {
-      Say("needs: " + lib + " -> " + n + ", a sibling in assets/rb32/, loaded first");
+    } else if (zip.Has(lib_dir_ + n)) {
+      Say("needs: " + lib + " -> " + n + ", a sibling in " + lib_dir_ + ", loaded first");
       if (LoadWithNeeded(zip, n, in_progress, out) == nullptr) return nullptr;
     } else {
       host_side += (host_side.empty() ? "" : ", ") + n;
@@ -291,6 +315,15 @@ bool Boot::BootOne(const std::string& apk, const std::string& lib, std::string* 
   if (apk.empty()) {
     Say("FATAL: rb_runtime_boot: no APK path was given");
     return false;
+  }
+  if (lib_dir_.empty()) {
+    std::string err;
+    auto zip = rb::loader::ZipReader::OpenFile(apk, &err);
+    if (zip) lib_dir_ = LibDirOf(*zip);
+    if (lib_dir_.empty()) lib_dir_ = "assets/rb32/";
+    if (lib_dir_ != "assets/rb32/") {
+      Say("lib: this is a stock APK — its 32-bit libraries are read from " + lib_dir_ + ", not a repack");
+    }
   }
   if (lib.empty() || lib.find('/') != std::string::npos) {
     Say("FATAL: rb_runtime_boot: '" + lib + "' is not a library file name");
@@ -451,7 +484,7 @@ std::vector<std::string> Boot::BundledLibraries(const std::string& apk) {
   std::string err;
   auto zip = rb::loader::ZipReader::OpenFile(apk, &err);
   if (!zip) return names;
-  const std::string prefix = "assets/rb32/";
+  const std::string prefix = LibDirOf(*zip);
   for (const std::string& entry : zip->Names()) {
     if (entry.rfind(prefix, 0) != 0 || entry.size() <= prefix.size() + 3 ||
         entry.compare(entry.size() - 3, 3, ".so") != 0) {
@@ -467,7 +500,7 @@ std::vector<std::string> Boot::BundledLibraries(const std::string& apk) {
 bool Boot::BundlesDlgl(const std::string& apk) {
   std::string err;
   auto zip = rb::loader::ZipReader::OpenFile(apk, &err);
-  return zip != nullptr && zip->Has("assets/rb32/libdlgl.so");
+  return zip != nullptr && zip->Has(LibDirOf(*zip) + "libdlgl.so");
 }
 
 BootResult Boot::BootJavaLibraries(const std::string& apk, const std::string& lib) {
@@ -486,11 +519,12 @@ BootResult Boot::BootJavaLibraries(const std::string& apk, const std::string& li
     auto zip = rb::loader::ZipReader::OpenFile(apk, &err);
     if (zip) {
       const auto bundled = BundledLibraries(apk);
+      const std::string dir = LibDirOf(*zip);
       for (bool changed = true; changed;) {
         changed = false;
         for (const std::string& name : bundled) {
           if (std::find(order.begin(), order.end(), name) != order.end()) continue;
-          auto image = zip->Read("assets/rb32/" + name, &err);
+          auto image = zip->Read(dir + name, &err);
           if (!image) continue;
           for (const std::string& need : rb::loader::NeededSonames(*image)) {
             if (std::find(order.begin(), order.end(), need) != order.end()) {
@@ -560,7 +594,7 @@ std::uint32_t Boot::DlOpen(const std::string& path, std::string* why) {
     *why = "the game's APK cannot be read (" + err + ")";
     return 0;
   }
-  if (!zip->Has("assets/rb32/" + base)) {
+  if (!zip->Has(lib_dir_ + base)) {
     *why = base + " is not one of the game's 32-bit libraries";
     return 0;
   }
@@ -575,7 +609,7 @@ std::uint32_t Boot::DlOpen(const std::string& path, std::string* why) {
     *why = base + ": constructor " + failed;
     return 0;
   }
-  Live("dl: dlopen(\"" + path + "\") loaded " + base + " from assets/rb32/");
+  Live("dl: dlopen(\"" + path + "\") loaded " + base + " from " + lib_dir_);
   return DlHandle(m);
 }
 

@@ -335,6 +335,14 @@ struct RbIosSession {
   };
 
   std::string apk, lib, data_dir;
+  /// Where this APK keeps its 32-bit libraries: the repack layout's assets/rb32/ or a stock store
+  /// APK's lib/armeabi-v7a/ (lib/armeabi/ only when v7a is absent). The boot reads through the same
+  /// answer.
+  std::string lib_dir = "assets/rb32/";
+  /// True when the APK is a stock store build rather than a RetroBug repack: it carries its own Java
+  /// classes, which the table does not know, so the JNI bridge defines them on demand instead of
+  /// failing the game's RegisterNatives with NoClassDefFoundError.
+  bool stock_apk = false;
   int client_version = 2;
   int width = 0, height = 0;
   /// The guest window this iOS build can actually reserve (4 GiB is refused; measured), tried largest
@@ -505,6 +513,7 @@ bool RbIosSession::Boot(std::string* err) {
   cfg.log = [self](const std::string& line) { self->Log(line); };
   cfg.make_java = [self, env](std::string*) -> std::unique_ptr<rb::abi::HostJava> {
     auto java = std::make_unique<rb::java::TableJava>();
+    java->set_define_unknown_classes(self->stock_apk);
     rb::java::InstallAndroidBase(*java, env);
     rb::java::InstallCocos2dx(*java, env);
     rb::java::InstallDlgl(*java, env);
@@ -744,30 +753,44 @@ extern "C" RbIosSession* rb_ios_create(const char* apk_path, const char* lib_nam
   s->apk = apk_path;
   s->lib = lib_name;
   if (s->lib.empty()) {
-    // The largest assets/rb32/*.so is the game's engine (the repack layout keeps every sibling there).
+    // The largest .so in whichever layout the APK uses: assets/rb32/ for a RetroBug repack, or a stock
+    // store APK's lib/armeabi-v7a/ (lib/armeabi only when the APK has no v7a build — what a device
+    // would load). Within one layout the game's engine is the largest image, as on the Android launcher.
     std::string why;
     auto archive = rb::loader::ApkArchive::Open(s->apk, &why);
     if (archive) {
-      std::uint32_t best = 0;
-      for (const std::string& name : archive->Names()) {
-        if (name.rfind("assets/rb32/", 0) != 0 || name.size() < 4 || name.compare(name.size() - 3, 3, ".so") != 0) {
-          continue;
+      for (const char* dir : {"assets/rb32/", "lib/armeabi-v7a/", "lib/armeabi/"}) {
+        const std::string prefix = dir;
+        std::uint32_t best = 0;
+        std::string pick;
+        for (const std::string& name : archive->Names()) {
+          if (name.rfind(prefix, 0) != 0 || name.size() <= prefix.size() + 3 ||
+              name.compare(name.size() - 3, 3, ".so") != 0) {
+            continue;
+          }
+          if (name.find('/', prefix.size()) != std::string::npos) continue;  // direct children only
+          const auto size = archive->EntrySize(name);
+          if (size && *size > best) {
+            best = *size;
+            pick = name.substr(prefix.size());
+          }
         }
-        const auto size = archive->EntrySize(name);
-        if (size && *size > best) {
-          best = *size;
-          s->lib = name.substr(name.rfind('/') + 1);
-        }
+        if (pick.empty()) continue;
+        s->lib = pick;
+        s->lib_dir = prefix;
+        s->Log("auto: " + pick + " (" + std::to_string(best) + " bytes) from " + prefix);
+        break;
       }
-      if (!s->lib.empty()) s->Log("auto: " + s->lib + " (" + std::to_string(best) + " bytes)");
     } else {
       s->Log("auto: cannot read the APK: " + why);
     }
     if (s->lib.empty()) {
-      CopyOut("no library name was given and the APK has no assets/rb32/*.so", err, err_len);
+      CopyOut("no library name was given and the APK has no assets/rb32/*.so or lib/armeabi-v7a/*.so",
+              err, err_len);
       return nullptr;
     }
   }
+  s->stock_apk = s->lib_dir != "assets/rb32/";
   s->data_dir = data_dir != nullptr ? data_dir : "";
   s->client_version = client_version == 1 ? 1 : 2;
   s->dlgl_apk = rb::host::Boot::BundlesDlgl(s->apk);

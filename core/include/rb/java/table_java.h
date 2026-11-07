@@ -40,6 +40,7 @@ class TableJava : public abi::HostJava {
   std::uint64_t CallNative(const std::string& cls, const std::string& name_sig,
                            const std::vector<std::uint64_t>& args);
   void set_native_invoker(NativeInvoker invoker) override { native_invoker_ = std::move(invoker); }
+  void set_define_unknown_classes(bool on) { define_unknown_ = on; }
 
   /// Defines a class (`super_name` empty for a root) and returns its class object's id.
   int DefineClass(const std::string& name, const std::string& super_name = {});
@@ -168,6 +169,10 @@ class TableJava : public abi::HostJava {
   std::map<std::string, std::size_t> calls_;
   std::function<void(const std::string&)> trace_;
   NativeInvoker native_invoker_;
+  /// A stock APK brings its own Java classes; none of them has a row here. With this on, FindClass
+  /// defines an unknown class as a plain Object so the game's RegisterNatives succeeds, and a method
+  /// the profile really lacks fails by name at its lookup instead of at JNI_OnLoad.
+  bool define_unknown_ = false;
   /// Which class registered each native, by name + signature: the jclass a callback receives must be
   /// the class it was registered on, and the registering class is the only honest source for it.
   std::map<std::string, std::string> native_owner_;
