@@ -1515,3 +1515,11 @@ assembled into the app like any other source.
   real output needs an AudioUnit device, a PCM ring buffer, at-least-once consumption of guest buffers
   and delivery of the buffer-queue callback from a guest thread. Host gate: `rb_table_java_tests` (with
   the new persistence and callback cases) ran on the Linux lane.
+- **Build 45 (iOS) + launcher rebuild (Android)** — folder import. Both add buttons now ask "APK file" or
+  "Folder of APKs" (iOS: a second document-picker mode over a security-scoped folder, direct `.apk`
+  children copied on a background queue, existing names skipped; Android: `ACTION_OPEN_DOCUMENT_TREE`,
+  children read through `DocumentsContract`, copied with the existing `.part`-then-rename routine, same
+  skip rule, one summary toast). iOS IPA `49064e29…`, build 45 (`1f724bd`); engine unchanged from 44.
+  Android launcher rebuilt with `tools/build_launcher_apk.sh` and installed on the SM-X710; verified by
+  picking `/sdcard/Download/aptest` (two APKs): `files/games/` gained `guestprobe.apk` and
+  `smbbounce.apk` and the library showed the new tile. Test files removed afterwards.
