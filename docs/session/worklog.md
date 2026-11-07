@@ -1531,3 +1531,18 @@ assembled into the app like any other source.
   auto-detection picks the largest .so from the same layout, and a stock APK's Java classes are defined
   on demand (a missing *method* fails at its own lookup, where the log names it). Android is unchanged
   (its launcher repacks first). Host gate on the tablet: table_java 238/0, host boot 47/0.
+- **Build 47** (`2499ed8`), 44,158,829 bytes, SHA-256
+  `389f997eea36f2d828f83604630a29a025681e3b069a1e741e2c95f7f260fd50`. Stock APKs now reach the game
+  code: every one of them stopped at `FATAL: rb_runtime_boot: assets/rb32sys/libc.so: no entry named …`
+  because only the repack layout carries the guest system libraries and iOS has no repack step.
+  `BootConfig::read_system_lib` lets the platform answer libc/libm/libz (and libstdc++ when the APK
+  carries none; a stock APK's own sibling still wins). The four images are now tracked in
+  `guest/system/` — byte-identical to what the launcher packages into a converted APK — and
+  `tools/build_ios_ipa.sh` copies them to `RetroBug.app/rb32sys/`, so the boot logs
+  `libc.so from the app bundle = 1267328 bytes` and continues. Trade-off: the repo and every IPA carry
+  1.5 MB of AOSP bionic (Apache-2.0; zlib for libz) that a stock APK cannot supply for itself.
+  Verification: host boot lane on the SM-X710 with a stock-layout APK and a no-platform-answer refusal
+  row, 58/0; the IPA's `rb32sys/*` hashes equal `guest/system/*`; `CFBundleVersion` 47; the app binary
+  has the new `the app bundle` literal (build 46's has none) and still compiles both AOT profiles
+  (`blocky`, `kitkat`). Next: triage the first failure past the scope from the new log (missing Java
+  method, GLES1/2 context, or an import nothing answers).
