@@ -55,6 +55,7 @@
 #include "rb/java/pikpok.h"
 #include "rb/loader/apk_assets.h"
 #include "rb/java/table_java.h"
+#include "halfbrick_bootstrap.h"
 #include "pikpok_bootstrap.h"
 #include "rb/loader/guest_elf.h"
 #include "rb/runtime/guest_thread.h"
@@ -363,6 +364,7 @@ struct RbIosSession {
   std::unique_ptr<rb::platform::ios::Cocos2dxBootstrap> game;
   std::unique_ptr<rb::platform::ios::DlglBootstrap> dlgl;  ///< KitKat Challenge's DLGE engine, when that is the lib
   std::unique_ptr<rb::platform::ios::PikPokBootstrap> pikpok;  ///< OREO/Turbo's Mab engine
+  std::unique_ptr<rb::platform::ios::HalfbrickBootstrap> halfbrick;  ///< Fruit Ninja's Mortar engine
   bool dlgl_apk = false;  ///< the APK ships assets/rb32/libdlgl.so: boot the whole DLGE Java load order
   /// Set at creation for an APK whose engine this host cannot drive (Unity): the render thread refuses
   /// with this line rather than loading tens of megabytes and failing at a made-up entry point.
@@ -783,6 +785,10 @@ bool RbIosSession::Boot(std::string* err) {
   } else if (exports("Java_com_pikpok_MabActivity_initApplication")) {
     pikpok = std::make_unique<rb::platform::ios::PikPokBootstrap>(*boot, *java, lib);
     self->Log("engine: PikPok Mab (initApplication + GLSurfaceView renderer + touch)");
+  } else if (exports("Java_com_halfbrick_mortar_NativeGameLib_native_1SystemInit")) {
+    halfbrick = std::make_unique<rb::platform::ios::HalfbrickBootstrap>(
+        *boot, *java, lib, self->data_dir + "/files", self->data_dir + "/cache");
+    self->Log("engine: Halfbrick Mortar (file manager, step renderer, touch)");
   } else if (exports("Java_org_cocos2dx_lib_Cocos2dxHelper_nativeSetApkPath")) {
     game = std::make_unique<rb::platform::ios::Cocos2dxBootstrap>(*boot, *java, lib);
     self->Log("engine: Cocos2d-x (Cocos2dxHelper natives)");
@@ -980,11 +986,16 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
         s->running.store(false);
         return;
       }
-      const bool started = s->dlgl  ? s->dlgl->Start(s->apk, s->width, s->height, &why)
-                           : s->pikpok ? s->pikpok->Start(s->apk, s->width, s->height, &why)
-                                       : s->game->Start(s->apk, s->width, s->height, &why);
+      const bool started = s->dlgl        ? s->dlgl->Start(s->apk, s->width, s->height, &why)
+                           : s->pikpok    ? s->pikpok->Start(s->apk, s->width, s->height, &why)
+                           : s->halfbrick ? s->halfbrick->Start(s->apk, s->width, s->height, &why)
+                                          : s->game->Start(s->apk, s->width, s->height, &why);
       if (!started) {
-        s->Fail(std::string{s->dlgl ? "dlxInit" : s->pikpok ? "initApplication" : "nativeInit"} + ": " + why);
+        s->Fail(std::string{s->dlgl        ? "dlxInit"
+                            : s->pikpok    ? "initApplication"
+                            : s->halfbrick ? "SystemInit"
+                                           : "nativeInit"} +
+                ": " + why);
         egl.ReleaseThread();
         s->running.store(false);
         return;
@@ -998,11 +1009,13 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
           if (want) {
             if (s->dlgl) s->dlgl->Resume(&e);
             else if (s->pikpok) s->pikpok->Resume(&e);
+            else if (s->halfbrick) s->halfbrick->Resume(&e);
             else s->game->Resume(&e);
             s->Log("resume");
           } else {
             if (s->dlgl) s->dlgl->Pause(&e);
             else if (s->pikpok) s->pikpok->Pause(&e);
+            else if (s->halfbrick) s->halfbrick->Pause(&e);
             else s->game->Pause(&e);
             s->Log("pause");
           }
@@ -1018,11 +1031,12 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
           queued.swap(s->touches);
         }
         for (const RbIosSession::Touch& t : queued) {
-          if (s->dlgl || s->pikpok) {
+          if (s->dlgl || s->pikpok || s->halfbrick) {
             // Android's MotionEvent action: down 0, up 1, move 2, cancel 3.
             const int action = t.kind == 0 ? 0 : t.kind == 1 ? 2 : t.kind == 2 ? 1 : 3;
             if (s->dlgl) s->dlgl->Touch(action, t.x, t.y);
-            else s->pikpok->Touch(t.id, action, t.x, t.y);
+            else if (s->pikpok) s->pikpok->Touch(t.id, action, t.x, t.y);
+            else s->halfbrick->Touch(t.id, action, t.x, t.y);
             continue;
           }
           switch (t.kind) {
@@ -1033,8 +1047,10 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
           }
         }
         const auto render_start = std::chrono::steady_clock::now();
-        const bool rendered =
-            s->dlgl ? s->dlgl->Render(&why) : s->pikpok ? s->pikpok->Render(&why) : s->game->Render(&why);
+        const bool rendered = s->dlgl        ? s->dlgl->Render(&why)
+                              : s->pikpok    ? s->pikpok->Render(&why)
+                              : s->halfbrick ? s->halfbrick->Render(&why)
+                                             : s->game->Render(&why);
         const auto render_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                    std::chrono::steady_clock::now() - render_start).count();
         if (!rendered) {

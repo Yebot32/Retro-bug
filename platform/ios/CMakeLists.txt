@@ -5,7 +5,7 @@
 enable_language(OBJCXX)
 
 add_library(rb_ios STATIC egl_shim.mm gl_symbols.mm ios_host.cpp cocos2dx_bootstrap.cpp dlgl_bootstrap.cpp
-    pikpok_bootstrap.cpp ios_session.cpp apk_icon.cpp text_render.mm)
+    pikpok_bootstrap.cpp halfbrick_bootstrap.cpp ios_session.cpp apk_icon.cpp text_render.mm)
 target_compile_features(rb_ios PUBLIC cxx_std_20)
 target_compile_options(rb_ios PRIVATE -fobjc-arc)
 target_include_directories(rb_ios PUBLIC
