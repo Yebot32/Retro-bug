@@ -1566,3 +1566,21 @@ assembled into the app like any other source.
   new engine strings. The PikPok start path itself is only compile-checked so far — the next device log
   says whether `initApplication` accepts the shell's Activity; its missing Java lookups are named by the
   `TableJava` trace.
+- **Build 49** (`28811a6`), 44,157,754 bytes, SHA-256
+  `f53e64072525a2aa7c154a64f4c15b8518b13654e8fab00a1cd8dc5cb045cca8`. Log 38 (build 48) showed the
+  engine selection working: Unity APKs refused before load, FN Skittles and Looney Tunes naming their
+  Java_* surfaces instead of a false Cocos error. Halfbrick's Mortar engine now has a bootstrap built
+  from its own dex: `InitFileManager(sourceDir, files+"/", cache+"/", false)`, the OpenSL manager (Java
+  sound manager on a false return), `SystemInit(width, height, language)`, `GameInit`, `step()` per frame
+  and `touchEvent(action, eventTime, pointerId, x, y, pressure, size)`; a false `step()` is reported as
+  the game's own shutdown/restart request. The 32-bit library was also classified on the tablet: only
+  **Blocky Roads** is Cocos and only **OREO/Turbo** are PikPok — the remaining titles are either Unity
+  (`libunity.so` + `libil2cpp.so`/`libmono.so`: Rolling Sky, MadTruck, Among Us, the Cartoon Network and
+  LEGO titles, Derby Quest, Cars 3, Crash Drive 2, FC All-Stars, SpongeBob, Sonic transformed, …) or
+  bespoke engines with large Java surfaces (Looney Tunes exports 847 Java_* entries, plus Cars, Angry
+  Birds’ ABK, Rabbids, Mickey/Walaber, Tap Tap, Gumball, SMB/PlayN). Unity needs a Java VM for
+  `UnityPlayer` and a fast tier for 24–56 MB of game code; that is a different runtime, not another
+  bootstrap. Verification: IPA carries the four `rb32sys` images unchanged, `CFBundleVersion` 49, both AOT
+  profiles compiled, the app binary carries the PikPok and Halfbrick engine strings; host boot lane
+  58/0. The PikPok and Halfbrick start paths are compile-checked only — the next device log is their
+  first run.
