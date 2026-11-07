@@ -1499,3 +1499,19 @@ assembled into the app like any other source.
   guest-window store from a host-heap access if a fault recurs. The cloud screen: the game's cloud sync
   uses a network path the port does not provide (no guest DNS/HTTP; `HttpGet.download` is a stub and
   `isActiveNetworkConnection` answers false), times out after ~30 s, and the title continues offline.
+- **Build 44** (`ee798cc`), 43,451,203 bytes, SHA-256
+  `178156a0f77eb09672fea4ceeed6260ac76a366a1713341956639e7176f7caad`. Three things the Java shim could not
+  do, and one it still cannot:
+  **(1) Complete an async native callback.** Blocky Roads' cloud load calls
+  `GPlayService.cloudLoadData(name, id)` and waits for the native it registered
+  (`onCloudDataLoadedCallback(IZ[BILjava/lang/String;)V` — the name and signature were recovered from the
+  library's JNINativeMethod table in `.data.rel.ro`). A no-op Java method never answers, which is the
+  "synchronizing data from the cloud" hang. TableJava now records the registering class per native, Boot
+  keeps the inbound targets, and the Java side can invoke one as a nested guest call (a path the ABI
+  context already documents); `cloudLoadData`/`cloudSaveData`/`HttpGet.download` answer at once with the
+  no-data result. **(2) KitKat saves.** `LocalStorage` was in memory; it is a file under
+  `files/localstorage.dat`, rewritten per save. **(3) Exit/timer probes.** The crash report already carries
+  `si_addr`. **Still open: audio** — the OpenSL ES backend is silent by design ("audio output is muted");
+  real output needs an AudioUnit device, a PCM ring buffer, at-least-once consumption of guest buffers
+  and delivery of the buffer-queue callback from a guest thread. Host gate: `rb_table_java_tests` (with
+  the new persistence and callback cases) ran on the Linux lane.
