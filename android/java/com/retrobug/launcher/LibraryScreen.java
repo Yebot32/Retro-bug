@@ -66,7 +66,7 @@ final class LibraryScreen extends LinearLayout {
         this.settings = new GameSettingsStore(c);
         setOrientation(VERTICAL);
         setBackgroundColor(HoloTheme.BG);
-        TextView add = HoloTheme.barAction(c, "Add APK");
+        TextView add = HoloTheme.barAction(c, "Add games");
         add.setOnClickListener(new OnClickListener() {
             @Override public void onClick(View v) { LibraryScreen.this.host.addApk(); }
         });

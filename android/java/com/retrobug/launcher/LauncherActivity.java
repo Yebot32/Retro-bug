@@ -368,7 +368,7 @@ public class LauncherActivity extends Activity {
             return library_;
         }
         library_ = new LibraryScreen(this, bg_, new LibraryScreen.Host() {
-            @Override public void addApk() { pickApk(); }
+            @Override public void addApk() { addApkOrFolder(); }
             @Override public void openSettings() { show(Screen.PREFS); }
             @Override public void pickFile(Intent i, java.util.function.Consumer<Uri> done) { LauncherActivity.this.pickFile(i, done); }
             @Override public String nameOf(Uri uri) { return queryName(uri); }
@@ -418,8 +418,8 @@ public class LauncherActivity extends Activity {
         root.addView(text("Add an APK. RetroBug reads its lib/armeabi-v7a library, loads it into the"
                 + " emulator, and calls the library's JNI entry point if it exports one.", 12f, false));
         root.addView(space(8));
-        root.addView(button("Add a game (.apk)", new Runnable() {
-            @Override public void run() { pickApk(); }
+        root.addView(button("Add games (APK or folder)", new Runnable() {
+            @Override public void run() { addApkOrFolder(); }
         }));
         root.addView(space(8));
 
@@ -1188,6 +1188,31 @@ public class LauncherActivity extends Activity {
 
     private static final int PICK_APK = 1;
 
+    /// The add button asks for a file or a folder first: restoring a library is tens of APKs in one
+    /// folder, and picking them one at a time is not a workflow.
+    private void addApkOrFolder() {
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Add games")
+                .setItems(new CharSequence[]{"APK file", "Folder of APKs"},
+                        new android.content.DialogInterface.OnClickListener() {
+                            @Override public void onClick(android.content.DialogInterface dialog, int which) {
+                                if (which == 0) pickApk(); else pickFolder();
+                            }
+                        })
+                .show();
+    }
+
+    private static final int PICK_TREE = 3;
+
+    private void pickFolder() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        try {
+            startActivityForResult(intent, PICK_TREE);
+        } catch (android.content.ActivityNotFoundException e) {
+            Toast.makeText(this, "No folder picker on this phone", Toast.LENGTH_LONG).show();
+        }
+    }
+
     private void pickApk() {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
@@ -1226,33 +1251,25 @@ public class LauncherActivity extends Activity {
             if (done != null && result == RESULT_OK && data != null && data.getData() != null) done.accept(data.getData());
             return;
         }
+        if (request == PICK_TREE) {
+            if (result != RESULT_OK || data == null || data.getData() == null) return;
+            importFolder(data.getData());
+            return;
+        }
         if (request != PICK_APK || result != RESULT_OK || data == null || data.getData() == null) return;
         final Uri uri = data.getData();
         String name = queryName(uri);
         if (name == null) name = "game.apk";
         if (!name.toLowerCase().endsWith(".apk")) name = name + ".apk";
-        final File dest = new File(gamesDir(), name.replaceAll("[^A-Za-z0-9._-]", "_"));
-        Toast.makeText(this, "Adding " + dest.getName() + " ...", Toast.LENGTH_SHORT).show();
+        final String pickedName = name;
+        Toast.makeText(this, "Adding " + destFor(name).getName() + " ...", Toast.LENGTH_SHORT).show();
         // Copied off the main thread: a game's APK is tens or hundreds of megabytes and copying one on the
         // UI thread is an ANR with a toast attached to it.
         new Thread(new Runnable() {
             @Override public void run() {
-                String problem = null;
-                // Copy beside the final name first (C15): a copy that fails halfway used to leave a truncated file
-                // under the game's real name, which the library then showed as a broken tile that could not play.
-                final File temp = new File(dest.getParentFile(), dest.getName() + ".part");
-                try (InputStream in = getContentResolver().openInputStream(uri);
-                     OutputStream out = new FileOutputStream(temp)) {
-                    if (in == null) throw new IOException("the picker returned a stream this app cannot open");
-                    byte[] buf = new byte[1 << 16];
-                    for (int n = in.read(buf); n > 0; n = in.read(buf)) out.write(buf, 0, n);
-                } catch (IOException | SecurityException e) {
-                    problem = e.getClass().getSimpleName() + ": " + e.getMessage();
-                }
-                if (problem == null && !temp.renameTo(dest)) problem = "could not finish the copy";
-                if (problem != null) temp.delete();
+                final String problem = copyIntoLibrary(uri, pickedName);
                 final String message = problem == null
-                        ? "Added " + dest.getName() + " (" + (dest.length() >> 20) + " MB)"
+                        ? "Added " + destFor(pickedName).getName() + " (" + (destFor(pickedName).length() >> 20) + " MB)"
                         : "Could not copy the file — " + problem;
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
@@ -1262,6 +1279,105 @@ public class LauncherActivity extends Activity {
                 });
             }
         }, "rb-add").start();
+    }
+
+    /// The library file a picked name lands on. The sanitising is here rather than at each call site so a
+    /// folder batch and a single pick can never disagree about whether a name already exists.
+    private File destFor(String name) {
+        String file = name == null || name.isEmpty() ? "game.apk" : name;
+        if (!file.toLowerCase(java.util.Locale.ROOT).endsWith(".apk")) file = file + ".apk";
+        return new File(gamesDir(), file.replaceAll("[^A-Za-z0-9._-]", "_"));
+    }
+
+    /// Copies one picked APK into the library on the calling (worker) thread. Null on success; otherwise
+    /// the reason, ready for a toast. The copy lands under a `.part` name first (C15): a copy that fails
+    /// halfway must not leave a truncated file under the game's real name for the library to show.
+    private String copyIntoLibrary(Uri uri, String name) {
+        final File dest = destFor(name);
+        final File temp = new File(dest.getParentFile(), dest.getName() + ".part");
+        try (InputStream in = getContentResolver().openInputStream(uri);
+             OutputStream out = new FileOutputStream(temp)) {
+            if (in == null) throw new IOException("the picker returned a stream this app cannot open");
+            byte[] buf = new byte[1 << 16];
+            for (int n = in.read(buf); n > 0; n = in.read(buf)) out.write(buf, 0, n);
+        } catch (IOException | SecurityException e) {
+            temp.delete();
+            return e.getClass().getSimpleName() + ": " + e.getMessage();
+        }
+        if (!temp.renameTo(dest)) {
+            temp.delete();
+            return "could not finish the copy";
+        }
+        return null;
+    }
+
+    /// Every `.apk` directly inside a chosen folder, copied the same way a single pick is. Same-named
+    /// games are skipped: choosing the same folder twice must not re-copy gigabytes or replace a game
+    /// that is already there. One summary toast, one library rescan.
+    private void importFolder(final Uri tree) {
+        new Thread(new Runnable() {
+            @Override public void run() {
+                int added = 0;
+                int skipped = 0;
+                int failed = 0;
+                int seen = 0;
+                String firstProblem = null;
+                try {
+                    final Uri children = android.provider.DocumentsContract.buildChildDocumentsUriUsingTree(
+                            tree, android.provider.DocumentsContract.getTreeDocumentId(tree));
+                    final android.database.Cursor c = getContentResolver().query(children,
+                            new String[]{
+                                    android.provider.DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                                    android.provider.DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                                    android.provider.DocumentsContract.Document.COLUMN_MIME_TYPE},
+                            null, null, null);
+                    try {
+                        while (c != null && c.moveToNext()) {
+                            final String id = c.getString(0);
+                            final String name = c.getString(1);
+                            final String mime = c.getString(2);
+                            if (mime != null
+                                    && mime.equals(android.provider.DocumentsContract.Document.MIME_TYPE_DIR)) {
+                                continue;
+                            }
+                            if (name == null || !name.toLowerCase(java.util.Locale.ROOT).endsWith(".apk")) continue;
+                            ++seen;
+                            if (destFor(name).exists()) {
+                                ++skipped;
+                                continue;
+                            }
+                            final Uri doc = android.provider.DocumentsContract.buildDocumentUriUsingTree(tree, id);
+                            final String problem = copyIntoLibrary(doc, name);
+                            if (problem == null) {
+                                ++added;
+                            } else {
+                                ++failed;
+                                if (firstProblem == null) firstProblem = problem;
+                            }
+                        }
+                    } finally {
+                        if (c != null) c.close();
+                    }
+                } catch (RuntimeException e) {
+                    ++failed;
+                    if (firstProblem == null) firstProblem = e.getClass().getSimpleName();
+                }
+                final String message;
+                if (seen == 0) {
+                    message = "No APKs in that folder";
+                } else {
+                    message = "Added " + added
+                            + (skipped > 0 ? ", skipped " + skipped + " already added" : "")
+                            + (failed > 0 ? ", " + failed + " failed (" + firstProblem + ")" : "");
+                }
+                runOnUiThread(new Runnable() {
+                    @Override public void run() {
+                        Toast.makeText(LauncherActivity.this, message, Toast.LENGTH_LONG).show();
+                        show(Screen.HOME);
+                    }
+                });
+            }
+        }, "rb-add-folder").start();
     }
 
     private String queryName(Uri uri) {

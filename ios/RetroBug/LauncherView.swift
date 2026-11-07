@@ -19,7 +19,7 @@ struct ImportedGame: Identifiable {
 
 struct LauncherView: View {
     private enum ActiveSheet: String, Identifiable {
-        case importer, share
+        case importer, importerFolder, share
         var id: String { rawValue }
     }
 
@@ -27,6 +27,7 @@ struct LauncherView: View {
     @StateObject private var icons = IconStore()
     @State private var games: [ImportedGame] = []
     @State private var sheet: ActiveSheet?
+    @State private var addSource = false
     @State private var showSettings = false
     @State private var menuGame: ImportedGame?
     @State private var pendingDelete: ImportedGame?
@@ -45,9 +46,9 @@ struct LauncherView: View {
             Holo.bg.ignoresSafeArea()
             VStack(spacing: 0) {
                 HoloActionBar(title: "RetroBug", accent: holo.accent) {
-                    HoloBarAction(label: "Add APK", accent: holo.accent) {
-                        AppLog.write("picker: requested")
-                        sheet = .importer
+                    HoloBarAction(label: "Add games", accent: holo.accent) {
+                        AppLog.write("picker: source asked for")
+                        addSource = true
                     }
                     HoloBarAction(label: "Settings", accent: holo.accent) {
                         showSettings = true
@@ -98,10 +99,25 @@ struct LauncherView: View {
                 HoloToast(text: toast)
             }
         }
+        .confirmationDialog("Add games", isPresented: $addSource, titleVisibility: .visible) {
+            Button("Choose APK") {
+                AppLog.write("picker: requested (apk)")
+                // The dialog's dismissal and the sheet's presentation in the same runloop step race: the
+                // sheet is presented while the dialog is still on screen and UIKit drops it.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { sheet = .importer }
+            }
+            Button("Choose folder of APKs") {
+                AppLog.write("picker: requested (folder)")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { sheet = .importerFolder }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
         .sheet(item: $sheet) { which in
             switch which {
             case .importer:
                 DocumentPicker(onPick: importURL, onDone: { sheet = nil })
+            case .importerFolder:
+                DocumentPicker(mode: .folder, onPick: importFolder, onDone: { sheet = nil })
             case .share:
                 ShareSheet(items: [AppLog.url])
             }
@@ -220,6 +236,56 @@ struct LauncherView: View {
             AppLog.write("import: FAILED: \(error)")
         }
         reload()
+    }
+
+    /// Imports every `.apk` directly inside a chosen folder. The picker hands the folder over as a
+    /// security-scoped URL (a folder is not copied into the container the way a single file is), so the
+    /// scope is held for the whole batch. Existing names are skipped rather than overwritten: choosing a
+    /// folder twice must not re-copy gigabytes or replace a game that is already playable.
+    private func importFolder(_ folder: URL) {
+        let fm = FileManager.default
+        let scoped = folder.startAccessingSecurityScopedResource()
+        AppLog.write("import: folder \(folder.path) security-scoped=\(scoped)")
+        let destDir = gamesDir
+        DispatchQueue.global(qos: .userInitiated).async {
+            defer { if scoped { folder.stopAccessingSecurityScopedResource() } }
+            let contents = (try? fm.contentsOfDirectory(
+                at: folder, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles])) ?? []
+            let apks = contents
+                .filter { $0.pathExtension.lowercased() == "apk" }
+                .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
+            var added = 0
+            var skipped = 0
+            var failed = 0
+            try? fm.createDirectory(at: destDir, withIntermediateDirectories: true)
+            for src in apks {
+                let dest = destDir.appendingPathComponent(src.lastPathComponent)
+                if fm.fileExists(atPath: dest.path) {
+                    skipped += 1
+                    AppLog.write("import: skipped existing \(src.lastPathComponent)")
+                    continue
+                }
+                do {
+                    try fm.copyItem(at: src, to: dest)
+                    added += 1
+                    AppLog.write("import: copied \(src.lastPathComponent)")
+                } catch {
+                    failed += 1
+                    AppLog.write("import: FAILED \(src.lastPathComponent): \(error.localizedDescription)")
+                }
+            }
+            DispatchQueue.main.async {
+                if apks.isEmpty {
+                    show("No APKs in that folder")
+                } else {
+                    var summary = "Added \(added) game" + (added == 1 ? "" : "s")
+                    if skipped > 0 { summary += ", skipped \(skipped) already added" }
+                    if failed > 0 { summary += ", \(failed) failed" }
+                    show(summary)
+                }
+                reload()
+            }
+        }
     }
 
     private func deleteConfirmed(_ game: ImportedGame) {

@@ -10,12 +10,28 @@ import UIKit
 import UniformTypeIdentifiers
 
 struct DocumentPicker: UIViewControllerRepresentable {
+    /// A file is copied into the app's container by the picker (`asCopy`), so there is no scope to manage.
+    /// A folder cannot be copied — a folder of APKs is gigabytes — so it arrives as a security-scoped URL
+    /// and the importer reads the APKs out of it in place.
+    enum Mode {
+        case apk
+        case folder
+    }
+
+    var mode: Mode = .apk
     let onPick: (URL) -> Void
     let onDone: () -> Void
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        AppLog.write("picker: presented (asCopy, .item)")
-        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: true)
+        let picker: UIDocumentPickerViewController
+        switch mode {
+        case .apk:
+            AppLog.write("picker: presented (asCopy, .item)")
+            picker = UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: true)
+        case .folder:
+            AppLog.write("picker: presented (open, .folder)")
+            picker = UIDocumentPickerViewController(forOpeningContentTypes: [.folder], asCopy: false)
+        }
         picker.allowsMultipleSelection = false
         picker.delegate = context.coordinator
         return picker
