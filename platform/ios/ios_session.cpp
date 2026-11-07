@@ -52,8 +52,10 @@
 #include "rb/java/blockyroads.h"
 #include "rb/java/cocos2dx.h"
 #include "rb/java/dlgl.h"
+#include "rb/java/pikpok.h"
 #include "rb/loader/apk_assets.h"
 #include "rb/java/table_java.h"
+#include "pikpok_bootstrap.h"
 #include "rb/loader/guest_elf.h"
 #include "rb/runtime/guest_thread.h"
 #include "rb/runtime/inbound.h"
@@ -360,7 +362,11 @@ struct RbIosSession {
   std::unique_ptr<rb::platform::ios::IosHost> host;                  ///< the guest's import answers
   std::unique_ptr<rb::platform::ios::Cocos2dxBootstrap> game;
   std::unique_ptr<rb::platform::ios::DlglBootstrap> dlgl;  ///< KitKat Challenge's DLGE engine, when that is the lib
+  std::unique_ptr<rb::platform::ios::PikPokBootstrap> pikpok;  ///< OREO/Turbo's Mab engine
   bool dlgl_apk = false;  ///< the APK ships assets/rb32/libdlgl.so: boot the whole DLGE Java load order
+  /// Set at creation for an APK whose engine this host cannot drive (Unity): the render thread refuses
+  /// with this line rather than loading tens of megabytes and failing at a made-up entry point.
+  std::string unsupported;
   bool booted = false;  ///< render thread only
   /// The engine this session actually booted on: 0 Tier I, 1 AOT (offline-translated), 2 Tier J.
   /// Written on the render thread, read by the UI through rb_ios_session_engine.
@@ -546,6 +552,7 @@ bool RbIosSession::Boot(std::string* err) {
     rb::java::InstallCocos2dx(*java, env);
     rb::java::InstallDlgl(*java, env);
     rb::java::InstallBlockyroads(*java, env);
+    rb::java::InstallPikPok(*java);
     self->java = java.get();
     java->set_trace([self](const std::string& line) { self->Log(line); });
     return java;
@@ -761,11 +768,39 @@ bool RbIosSession::Boot(std::string* err) {
   // A sampling profile of guest execution: one sample per slice boundary, cheap enough to leave on, and the
   // only way to name where an interpreted title spends its minutes on a host with no JIT.
   boot->process()->StartPcProfile();
+  // Which engine the loaded library presents. The natives are the evidence, not the library's name: a
+  // stock APK's engine image is whatever the Java layer would have loaded, and only its exports say what
+  // the shell must call. A surface none of these matches is named, with the exports it does offer, rather
+  // than being handed to the nearest bootstrap and failing at an entry point it never had.
+  const rb::loader::GuestModule* const module = boot->module(lib);
+  const auto exports = [module](const char* name) {
+    return module != nullptr && module->FindExport(name).has_value();
+  };
   if (dlgl_apk || lib == "libdlgl.so") {
     dlgl = std::make_unique<rb::platform::ios::DlglBootstrap>(
         *java, boot->jni()->env(), lib, [self](const std::string& line) { self->Log(line); });
-  } else {
+    self->Log("engine: DLGE (natives registered in JNI_OnLoad)");
+  } else if (exports("Java_com_pikpok_MabActivity_initApplication")) {
+    pikpok = std::make_unique<rb::platform::ios::PikPokBootstrap>(*boot, *java, lib);
+    self->Log("engine: PikPok Mab (initApplication + GLSurfaceView renderer + touch)");
+  } else if (exports("Java_org_cocos2dx_lib_Cocos2dxHelper_nativeSetApkPath")) {
     game = std::make_unique<rb::platform::ios::Cocos2dxBootstrap>(*boot, *java, lib);
+    self->Log("engine: Cocos2d-x (Cocos2dxHelper natives)");
+  } else {
+    std::string names;
+    int total = 0;
+    if (module != nullptr) {
+      for (const rb::loader::Symbol& sym : module->exports) {
+        if (sym.name.rfind("Java_", 0) != 0) continue;
+        if (total < 6) names += (names.empty() ? "" : ", ") + sym.name;
+        ++total;
+      }
+    }
+    boot_error = "engine: no bootstrap for this native surface — its Java_* exports: " +
+                 (names.empty() ? std::string{"none"} : names) +
+                 (total > 6 ? " (and " + std::to_string(total - 6) + " more)" : "");
+    *err = boot_error;
+    return false;
   }
   return true;
 }
@@ -787,17 +822,20 @@ extern "C" RbIosSession* rb_ios_create(const char* apk_path, const char* lib_nam
     // would load). Within one layout the game's engine is the largest image, as on the Android launcher.
     std::string why;
     auto archive = rb::loader::ApkArchive::Open(s->apk, &why);
+    bool unity = false;
     if (archive) {
       for (const char* dir : {"assets/rb32/", "lib/armeabi-v7a/", "lib/armeabi/"}) {
         const std::string prefix = dir;
         std::uint32_t best = 0;
         std::string pick;
+        bool layout_unity = false;
         for (const std::string& name : archive->Names()) {
           if (name.rfind(prefix, 0) != 0 || name.size() <= prefix.size() + 3 ||
               name.compare(name.size() - 3, 3, ".so") != 0) {
             continue;
           }
           if (name.find('/', prefix.size()) != std::string::npos) continue;  // direct children only
+          if (name == prefix + "libunity.so") layout_unity = true;
           const auto size = archive->EntrySize(name);
           if (size && *size > best) {
             best = *size;
@@ -807,6 +845,7 @@ extern "C" RbIosSession* rb_ios_create(const char* apk_path, const char* lib_nam
         if (pick.empty()) continue;
         s->lib = pick;
         s->lib_dir = prefix;
+        unity = layout_unity;
         s->Log("auto: " + pick + " (" + std::to_string(best) + " bytes) from " + prefix);
         break;
       }
@@ -820,6 +859,11 @@ extern "C" RbIosSession* rb_ios_create(const char* apk_path, const char* lib_nam
     }
   }
   s->stock_apk = s->lib_dir != "assets/rb32/";
+  if (unity) {
+    s->unsupported =
+        "engine: Unity — its entry is libunity.so and the Java layer (UnityPlayer) needs an Android VM this "
+        "host does not have; loading the native engine alone cannot draw a frame";
+  }
   s->data_dir = data_dir != nullptr ? data_dir : "";
   s->client_version = client_version == 1 ? 1 : 2;
   s->dlgl_apk = rb::host::Boot::BundlesDlgl(s->apk);
@@ -914,6 +958,11 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
     try {
       static std::atomic<bool> probed{false};
       if (!probed.exchange(true)) ProbeWindowMemory(s);
+      if (!s->unsupported.empty()) {
+        s->Fail(s->unsupported);
+        s->running.store(false);
+        return;
+      }
       if (!s->booted) {
         s->Log("game: booting " + s->apk + " lib=" + s->lib);
         if (!s->Boot(&why)) {
@@ -931,10 +980,11 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
         s->running.store(false);
         return;
       }
-      const bool started = s->dlgl ? s->dlgl->Start(s->apk, s->width, s->height, &why)
-                                   : s->game->Start(s->apk, s->width, s->height, &why);
+      const bool started = s->dlgl  ? s->dlgl->Start(s->apk, s->width, s->height, &why)
+                           : s->pikpok ? s->pikpok->Start(s->apk, s->width, s->height, &why)
+                                       : s->game->Start(s->apk, s->width, s->height, &why);
       if (!started) {
-        s->Fail(std::string{s->dlgl ? "dlxInit" : "nativeInit"} + ": " + why);
+        s->Fail(std::string{s->dlgl ? "dlxInit" : s->pikpok ? "initApplication" : "nativeInit"} + ": " + why);
         egl.ReleaseThread();
         s->running.store(false);
         return;
@@ -946,10 +996,14 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
         if (want != !app_paused) {
           std::string e;
           if (want) {
-            if (s->dlgl) s->dlgl->Resume(&e); else s->game->Resume(&e);
+            if (s->dlgl) s->dlgl->Resume(&e);
+            else if (s->pikpok) s->pikpok->Resume(&e);
+            else s->game->Resume(&e);
             s->Log("resume");
           } else {
-            if (s->dlgl) s->dlgl->Pause(&e); else s->game->Pause(&e);
+            if (s->dlgl) s->dlgl->Pause(&e);
+            else if (s->pikpok) s->pikpok->Pause(&e);
+            else s->game->Pause(&e);
             s->Log("pause");
           }
           app_paused = !want;
@@ -964,10 +1018,11 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
           queued.swap(s->touches);
         }
         for (const RbIosSession::Touch& t : queued) {
-          if (s->dlgl) {
+          if (s->dlgl || s->pikpok) {
             // Android's MotionEvent action: down 0, up 1, move 2, cancel 3.
             const int action = t.kind == 0 ? 0 : t.kind == 1 ? 2 : t.kind == 2 ? 1 : 3;
-            s->dlgl->Touch(action, t.x, t.y);
+            if (s->dlgl) s->dlgl->Touch(action, t.x, t.y);
+            else s->pikpok->Touch(t.id, action, t.x, t.y);
             continue;
           }
           switch (t.kind) {
@@ -978,7 +1033,8 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
           }
         }
         const auto render_start = std::chrono::steady_clock::now();
-        const bool rendered = s->dlgl ? s->dlgl->Render(&why) : s->game->Render(&why);
+        const bool rendered =
+            s->dlgl ? s->dlgl->Render(&why) : s->pikpok ? s->pikpok->Render(&why) : s->game->Render(&why);
         const auto render_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                    std::chrono::steady_clock::now() - render_start).count();
         if (!rendered) {

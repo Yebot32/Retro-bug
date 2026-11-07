@@ -231,7 +231,9 @@ target_link_libraries(rb_zip_tests PRIVATE rb_loader)
 # S1: the platform-free boot, on the gate's own fixtures (the tablet's libc and the C06 chain). It is a
 # guest lane like rb_guest_process_tests, so it exists only where the inbound trampoline pool does.
 if(TARGET rb_inbound)
-  add_executable(rb_host_boot_tests host_boot_test.cpp)
+  # pikpok_bootstrap.cpp is compiled here only so its calls into Boot/TableJava are type-checked on a host
+  # build; the iOS app is its one user.
+  add_executable(rb_host_boot_tests host_boot_test.cpp "${CMAKE_SOURCE_DIR}/platform/ios/pikpok_bootstrap.cpp")
   target_link_libraries(rb_host_boot_tests PRIVATE rb_host rb_java)
   target_compile_definitions(rb_host_boot_tests PRIVATE
     RB_DEVICE_LIBC_PATH="/data/local/tmp/rb_device_libc.so"
