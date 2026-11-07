@@ -816,13 +816,13 @@ extern "C" RbIosSession* rb_ios_create(const char* apk_path, const char* lib_nam
   InstallCrashLog(s->log_file);
   s->apk = apk_path;
   s->lib = lib_name;
+  bool unity = false;
   if (s->lib.empty()) {
     // The largest .so in whichever layout the APK uses: assets/rb32/ for a RetroBug repack, or a stock
     // store APK's lib/armeabi-v7a/ (lib/armeabi only when the APK has no v7a build — what a device
     // would load). Within one layout the game's engine is the largest image, as on the Android launcher.
     std::string why;
     auto archive = rb::loader::ApkArchive::Open(s->apk, &why);
-    bool unity = false;
     if (archive) {
       for (const char* dir : {"assets/rb32/", "lib/armeabi-v7a/", "lib/armeabi/"}) {
         const std::string prefix = dir;
