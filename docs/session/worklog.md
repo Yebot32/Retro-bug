@@ -1523,3 +1523,11 @@ assembled into the app like any other source.
   Android launcher rebuilt with `tools/build_launcher_apk.sh` and installed on the SM-X710; verified by
   picking `/sdcard/Download/aptest` (two APKs): `files/games/` gained `guestprobe.apk` and
   `smbbounce.apk` and the library showed the new tile. Test files removed afterwards.
+- **Build 46** (`a475c9e`), 43,463,872 bytes, SHA-256
+  `89fe029d85d3802eee997f20aa12c8b989dd2351256ee5db08471db5e15521e6`. The 32 APKs copied from the
+  tablet all failed on iOS with "the APK has no assets/rb32/*.so": only the repack layout was known. The
+  boot now decides the library layout once per APK (`LibDirOf`: assets/rb32 → lib/armeabi-v7a →
+  lib/armeabi) and reads DT_NEEDED siblings, guest dlopen and the dlgl load order through it; the iOS
+  auto-detection picks the largest .so from the same layout, and a stock APK's Java classes are defined
+  on demand (a missing *method* fails at its own lookup, where the log names it). Android is unchanged
+  (its launcher repacks first). Host gate on the tablet: table_java 238/0, host boot 47/0.
