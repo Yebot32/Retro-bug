@@ -32,6 +32,7 @@ std::unique_ptr<ApkFile> ApkArchive::OpenFile(const std::string& name, std::stri
 }
 
 std::int64_t ApkFile::Read(void* dst, std::int64_t n) {
+  std::lock_guard<std::mutex> lk(mu_);
   if (n <= 0 || dst == nullptr || pos_ >= static_cast<std::int64_t>(bytes_.size())) return 0;
   const std::int64_t left = static_cast<std::int64_t>(bytes_.size()) - pos_;
   const std::int64_t take = std::min(n, left);
@@ -41,6 +42,7 @@ std::int64_t ApkFile::Read(void* dst, std::int64_t n) {
 }
 
 std::int64_t ApkFile::Seek(std::int64_t off, int whence) {
+  std::lock_guard<std::mutex> lk(mu_);
   std::int64_t base = 0;
   switch (whence) {
     case 0: base = 0; break;                                       // SEEK_SET

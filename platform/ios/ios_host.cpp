@@ -364,52 +364,63 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
       ++asset_logs_;
       log_("assets: open(\"" + name + "\") = " + std::to_string(file->Length()) + " bytes");
     }
-    assets_[file.get()] = std::move(file);
+    {
+      std::shared_ptr<loader::ApkFile> owned = std::move(file);
+      std::lock_guard<std::mutex> lk(assets_mu_);
+      assets_[owned.get()] = std::move(owned);
+    }
     s.r[0] = handle;
     return true;
   });
-  AddSpecial("AAsset_read", [this](exec::MachineState& s, std::string* why) {
-    void* host = nullptr;
-    if (!handles_.Get(s.r[0], &host)) {
-      *why = "AAsset_read: asset " + Hex(s.r[0]) + " was never issued or was closed";
-      return false;
+  // The entry must be taken under the map's lock, but the returned reference is what keeps the file
+  // alive after the lock drops: a close on another thread removes the map entry, and the object dies
+  // only when the last read that borrowed it returns.
+  const auto asset = [this](std::uint32_t handle, void** host, std::string* why,
+                            const char* what) -> std::shared_ptr<loader::ApkFile> {
+    if (!handles_.Get(handle, host)) {
+      *why = std::string{what} + ": asset " + Hex(handle) + " was never issued or was closed";
+      return nullptr;
     }
+    auto file = FindAsset(*host);
+    if (!file) {
+      *why = std::string{what} + ": asset " + Hex(handle) + " was closed while in use";
+      return nullptr;
+    }
+    return file;
+  };
+  AddSpecial("AAsset_read", [this, asset](exec::MachineState& s, std::string* why) {
+    void* host = nullptr;
+    auto file = asset(s.r[0], &host, why, "AAsset_read");
+    if (!file) return false;
     const std::uint32_t count = s.r[2];
     void* buffer = count == 0 ? nullptr : p_.memory().HostForAccess(s.r[1]);
     if (count != 0 && buffer == nullptr) {
       *why = "AAsset_read: the buffer " + Hex(s.r[1]) + " is not guest memory";
       return false;
     }
-    const auto got = static_cast<loader::ApkFile*>(host)->Read(buffer, static_cast<std::int64_t>(count));
+    const auto got = file->Read(buffer, static_cast<std::int64_t>(count));
     s.r[0] = static_cast<std::uint32_t>(got);
     return true;
   });
-  AddSpecial("AAsset_getLength", [this](exec::MachineState& s, std::string* why) {
+  AddSpecial("AAsset_getLength", [this, asset](exec::MachineState& s, std::string* why) {
     void* host = nullptr;
-    if (!handles_.Get(s.r[0], &host)) {
-      *why = "AAsset_getLength: asset " + Hex(s.r[0]) + " was never issued";
-      return false;
-    }
-    s.r[0] = static_cast<std::uint32_t>(static_cast<loader::ApkFile*>(host)->Length());
+    auto file = asset(s.r[0], &host, why, "AAsset_getLength");
+    if (!file) return false;
+    s.r[0] = static_cast<std::uint32_t>(file->Length());
     return true;
   });
-  AddSpecial("AAsset_getRemainingLength", [this](exec::MachineState& s, std::string* why) {
+  AddSpecial("AAsset_getRemainingLength", [this, asset](exec::MachineState& s, std::string* why) {
     void* host = nullptr;
-    if (!handles_.Get(s.r[0], &host)) {
-      *why = "AAsset_getRemainingLength: asset " + Hex(s.r[0]) + " was never issued";
-      return false;
-    }
-    auto* file = static_cast<loader::ApkFile*>(host);
+    auto file = asset(s.r[0], &host, why, "AAsset_getRemainingLength");
+    if (!file) return false;
     s.r[0] = static_cast<std::uint32_t>(file->Length() - file->Position());
     return true;
   });
-  AddSpecial("AAsset_seek", [this](exec::MachineState& s, std::string* why) {
+  AddSpecial("AAsset_seek", [this, asset](exec::MachineState& s, std::string* why) {
     void* host = nullptr;
-    if (!handles_.Get(s.r[0], &host)) {
-      *why = "AAsset_seek: asset " + Hex(s.r[0]) + " was never issued";
-      return false;
-    }
-    const auto at = static_cast<loader::ApkFile*>(host)->Seek(static_cast<std::int32_t>(s.r[1]), static_cast<int>(s.r[2]));
+    auto file = asset(s.r[0], &host, why, "AAsset_seek");
+    if (!file) return false;
+    const auto at = file->Seek(static_cast<std::int32_t>(s.r[1]), static_cast<int>(s.r[2]));
     s.r[0] = static_cast<std::uint32_t>(static_cast<std::int32_t>(at));
     return true;
   });
@@ -417,6 +428,7 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
     void* host = nullptr;
     if (handles_.Get(s.r[0], &host)) {
       handles_.Forget(host);
+      std::lock_guard<std::mutex> lk(assets_mu_);
       assets_.erase(static_cast<loader::ApkFile*>(host));
     }
     return true;
@@ -571,6 +583,12 @@ bool IosHost::OpenApk(const std::string& path, std::string* err) {
   }
   archive_ = loader::ApkArchive::Open(path, err);
   return archive_ != nullptr;
+}
+
+std::shared_ptr<loader::ApkFile> IosHost::FindAsset(void* host) const {
+  std::lock_guard<std::mutex> lk(assets_mu_);
+  const auto it = assets_.find(static_cast<loader::ApkFile*>(host));
+  return it == assets_.end() ? nullptr : it->second;
 }
 
 void IosHost::EmitLog(int priority, const std::string& tag, const std::string& text) {

@@ -16,6 +16,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
@@ -114,7 +115,13 @@ class IosHost {
   void EmitLog(int priority, const std::string& tag, const std::string& text);
   std::unique_ptr<rb::loader::ApkArchive> archive_;
   int asset_manager_marker_ = 0;
-  std::map<const rb::loader::ApkFile*, std::unique_ptr<rb::loader::ApkFile>> assets_;
+  /// Assets are opened and closed by several guest threads at once. Ownership is shared so that a close
+  /// on one thread cannot free an ApkFile while another is inside `AAsset_read` on the same handle — a
+  /// use-after-free that killed Blocky Roads ~30 s into loading its 31 MB asset archive. The mutex guards
+  /// the map, not the reads: an in-flight read holds its own reference.
+  mutable std::mutex assets_mu_;
+  std::map<const rb::loader::ApkFile*, std::shared_ptr<rb::loader::ApkFile>> assets_;
+  std::shared_ptr<rb::loader::ApkFile> FindAsset(void* host) const;
   /// Data imports (the OpenSL ES interface IDs): their guest address is a cell holding a value, not a
   /// host slot — the guest loads the value rather than calling it.
   std::map<std::string, std::uint32_t> data_symbols_;

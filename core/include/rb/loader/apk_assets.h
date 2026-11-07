@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -18,7 +19,10 @@ namespace rb::loader {
 class ApkFile {
  public:
   [[nodiscard]] std::int64_t Length() const { return static_cast<std::int64_t>(bytes_.size()); }
-  [[nodiscard]] std::int64_t Position() const { return pos_; }
+  [[nodiscard]] std::int64_t Position() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return pos_;
+  }
   /// Up to `n` bytes from the cursor; 0 at the end. The cursor advances by what was copied.
   std::int64_t Read(void* dst, std::int64_t n);
   /// SEEK_SET (0), SEEK_CUR (1), SEEK_END (2); returns the new position, or -1 for a bad `whence` or a
@@ -29,6 +33,10 @@ class ApkFile {
   friend class ApkArchive;
   explicit ApkFile(std::vector<std::uint8_t> bytes) : bytes_(std::move(bytes)) {}
   std::vector<std::uint8_t> bytes_;
+  /// The cursor is per handle in bionic, and a title that shares one handle across loader threads still
+  /// expects each Read/Seek to be a whole operation: Blocky reads its 31 MB archive from several guest
+  /// threads, and an unsynchronised cursor let one thread read at another s position.
+  mutable std::mutex mu_;
   std::int64_t pos_ = 0;
 };
 

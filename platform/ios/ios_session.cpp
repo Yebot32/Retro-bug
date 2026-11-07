@@ -215,7 +215,13 @@ void CrashHex(std::uint32_t value) {
   CrashWrite(b);
 }
 
-void CrashSignal(int sig) {
+void CrashHexWide(std::uint64_t value) {
+  char b[24];
+  std::snprintf(b, sizeof b, "0x%llx", static_cast<unsigned long long>(value));
+  CrashWrite(b);
+}
+
+void CrashSignal(int sig, siginfo_t* info, void* /*context*/) {
   CrashWrite("\n=== RetroBug host crash: signal ");
   switch (sig) {
     case SIGABRT: CrashWrite("SIGABRT"); break;
@@ -227,6 +233,16 @@ void CrashSignal(int sig) {
     default: CrashWrite("unknown"); break;
   }
   CrashWrite(" ===\n");
+  if (info != nullptr) {
+    // The faulting address separates a guest-window store (a page-protection or page-state problem in
+    // the memory model) from a host-heap access (a lifetime bug in the code that is running). The raw
+    // address is printed because the guest window moves with ASLR.
+    CrashWrite("fault address: ");
+    CrashHexWide(reinterpret_cast<std::uintptr_t>(info->si_addr));
+    CrashWrite(" si_code ");
+    CrashHex(static_cast<std::uint32_t>(info->si_code));
+    CrashWrite("\n");
+  }
   const char* last = rb::platform::ios::LastHostCall();
   CrashWrite("last host call: ");
   CrashWrite(last != nullptr ? last : "none");
@@ -276,8 +292,8 @@ void InstallCrashLog(std::FILE* file) {
   ss.ss_flags = 0;
   (void)::sigaltstack(&ss, nullptr);
   struct sigaction sa {};
-  sa.sa_handler = CrashSignal;
-  sa.sa_flags = SA_ONSTACK;
+  sa.sa_sigaction = CrashSignal;
+  sa.sa_flags = SA_ONSTACK | SA_SIGINFO;
   // `sa_mask` is zero-initialised, which is the empty set on Darwin (sigemptyset is not declared at
   // this SDK's feature level).
   for (const int sig : {SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGSEGV, SIGTRAP}) (void)::sigaction(sig, &sa, nullptr);
