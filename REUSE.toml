@@ -60,3 +60,25 @@ SPDX-FileCopyrightText = "© 2014-2024 Florian Bernd and Zydis contributors"
 path = "external/dynarmic/externals/zycore/*"
 SPDX-License-Identifier = "MIT"
 SPDX-FileCopyrightText = "© 2018-2024 Florian Bernd and Zycore contributors"
+
+# The guest's 32-bit system libraries: the same images the Android launcher packages into a repackaged
+# APK, and the copies a stock APK boots against on iOS. Bionic is Apache-2.0; libz is zlib's own licence.
+[[package]]
+path = "guest/system/libc.so"
+SPDX-License-Identifier = "Apache-2.0"
+SPDX-FileCopyrightText = "© 2008-2024 The Android Open Source Project"
+
+[[package]]
+path = "guest/system/libstdc++.so"
+SPDX-License-Identifier = "Apache-2.0"
+SPDX-FileCopyrightText = "© 2008-2024 The Android Open Source Project"
+
+[[package]]
+path = "guest/system/libm.so"
+SPDX-License-Identifier = "Apache-2.0"
+SPDX-FileCopyrightText = "© 2008-2024 The Android Open Source Project"
+
+[[package]]
+path = "guest/system/libz.so"
+SPDX-License-Identifier = "Zlib"
+SPDX-FileCopyrightText = "© 1995-2024 Jean-loup Gailly and Mark Adler"

@@ -13,10 +13,13 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstdint>
 #include <signal.h>
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <fstream>
+#include <limits.h>
 #if defined(__APPLE__) && __has_include(<execinfo.h>)
 #include <execinfo.h>
 #endif
@@ -463,6 +466,31 @@ void Take(RbIosSession* s, int kind, int id, float x, float y) {
   s->touches.push_back(t);
 }
 
+#if defined(__APPLE__)
+/// A guest system library shipped in the app bundle under `rb32sys/`. A stock store APK carries only its
+/// own libraries under lib/armeabi-v7a and has no assets/rb32sys, so the boot reads bionic from here.
+std::optional<std::vector<std::uint8_t>> ReadBundledSystemLib(const std::string& name) {
+  CFBundleRef bundle = CFBundleGetMainBundle();
+  if (bundle == nullptr) return std::nullopt;
+  CFURLRef url = CFBundleCopyBundleURL(bundle);
+  if (url == nullptr) return std::nullopt;
+  char root[PATH_MAX];
+  const bool ok =
+      CFURLGetFileSystemRepresentation(url, true, reinterpret_cast<UInt8*>(root), sizeof root) != 0;
+  CFRelease(url);
+  if (!ok) return std::nullopt;
+  std::ifstream f(std::string(root) + "/rb32sys/" + name, std::ios::binary);
+  if (!f) return std::nullopt;
+  f.seekg(0, std::ios::end);
+  const std::streamoff n = f.tellg();
+  if (n <= 0) return std::nullopt;
+  f.seekg(0, std::ios::beg);
+  std::vector<std::uint8_t> bytes(static_cast<std::size_t>(n));
+  if (!f.read(reinterpret_cast<char*>(bytes.data()), n)) return std::nullopt;
+  return bytes;
+}
+#endif
+
 }  // namespace
 
 bool RbIosSession::Boot(std::string* err) {
@@ -525,6 +553,7 @@ bool RbIosSession::Boot(std::string* err) {
   cfg.resolve_host = [self](const std::string& name) -> std::optional<rb::exec::GuestAddr> {
     return self->host ? self->host->Resolve(name) : std::nullopt;
   };
+  cfg.read_system_lib = [](const std::string& name) { return ReadBundledSystemLib(name); };
   // What only this layer knows when the guest faults: the GL context version and the host calls that led
   // to it. The runtime prints every thread, register and module beside these.
   cfg.fault_state = [self] {

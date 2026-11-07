@@ -103,9 +103,25 @@ fi
 
 APP="$BUILD/dd/Build/Products/Release-iphoneos/RetroBug.app"
 [ -d "$APP" ] || { echo "no app at $APP" >&2; exit 1; }
+
+# The guest's system libraries. A stock store APK carries only its own libraries under lib/armeabi-v7a
+# and no assets/rb32sys, so a repack is not needed: the app bundles the same four images the launcher
+# packaged into a converted APK, and the boot falls back to them (BootConfig::read_system_lib).
+SCOPE="$ROOT/guest/system"
+SCOPE_LIBS=(libc.so libm.so libz.so libstdc++.so)
+for name in "${SCOPE_LIBS[@]}"; do
+  [ -s "$SCOPE/$name" ] || { echo "missing $SCOPE/$name — the guest system libraries must be in the repo" >&2; exit 1; }
+done
+
 mkdir -p "$BUILD/ipa/Payload"
 rm -rf "$BUILD/ipa/Payload/RetroBug.app"
 cp -R "$APP" "$BUILD/ipa/Payload/"
+mkdir -p "$BUILD/ipa/Payload/RetroBug.app/rb32sys"
+for name in "${SCOPE_LIBS[@]}"; do
+  cp "$SCOPE/$name" "$BUILD/ipa/Payload/RetroBug.app/rb32sys/$name"
+done
+echo "scope: bundled ${SCOPE_LIBS[*]} in RetroBug.app/rb32sys"
+ls -l "$BUILD/ipa/Payload/RetroBug.app/rb32sys"
 rm -f "$BUILD/ipa/RetroBug-unsigned.ipa"
 ( cd "$BUILD/ipa" && zip -qry RetroBug-unsigned.ipa Payload )
 echo "built $BUILD/ipa/RetroBug-unsigned.ipa"

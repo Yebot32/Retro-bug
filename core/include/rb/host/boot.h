@@ -60,6 +60,11 @@ struct BootConfig {
   /// The host's answers for imports no guest image defines (GLES/EGL/dl/log on Android; the gfx/audio
   /// adapters on iOS). Same contract as `GuestProcessOptions::host_resolver`.
   std::function<std::optional<rb::exec::GuestAddr>(const std::string&)> resolve_host;
+  /// A system library (`libc.so`, `libm.so`, `libz.so`, `libstdc++.so`) the APK does not carry. A
+  /// repackaged APK keeps them under `assets/rb32sys/`; a stock store APK has only its own libraries
+  /// under lib/armeabi-v7a and cannot boot without them, so the platform answers from its own copy (the
+  /// iOS app carries them in its bundle). Null: the entry must be in the APK, as before.
+  std::function<std::optional<std::vector<std::uint8_t>>(const std::string& name)> read_system_lib;
   /// Platform services installed once the bridge is up and before any guest library loads: the host slots,
   /// audio, file providers, thunks that need the Java bridge. `boot.jni()` and `proc` are usable here.
   std::function<void(Boot& boot, rb::runtime::GuestProcess& proc)> on_bridge;
@@ -144,6 +149,10 @@ class Boot {
 
  private:
   bool BootScope(const std::string& apk, rb::loader::ZipReader& zip, std::string* out);
+  /// `name` from the APK's repack layout, else from `cfg_.read_system_lib`. `from` says which answered:
+  /// the zip entry's name, or "the app bundle". Null when neither has it.
+  std::optional<std::vector<std::uint8_t>> ReadSystemLib(rb::loader::ZipReader& zip, const std::string& name,
+                                                         std::string* from, std::string* err);
   bool BootBridge(std::string* out);
   const rb::loader::GuestModule* LoadWithNeeded(rb::loader::ZipReader& zip, const std::string& lib,
                                                 std::set<std::string>& in_progress, std::string* out);

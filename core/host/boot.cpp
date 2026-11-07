@@ -173,6 +173,23 @@ bool Boot::BootBridge(std::string* out) {
   return true;
 }
 
+std::optional<std::vector<std::uint8_t>> Boot::ReadSystemLib(rb::loader::ZipReader& zip,
+                                                             const std::string& name, std::string* from,
+                                                             std::string* err) {
+  const std::string entry = std::string{"assets/rb32sys/"} + name;
+  if (auto bytes = zip.Read(entry, err)) {
+    *from = entry;
+    return bytes;
+  }
+  if (cfg_.read_system_lib) {
+    if (auto bytes = cfg_.read_system_lib(name)) {
+      *from = "the app bundle";
+      return bytes;
+    }
+  }
+  return std::nullopt;
+}
+
 bool Boot::BootScope(const std::string& apk, rb::loader::ZipReader& zip, std::string* out) {
   (void)apk;
   (void)out;
@@ -203,15 +220,17 @@ bool Boot::BootScope(const std::string& apk, rb::loader::ZipReader& zip, std::st
   std::vector<std::uint8_t> sys[3];
   const char* const names[3] = {"libc.so", "libm.so", "libz.so"};
   for (int i = 0; i < 3; ++i) {
-    const std::string entry = std::string{"assets/rb32sys/"} + names[i];
-    auto bytes = zip.Read(entry, &err);
+    std::string from;
+    auto bytes = ReadSystemLib(zip, names[i], &from, &err);
     if (!bytes) {
-      Say("FATAL: rb_runtime_boot: " + entry + ": " + err);
+      Say("FATAL: rb_runtime_boot: assets/rb32sys/" + std::string{names[i]} + ": " + err);
       DropScope();
       return false;
     }
     sys[i] = std::move(*bytes);
-    Say("rb_runtime_boot: " + entry + " = " + std::to_string(sys[i].size()) + " bytes");
+    const std::string shown =
+        from == "the app bundle" ? std::string{names[i]} + " from " + from : from;
+    Say("rb_runtime_boot: " + shown + " = " + std::to_string(sys[i].size()) + " bytes");
   }
   if (!proc_->LoadScope(sys[0], sys[1], sys[2], {}, &err)) {
     Say("FATAL: " + err);
@@ -270,16 +289,31 @@ const rb::loader::GuestModule* Boot::LoadWithNeeded(rb::loader::ZipReader& zip, 
     // libstdc++ comes in on demand, where the launcher's Inspect passes it to LoadScope: this scope is booted
     // once for every library the process will ever load, so it joins later the way a device's linker loads a
     // DT_NEEDED — after the scope, before its user, its constructors run with the user's.
-    if (n == "libstdc++.so" && zip.Has("assets/rb32sys/libstdc++.so")) {
-      auto cxx = zip.Read("assets/rb32sys/libstdc++.so", &err);
-      touched_ = true;
-      const rb::loader::GuestModule* m = cxx ? proc_->LoadApp(*cxx, n, &err) : nullptr;
-      if (m == nullptr) {
-        Say("FATAL: rb_runtime_boot: " + lib + " needs libstdc++.so, which did not load: " + err);
-        return nullptr;
+    if (n == "libstdc++.so") {
+      // A stock APK may carry its own (the one its game was linked against) beside its libraries; that
+      // copy wins over the platform's. Only the repack layout's rb32sys entry, or an APK that carries
+      // none at all, consults the platform.
+      std::optional<std::vector<std::uint8_t>> cxx;
+      std::string from;
+      if (zip.Has("assets/rb32sys/libstdc++.so") || !zip.Has(lib_dir_ + n)) {
+        std::string cxx_err;
+        cxx = ReadSystemLib(zip, n, &from, &cxx_err);
       }
-      loaded_[n] = m;
-      Say("needs: " + lib + " -> libstdc++.so, loaded from assets/rb32sys/ on demand");
+      if (cxx) {
+        touched_ = true;
+        const rb::loader::GuestModule* m = proc_->LoadApp(*cxx, n, &err);
+        if (m == nullptr) {
+          Say("FATAL: rb_runtime_boot: " + lib + " needs libstdc++.so, which did not load: " + err);
+          return nullptr;
+        }
+        loaded_[n] = m;
+        Say("needs: " + lib + " -> libstdc++.so, loaded from " + from + " on demand");
+      } else if (zip.Has(lib_dir_ + n)) {
+        Say("needs: " + lib + " -> " + n + ", a sibling in " + lib_dir_ + ", loaded first");
+        if (LoadWithNeeded(zip, n, in_progress, out) == nullptr) return nullptr;
+      } else {
+        host_side += (host_side.empty() ? "" : ", ") + n;
+      }
     } else if (zip.Has(lib_dir_ + n)) {
       Say("needs: " + lib + " -> " + n + ", a sibling in " + lib_dir_ + ", loaded first");
       if (LoadWithNeeded(zip, n, in_progress, out) == nullptr) return nullptr;

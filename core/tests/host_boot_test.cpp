@@ -8,6 +8,8 @@
 //     native dispatch looks up;
 //   * dlopen/dlsym answer the game's own libraries and refuse a name neither they nor the host define;
 //   * a missing entry fails by name without poisoning the process, so the next call can still boot;
+//   * a stock APK (libraries under lib/armeabi-v7a, no assets/rb32sys) boots when the platform supplies the
+//     system libraries, as the iOS app bundle does;
 //   * a constructor fault after guest state changed poisons the process, and every later boot refuses.
 //
 // The images are the tablet's own (the gate's fixtures): a different libc build is refused by
@@ -139,6 +141,16 @@ std::vector<std::uint8_t> BuildApk(const Images& im) {
   w.AddDeflated("assets/rb32/librbleaf.so", im.leaf);
   w.AddDeflated("assets/rb32/librbmid.so", im.mid);
   w.AddDeflated("assets/rb32/librbctorfault.so", im.ctorfault);
+  w.AddStored("AndroidManifest.xml", test::Bytes("the boot does not read this"));
+  return w.Finish();
+}
+
+/// A stock store APK: its own libraries where the platform looks, and no assets/rb32sys at all.
+std::vector<std::uint8_t> BuildStockApk(const Images& im) {
+  test::ZipWriter w;
+  w.AddDeflated("lib/armeabi-v7a/librbleaf.so", im.leaf);
+  w.AddDeflated("lib/armeabi-v7a/librbmid.so", im.mid);
+  w.AddDeflated("lib/armeabi-v7a/librbctorfault.so", im.ctorfault);
   w.AddStored("AndroidManifest.xml", test::Bytes("the boot does not read this"));
   return w.Finish();
 }
@@ -289,6 +301,52 @@ void boots_a_scope_and_the_sibling_first(const std::string& apk) {
   CHECK_CTX(boot.DlSym(global, "leaf_add").has_value(), "dlsym on the global handle did not search every module");
 }
 
+/// A stock APK has no assets/rb32sys, so the platform answers the three system libraries. The boot must
+/// take them from there, read the game's own libraries from lib/armeabi-v7a, and run constructors as it
+/// does for a repack.
+void a_stock_apk_boots_from_platform_system_libraries(const Images& im) {
+  auto rig = std::make_shared<Rig>();
+  rb::host::BootConfig cfg = MakeConfig(rig);
+  int reads = 0;
+  cfg.read_system_lib = [&im, &reads](const std::string& name)
+      -> std::optional<std::vector<std::uint8_t>> {
+    ++reads;
+    if (name == "libc.so") return im.libc;
+    if (name == "libm.so") return im.libm;
+    if (name == "libz.so") return im.libz;
+    return std::nullopt;
+  };
+  const std::string apk = WriteTempApk(BuildStockApk(im));
+  CHECK(!apk.empty());
+  if (apk.empty()) return;
+  rb::host::Boot boot(cfg);
+  const auto r = boot.BootLibrary(apk, "librbmid.so");
+  std::remove(apk.c_str());
+  CHECK_CTX(r.ok, r.report);
+  CHECK(reads == 3);
+  CHECK_CTX(r.report.find("this is a stock APK") != std::string::npos, r.report);
+  CHECK_CTX(r.report.find("libc.so from the app bundle") != std::string::npos, r.report);
+  CHECK_CTX(r.report.find("needs: librbmid.so -> librbleaf.so, a sibling in lib/armeabi-v7a/") !=
+                std::string::npos,
+            r.report);
+  const loader::Symbol* mid = Export(boot, "librbmid.so", "g_mid_ran");
+  CHECK(mid != nullptr);
+  if (mid) CHECK_CTX(Word(*boot.process(), mid->value) == 0xB22B22u + 5u, "g_mid_ran missing");
+}
+
+/// Without a platform answer the same stock APK still fails at the scope, by the name it looked for.
+void a_stock_apk_without_platform_libs_is_refused_by_name(const Images& im) {
+  auto rig = std::make_shared<Rig>();
+  const std::string apk = WriteTempApk(BuildStockApk(im));
+  CHECK(!apk.empty());
+  if (apk.empty()) return;
+  rb::host::Boot boot(MakeConfig(rig));
+  const auto refused = boot.BootLibrary(apk, "librbmid.so");
+  std::remove(apk.c_str());
+  CHECK(!refused.ok);
+  CHECK_CTX(refused.report.find("assets/rb32sys/libc.so") != std::string::npos, refused.report);
+}
+
 void a_missing_entry_fails_by_name_and_can_be_retried(const std::string& apk) {
   auto rig = std::make_shared<Rig>();
   rb::host::Boot boot(MakeConfig(rig));
@@ -339,6 +397,8 @@ int main() {
     return 1;
   }
   boots_a_scope_and_the_sibling_first(apk);
+  a_stock_apk_boots_from_platform_system_libraries(im);
+  a_stock_apk_without_platform_libs_is_refused_by_name(im);
   a_missing_entry_fails_by_name_and_can_be_retried(apk);
   a_constructor_fault_poisons_the_process(apk);
   std::remove(apk.c_str());
