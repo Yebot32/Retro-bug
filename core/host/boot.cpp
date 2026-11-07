@@ -76,7 +76,42 @@ void* Boot::BindNative(rb::exec::GuestAddr fn, const std::string& name, const st
     if (err != nullptr) *err = "the JNI bridge is not up";
     return nullptr;
   }
-  return inbound_->BindPool(rb::runtime::InboundTarget{fn, shorty, name + sig}, err);
+  rb::runtime::InboundTarget target{fn, shorty, name + sig};
+  {
+    std::lock_guard<std::mutex> lk(native_mu_);
+    native_targets_[name + sig] = target;
+  }
+  return inbound_->BindPool(target, err);
+}
+
+std::uint64_t Boot::CallNative(const std::string& name_sig, std::uintptr_t cls,
+                               const std::vector<std::uint64_t>& args, std::string* err) {
+  rb::runtime::InboundTarget target;
+  {
+    std::lock_guard<std::mutex> lk(native_mu_);
+    const auto it = native_targets_.find(name_sig);
+    if (it == native_targets_.end()) {
+      if (err != nullptr) *err = "no native of that name and signature was registered by the guest";
+      return 0;
+    }
+    target = it->second;
+  }
+  if (!inbound_) {
+    if (err != nullptr) *err = "the JNI bridge is not up";
+    return 0;
+  }
+  // AAPCS64: env, this/class and six integer/FP arguments fit the registers; a callback with more
+  // declared arguments than that would need a stack image this entry point does not build.
+  if (args.size() > 6) {
+    if (err != nullptr) *err = "the call has more than six arguments";
+    return 0;
+  }
+  rb::runtime::CapturedArgs captured{};
+  captured.x[1] = static_cast<std::uint64_t>(cls);
+  for (std::size_t i = 0; i < args.size(); ++i) captured.x[2 + i] = args[i];
+  captured.stack = nullptr;
+  if (err != nullptr) err->clear();
+  return inbound_->Dispatch(target, captured);
 }
 
 bool Boot::BootBridge(std::string* out) {
@@ -119,6 +154,14 @@ bool Boot::BootBridge(std::string* out) {
   if (cfg_.fault_state) p.set_fault_suffix(cfg_.fault_state);
   jni_->set_native_binder([this](rb::exec::GuestAddr fn, const std::string& name, const std::string& sig,
                                  std::string* e) -> void* { return BindNative(fn, name, sig, e); });
+  // The Java side of the bridge is C++ here, so a title's asynchronous callback ("the download
+  // completed") has no Java frame to run in. This is that entry: the shim invokes the native the guest
+  // registered, as a nested guest call.
+  java_->set_native_invoker(
+      [this](const std::string& name_sig, rb::abi::HostRef cls,
+             const std::vector<std::uint64_t>& args, std::string* e) -> std::uint64_t {
+        return CallNative(name_sig, cls, args, e);
+      });
   inbound_->set_on_exit([this](int status) {
     Say("jni: a guest native called exit(" + std::to_string(status) + "); the app exits, as on a device");
     if (cfg_.on_guest_exit) cfg_.on_guest_exit(status);

@@ -28,6 +28,7 @@
 #include "rb/abi/host_java.h"
 #include "rb/exec/machine_state.h"
 #include "rb/runtime/guest_process.h"
+#include "rb/runtime/inbound.h"
 
 namespace rb::abi {
 class ForwardingJni;
@@ -122,6 +123,12 @@ class Boot {
   std::optional<std::uint32_t> DlSym(std::uint32_t handle, const std::string& name);
   /// Binds a guest native into the inbound pool (what a guest RegisterNatives reaches). 0 with `err`.
   void* BindNative(rb::exec::GuestAddr fn, const std::string& name, const std::string& sig, std::string* err);
+  /// Runs a native the guest registered, from the Java side of the bridge — how a shim completes a
+  /// callback real Java would have made (an async download, a cloud load). `name_sig` is the registered
+  /// name plus its JNI signature; `cls` is the class it was registered on; references in `args` are
+  /// HostRef values. The call is nested: the engine saves the outer guest state and restores it after.
+  std::uint64_t CallNative(const std::string& name_sig, std::uintptr_t cls,
+                           const std::vector<std::uint64_t>& args, std::string* err);
 
   /// The live guest process (null before a scope booted). Set once, never cleared.
   rb::runtime::GuestProcess* process();
@@ -156,6 +163,10 @@ class Boot {
   std::unique_ptr<rb::abi::HostJava> java_;
   std::unique_ptr<rb::abi::ForwardingJni> jni_;
   std::unique_ptr<rb::runtime::Inbound> inbound_;
+  /// Every native the guest registered, by name plus signature, for `CallNative`. Written during
+  /// JNI_OnLoad and read afterwards, so the mutex is a leaf.
+  std::mutex native_mu_;
+  std::map<std::string, rb::runtime::InboundTarget> native_targets_;
   std::map<std::string, const rb::loader::GuestModule*> loaded_;
   std::set<std::string> booted_;
 

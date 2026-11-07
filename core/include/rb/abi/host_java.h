@@ -10,6 +10,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -94,6 +95,16 @@ class HostJava {
   };
   virtual std::int32_t RegisterNatives(HostRef cls, const std::vector<NativeBinding>& methods) = 0;
   virtual std::int32_t UnregisterNatives(HostRef cls) = 0;
+  /// How the Java side completes an asynchronous native: a Java implementation here is C++, so a
+  /// callback that real Java would make ("the download finished, here is the data") has to be invoked
+  /// explicitly. `name_sig` is the registered method's name plus its JNI signature; `cls` is the class
+  /// it was registered on; `args` are the declared parameters after it, references as HostRef values.
+  /// The engine runs the native as a nested guest call. Default: nothing registered, so a host that
+  /// does not support this simply drops the callback.
+  using NativeInvoker = std::function<std::uint64_t(const std::string& name_sig, HostRef cls,
+                                                   const std::vector<std::uint64_t>& args,
+                                                   std::string* err)>;
+  virtual void set_native_invoker(NativeInvoker) {}
 
   // Reflection.
   virtual HostRef ToReflected(HostRef cls, HostId id, bool is_field, bool is_static) = 0;

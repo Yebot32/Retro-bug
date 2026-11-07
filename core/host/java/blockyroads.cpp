@@ -71,6 +71,18 @@ void InstanceString(TableJava& j, const std::string& cls, const std::string& nam
                  });
 }
 
+/// The native a title registers for a cloud-load result: `(int id, boolean ok, byte[] data, int, String)`.
+/// Its class is found from the registration itself, so the shim that completes the request only has to
+/// know the name and signature. A title that never registered one drops the call (and keeps its own
+/// timeout); nothing here invents a callback.
+void FireCloudLoaded(TableJava& f, std::int32_t id, bool ok, const std::string& message) {
+  const Ref bytes = f.NewArray('B', 0, 0, 0);
+  const Ref text = f.NewJavaString(U(message));
+  f.CallNative("", "onCloudDataLoadedCallback(IZ[BILjava/lang/String;)V",
+               {static_cast<std::uint64_t>(static_cast<std::uint32_t>(id)), ok ? 1u : 0u,
+                static_cast<std::uint64_t>(bytes), 0u, static_cast<std::uint64_t>(text)});
+}
+
 void InstallFileHelper(TableJava& j, const AndroidEnv& env) {
   const std::string cls = "com/utils/FileHelper";
   GetInstance(j, cls);
@@ -166,11 +178,15 @@ void InstallBlockyroads(TableJava& j, const AndroidEnv& env) {
                    return static_cast<std::uint64_t>(f.NewArray('F', 3, 0, 0));
                  });
 
-  // The downloader: there is no HTTP client behind it yet, so a request is accepted and never completes.
-  // Nothing in the boot path waits on it; it backs optional remote content.
+  // The downloader: there is no HTTP client behind it, so the request is completed at once with the
+  // "no data" result the native callback carries. A no-op here is what a caller waits on forever.
   const std::string http = "com/utils/HttpGet";
   GetInstance(j, http);
-  NoOpVirtual(j, http, "download", "(ILjava/lang/String;[B)V");
+  j.DefineMethod(http, "download", "(ILjava/lang/String;[B)V", false,
+                 [](TableJava& f, int, const std::vector<std::uint64_t>& a) -> std::uint64_t {
+                   FireCloudLoaded(f, static_cast<std::int32_t>(a[0]), false, "");
+                   return 0;
+                 });
 
   // OS actions. Opening URLs, vibrating and notifications are outside the sandbox; the answers are the
   // "no backend" ones so game logic takes its fallback path rather than waiting for a callback.
@@ -224,8 +240,22 @@ void InstallBlockyroads(TableJava& j, const AndroidEnv& env) {
   NoOpVirtual(j, games, "unlockAchievement", "(Ljava/lang/String;)V");
   NoOpVirtual(j, games, "setAchievementCounter", "(Ljava/lang/String;I)V");
   NoOpVirtual(j, games, "setHighScore", "(Ljava/lang/String;I)V");
-  NoOpVirtual(j, games, "cloudSaveData", "(Ljava/lang/String;Ljava/lang/String;I[B)V");
-  NoOpVirtual(j, games, "cloudLoadData", "(Ljava/lang/String;I)V");
+  // Cloud saves are Play Games Saves on a device. There is no Play Games here, but the caller waits for
+  // the result through the native it registered — and a no-op never answers, which is what left Blocky
+  // Roads on "getting data from the cloud" forever. Answer with the honest result: no data, no error
+  // string, and the title takes its offline path at once.
+  j.DefineMethod(games, "cloudLoadData", "(Ljava/lang/String;I)V", false,
+                 [](TableJava& f, int, const std::vector<std::uint64_t>& a) -> std::uint64_t {
+                   FireCloudLoaded(f, static_cast<std::int32_t>(a[1]), false, "");
+                   return 0;
+                 });
+  j.DefineMethod(games, "cloudSaveData", "(Ljava/lang/String;Ljava/lang/String;I[B)V", false,
+                 [games](TableJava& f, int, const std::vector<std::uint64_t>& a) -> std::uint64_t {
+                   const auto id = static_cast<std::int32_t>(a[2]);
+                   f.CallNative(games, "onCloudDataSavedCallback(IZ)V",
+                                {static_cast<std::uint64_t>(static_cast<std::uint32_t>(id)), 0u});
+                   return 0;
+                 });
   EmptyVirtualString(j, games, "getLoggedInPlayerName", "()Ljava/lang/String;");
   EmptyVirtualString(j, games, "getLoggedInPlayerID", "()Ljava/lang/String;");
 

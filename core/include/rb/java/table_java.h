@@ -33,6 +33,14 @@ class TableJava : public abi::HostJava {
   /// surface a title expects but the profile does not yet provide.
   void set_trace(std::function<void(const std::string&)> trace);
 
+  /// The engine's nested-call entry (see `HostJava::NativeInvoker`). A Java implementation here is C++,
+  /// so a game's asynchronous callback — Play Games' cloud load, a download — has to be invoked by the
+  /// shim that completed it. `cls` is the JNI class name the callback belongs to; a name+sig the guest
+  /// never registered is dropped silently (the title simply stays on its own timeout).
+  std::uint64_t CallNative(const std::string& cls, const std::string& name_sig,
+                           const std::vector<std::uint64_t>& args);
+  void set_native_invoker(NativeInvoker invoker) override { native_invoker_ = std::move(invoker); }
+
   /// Defines a class (`super_name` empty for a root) and returns its class object's id.
   int DefineClass(const std::string& name, const std::string& super_name = {});
   /// Defines (or, for an existing one, replaces the body of) a method.
@@ -159,6 +167,10 @@ class TableJava : public abi::HostJava {
   Ref next_ref_ = 0x1000;
   std::map<std::string, std::size_t> calls_;
   std::function<void(const std::string&)> trace_;
+  NativeInvoker native_invoker_;
+  /// Which class registered each native, by name + signature: the jclass a callback receives must be
+  /// the class it was registered on, and the registering class is the only honest source for it.
+  std::map<std::string, std::string> native_owner_;
   int pending_ = 0;  ///< the pending throwable's object id
   std::map<std::thread::id, std::vector<std::vector<Ref>>> frames_;  ///< per thread: refs made in each frame
   std::map<std::thread::id, bool> detached_;

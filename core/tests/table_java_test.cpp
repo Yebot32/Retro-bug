@@ -473,6 +473,84 @@ void file_helper_store_round_trips() {
   std::remove(path.c_str());
 }
 
+/// KitKat's saves were in memory until this test existed: a score written before a restart was gone
+/// after it. The store is a file under the profile's files directory, read by a fresh TableJava the way
+/// the next launch reads it.
+void local_storage_persists() {
+  const std::string store = "/tmp/localstorage.dat";
+  std::remove(store.c_str());
+  const auto float_bits = [](float f) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &f, 4);
+    return static_cast<std::uint64_t>(bits);
+  };
+  {
+    Rig r("/tmp");
+    r.CallStatic("com/doubleleft/LocalStorage", "saveFloat", "(Ljava/lang/String;F)V",
+                 {r.java.NewString(U("best")), float_bits(12.5f)});
+    r.CallStatic("com/doubleleft/LocalStorage", "saveString", "(Ljava/lang/String;Ljava/lang/String;)V",
+                 {r.java.NewString(U("name")), r.java.NewString(U("ace"))});
+  }
+  {
+    Rig r("/tmp");
+    const auto got = r.CallStatic("com/doubleleft/LocalStorage", "loadFloat", "(Ljava/lang/String;)F",
+                                  {r.java.NewString(U("best"))});
+    float value = 0;
+    const auto bits = static_cast<std::uint32_t>(got);
+    std::memcpy(&value, &bits, 4);
+    CHECK_CTX(value == 12.5f, std::to_string(value));
+    const auto text = static_cast<TableJava::Ref>(r.CallStatic(
+        "com/doubleleft/LocalStorage", "loadString", "(Ljava/lang/String;)Ljava/lang/String;",
+        {r.java.NewString(U("name"))}));
+    CHECK_CTX(r.StringArg(text) == "ace", r.StringArg(text));
+    // A key never written answers the defaults the engine expects, not a stale neighbour.
+    const auto missing = r.CallStatic("com/doubleleft/LocalStorage", "loadFloat",
+                                      "(Ljava/lang/String;)F", {r.java.NewString(U("other"))});
+    CHECK(missing == 0);
+  }
+  std::remove(store.c_str());
+}
+
+/// A title's async result has no Java frame to run in on this host; the shim invokes the native the
+/// guest registered, as a nested guest call. This is the table-side half: the call carries the exact
+/// name and signature, the arguments in order, and the class that registered the native.
+void native_callbacks_reach_the_registration() {
+  Rig r;
+  std::string seen_name;
+  std::uintptr_t seen_class = 0;
+  std::vector<std::uint64_t> seen_args;
+  r.java.set_native_invoker([&](const std::string& name_sig, std::uintptr_t cls,
+                                const std::vector<std::uint64_t>& args, std::string* err) {
+    seen_name = name_sig;
+    seen_class = cls;
+    seen_args = args;
+    if (err != nullptr) err->clear();
+    return static_cast<std::uint64_t>(7);
+  });
+  const TableJava::Ref games = r.Cls("com/utils/GPlayService");
+  CHECK(games != 0);
+  CHECK(r.java.RegisterNatives(games, {{"onCloudDataLoadedCallback", "(IZ[BILjava/lang/String;)V",
+                                        reinterpret_cast<void*>(1)}}) == 0);
+  const auto got = r.java.CallNative("", "onCloudDataLoadedCallback(IZ[BILjava/lang/String;)V",
+                                     {3, 0, 99, 0, 5});
+  CHECK_CTX(got == 7, std::to_string(got));
+  CHECK_CTX(seen_name == "onCloudDataLoadedCallback(IZ[BILjava/lang/String;)V", seen_name);
+  CHECK_CTX(seen_args.size() == 5 && seen_args[0] == 3 && seen_args[1] == 0 && seen_args[2] == 99,
+            std::to_string(seen_args.size()));
+  CHECK_CTX(seen_class != 0, "the registering class is the jclass");
+  // The shim that completes a cloud load answers through that same native with (id, ok = false).
+  seen_args.clear();
+  const auto service = static_cast<TableJava::Ref>(
+      r.CallStatic("com/utils/GPlayService", "getInstance", "()Lcom/utils/GPlayService;"));
+  CHECK(service != 0);
+  r.CallVirtual(service, "cloudLoadData", "(Ljava/lang/String;I)V", {r.java.NewString(U("slot")), 4});
+  CHECK_CTX(seen_args.size() == 5 && seen_args[0] == 4 && seen_args[1] == 0,
+            std::to_string(seen_args.size()));
+  // A name nobody registered is dropped (and the invoker is not called).
+  seen_name.clear();
+  CHECK(r.java.CallNative("rb/Missing", "missing()V", {}) == 0 && seen_name.empty());
+}
+
 void a_missing_row_is_named() {
   Rig r;
   std::vector<std::string> trace;
@@ -519,6 +597,8 @@ int main() {
   dlgl_profile_answers();
   blocky_native_surface_resolves();
   file_helper_store_round_trips();
+  local_storage_persists();
+  native_callbacks_reach_the_registration();
   a_missing_row_is_named();
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;

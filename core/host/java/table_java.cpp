@@ -553,7 +553,10 @@ std::int32_t TableJava::RegisterNatives(Ref cls, const std::vector<NativeBinding
   std::lock_guard<std::mutex> lk(mu_);
   const auto it = classes_.find(Obj(cls));
   if (it == classes_.end()) return -1;
-  for (const NativeBinding& b : methods) it->second.natives.push_back(b);
+  for (const NativeBinding& b : methods) {
+    it->second.natives.push_back(b);
+    native_owner_[b.name + b.sig] = it->second.name;
+  }
   return 0;
 }
 
@@ -632,6 +635,32 @@ namespace rb::java {
 void TableJava::set_trace(std::function<void(const std::string&)> trace) {
   std::lock_guard<std::mutex> lk(mu_);
   trace_ = std::move(trace);
+}
+
+std::uint64_t TableJava::CallNative(const std::string& cls, const std::string& name_sig,
+                                    const std::vector<std::uint64_t>& args) {
+  NativeInvoker invoker;
+  Ref class_ref = 0;
+  {
+    std::lock_guard<std::mutex> lk(mu_);
+    invoker = native_invoker_;
+    std::string owner = cls;
+    if (const auto it = native_owner_.find(name_sig); it != native_owner_.end()) owner = it->second;
+    for (const auto& [id, k] : classes_) {
+      if (k.name == owner) {
+        class_ref = MakeRefLocked(id);
+        break;
+      }
+    }
+  }
+  if (!invoker || class_ref == 0) {
+    if (trace_) trace_("java: no native callback " + name_sig + " (class " + cls + ") is registered");
+    return 0;
+  }
+  std::string err;
+  const std::uint64_t result = invoker(name_sig, class_ref, args, &err);
+  if (!err.empty() && trace_) trace_("java: native callback " + name_sig + " failed: " + err);
+  return result;
 }
 
 }  // namespace rb::java
