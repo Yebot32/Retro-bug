@@ -1546,3 +1546,23 @@ assembled into the app like any other source.
   has the new `the app bundle` literal (build 46's has none) and still compiles both AOT profiles
   (`blocky`, `kitkat`). Next: triage the first failure past the scope from the new log (missing Java
   method, GLES1/2 context, or an import nothing answers).
+- **Build 48** (`173756f`), 44,163,656 bytes, SHA-256
+  `4e06b8765967e004a81368e74c745c38d1b844aecec4ad67ff51be10c19b0560`. Build 47 got every stock APK as
+  far as its own native code; the two tried then died at `nativeInit: … exports no
+  Java_org_cocos2dx_lib_Cocos2dxHelper_nativeSetApkPath` because every non-DLGE game was handed to the
+  Cocos bootstrap. The engine is now chosen from the loaded library's **exports**, not the APK family:
+  DLGE (JNI_OnLoad registration), PikPok Mab (`MabActivity_initApplication`), Cocos2d-x
+  (`Cocos2dxHelper_nativeSetApkPath`), each logged by name. PikPok — OREO: Twist, Lick, Dunk and Turbo —
+  gets a bootstrap built from its own dex: an Activity instance for the natives' JNI callbacks
+  (`InstallPikPok` defines `com/pikpok/MabActivity` as an Activity subclass before any library loads),
+  `initApplication(String[])` with the empty array its Java builds, the renderer's
+  resumed/context-acquired/resize/initGraphics sequence, `nativeRender` per frame, and touches with the
+  pointer id and a monotonic event time (the dex's `MabInput$QueuedTouches` passes
+  `Touch.{id,x,y,time}`). Unity APKs are refused by name before loading their 24 MB image (its Java
+  UnityPlayer layer needs a VM this host does not have), and any other surface reports the `Java_*`
+  exports it offers instead of a false Cocos error. Android is unchanged. Verification: host boot lane on
+  the SM-X710 still 58/0; the IPA carries the four `rb32sys` images byte-identical to `guest/system/`,
+  `CFBundleVersion` 48, both AOT profiles (`blocky`, `kitkat`) compiled, and the app binary carries the
+  new engine strings. The PikPok start path itself is only compile-checked so far — the next device log
+  says whether `initApplication` accepts the shell's Activity; its missing Java lookups are named by the
+  `TableJava` trace.
