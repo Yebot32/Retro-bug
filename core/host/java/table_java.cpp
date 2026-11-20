@@ -342,6 +342,7 @@ std::uint64_t TableJava::Call(char /*ret_kind*/, bool is_static, Ref target, Ref
                              const std::vector<std::uint64_t>& args) {
   Body body;
   int self = 0;
+  std::string call_line;
   {
     std::lock_guard<std::mutex> lk(mu_);
     if (method == 0 || method >= methods_.size()) return 0;
@@ -355,7 +356,16 @@ std::uint64_t TableJava::Call(char /*ret_kind*/, bool is_static, Ref target, Ref
     }
     ++calls_[m->name];
     body = m->body;
+    // The calls a guest makes are the Java surface it needs; a title whose Java does not run here can
+    // only be driven by knowing which calls it makes. The trace is budgeted, because a game's own
+    // Java (when it does run) can call in the thousands.
+    if (trace_ != nullptr && call_trace_left_ > 0) {
+      --call_trace_left_;
+      const Class* k = ClassOfObj(is_static ? (nonvirtual_cls != 0 ? Obj(nonvirtual_cls) : 0) : objects_[self].cls);
+      call_line = "java call: " + (k != nullptr ? k->name : std::string{"<null class>"}) + "." + m->name + m->sig;
+    }
   }
+  if (!call_line.empty() && trace_ != nullptr) trace_(call_line);
   return body ? body(*this, self, args) : 0;  // outside the lock: a body may call back into the fake
 }
 

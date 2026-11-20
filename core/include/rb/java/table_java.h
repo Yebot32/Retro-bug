@@ -32,6 +32,10 @@ class TableJava : public abi::HostJava {
   /// A line for every failed class/method/field lookup. The iOS boot log uses it to name the Java
   /// surface a title expects but the profile does not yet provide.
   void set_trace(std::function<void(const std::string&)> trace);
+  /// How many Java calls the trace names in full (`java call: <class>.<method><sig>`). A title whose
+  /// Java does not run here can only be driven by knowing which calls it makes, so the boot turns this
+  /// on for the first calls of a session. Zero (the default) keeps the trace to failures only.
+  void set_call_trace_budget(int calls) { call_trace_left_ = calls > 0 ? calls : 0; }
 
   /// The engine's nested-call entry (see `HostJava::NativeInvoker`). A Java implementation here is C++,
   /// so a game's asynchronous callback — Play Games' cloud load, a download — has to be invoked by the
@@ -168,6 +172,8 @@ class TableJava : public abi::HostJava {
   Ref next_ref_ = 0x1000;
   std::map<std::string, std::size_t> calls_;
   std::function<void(const std::string&)> trace_;
+  /// Remaining Java calls the trace names in full (see set_call_trace_budget).
+  int call_trace_left_ = 0;
   NativeInvoker native_invoker_;
   /// A stock APK brings its own Java classes; none of them has a row here. With this on, FindClass
   /// defines an unknown class as a plain Object so the game's RegisterNatives succeeds, and a method

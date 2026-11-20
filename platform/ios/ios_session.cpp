@@ -589,6 +589,10 @@ bool RbIosSession::Boot(std::string* err) {
     rb::java::InstallHalfbrick(*java);
     self->java = java.get();
     java->set_trace([self](const std::string& line) { self->Log(line); });
+    // The first Java calls of a session are named in full: a title whose own Java does not run here can
+    // only be driven by knowing which calls it makes, and the failures alone do not say what it asked
+    // for before it failed.
+    java->set_call_trace_budget(400);
     return java;
   };
   cfg.resolve_host = [self](const std::string& name) -> std::optional<rb::exec::GuestAddr> {
@@ -616,6 +620,24 @@ bool RbIosSession::Boot(std::string* err) {
         process, boot, [self](const std::string& line) { self->Log(line); });
     std::string why;
     if (!self->host->OpenApk(self->apk, &why)) self->Log("assets: " + why);
+    // Files are the host's, as on the Android launcher: a game's own code reads and writes its sandbox
+    // with the app's permissions, and a title that unpacks its resources out of the APK (Halfbrick does,
+    // opening the APK path itself) cannot do that with every open refused. The app is sandboxed, so the
+    // guest reaches the app's container and nothing else.
+    process.monitor().set_file_provider([](const std::string&) -> std::optional<std::vector<std::uint8_t>> {
+      return std::nullopt;
+    });
+    process.monitor().set_host_io(true);
+    // What the guest opened, with the failures: a refused open is the difference between a title that
+    // loads and one that stops in its first file manager.
+    auto left = std::make_shared<std::atomic<int>>(600);
+    process.monitor().set_host_io_trace([self, left](const std::string& line) {
+      if (left->fetch_sub(1) <= 0) return;
+      const bool error = line.find(" = -") != std::string::npos;
+      if (error || line.find("openat") != std::string::npos || line.find("mkdirat") != std::string::npos) {
+        self->Log("io: " + line);
+      }
+    });
   };
 
   // Tier selection is automatic: AOT when a profile matches, then Tier J when this launch holds a real

@@ -31,6 +31,12 @@ void InstallPikPok(TableJava& java, const AndroidEnv& env) {
     java.DefineMethod(cls, "<init>", "(J)V", false,
                       [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
   }
+  // The push-notification helper takes a handle and a registration id.
+  java.DefineClass("com/pikpok/MabPushNotifications", "java/lang/Object");
+  java.DefineMethod("com/pikpok/MabPushNotifications", "<init>", "(JLjava/lang/String;)V", false,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+  java.DefineMethod("com/pikpok/MabPushNotifications", "Register", "()V", false,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
   java.DefineMethod("com/pikpok/MabSensors", "Start", "()V", false,
                     [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
   java.DefineMethod("com/pikpok/MabSensors", "Stop", "()V", false,
@@ -68,7 +74,22 @@ void InstallPikPok(TableJava& java, const AndroidEnv& env) {
   java.DefineMethod("com/pikpok/Natives", "GetStoredLongLong", "(Ljava/lang/String;)J", true,
                     [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
   java.DefineMethod("com/pikpok/Natives", "GetSystemInformation", "()[Ljava/lang/String;", true,
-                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+                    [](TableJava& f, int, const std::vector<std::uint64_t>&) {
+                      // The game's own method builds a String[16] (its dex: const/16 v6, #16) of system
+                      // facts — OS version, build, locale, date, package name and the like. The native
+                      // reads it by index, so the array must exist and have that length; the entries
+                      // below are the facts a shell can state truthfully.
+                      const auto elem = f.FindClass("java/lang/String");
+                      const auto array = f.NewArray('L', 16, elem, 0);
+                      const char* const facts[16] = {
+                          "34",                 // os.version (the API level the shell reports)
+                          "", "", "", "", "", "", "",
+                          "", "", "", "", "", "", "", ""};
+                      for (int i = 0; i < 16; ++i) {
+                        f.SetObjectArrayElement(array, i, f.NewJavaString(std::u16string(facts[i], facts[i] + std::strlen(facts[i]))));
+                      }
+                      return static_cast<std::uint64_t>(array);
+                    });
   java.DefineMethod("com/pikpok/Natives", "GetUptimeSeconds", "()D", true,
                     [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
   java.DefineMethod("com/pikpok/Natives", "GetDeviceOdin1", "(Ljava/lang/String;)Ljava/lang/String;", true,
