@@ -4,6 +4,8 @@
 
 #include "rb/java/pikpok.h"
 
+#include <cstring>
+
 namespace rb::java {
 
 namespace {
