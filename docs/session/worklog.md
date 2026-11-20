@@ -1584,3 +1584,20 @@ assembled into the app like any other source.
   profiles compiled, the app binary carries the PikPok and Halfbrick engine strings; host boot lane
   58/0. The PikPok and Halfbrick start paths are compile-checked only — the next device log is their
   first run.
+- **Build 50** (`3aa0b22`), 44,171,804 bytes, SHA-256
+  `4353f6cd7637ac270b4e0ab2724c8351991a75d0f546e4ad610321a9405fa947`. Log 39 (build 49) has three
+  data points. Android KitKat still reaches `started: 2360x1640`. OREO and Turbo both select PikPok, boot,
+  create the GLES2 context, and then stall on the first Java lookup their native init asks for:
+  `Java: no method com/pikpok/MabActivity.getExpansionMainPath()Ljava/lang/String;`, followed by
+  `GetStringUTFChars: 0xff5ed080 is another thread's local reference (thread 245; this is thread 0)`.
+  FN Skittles reaches Halfbrick's file manager and then aborts with `Java: no method
+  com/halfbrick/mortar/SoftKeyboard.Init()V` — the native calls `exit_group(0x7f)` where a real VM would
+  have answered. Both surfaces are now defined before any library loads: MabActivity gains
+  `getFilePath`/`getCachePath`/`getExternalFilesPath` (the app's own directories) and the two expansion
+  paths the dex initialises to `""`; SoftKeyboard gains `Init`/`HideKeyboard`/`ShowKeyboard`/
+  `UpdateKeyboard`/`Prepare` as no-ops. Open risk: if the cross-thread local-reference line recurs, the
+  bridge's strict per-thread local check (which release ART does not perform) is refusing the engine
+  passing a Java-returned string to a worker; the next log names the reference. Verification: IPA carries
+  `CFBundleVersion` 50, all four `rb32sys` images unchanged, and the binary contains the new PikPok and
+  SoftKeyboard strings; both AOT profiles compiled. The tablet was disconnected for this round, so the
+  host boot lane was not rerun (no boot-path change; last measured 58/0).
