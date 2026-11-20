@@ -52,6 +52,7 @@
 #include "rb/java/blockyroads.h"
 #include "rb/java/cocos2dx.h"
 #include "rb/java/dlgl.h"
+#include "rb/java/halfbrick.h"
 #include "rb/java/pikpok.h"
 #include "rb/loader/apk_assets.h"
 #include "rb/java/table_java.h"
@@ -554,7 +555,8 @@ bool RbIosSession::Boot(std::string* err) {
     rb::java::InstallCocos2dx(*java, env);
     rb::java::InstallDlgl(*java, env);
     rb::java::InstallBlockyroads(*java, env);
-    rb::java::InstallPikPok(*java);
+    rb::java::InstallPikPok(*java, env);
+    rb::java::InstallHalfbrick(*java);
     self->java = java.get();
     java->set_trace([self](const std::string& line) { self->Log(line); });
     return java;
