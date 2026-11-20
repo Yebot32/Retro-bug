@@ -1656,3 +1656,19 @@ assembled into the app like any other source.
   and stack chain are printed from now on, so the next log names the code that computed the size instead
   of leaving a number. Verification: the iOS build compiles, the Linux lane passes, the IPA carries
   `CFBundleVersion` 53, the four `rb32sys` images unchanged and the new `Natives`/stack strings.
+- **Build 54** (`578b703`), 44,189,428 bytes, SHA-256
+  `389ab21d19f5c2f73d48fb93fac3fe4d7640867ffa6a2b2b467b90cd2257a52f`. Log 42 (build 53) moved PikPok
+  past `initApplication` (its native now reaches `nativeInitGraphics`) and gave Halfbrick's abort a
+  stack: the engine parses a number out of a string, got -100, and allocated `12 * (count / 4)` with
+  it. **The string is the path of the file the engine unpacks its resources from** — the APK path
+  `InitFileManager` is given — and it opens it with the guest's own `open()`. Every such open was
+  refused, because only the Android launcher enabled host file I/O. It does now, the way the launcher
+  does: the game's code reads and writes its sandbox with the app's permissions (the app is sandboxed,
+  so it reaches its own container and nothing else), and a title that unpacks from the APK can. The
+  first host-I/O answers are logged, failures included, so the next log names what was opened.
+  **The Java call trace now names every call a guest makes** (budgeted at 400 calls per session), which
+  is what says which surface an engine needs instead of the failures alone. PikPok also gets
+  `GetSystemInformation`'s `String[16]` (its native reads it by index; a null array was the next stop)
+  and `MabPushNotifications`. Verification: the iOS build compiles, the Linux lane passes (the first
+  attempt missed `<cstring>` on glibc), the IPA carries `CFBundleVersion` 54, the four `rb32sys` images
+  unchanged and the new trace and class strings.
