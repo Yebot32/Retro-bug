@@ -68,6 +68,10 @@ class HalfbrickBootstrap {
   std::uint32_t game_init_ = 0;
   std::uint32_t step_ = 0;
   std::uint32_t touch_ = 0;
+  std::uint32_t gles_version_ = 0;
+  /// The surface size the touch coordinates are normalised by (the Java divides by the display size).
+  int width_ = 0;
+  int height_ = 0;
   std::uint32_t on_pause_ = 0;
   std::uint32_t on_resume_ = 0;
   std::uint32_t on_focus_lost_ = 0;

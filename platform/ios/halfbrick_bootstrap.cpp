@@ -4,6 +4,8 @@
 
 #include "halfbrick_bootstrap.h"
 
+#include "gl_symbols.h"
+
 #include "rb/abi/jni_forward.h"
 #include "rb/host/boot.h"
 #include "rb/java/table_java.h"
@@ -17,6 +19,23 @@ constexpr const char* kNativeClass = "com/halfbrick/mortar/NativeGameLib";
 constexpr const char* kPrefix = "Java_com_halfbrick_mortar_NativeGameLib_native_1";
 
 std::u16string U(const std::string& s) { return std::u16string(s.begin(), s.end()); }
+
+/// The GL state the game's Java layer sets before the engine draws. GameManager.SystemInit disables the
+/// four client states when the engine is not GLES1, turns dithering and face culling off and sets the
+/// front face; GameManager.Render re-enables culling and the depth test before every step. The constants
+/// are the game's own (from its dex): GL_CCW 2305, GL_CULL_FACE 2884, GL_BACK 1029, GL_DEPTH_TEST 2929,
+/// GL_DITHER 3042, and the client states 0x8078, 0x8076, 0x8074, 0x8075.
+void CallGl(const char* name, int a) {
+  using Fn = void (*)(int);
+  const auto fn = reinterpret_cast<Fn>(GlSymbol(name));
+  if (fn != nullptr) fn(a);
+}
+
+void CallGlViewport(int x, int y, int width, int height) {
+  using Fn = void (*)(int, int, int, int);
+  const auto fn = reinterpret_cast<Fn>(GlSymbol("glViewport"));
+  if (fn != nullptr) fn(x, y, width, height);
+}
 
 }  // namespace
 
@@ -78,6 +97,33 @@ bool HalfbrickBootstrap::Start(const std::string& apk_path, int width, int heigh
   on_resume_ = Export((std::string{kPrefix} + "onResume").c_str(), nullptr);
   on_focus_lost_ = Export((std::string{kPrefix} + "onFocusLost").c_str(), nullptr);
   on_focus_retrieved_ = Export((std::string{kPrefix} + "onFocusRetrieved").c_str(), nullptr);
+  gles_version_ = Export((std::string{kPrefix} + "GLESVersion").c_str(), nullptr);
+
+  // The engine's own GLES version decides whether the client-state disables happen (the Java skips them
+  // for a GLES1 engine). It is asked before the first frame, exactly where the Java asks it.
+  int gles_version = 2;
+  if (gles_version_ != 0) {
+    rb::abi::ForwardingJni* version_jni = boot_.jni();
+    version_jni->PushFrame();
+    std::string version_why;
+    const std::uint32_t cls = version_jni->ToGuestLocal(java_.FindClass(kNativeClass), &version_why);
+    if (cls != 0) {
+      rb::exec::RunResult rr{};
+      const auto r = Call(gles_version_, "VII", {rb::abi::Value32::Ptr(version_jni->env()),
+                                                 rb::abi::Value32::Ptr(cls)}, &rr);
+      if (rr.reason == rb::exec::StopReason::Returned) gles_version = r.i();
+    }
+    version_jni->PopFrame(0);
+  }
+  if (gles_version != 1) {
+    for (const int state : {0x8078, 0x8076, 0x8074, 0x8075}) CallGl("glDisableClientState", state);
+  }
+  CallGl("glFrontFace", 2305);  // GL_CCW
+  CallGl("glDisable", 3042);    // GL_DITHER
+  CallGl("glDisable", 2884);    // GL_CULL_FACE
+  width_ = width;
+  height_ = height;
+  CallGlViewport(0, 0, width, height);
 
   jni->PushFrame();
   std::string why;
@@ -111,7 +157,7 @@ bool HalfbrickBootstrap::Start(const std::string& apk_path, int width, int heigh
     }
   }
   if (ok) {
-    ok = CallVoid(system_init_, "VIIIL",
+    ok = CallVoid(system_init_, "VIIIIL",
                   {rb::abi::Value32::Ptr(jni->env()), rb::abi::Value32::Ptr(cls), rb::abi::Value32::S32(width),
                    rb::abi::Value32::S32(height), rb::abi::Value32::Ptr(lang)},
                   "SystemInit", err);
@@ -135,6 +181,11 @@ bool HalfbrickBootstrap::Render(std::string* err) {
   jni->PushFrame();
   std::string why;
   const std::uint32_t cls = jni->ToGuestLocal(java_.FindClass(kNativeClass), &why);
+  // The state the Java sets before every frame: front face, face culling and the depth test.
+  CallGl("glFrontFace", 2305);  // GL_CCW
+  CallGl("glEnable", 2884);     // GL_CULL_FACE
+  CallGl("glCullFace", 1029);   // GL_BACK
+  CallGl("glEnable", 2929);     // GL_DEPTH_TEST
   rb::exec::RunResult rr{};
   const auto r = Call(step_, "VII", {rb::abi::Value32::Ptr(jni->env()), rb::abi::Value32::Ptr(cls)}, &rr);
   jni->PopFrame(0);
@@ -176,21 +227,25 @@ bool HalfbrickBootstrap::Resume(std::string* err) {
 }
 
 void HalfbrickBootstrap::Touch(int id, int action, float x, float y) {
+  (void)id;
   if (!started_ || touch_ == 0) return;
   const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                       std::chrono::steady_clock::now() - started_at_)
                       .count();
+  // The Java normalises the point by the display size and passes a literal zero for the third int:
+  // touchEvent(action, eventTime, 0, x / width, y / height, pressure, size).
+  const float nx = width_ > 0 ? x / static_cast<float>(width_) : x;
+  const float ny = height_ > 0 ? y / static_cast<float>(height_) : y;
   rb::abi::ForwardingJni* jni = boot_.jni();
   jni->PushFrame();
   std::string why;
   const std::uint32_t cls = jni->ToGuestLocal(java_.FindClass(kNativeClass), &why);
   if (cls != 0) {
-    // (action, eventTime, pointerId, x, y, pressure, size), exactly what MotionEvent's getters feed.
     rb::exec::RunResult rr{};
     Call(touch_, "VIIJIFFFF",
          {rb::abi::Value32::Ptr(jni->env()), rb::abi::Value32::Ptr(cls), rb::abi::Value32::S32(action),
-          rb::abi::Value32::I64(ms), rb::abi::Value32::S32(id), rb::abi::Value32::F32(x),
-          rb::abi::Value32::F32(y), rb::abi::Value32::F32(1.0f), rb::abi::Value32::F32(0.0f)},
+          rb::abi::Value32::I64(ms), rb::abi::Value32::S32(0), rb::abi::Value32::F32(nx),
+          rb::abi::Value32::F32(ny), rb::abi::Value32::F32(1.0f), rb::abi::Value32::F32(0.0f)},
          &rr);
   }
   jni->PopFrame(0);

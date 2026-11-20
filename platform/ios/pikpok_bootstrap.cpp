@@ -81,8 +81,10 @@ bool PikPokBootstrap::Start(const std::string& apk_path, int width, int height, 
   std::string why;
   const auto activity_ref = java_.NewGlobalRef(java_.NewInstance(kActivityClass));
   const std::uint32_t activity = activity_ref != 0 ? jni->ToGuestLocal(activity_ref, &why) : 0;
+  // The Java builds `new String[3]` and hands it over unfilled (the dex: const/4 v0, #3; new-array), so the
+  // array is three nulls — not an empty one.
   const std::uint32_t empty_argv = jni->ToGuestLocal(
-      java_.NewArray('L', 0, java_.FindClass("java/lang/String"), 0), &why);
+      java_.NewArray('L', 3, java_.FindClass("java/lang/String"), 0), &why);
   const std::uint32_t renderer = jni->ToGuestLocal(java_.FindClass(kRendererClass), &why);
   bool ok = activity != 0 && empty_argv != 0 && renderer != 0 &&
             Call(init_, "VIIL", {rb::abi::Value32::Ptr(jni->env()), rb::abi::Value32::Ptr(activity),
