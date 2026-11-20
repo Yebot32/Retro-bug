@@ -1601,3 +1601,22 @@ assembled into the app like any other source.
   `CFBundleVersion` 50, all four `rb32sys` images unchanged, and the binary contains the new PikPok and
   SoftKeyboard strings; both AOT profiles compiled. The tablet was disconnected for this round, so the
   host boot lane was not rerun (no boot-path change; last measured 58/0).
+- **Build 51** (`057af6e`), 44,163,572 bytes, SHA-256
+  `861de90def5fd6d5081f9d9bd825147e393e0e6ecb241b3b5799564ccb213c06`. A verification pass over build 50
+  (before it was installed) compared every call the shell makes with the dex of the game it stands in for,
+  and found three differences: PikPok's Activity builds `new String[3]` and hands it to `initApplication`
+  unfilled (the shell passed an empty array); Halfbrick's touch handler divides the point by the display
+  size and passes a literal `0` as the third int (the shell passed pixels and a pointer id); and
+  Halfbrick's Java sets the GL state before the engine draws — the four client-state disables (only when
+  the engine's own `GLESVersion` is not 1), `glFrontFace(GL_CCW)`, `glDisable(GL_DITHER)`,
+  `glDisable(GL_CULL_FACE)`, the viewport, and per frame `glEnable(GL_CULL_FACE)`,
+  `glCullFace(GL_BACK)`, `glEnable(GL_DEPTH_TEST)` — which the shell did not do at all. All three now
+  match the dex exactly, with the same arguments and the same order; the GL entry points come from
+  OpenGLES.framework the way the game's Java layer would use them. Everything re-derived and confirmed
+  unchanged: Halfbrick's `InitFileManager(sourceDir, files+"/", cache+"/", false)`,
+  `SystemInit(width, height, language)`, `GameInit`, `step`, and the ten natives its Java calls; PikPok's
+  `initApplication`, resumed/context-acquired/resize/initGraphics/render order, and its touch
+  `(id, x, y, eventTime/1000.0)`. Verification: iOS build compiles the Halfbrick path (it uses the
+  framework's GL symbols, so it is no longer part of the host lane's type-check), the Linux lane passes,
+  the IPA carries `CFBundleVersion` 51, the four `rb32sys` images unchanged and the new GL and profile
+  strings in the binary.
