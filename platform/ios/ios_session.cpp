@@ -529,7 +529,6 @@ void Take(RbIosSession* s, int kind, int id, float x, float y) {
   s->touches.push_back(t);
 }
 
-#if defined(__APPLE__)
 }  // namespace
 
 
