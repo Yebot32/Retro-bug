@@ -1620,3 +1620,25 @@ assembled into the app like any other source.
   framework's GL symbols, so it is no longer part of the host lane's type-check), the Linux lane passes,
   the IPA carries `CFBundleVersion` 51, the four `rb32sys` images unchanged and the new GL and profile
   strings in the binary.
+- **Build 52** (`e2ba762`), 44,177,857 bytes, SHA-256
+  `df9f666d0340c53c0f8d0462982cbd705a19a0b618ecf75096c5b2aa05d9cb05`. Log 40 (build 51) named three
+  things, and each is now fixed. **(1) KitKat's slowness was the AOT gate, not a regression:** the
+  matcher only looked for the repack layout (`assets/rb32/<lib>`), so the stock KitKat APK — the same
+  game, same library bytes — fell back to the interpreter ("aot: no AOT for this APK (the APK carries no
+  assets/rb32/libandroidkitkat.so) — Tier I"). The matcher now follows the loader's own precedence
+  (`assets/rb32/`, `lib/armeabi-v7a/`, `lib/armeabi/`, and the app bundle for libc/libm/libz/
+  libstdc++), and the digests were checked by hand: the stock APK's `libandroidkitkat.so`
+  (`8d65ad5a…`) and `libdlgl.so` (`58d0c538…`) are exactly the profile's, and the bundle's four system
+  images carry the profile's `8fc841e8…`, `32d06ce1…`, `b2bcbc70…`. **(2) JIT:** the MAP_JIT probe was
+  cached for the whole process, so a grant that arrives after the app started (StikDebug or SideStore
+  enabling it for the app) was never seen; it is probed per launch now. StikDebug's own requirements:
+  the app must carry `get-task-allow`, LocalDevVPN must be running, and JIT is enabled per app in
+  StikDebug ("Enable JIT" → pick RetroBug) before the app is (re)launched. **(3) Halfbrick's abort:**
+  the engine wrote its reason to stderr and the runtime dropped it, because the tail was only printed
+  when a SIGABRT was *delivered* and Halfbrick has no handler for it; the tail is printed now, so the
+  next log carries the engine's own words. PikPok also gets the three classes its native builds itself
+  (`MabSensors`, `MabGesture`, `MabWebDownloader`, each with `<init>(J)V`), which is what build 51's
+  `NewObjectA: 0x0 is not a method or field ID` was asking for. Verification: the iOS build compiles
+  (the first attempt failed on an unbalanced Apple guard, fixed in `e2ba762`), the Linux lane passes, the
+  IPA carries `CFBundleVersion` 52, the four `rb32sys` images unchanged and the new strings in the
+  binary.
