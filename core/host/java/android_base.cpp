@@ -443,6 +443,9 @@ void InstallAndroidBase(TableJava& j, AndroidEnv env) {
   j.DefineClass("android/content/ContextWrapper", "android/content/Context");
   j.DefineClass("android/app/Activity", "android/content/ContextWrapper");
   j.DefineClass("android/content/res/AssetManager", "java/lang/Object");
+  // PikPok's native calls Destroy() on the manager it was handed when the game ends.
+  j.DefineMethod("android/content/res/AssetManager", "Destroy", "()V", false,
+                 [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
   j.DefineMethod("android/content/Context", "getPackageName", "()Ljava/lang/String;", false,
                  [env](TableJava& f, int, const std::vector<std::uint64_t>&) {
                    return static_cast<std::uint64_t>(f.NewJavaString(U(env.package_name)));

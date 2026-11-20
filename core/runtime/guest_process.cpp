@@ -405,6 +405,16 @@ std::unique_ptr<GuestProcess> GuestProcess::Create(const GuestProcessOptions& op
             }
             owner->Log("signals: last guest stderr: \"" + tail + "\"");
           }
+          // The aborting thread's own state: the pc names the instruction that raised the signal, and the
+          // stack chain names the caller that led there. Without it, an abort is only a number.
+          runtime::GuestThread* self = runtime::CurrentGuestThread();
+          if (self != nullptr) {
+            owner->Log("signals: SIGABRT at pc=" + Hex(self->state.pc) + " lr=" + Hex(self->state.r[14]) +
+                       " sp=" + Hex(self->state.r[13]) + " cpsr=" + Hex(self->state.cpsr));
+            const std::string chain = owner->StackWords(self->state.r[13], 1024, 16);
+            owner->Log("signals: SIGABRT stack: " +
+                       (chain.empty() ? std::string{"(no module-shaped words)"} : chain));
+          }
         }
       }
     });

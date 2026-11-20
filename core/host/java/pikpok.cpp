@@ -50,6 +50,64 @@ void InstallPikPok(TableJava& java, const AndroidEnv& env) {
   java.DefineMethod("com/pikpok/MabGesture", "onScaleEnd", "(Landroid/view/ScaleGestureDetector;)V", false,
                     [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
 
+  // The engine's own Java utility class. The native calls these statics directly (JNI), so they must
+  // exist with the same names and shapes; their bodies (the game's Java) do not run here, and the
+  // answers below are what the shell can honestly give: the locale, that this is a tablet, the uptime
+  // the engine times its animation with, and no stored values (the game's own preferences are not here).
+  java.DefineClass("com/pikpok/Natives", "java/lang/Object");
+  java.DefineMethod("com/pikpok/Natives", "GetDefaultLocale", "()Ljava/lang/String;", true,
+                    [](TableJava& f, int, const std::vector<std::uint64_t>&) { return NewString(f, "en"); });
+  java.DefineMethod("com/pikpok/Natives", "GetStoredString", "(Ljava/lang/String;)Ljava/lang/String;", true,
+                    [](TableJava& f, int, const std::vector<std::uint64_t>&) { return NewString(f, ""); });
+  java.DefineMethod("com/pikpok/Natives", "GetStoredInt", "(Ljava/lang/String;)I", true,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+  java.DefineMethod("com/pikpok/Natives", "GetStoredFloat", "(Ljava/lang/String;)F", true,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+  java.DefineMethod("com/pikpok/Natives", "GetStoredBool", "(Ljava/lang/String;)Z", true,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+  java.DefineMethod("com/pikpok/Natives", "GetStoredLongLong", "(Ljava/lang/String;)J", true,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+  java.DefineMethod("com/pikpok/Natives", "GetSystemInformation", "()[Ljava/lang/String;", true,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+  java.DefineMethod("com/pikpok/Natives", "GetUptimeSeconds", "()D", true,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+  java.DefineMethod("com/pikpok/Natives", "GetDeviceOdin1", "(Ljava/lang/String;)Ljava/lang/String;", true,
+                    [](TableJava& f, int, const std::vector<std::uint64_t>&) { return NewString(f, ""); });
+  java.DefineMethod("com/pikpok/Natives", "IsLowMemory", "()Z", true,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+  java.DefineMethod("com/pikpok/Natives", "IsTablet", "()Z", true,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{1}; });
+  java.DefineMethod("com/pikpok/Natives", "RequestAudioFocus", "()Z", true,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{1}; });
+  java.DefineMethod("com/pikpok/Natives", "SHA1", "(Ljava/lang/String;)Ljava/lang/String;", true,
+                    [](TableJava& f, int, const std::vector<std::uint64_t>&) { return NewString(f, ""); });
+  java.DefineMethod("com/pikpok/Natives", "convertToHex", "([B)Ljava/lang/String;", true,
+                    [](TableJava& f, int, const std::vector<std::uint64_t>&) { return NewString(f, ""); });
+  java.DefineMethod("com/pikpok/Natives", "SetStoredString", "(Ljava/lang/String;Ljava/lang/String;)V", true,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+  java.DefineMethod("com/pikpok/Natives", "SetStoredInt", "(Ljava/lang/String;I)V", true,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+  java.DefineMethod("com/pikpok/Natives", "SetStoredFloat", "(Ljava/lang/String;F)V", true,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+  java.DefineMethod("com/pikpok/Natives", "SetStoredBool", "(Ljava/lang/String;Z)V", true,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+  java.DefineMethod("com/pikpok/Natives", "SetStoredLongLong", "(Ljava/lang/String;J)V", true,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+  java.DefineMethod("com/pikpok/Natives", "RemoveStoredValue", "(Ljava/lang/String;)V", true,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+  java.DefineMethod("com/pikpok/Natives", "BackupStoredValues", "()V", true,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+  java.DefineMethod("com/pikpok/Natives", "KeepScreenOn", "(Z)V", true,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+  java.DefineMethod("com/pikpok/Natives", "OpenURL", "(Ljava/lang/String;)V", true,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+  java.DefineMethod("com/pikpok/Natives", "OpenUpgradeURL", "()V", true,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+  java.DefineMethod("com/pikpok/Natives", "QuitApp", "()V", true,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+  java.DefineMethod("com/pikpok/Natives", "DisplayLoadingWheel", "(ZF)V", true,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+
   // Dir + "/" is exactly what the dex's get*Path methods build (absolute path, then the File.separator if
   // the path does not already end with it).
   const std::string files = env.files_dir + "/";
