@@ -81,6 +81,31 @@ namespace {
 std::atomic<int> g_crash_fd{-1};
 std::atomic<bool> g_crash_handlers_installed{false};
 
+#if defined(__APPLE__)
+/// A guest system library shipped in the app bundle under `rb32sys/`. A stock store APK carries only its
+/// own libraries under lib/armeabi-v7a and has no assets/rb32sys, so the boot reads bionic from here.
+std::optional<std::vector<std::uint8_t>> ReadBundledSystemLib(const std::string& name) {
+  CFBundleRef bundle = CFBundleGetMainBundle();
+  if (bundle == nullptr) return std::nullopt;
+  CFURLRef url = CFBundleCopyBundleURL(bundle);
+  if (url == nullptr) return std::nullopt;
+  char root[PATH_MAX];
+  const bool ok =
+      CFURLGetFileSystemRepresentation(url, true, reinterpret_cast<UInt8*>(root), sizeof root) != 0;
+  CFRelease(url);
+  if (!ok) return std::nullopt;
+  std::ifstream f(std::string(root) + "/rb32sys/" + name, std::ios::binary);
+  if (!f) return std::nullopt;
+  f.seekg(0, std::ios::end);
+  const std::streamoff n = f.tellg();
+  if (n <= 0) return std::nullopt;
+  f.seekg(0, std::ios::beg);
+  std::vector<std::uint8_t> bytes(static_cast<std::size_t>(n));
+  if (!f.read(reinterpret_cast<char*>(bytes.data()), n)) return std::nullopt;
+  return bytes;
+}
+#endif
+
 /// JIT viability: -1 unprobed, 0 refused, 1 available.
 std::atomic<int> g_jit_available{-1};
 
@@ -131,18 +156,19 @@ bool MapJitWorks() {
 }
 
 bool JitAvailable() {
-  int v = g_jit_available.load(std::memory_order_relaxed);
-  if (v < 0) {
-    // MAP_JIT is the permission the engine's code blocks now use (patches/dynarmic/0011), so it is the
-    // answer. The old probe asked whether an R|X page could be made writable with mprotect; on iOS that
-    // flip succeeds and the kernel then kills the process the first time the page executes — build 36-38
-    // took Tier J on that green light and died at the first guest call with no crash report. A MAP_JIT
-    // mapping is granted only to a launch the kernel actually permits to JIT and fails with EPERM
-    // otherwise, without touching any code page. The flip is still measured for the log, because a
-    // disagreement between the two is what says which kind of grant this launch received.
-    v = MapJitWorks() ? 1 : 0;
-    g_jit_available.store(v, std::memory_order_relaxed);
-  }
+  // MAP_JIT is the permission the engine's code blocks now use (patches/dynarmic/0011), so it is the
+  // answer. The old probe asked whether an R|X page could be made writable with mprotect; on iOS that
+  // flip succeeds and the kernel then kills the process the first time the page executes — build 36-38
+  // took Tier J on that green light and died at the first guest call with no crash report. A MAP_JIT
+  // mapping is granted only to a launch the kernel actually permits to JIT and fails with EPERM
+  // otherwise, without touching any code page. The flip is still measured for the log, because a
+  // disagreement between the two is what says which kind of grant this launch received.
+  //
+  // The probe runs again for every launch, not once per process: the grant can arrive *after* the app
+  // started — StikDebug (and SideStore's own JIT) enable it for a running app, and the next game the
+  // player starts should see it. A cached "no" would keep the interpreter for the rest of the session.
+  const int v = MapJitWorks() ? 1 : 0;
+  g_jit_available.store(v, std::memory_order_relaxed);
   return v == 1;
 }
 
@@ -169,34 +195,62 @@ bool MatchAotProfile(const rb::exec::AotProfile& profile, const std::string& apk
       *why = "the profile entry " + std::to_string(i) + " is malformed";
       return false;
     }
-    // The boot reads the scope libraries (libc/libm/libz/libstdc++) from assets/rb32sys and everything
-    // else from assets/rb32. Hashing a different copy than the loader reads would defeat the whole
-    // check, so the paths follow the loader's precedence exactly.
+    // The boot reads the scope libraries (libc/libm/libz/libstdc++) from assets/rb32sys when the APK
+    // carries them and from the app bundle otherwise, and everything else from the APK's library
+    // directory (assets/rb32 for a repack, lib/armeabi-v7a or lib/armeabi for a stock APK). Hashing a
+    // different copy than the loader reads would defeat the whole check, so the paths follow the
+    // loader's precedence exactly — a stock APK with the same libraries is the same game and must run
+    // the same translated code.
     const std::string name{library.soname};
     const bool scope = name == "libc.so" || name == "libm.so" || name == "libz.so" ||
                        name == "libstdc++.so";
-    const std::string path = std::string{scope ? "assets/rb32sys/" : "assets/rb32/"} + name;
-    if (!zip->Has(path)) {
-      *why = std::string{"the APK carries no "} + path;
-      return false;
+    std::string path;
+    std::vector<std::uint8_t> bundled;
+    if (scope) {
+      const std::string in_apk = "assets/rb32sys/" + name;
+      if (zip->Has(in_apk)) {
+        path = in_apk;
+      } else {
+        // The app's own copy is what the boot will read.
+        const auto bytes = ReadBundledSystemLib(name);
+        if (!bytes) {
+          *why = std::string{"neither the APK nor the app carries "} + name;
+          return false;
+        }
+        bundled = std::move(*bytes);
+      }
+    } else {
+      for (const char* dir : {"assets/rb32/", "lib/armeabi-v7a/", "lib/armeabi/"}) {
+        const std::string candidate = std::string{dir} + name;
+        if (zip->Has(candidate)) {
+          path = candidate;
+          break;
+        }
+      }
+      if (path.empty()) {
+        *why = std::string{"the APK carries no "} + name;
+        return false;
+      }
     }
-    if (path.empty()) {
-      *why = std::string{"the APK carries no "} + library.soname;
-      return false;
+    std::vector<std::uint8_t> bytes;
+    if (!bundled.empty()) {
+      bytes = std::move(bundled);
+    } else {
+      // A crafted import can claim a multi-gigabyte entry; refuse before allocating it.
+      const auto size = zip->UncompressedSize(path);
+      if (!size || *size > (256u << 20)) {
+        *why = path + " is missing or implausibly large";
+        return false;
+      }
+      std::string read_err;
+      const auto read = zip->Read(path, &read_err);
+      if (!read) {
+        *why = path + ": " + read_err;
+        return false;
+      }
+      bytes = std::move(*read);
     }
-    // A crafted import can claim a multi-gigabyte entry; refuse before allocating it.
-    const auto size = zip->UncompressedSize(path);
-    if (!size || *size > (256u << 20)) {
-      *why = path + " is missing or implausibly large";
-      return false;
-    }
-    std::string read_err;
-    const auto bytes = zip->Read(path, &read_err);
-    if (!bytes) {
-      *why = path + ": " + read_err;
-      return false;
-    }
-    const std::string digest = rb::crypto::Sha256Hex(rb::crypto::Sha256(*bytes));
+    const std::string digest = rb::crypto::Sha256Hex(rb::crypto::Sha256(bytes));
     if (digest != library.sha256) {
       *why = std::string{library.soname} + " is not the translated build (" + digest.substr(0, 12) +
              " != " + std::string{library.sha256}.substr(0, 12) + ")";
@@ -476,31 +530,8 @@ void Take(RbIosSession* s, int kind, int id, float x, float y) {
 }
 
 #if defined(__APPLE__)
-/// A guest system library shipped in the app bundle under `rb32sys/`. A stock store APK carries only its
-/// own libraries under lib/armeabi-v7a and has no assets/rb32sys, so the boot reads bionic from here.
-std::optional<std::vector<std::uint8_t>> ReadBundledSystemLib(const std::string& name) {
-  CFBundleRef bundle = CFBundleGetMainBundle();
-  if (bundle == nullptr) return std::nullopt;
-  CFURLRef url = CFBundleCopyBundleURL(bundle);
-  if (url == nullptr) return std::nullopt;
-  char root[PATH_MAX];
-  const bool ok =
-      CFURLGetFileSystemRepresentation(url, true, reinterpret_cast<UInt8*>(root), sizeof root) != 0;
-  CFRelease(url);
-  if (!ok) return std::nullopt;
-  std::ifstream f(std::string(root) + "/rb32sys/" + name, std::ios::binary);
-  if (!f) return std::nullopt;
-  f.seekg(0, std::ios::end);
-  const std::streamoff n = f.tellg();
-  if (n <= 0) return std::nullopt;
-  f.seekg(0, std::ios::beg);
-  std::vector<std::uint8_t> bytes(static_cast<std::size_t>(n));
-  if (!f.read(reinterpret_cast<char*>(bytes.data()), n)) return std::nullopt;
-  return bytes;
-}
-#endif
-
 }  // namespace
+
 
 bool RbIosSession::Boot(std::string* err) {
   RbIosSession* self = this;

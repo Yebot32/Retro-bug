@@ -21,6 +21,35 @@ void InstallPikPok(TableJava& java, const AndroidEnv& env) {
   java.DefineClass("com/pikpok/MabRenderer", "java/lang/Object");
   java.DefineClass("com/pikpok/MabInput", "java/lang/Object");
 
+  // The engine builds these Java objects itself (NewObjectA with the class's <init>(J)V — the timestamp is
+  // the handle it gives the Java side) and then calls their methods: the sensors for orientation, the
+  // gesture detector for pinch, the text field for the keyboard. Their bodies are the game's Java, which
+  // does not run here; the methods answer without doing anything, which is what an iPad without a
+  // accelerometer or a text cursor needs.
+  for (const char* cls : {"com/pikpok/MabSensors", "com/pikpok/MabGesture", "com/pikpok/MabWebDownloader"}) {
+    java.DefineClass(cls, "java/lang/Object");
+    java.DefineMethod(cls, "<init>", "(J)V", false,
+                      [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+  }
+  java.DefineMethod("com/pikpok/MabSensors", "Start", "()V", false,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+  java.DefineMethod("com/pikpok/MabSensors", "Stop", "()V", false,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+  java.DefineMethod("com/pikpok/MabSensors", "onPause", "()V", false,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+  java.DefineMethod("com/pikpok/MabSensors", "onResume", "()V", false,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+  java.DefineMethod("com/pikpok/MabSensors", "onDestroy", "()V", false,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+  java.DefineMethod("com/pikpok/MabSensors", "SetMotionUpdateFrequency", "(F)V", false,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+  java.DefineMethod("com/pikpok/MabGesture", "onScaleBegin", "(Landroid/view/ScaleGestureDetector;)Z", false,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+  java.DefineMethod("com/pikpok/MabGesture", "onScale", "(Landroid/view/ScaleGestureDetector;)Z", false,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+  java.DefineMethod("com/pikpok/MabGesture", "onScaleEnd", "(Landroid/view/ScaleGestureDetector;)V", false,
+                    [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+
   // Dir + "/" is exactly what the dex's get*Path methods build (absolute path, then the File.separator if
   // the path does not already end with it).
   const std::string files = env.files_dir + "/";

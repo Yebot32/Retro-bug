@@ -392,6 +392,20 @@ std::unique_ptr<GuestProcess> GuestProcess::Create(const GuestProcessOptions& op
       } else if (why.find("no signal is pending") == std::string::npos &&
                  why.find("is blocked in this thread's mask") == std::string::npos) {
         owner->Log("signals: not delivered — " + why);
+        // An abort the guest cannot handle still wrote its reason to stderr a few instructions earlier.
+        // The delivered path prints it (above); this is the path where the guest had no handler for
+        // SIGABRT, so the reason was captured and never shown — the engine that aborts without a handler
+        // is exactly the one whose message explains the abort.
+        if (why.find("signal 6") != std::string::npos) {
+          const std::string& err = owner->monitor_->captured_stderr();
+          if (!err.empty()) {
+            std::string tail = err.size() > 400 ? err.substr(err.size() - 400) : err;
+            for (char& c : tail) {
+              if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+            }
+            owner->Log("signals: last guest stderr: \"" + tail + "\"");
+          }
+        }
       }
     });
     // A synchronous memory fault the guest has a SIGSEGV handler for is a signal, not a dead process. The
