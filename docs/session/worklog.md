@@ -1642,3 +1642,17 @@ assembled into the app like any other source.
   (the first attempt failed on an unbalanced Apple guard, fixed in `e2ba762`), the Linux lane passes, the
   IPA carries `CFBundleVersion` 52, the four `rb32sys` images unchanged and the new strings in the
   binary.
+- **Build 53** (`2cdd8a4`), 44,176,868 bytes, SHA-256
+  `9322fcd9578f74508143155e567f022ee34f49dee4791f556ce22cbc14f2eb7d`. Log 41 (build 52) confirmed the
+  AOT gate is fixed — KitKat logs `aot: profile aot_kitkat matches (6 libraries)`, runs on
+  `AOT (offline-translated AArch64)` and draws its first frame, so the stock-layout APK is fast again.
+  The three new titles each named their next blocker. **PikPok** asked for two more Java members:
+  `com/pikpok/Natives.GetDefaultLocale()` (the engine's own utility class, whose statics the native calls
+  directly) and `AssetManager.Destroy()`; the whole `Natives` class is now defined with the shapes its dex
+  declares — the stored-value getters and setters, the locale, the device facts (a tablet, no low memory,
+  the uptime), the URL and quit calls — with the answers a device can honestly give. **Halfbrick** finally
+  spoke: its abort is `libc: malloc(4294967284) failed` — a size of -300 — thrown as `std::bad_alloc`
+  inside `InitFileManager`; the runtime's stderr capture showed it, and the aborting thread's registers
+  and stack chain are printed from now on, so the next log names the code that computed the size instead
+  of leaving a number. Verification: the iOS build compiles, the Linux lane passes, the IPA carries
+  `CFBundleVersion` 53, the four `rb32sys` images unchanged and the new `Natives`/stack strings.
