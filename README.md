@@ -53,7 +53,7 @@ Use the [development branch](https://github.com/Yebot32/Retro-bug/tree/session/m
 
 ## Community
 
-- [Discord](https://discord.gg/r4mQdVgQsT) for discussion, help, and compatibility reports.
+- [Yebot Studios on Discord](https://discord.gg/hPefjfkkVs) for emulation, game development, RetroBug support, and compatibility reports.
 - [GitHub Issues](https://github.com/Yebot32/Retro-bug/issues) for reproducible bugs. Include the RetroBug build, device and OS, game and version, steps to reproduce, and any relevant logs with personal information removed.
 - [YouTube](https://www.youtube.com/@Yebot32) for Yebot32’s videos.
 - [PayPal](https://www.paypal.com/paypalme/Yebot32) for optional support.
