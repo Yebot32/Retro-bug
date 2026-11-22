@@ -14,6 +14,7 @@ struct SettingsView: View {
 
     @State private var taps = 0
     @State private var toast: String?
+    @State private var jitAvailable = false
     @AppStorage("performanceOverlay") private var performanceOverlay = false
     @AppStorage("renderScale") private var renderScale = 1.0
     @AppStorage("runtimeJit") private var runtimeJit = true
@@ -86,7 +87,7 @@ struct SettingsView: View {
                     if holo.developer {
                         HoloSection(title: "Developer", accent: holo.accent)
                         HoloRow(title: "Engine",
-                                subtitle: runtimeJit && rb_ios_jit_available() != 0
+                                subtitle: jitAvailable
                                     ? "A matching translated profile runs first, followed by JIT and the interpreter."
                                     : "A matching translated profile runs first, followed by the interpreter.")
                         HoloDivider()
@@ -111,6 +112,9 @@ struct SettingsView: View {
             }
         }
         .background(Holo.bg.ignoresSafeArea())
+        .task(id: holo.developer && runtimeJit) {
+            jitAvailable = holo.developer && runtimeJit && rb_ios_jit_available() != 0
+        }
         .overlay(alignment: .bottom) {
             if let toast = toast {
                 HoloToast(text: toast)

@@ -103,6 +103,7 @@ class IosHost {
   std::function<void(const std::string&)> log_;
   std::unique_ptr<rb::audio::SilentSles> sles_;  ///< no audio device: a real object model over a muted sink
   std::map<std::string, Special> specials_;
+  mutable std::mutex slots_mu_;  ///< resolution and diagnostic snapshots; forwarded calls do not take it
   std::map<std::string, std::uint32_t> slots_;
   std::map<std::string, std::uint32_t> strings_;
   std::uint32_t string_next_ = 0, string_bytes_left_ = 0;
@@ -114,6 +115,7 @@ class IosHost {
   std::array<std::atomic<std::uint64_t>, abi::AbiContext::kMaxSlots> slot_calls_{};
 
   void EmitLog(int priority, const std::string& tag, const std::string& text);
+  bool FirstRefusal(const std::string& name);
   std::unique_ptr<rb::loader::ApkArchive> archive_;
   int asset_manager_marker_ = 0;
   /// Assets are opened and closed by several guest threads at once. Ownership is shared so that a close

@@ -253,6 +253,32 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
     *why = "glGetBufferPointerv: result is not writable guest memory";
     return false;
   });
+  const auto write_gl_pointer = [this](std::uint32_t out, void* host, std::string* why) {
+    std::uint32_t guest = 0;
+    const auto value = reinterpret_cast<std::uintptr_t>(host);
+    if (host != nullptr && !p_.memory().Translate(host, &guest) && value <= UINT32_MAX) {
+      guest = static_cast<std::uint32_t>(value);
+    }
+    if (p_.memory().Write(out, &guest, sizeof guest)) return true;
+    *why = "GL pointer result is not writable guest memory";
+    return false;
+  };
+  AddSpecial("glGetVertexAttribPointerv", [write_gl_pointer](exec::MachineState& s, std::string* why) {
+    using Fn = void (*)(unsigned, unsigned, void**);
+    static const auto f = reinterpret_cast<Fn>(GlSymbol("glGetVertexAttribPointerv"));
+    if (!f) { *why = "OpenGLES.framework has no glGetVertexAttribPointerv"; return false; }
+    void* host = &s;
+    f(s.r[0], s.r[1], &host);
+    return host == &s || write_gl_pointer(s.r[2], host, why);
+  });
+  AddSpecial("glGetPointerv", [write_gl_pointer](exec::MachineState& s, std::string* why) {
+    using Fn = void (*)(unsigned, void**);
+    static const auto f = reinterpret_cast<Fn>(GlSymbol("glGetPointerv"));
+    if (!f) { *why = "OpenGLES.framework has no glGetPointerv"; return false; }
+    void* host = &s;
+    f(s.r[0], &host);
+    return host == &s || write_gl_pointer(s.r[1], host, why);
+  });
   AddSpecial("eglQueryString", [this](exec::MachineState& s, std::string* why) {
     void* dpy = nullptr;
     if (!handles_.Get(s.r[0], &dpy)) {
@@ -268,7 +294,7 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
     const std::string name = GuestStringOrEmpty(p_.memory(), s.r[0]);
     const auto at = name.empty() ? std::nullopt : Resolve(name);
     if (!at && !name.empty()) {
-      if (refused_.insert("proc:" + name).second && log_) {
+      if (FirstRefusal("proc:" + name) && log_) {
         log_("egl: eglGetProcAddress(\"" + name + "\") = NULL (no iOS implementation)");
       }
     }
@@ -718,6 +744,7 @@ void IosHost::EmitLog(int priority, const std::string& tag, const std::string& t
 }
 
 std::optional<std::uint32_t> IosHost::Resolve(const std::string& name) {
+  std::lock_guard<std::mutex> lock(slots_mu_);
   // Data imports answer an address the guest reads, not a slot it calls.
   if (const auto it = data_symbols_.find(name); it != data_symbols_.end()) return it->second;
   if (const auto it = slots_.find(name); it != slots_.end()) return p_.abi().SlotFor(it->second);
@@ -756,7 +783,7 @@ std::optional<std::uint32_t> IosHost::Resolve(const std::string& name) {
                   recent_[at % kRecentCalls] = RecentHostCall{name.c_str(), {s.r[0], s.r[1], s.r[2], s.r[3]}};
                   if (fn(s, why)) return true;
                   s.r[0] = 0;
-                  if (refused_.insert(name).second && log_) log_("thunks: " + name + " refused: " + *why);
+                  if (FirstRefusal(name) && log_) log_("thunks: " + name + " refused: " + *why);
                   return true;
                 },
                 Waits(name) ? abi::AbiContext::SlotLock::kReleasesGgl : abi::AbiContext::SlotLock::kHoldsGgl);
@@ -765,11 +792,13 @@ std::optional<std::uint32_t> IosHost::Resolve(const std::string& name) {
 
 std::vector<std::string> IosHost::CallCountLines() const {
   std::vector<std::pair<std::string, std::uint64_t>> counts;
-  counts.reserve(slots_.size());
-  for (const auto& [name, index] : slots_) {
-    if (index >= slot_calls_.size()) continue;
-    const std::uint64_t n = slot_calls_[index].load(std::memory_order_relaxed);
-    if (n != 0) counts.emplace_back(name, n);
+  {
+    std::lock_guard<std::mutex> lock(slots_mu_);
+    counts.reserve(slots_.size());
+    for (const auto& [name, index] : slots_) {
+      const std::uint64_t n = slot_calls_[index].load(std::memory_order_relaxed);
+      if (n != 0) counts.emplace_back(name, n);
+    }
   }
   std::sort(counts.begin(), counts.end(),
             [](const auto& a, const auto& b) { return a.second > b.second; });
@@ -782,6 +811,11 @@ std::vector<std::string> IosHost::CallCountLines() const {
     out.emplace_back(line);
   }
   return out;
+}
+
+bool IosHost::FirstRefusal(const std::string& name) {
+  std::lock_guard<std::mutex> lock(slots_mu_);
+  return refused_.insert(name).second;
 }
 
 std::vector<std::string> IosHost::RecentCallLines() const {

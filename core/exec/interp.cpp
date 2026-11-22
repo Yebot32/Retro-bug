@@ -847,11 +847,11 @@ class BlockRunner {
     // and the alternative — a hash insertion and a hash lookup for every operand — was the dominant cost
     // of this interpreter).
     const std::size_t slots = block.ir.size() + 1;
-    temps_.resize(slots);  // temps_set_ gates reads, so existing operand storage needs no reset.
-    temps_set_.assign(slots, std::uint8_t{0});
-    produced_.assign(slots, std::optional<Flags>{});
-    carry_.assign(slots, std::optional<bool>{});
-    ge_.assign(slots, std::optional<std::uint32_t>{});
+    temps_.resize(slots);
+    produced_.resize(slots);
+    carry_.resize(slots);
+    ge_.resize(slots);
+    valid_.assign(slots, std::uint8_t{0});
     for (const auto& inst : block.ir) {
       if (!Step(&inst)) return false;
       ++steps;
@@ -927,7 +927,7 @@ class BlockRunner {
       return false;
     }
     const unsigned slot = SlotOf(v.GetInst());
-    if (slot == 0 || slot >= temps_.size() || temps_set_[slot] == 0) {
+    if (!HasValue(slot, kTemp)) {
       stop.reason = StopReason::Internal;
       stop.detail = slot == 0 ? "IR temporary produced by an unnamed instruction (the block was not numbered)"
                               : "IR temporary read before it was written";
@@ -1013,18 +1013,15 @@ class BlockRunner {
   /// map this file used to hash for every `GetNZCVFromOp`.
   [[nodiscard]] const Flags* Produced(const Inst* inst) const {
     const unsigned slot = SlotOf(inst);
-    if (slot == 0 || slot >= produced_.size() || !produced_[slot]) return nullptr;
-    return &*produced_[slot];
+    return HasValue(slot, kFlags) ? &produced_[slot] : nullptr;
   }
   [[nodiscard]] const bool* Carried(const Inst* inst) const {
     const unsigned slot = SlotOf(inst);
-    if (slot == 0 || slot >= carry_.size() || !carry_[slot]) return nullptr;
-    return &*carry_[slot];
+    return HasValue(slot, kCarry) ? &carry_[slot].value : nullptr;
   }
   [[nodiscard]] const std::uint32_t* GeOf(const Inst* inst) const {
     const unsigned slot = SlotOf(inst);
-    if (slot == 0 || slot >= ge_.size() || !ge_[slot]) return nullptr;
-    return &*ge_[slot];
+    return HasValue(slot, kGe) ? &ge_[slot] : nullptr;
   }
 
   void Put(const Inst* inst, V value) {
@@ -1034,7 +1031,7 @@ class BlockRunner {
     // somewhere else. Sizing guarantees the upper bound.
     if (slot != 0 && slot < temps_.size()) {
       temps_[slot] = value;
-      temps_set_[slot] = 1;
+      valid_[slot] |= kTemp;
     }
   }
 
@@ -1102,7 +1099,10 @@ class BlockRunner {
   /// consumer — not the producer — decides which bits it reads.
   void NoteFlags(const Inst* inst, const Flags& f) {
     const unsigned slot = SlotOf(inst);
-    if (slot != 0 && slot < produced_.size()) produced_[slot] = f;
+    if (slot != 0 && slot < valid_.size()) {
+      produced_[slot] = f;
+      valid_[slot] |= kFlags;
+    }
   }
 
   mem::GuestMemory& memory_;
@@ -1114,18 +1114,24 @@ class BlockRunner {
   /// `isa::TranslateOne`). These were `std::unordered_map<const Inst*, …>` — a hash per operand read and
   /// per result write — which made operand access, not the operation itself, the interpreter's cost.
   std::vector<V> temps_;
-  std::vector<std::uint8_t> temps_set_;
-  std::vector<std::optional<Flags>> produced_;
+  enum : std::uint8_t { kTemp = 1, kFlags = 2, kCarry = 4, kGe = 8 };
+  bool HasValue(unsigned slot, std::uint8_t kind) const {
+    return slot != 0 && slot < valid_.size() && (valid_[slot] & kind) != 0;
+  }
+  // Clear one byte per IR slot between blocks. Payloads are reused until the producer writes them.
+  std::vector<std::uint8_t> valid_;
+  std::vector<Flags> produced_;
   /// Shifter carries, kept apart from `produced_` because their N/Z reach CPSR by a different route
   /// (`TST`) than their C does (`GetCarryFromOp`), and merging them would make Tier I disagree with
   /// the back end about what a `GetNZCVFromOp` on a shift means.
-  std::vector<std::optional<bool>> carry_;
+  struct ShiftCarry { bool value; };
+  std::vector<ShiftCarry> carry_;
   /// The GE word a packed add/subtract produced, in dynarmic's expanded one-lane-per-bit form, keyed by
   /// the instruction that produced it — the same shape as `carry_` and for the same reason: the IR names
   /// the *producer* in `GetGEFromOp`, so the value has to be recorded where a producer can leave it and
   /// read where a consumer asks. Held apart from `produced_` because it is not a flag: it survives an
   /// unrelated `ADDS` in between, and `MRS rD, CPSR` reads it out of CPSR's own bits.
-  std::vector<std::optional<std::uint32_t>> ge_;
+  std::vector<std::uint32_t> ge_;
   bool check_bit = false;
   /// An SVC noted by `A32CallSupervisor`, waiting to be surfaced at the block's `CheckHalt` terminal —
   /// see the two places that read it. Pending rather than immediate so the PC is already past the
@@ -1617,7 +1623,10 @@ bool BlockRunner::Step(const Inst* inst) {
       const unsigned width = PackedLaneWidth(op);
       Put(inst, V{LaneAddSub(a, b, width, IsPackedSub(op)), 0});
       const unsigned slot = SlotOf(inst);
-      if (slot != 0 && slot < ge_.size()) ge_[slot] = GeOfPackedAddSub(op, a, b, width);
+      if (slot != 0 && slot < valid_.size()) {
+        ge_[slot] = GeOfPackedAddSub(op, a, b, width);
+        valid_[slot] |= kGe;
+      }
       return true;
     }
     case Opcode::PackedSaturatedAddU8:
@@ -2263,7 +2272,10 @@ bool BlockRunner::Step(const Inst* inst) {
       Put(inst, V{result, 0});
       {
         const unsigned slot = SlotOf(inst);
-        if (slot != 0 && slot < carry_.size()) carry_[slot] = carry;
+        if (slot != 0 && slot < valid_.size()) {
+          carry_[slot].value = carry;
+          valid_[slot] |= kCarry;
+        }
       }
       NoteFlags(inst, Tst(result, 32));  // N and Z from the result; C is published separately, V clear
       return true;
