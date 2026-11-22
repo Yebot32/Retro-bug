@@ -22,7 +22,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.retrobug.ios
         MARKETING_VERSION: "0.1.5"
-        CURRENT_PROJECT_VERSION: "57"
+        CURRENT_PROJECT_VERSION: "58"
         INFOPLIST_FILE: RetroBug/Info.plist
         SWIFT_OBJC_BRIDGING_HEADER: RetroBug/Retrobug-Bridging-Header.h
         HEADER_SEARCH_PATHS:

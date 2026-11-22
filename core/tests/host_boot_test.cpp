@@ -31,10 +31,12 @@
 #include "fake_java.h"
 #include "rb/abi/abi.h"
 #include "rb/host/boot.h"
+#include "rb/java/android_base.h"
 #include "rb/loader/guest_elf.h"
 #include "rb/mem/guest_memory.h"
 #include "rb/runtime/guest_process.h"
 #include "zip_builder.h"
+#include "../../platform/ios/unity_bootstrap.h"
 
 #ifndef RB_DEVICE_LIBC_PATH
 #define RB_DEVICE_LIBC_PATH "/data/local/tmp/rb_device_libc.so"
@@ -381,14 +383,55 @@ void a_constructor_fault_poisons_the_process(const std::string& apk) {
   CHECK_CTX(refused.report.find("half-initialized") != std::string::npos, refused.report);
 }
 
+void unity_uses_the_imports_package_and_launch_intent() {
+  java::TableJava java;
+  java::AndroidEnv env;
+  env.package_name = "com.example.unity";
+  env.apk_path = "/games/test.apk";
+  java::InstallAndroidBase(java, env);
+  platform::ios::UnityBootstrap::InstallJava(java, env.apk_path, {env.package_name, u"1.5.6", 42});
+  const auto activity = java.NewInstance("com/unity3d/player/UnityPlayerActivity");
+  const auto cls = java.GetObjectClass(activity);
+  const auto intent_method = java.GetMethodID(cls, "getIntent", "()Landroid/content/Intent;", false);
+  const auto intent = java.Call('L', false, activity, 0, intent_method, {});
+  CHECK(intent != 0);
+  const auto object = java.FindClass("java/lang/Object");
+  const auto to_string = java.GetMethodID(object, "toString", "()Ljava/lang/String;", false);
+  const auto text = java.Call('L', false, intent, 0, to_string, {});
+  CHECK(java.GetStringChars(text) == u"Intent { act=android.intent.action.MAIN }");
+
+  const auto get_pm = java.GetMethodID(cls, "getPackageManager", "()Landroid/content/pm/PackageManager;", false);
+  const auto manager = java.Call('L', false, activity, 0, get_pm, {});
+  CHECK(manager != 0);
+  const auto pm_class = java.GetObjectClass(manager);
+  const auto get_package = java.GetMethodID(pm_class, "getPackageInfo",
+                                            "(Ljava/lang/String;I)Landroid/content/pm/PackageInfo;", false);
+  const auto name = java.NewString(u"com.example.unity");
+  const auto info = java.Call('L', false, manager, 0, get_package, {name, 0});
+  CHECK(info != 0);
+  const auto info_class = java.GetObjectClass(info);
+  const auto version = java.GetFieldID(info_class, "versionName", "Ljava/lang/String;", false);
+  const auto code = java.GetFieldID(info_class, "versionCode", "I", false);
+  CHECK(java.GetStringChars(java.GetField('L', false, info, version)) == u"1.5.6");
+  CHECK(java.GetField('I', false, info, code) == 42);
+  const auto installer = java.GetMethodID(pm_class, "getInstallerPackageName", "(Ljava/lang/String;)Ljava/lang/String;",
+                                           false);
+  CHECK(installer != 0 && java.Call('L', false, manager, 0, installer, {name}) == 0);
+  CHECK(!java.ExceptionCheck());
+  const auto missing = java.NewString(u"com.example.missing");
+  CHECK(java.Call('L', false, manager, 0, get_package, {missing, 0}) == 0);
+  CHECK(java.PendingClass() == "android/content/pm/PackageManager$NameNotFoundException");
+}
+
 }  // namespace
 
 int main() {
+  unity_uses_the_imports_package_and_launch_intent();
   const Images im = LoadImages();
   if (!im.ok) {
     std::fprintf(stderr, "# host boot lane skipped: %s is missing (run tools/run_engine_tests.sh)\n", im.missing.c_str());
-    std::printf("0 checks, 0 failures (skipped)\n");
-    return 0;
+    std::printf("%d checks, %d failures (Unity profile only)\n", checks, failures);
+    return failures == 0 ? 0 : 1;
   }
   const std::vector<std::uint8_t> apk_bytes = BuildApk(im);
   const std::string apk = WriteTempApk(apk_bytes);

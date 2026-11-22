@@ -75,6 +75,13 @@ int TableJava::ObjectOf(Ref r) const {
   return Obj(r);
 }
 
+std::string TableJava::ObjectClassName(int obj) const {
+  std::lock_guard<std::mutex> lk(mu_);
+  if (obj <= 0 || obj >= static_cast<int>(objects_.size())) return {};
+  const auto* cls = ClassOfObj(objects_[obj].cls);
+  return cls != nullptr ? cls->name : std::string{"java/lang/Class"};
+}
+
 std::u16string TableJava::StringOf(int obj) const {
   std::lock_guard<std::mutex> lk(mu_);
   return obj > 0 && obj < static_cast<int>(objects_.size()) ? objects_[obj].str : std::u16string{};

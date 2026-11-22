@@ -472,7 +472,8 @@ void InstallAndroidBase(TableJava& j, AndroidEnv env) {
                  [](TableJava& f, int, const std::vector<std::uint64_t>&) {
                    return static_cast<std::uint64_t>(f.NewJavaString(u""));
                  });
-  j.DefineClass("android/content/pm/ApplicationInfo", "java/lang/Object");
+  j.DefineClass("android/content/pm/PackageItemInfo", "java/lang/Object");
+  j.DefineClass("android/content/pm/ApplicationInfo", "android/content/pm/PackageItemInfo");
   j.DefineField("android/content/pm/ApplicationInfo", "packageName", "Ljava/lang/String;", false);
   j.DefineField("android/content/pm/ApplicationInfo", "sourceDir", "Ljava/lang/String;", false);
   j.DefineMethod("android/content/Context", "getString", "(I[Ljava/lang/Object;)Ljava/lang/String;", false,

@@ -1,6 +1,8 @@
 // RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
 #include "unity_bootstrap.h"
 
+#include <algorithm>
+#include <cstdio>
 #include <filesystem>
 #include <utility>
 
@@ -12,17 +14,139 @@ constexpr char kPlayer[] = "com/unity3d/player/UnityPlayer";
 constexpr char kActivity[] = "com/unity3d/player/UnityPlayerActivity";
 constexpr char kActivitySig[] = "Landroid/app/Activity;";
 constexpr char kSurface[] = "android/view/Surface";
+constexpr char kIntent[] = "android/content/Intent";
+constexpr char kBundle[] = "android/os/Bundle";
+constexpr char kManager[] = "android/content/pm/PackageManager";
+constexpr char kPackageInfo[] = "android/content/pm/PackageInfo";
+
+using Java = java::TableJava;
+
+void PutObject(Java& vm, int object, const char* field, Java::Ref value) {
+  vm.PutField(object, field, vm.ObjectOf(value));
 }
 
-void UnityBootstrap::InstallJava(java::TableJava& java, const std::string& apk) {
+void PutString(Java& vm, int object, const char* field, const std::u16string& text) {
+  const auto value = vm.NewString(text);
+  PutObject(vm, object, field, value);
+  vm.DeleteLocalRef(value);
+}
+
+void InstallIntent(Java& vm) {
+  vm.DefineClass(kIntent, "java/lang/Object");
+  vm.DefineField(kIntent, "action", "Ljava/lang/String;", false);
+  vm.DefineField(kIntent, "package", "Ljava/lang/String;", false);
+  vm.DefineMethod(kIntent, "<init>", "()V", false, [](Java&, int, const auto&) { return 0u; });
+  vm.DefineMethod(kIntent, "<init>", "(Ljava/lang/String;)V", false, [](Java& j, int self, const auto& args) {
+    PutObject(j, self, "action", args.at(0));
+    return 0u;
+  });
+  vm.DefineMethod("android/app/Activity", "getIntent", "()Landroid/content/Intent;", false,
+                  [](Java& j, int, const auto&) {
+    const auto intent = j.NewInstance(kIntent);
+    PutString(j, j.ObjectOf(intent), "action", u"android.intent.action.MAIN");
+    return intent;
+  });
+  vm.DefineMethod("java/lang/Object", "toString", "()Ljava/lang/String;", false,
+                  [](Java& j, int self, const auto&) {
+    char identity[16];
+    std::snprintf(identity, sizeof identity, "%x", static_cast<unsigned>(self));
+    auto name = j.ObjectClassName(self);
+    std::replace(name.begin(), name.end(), '/', '.');
+    const std::string text = name + "@" + identity;
+    return j.NewString(std::u16string(text.begin(), text.end()));
+  });
+  vm.DefineMethod(kIntent, "toString", "()Ljava/lang/String;", false, [](Java& j, int self, const auto&) {
+    auto action = j.StringOf(static_cast<int>(j.FieldOf(self, "action")));
+    auto package = j.StringOf(static_cast<int>(j.FieldOf(self, "package")));
+    std::u16string text = u"Intent {";
+    if (!action.empty()) text += u" act=" + action;
+    if (!package.empty()) text += u" pkg=" + package;
+    return j.NewString(text + u" }");
+  });
+  for (const auto& [name, field] : {std::pair{"getAction", "action"}, {"getPackage", "package"}}) {
+    vm.DefineMethod(kIntent, name, "()Ljava/lang/String;", false, [field](Java& j, int self, const auto&) {
+      return j.MakeRef(static_cast<int>(j.FieldOf(self, field)));
+    });
+  }
+  vm.DefineMethod(kIntent, "getExtras", "()Landroid/os/Bundle;", false,
+                  [](Java&, int, const auto&) { return 0u; });
+  vm.DefineMethod(kIntent, "setPackage", "(Ljava/lang/String;)Landroid/content/Intent;", false,
+                  [](Java& j, int self, const auto& args) {
+    PutObject(j, self, "package", args.at(0));
+    return j.MakeRef(self);
+  });
+}
+
+void InstallPackageManager(Java& vm, const ApkIdentity& identity, const std::u16string& apk_path) {
+  const auto empty = [](Java&, int, const auto&) { return 0u; };
+  vm.DefineClass(kBundle, "java/lang/Object");
+  vm.DefineClass(kManager, "java/lang/Object");
+  vm.DefineClass(kPackageInfo, "java/lang/Object");
+  vm.DefineClass("android/app/ApplicationErrorReport", "java/lang/Object");
+  vm.DefineField(kPackageInfo, "packageName", "Ljava/lang/String;", false);
+  vm.DefineField(kPackageInfo, "versionName", "Ljava/lang/String;", false);
+  vm.DefineField(kPackageInfo, "versionCode", "I", false);
+  vm.DefineField(kPackageInfo, "applicationInfo", "Landroid/content/pm/ApplicationInfo;", false);
+  vm.DefineField("android/content/pm/PackageItemInfo", "metaData", "Landroid/os/Bundle;", false);
+  vm.DefineMethod("android/content/Context", "getPackageManager", "()Landroid/content/pm/PackageManager;",
+                  false, [](Java& j, int, const auto&) { return j.NewInstance(kManager); });
+  // A sideloaded APK on iOS has neither a Play installer nor an Android error-report receiver.
+  vm.DefineMethod(kManager, "getInstallerPackageName", "(Ljava/lang/String;)Ljava/lang/String;", false, empty);
+  vm.DefineMethod(kManager, "resolveActivity", "(Landroid/content/Intent;I)Landroid/content/pm/ResolveInfo;",
+                  false, empty);
+  vm.DefineMethod(kManager, "hasSystemFeature", "(Ljava/lang/String;)Z", false, empty);
+  vm.DefineMethod("android/app/ApplicationErrorReport", "getErrorReportReceiver",
+                  "(Landroid/content/Context;Ljava/lang/String;I)Landroid/content/ComponentName;", true, empty);
+  vm.DefineMethod(kBundle, "getBoolean", "(Ljava/lang/String;Z)Z", false,
+                  [](Java&, int, const auto& args) { return args.at(1); });
+  vm.DefineMethod(kBundle, "getBoolean", "(Ljava/lang/String;)Z", false, empty);
+  const std::u16string package(identity.package.begin(), identity.package.end());
+  const auto application_info = [package, apk_path](Java& j) {
+    const auto info = j.NewInstance("android/content/pm/ApplicationInfo");
+    int object = j.ObjectOf(info);
+    PutString(j, object, "packageName", package);
+    PutString(j, object, "sourceDir", apk_path);
+    return info;
+  };
+  vm.DefineMethod("android/content/Context", "getApplicationInfo", "()Landroid/content/pm/ApplicationInfo;",
+                  false, [application_info](Java& j, int, const auto&) { return application_info(j); });
+  const auto get_application = [package, application_info](Java& j, int, const auto& args) -> Java::Ref {
+    if (j.StringOf(j.ObjectOf(args.at(0))) != package) {
+      j.SetPending("android/content/pm/PackageManager$NameNotFoundException", "package is not imported");
+      return 0;
+    }
+    return application_info(j);
+  };
+  vm.DefineMethod(kManager, "getApplicationInfo", "(Ljava/lang/String;I)Landroid/content/pm/ApplicationInfo;",
+                  false, get_application);
+  vm.DefineMethod(kManager, "getPackageInfo", "(Ljava/lang/String;I)Landroid/content/pm/PackageInfo;", false,
+                  [get_application, package, identity](Java& j, int self, const auto& args) -> Java::Ref {
+    const auto application = get_application(j, self, args);
+    if (application == 0) return 0;
+    const auto info = j.NewInstance(kPackageInfo);
+    const auto object = j.ObjectOf(info);
+    PutString(j, object, "packageName", package);
+    PutString(j, object, "versionName", identity.version_name);
+    j.PutField(object, "versionCode", identity.version_code);
+    PutObject(j, object, "applicationInfo", application);
+    j.DeleteLocalRef(application);
+    return info;
+  });
+}
+}
+
+void UnityBootstrap::InstallJava(java::TableJava& java, const std::string& apk, const ApkIdentity& identity) {
   java.DefineClass("android/view/View", "java/lang/Object");
   java.DefineClass("android/view/ViewGroup", "android/view/View");
   java.DefineClass("android/widget/FrameLayout", "android/view/ViewGroup");
   java.DefineClass(kPlayer, "android/widget/FrameLayout");
   java.DefineClass(kActivity, "android/app/Activity");
   java.DefineClass(kSurface, "java/lang/Object");
+  java.DefineClass("com/unity3d/player/ReflectionHelper", "java/lang/Object");
+  InstallIntent(java);
   java.DefineField(kPlayer, "currentActivity", kActivitySig, true);
   const auto apk_path = std::filesystem::path(apk).u16string();
+  InstallPackageManager(java, identity, apk_path);
   for (const char* method : {"getPackageCodePath", "getPackageResourcePath"}) {
     java.DefineMethod("android/content/Context", method, "()Ljava/lang/String;", false,
                       [apk_path](java::TableJava& vm, int, const auto&) { return vm.NewString(apk_path); });

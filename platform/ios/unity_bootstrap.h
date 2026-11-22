@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "apk_identity.h"
 #include "rb/java/table_java.h"
 
 namespace rb::host { class Boot; }
@@ -14,7 +15,7 @@ namespace rb::platform::ios {
 // The Java-driven lifecycle used by older Android UnityPlayer builds.
 class UnityBootstrap {
  public:
-  static void InstallJava(java::TableJava& java, const std::string& apk);
+  static void InstallJava(java::TableJava& java, const std::string& apk, const ApkIdentity& identity);
   UnityBootstrap(host::Boot& boot, java::TableJava& java);
   ~UnityBootstrap();
   bool Start(const std::string& apk, std::string* why);

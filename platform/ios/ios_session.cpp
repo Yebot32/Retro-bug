@@ -426,6 +426,7 @@ struct RbIosSession {
   std::unique_ptr<rb::platform::ios::HalfbrickBootstrap> halfbrick;  ///< Fruit Ninja's Mortar engine
   std::unique_ptr<rb::platform::ios::UnityBootstrap> unity;
   bool unity_apk = false;
+  rb::platform::ios::ApkIdentity apk_identity;
   bool dlgl_apk = false;  ///< the APK ships assets/rb32/libdlgl.so: boot the whole DLGE Java load order
   bool booted = false;  ///< render thread only
   bool runtime_jit = true;  ///< configured before the render thread starts
@@ -540,7 +541,7 @@ void Take(RbIosSession* s, int kind, int id, float x, float y) {
 bool RbIosSession::Boot(std::string* err) {
   RbIosSession* self = this;
   rb::java::AndroidEnv env;
-  env.package_name = "retrobug.game";
+  env.package_name = unity_apk ? apk_identity.package : "retrobug.game";
   env.apk_path = apk;
   env.files_dir = data_dir + "/files";
   env.cache_dir = data_dir + "/cache";
@@ -598,7 +599,7 @@ bool RbIosSession::Boot(std::string* err) {
     rb::java::InstallBlockyroads(*java, env);
     rb::java::InstallPikPok(*java, env);
     rb::java::InstallHalfbrick(*java);
-    if (self->unity_apk) rb::platform::ios::UnityBootstrap::InstallJava(*java, self->apk);
+    if (self->unity_apk) rb::platform::ios::UnityBootstrap::InstallJava(*java, self->apk, self->apk_identity);
     self->java = java.get();
     java->set_trace([self](const std::string& line) { self->Log(line); });
     // The first Java calls of a session are named in full: a title whose own Java does not run here can
@@ -945,6 +946,22 @@ extern "C" RbIosSession* rb_ios_create(const char* apk_path, const char* lib_nam
   }
   s->stock_apk = s->lib_dir != "assets/rb32/";
   s->unity_apk = unity || s->lib == "libunity.so";
+  if (s->unity_apk) {
+    std::string why;
+    auto archive = rb::loader::ApkArchive::Open(s->apk, &why);
+    if (archive && archive->EntrySize("AndroidManifest.xml").value_or(0) <= 2 * 1024 * 1024) {
+      if (const auto manifest = archive->Read("AndroidManifest.xml", &why)) {
+        s->apk_identity = rb::platform::ios::ReadApkIdentity(*manifest);
+      }
+    }
+    if (s->apk_identity.package.empty()) {
+      s->Log("unity: APK manifest has no readable package identity");
+      s->apk_identity.package = "retrobug.game";
+    } else {
+      s->Log("unity: package " + s->apk_identity.package + " version code " +
+             std::to_string(s->apk_identity.version_code));
+    }
+  }
   s->data_dir = data_dir != nullptr ? data_dir : "";
   s->client_version = client_version == 1 ? 1 : 2;
   s->dlgl_apk = rb::host::Boot::BundlesDlgl(s->apk);

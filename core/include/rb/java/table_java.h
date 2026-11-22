@@ -55,6 +55,7 @@ class TableJava : public abi::HostJava {
   Ref NewInstance(const std::string& cls);
   Ref NewJavaString(const std::u16string& s);
   int ObjectOf(Ref r) const;  ///< the object a live reference names, 0 if none
+  std::string ObjectClassName(int obj) const;
   std::u16string StringOf(int obj) const;
   std::uint64_t FieldOf(int obj, const std::string& name) const;
   std::uint64_t StaticOf(const std::string& cls, const std::string& name) const;
