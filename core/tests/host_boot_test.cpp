@@ -423,10 +423,64 @@ void unity_uses_the_imports_package_and_launch_intent() {
   CHECK(java.PendingClass() == "android/content/pm/PackageManager$NameNotFoundException");
 }
 
+void unity_can_cache_its_player_callbacks_and_power_methods() {
+  java::TableJava java;
+  java::AndroidEnv env;
+  java::InstallAndroidBase(java, env);
+  std::string requested;
+  bool shutdown = false;
+  platform::ios::UnityBootstrap::JavaServices services;
+  services.load_library = [&](const std::string& name) { requested = name; return name == "unity"; };
+  services.request_shutdown = [&] { shutdown = true; };
+  platform::ios::UnityBootstrap::InstallJava(java, "/games/test.apk", {env.package_name, u"1", 1}, services);
+  const auto player_class = java.FindClass("com/unity3d/player/UnityPlayer");
+  const auto player = java.NewInstance("com/unity3d/player/UnityPlayer");
+  for (const auto& [name, sig] : {
+           std::pair{"showSoftInput", "(Ljava/lang/String;IZZZZLjava/lang/String;)V"}, {"hideSoftInput", "()V"},
+           {"setSoftInputStr", "(Ljava/lang/String;)V"}, {"showVideoPlayer", "(Ljava/lang/String;IIIZII)V"},
+           {"Location_IsServiceEnabledByUser", "()Z"}, {"Location_SetDesiredAccuracy", "(F)V"},
+           {"Location_SetDistanceFilter", "(F)V"}, {"Location_StartUpdatingLocation", "()V"},
+           {"Location_StopUpdatingLocation", "()V"}, {"setFullscreen", "(Z)V"}, {"initCamera", "(IIII)[I"},
+           {"closeCamera", "(I)V"}, {"getNumCameras", "()I"}, {"isCameraFrontFacing", "(I)Z"},
+           {"getCameraOrientation", "(I)I"}, {"restartFMODAudioDevice", "()V"},
+           {"startActivityIndicator", "()V"}, {"stopActivityIndicator", "()V"}, {"kill", "()V"},
+           {"executeGLThreadJobs", "()V"}, {"getSplashMode", "()I"}, {"disableLogger", "()V"},
+           {"loadLibrary", "(Ljava/lang/String;)Z"}, {"installPresentationDisplay", "(I)Z"}}) {
+    CHECK_CTX(java.GetMethodID(player_class, name, sig, false) != 0, name);
+  }
+  const auto load = java.GetMethodID(player_class, "loadLibrary", "(Ljava/lang/String;)Z", false);
+  CHECK(java.Call('Z', false, player, 0, load, {java.NewString(u"unity")}) == 1);
+  CHECK(requested == "unity");
+  CHECK(java.Call('Z', false, player, 0, load, {java.NewString(u"../unity")}) == 0 && requested == "unity");
+  const auto kill = java.GetMethodID(player_class, "kill", "()V", false);
+  java.Call('V', false, player, 0, kill, {});
+  CHECK(shutdown);
+  const auto context_class = java.FindClass("android/content/Context");
+  const auto power_field = java.GetFieldID(context_class, "POWER_SERVICE", "Ljava/lang/String;", true);
+  const auto power = java.GetField('L', true, context_class, power_field);
+  CHECK(java.GetStringChars(power) == u"power");
+  CHECK(java.GetFieldID(context_class, "MODE_PRIVATE", "I", true) != 0);
+  const auto activity = java.NewInstance("com/unity3d/player/UnityPlayerActivity");
+  const auto system = java.GetMethodID(context_class, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;", false);
+  const auto manager = java.Call('L', false, activity, 0, system, {power});
+  const auto wake = java.GetMethodID(java.GetObjectClass(manager), "newWakeLock",
+                                    "(ILjava/lang/String;)Landroid/os/PowerManager$WakeLock;", false);
+  const auto lock = java.Call('L', false, manager, 0, wake, {1, java.NewString(u"fixture")});
+  const auto lock_class = java.GetObjectClass(lock);
+  const auto held = java.GetMethodID(lock_class, "isHeld", "()Z", false);
+  CHECK(java.Call('Z', false, lock, 0, held, {}) == 0);
+  java.Call('V', false, lock, 0, java.GetMethodID(lock_class, "acquire", "()V", false), {});
+  CHECK(java.Call('Z', false, lock, 0, held, {}) == 1);
+  java.Call('V', false, lock, 0, java.GetMethodID(lock_class, "release", "()V", false), {});
+  CHECK(java.Call('Z', false, lock, 0, held, {}) == 0);
+  CHECK(!java.ExceptionCheck());
+}
+
 }  // namespace
 
 int main() {
   unity_uses_the_imports_package_and_launch_intent();
+  unity_can_cache_its_player_callbacks_and_power_methods();
   const Images im = LoadImages();
   if (!im.ok) {
     std::fprintf(stderr, "# host boot lane skipped: %s is missing (run tools/run_engine_tests.sh)\n", im.missing.c_str());

@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -15,7 +16,13 @@ namespace rb::platform::ios {
 // The Java-driven lifecycle used by older Android UnityPlayer builds.
 class UnityBootstrap {
  public:
-  static void InstallJava(java::TableJava& java, const std::string& apk, const ApkIdentity& identity);
+  struct JavaServices {
+    std::function<bool(const std::string&)> load_library;
+    std::function<void()> request_shutdown;
+    std::function<void(const std::string&)> log;
+  };
+  static void InstallJava(java::TableJava& java, const std::string& apk, const ApkIdentity& identity,
+                          const JavaServices& services = {});
   UnityBootstrap(host::Boot& boot, java::TableJava& java);
   ~UnityBootstrap();
   bool Start(const std::string& apk, std::string* why);

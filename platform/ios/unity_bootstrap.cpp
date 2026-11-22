@@ -2,8 +2,10 @@
 #include "unity_bootstrap.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <filesystem>
+#include <memory>
 #include <utility>
 
 #include "rb/host/boot.h"
@@ -133,9 +135,82 @@ void InstallPackageManager(Java& vm, const ApkIdentity& identity, const std::u16
     return info;
   });
 }
+
+void InstallPlayerCallbacks(Java& vm, const UnityBootstrap::JavaServices& services) {
+  const auto empty = [](Java&, int, const auto&) { return 0u; };
+  // Unity caches these method IDs together. For services the shell cannot supply, report zero devices,
+  // unavailable, or no result according to the method's return type.
+  for (const auto& [name, sig] : {
+           std::pair{"Location_IsServiceEnabledByUser", "()Z"}, {"getNumCameras", "()I"},
+           {"initCamera", "(IIII)[I"}, {"isCameraFrontFacing", "(I)Z"}, {"getCameraOrientation", "(I)I"},
+           {"installPresentationDisplay", "(I)Z"}, {"getSplashMode", "()I"},
+           {"executeGLThreadJobs", "()V"}, {"disableLogger", "()V"},
+           {"startActivityIndicator", "()V"}, {"stopActivityIndicator", "()V"}, {"setFullscreen", "(Z)V"}}) {
+    vm.DefineMethod(kPlayer, name, sig, false, empty);
+  }
+  for (const auto& [name, sig] : {
+           std::pair{"showSoftInput", "(Ljava/lang/String;IZZZZLjava/lang/String;)V"},
+           {"hideSoftInput", "()V"}, {"setSoftInputStr", "(Ljava/lang/String;)V"},
+           {"showVideoPlayer", "(Ljava/lang/String;IIIZII)V"}, {"Location_SetDesiredAccuracy", "(F)V"},
+           {"Location_SetDistanceFilter", "(F)V"}, {"Location_StartUpdatingLocation", "()V"},
+           {"Location_StopUpdatingLocation", "()V"}, {"closeCamera", "(I)V"}, {"restartFMODAudioDevice", "()V"}}) {
+    vm.DefineMethod(kPlayer, name, sig, false,
+                    [name, log = services.log, reported = std::make_shared<std::atomic<bool>>(false)]
+                    (Java&, int, const auto&) {
+      if (log && !reported->exchange(true, std::memory_order_relaxed)) {
+        log(std::string("unity: Android service unavailable: UnityPlayer.") + name);
+      }
+      return 0u;
+    });
+  }
+  vm.DefineMethod(kPlayer, "kill", "()V", false, [shutdown = services.request_shutdown](Java&, int, const auto&) {
+    if (shutdown) shutdown();
+    return 0u;
+  });
+  vm.DefineMethod(kPlayer, "loadLibrary", "(Ljava/lang/String;)Z", false,
+                  [load = services.load_library](Java& j, int, const auto& args) {
+    const auto name = j.StringOf(j.ObjectOf(args.at(0)));
+    if (name.empty() || !std::all_of(name.begin(), name.end(), [](char16_t c) {
+          return (c >= u'a' && c <= u'z') || (c >= u'A' && c <= u'Z') || (c >= u'0' && c <= u'9') ||
+                 c == u'_' || c == u'-' || c == u'.';
+        })) return false;
+    return load && load(std::string(name.begin(), name.end()));
+  });
 }
 
-void UnityBootstrap::InstallJava(java::TableJava& java, const std::string& apk, const ApkIdentity& identity) {
+void InstallPowerManager(Java& vm) {
+  constexpr char context[] = "android/content/Context";
+  constexpr char manager[] = "android/os/PowerManager";
+  constexpr char lock[] = "android/os/PowerManager$WakeLock";
+  vm.DefineClass(manager, "java/lang/Object");
+  vm.DefineClass(lock, "java/lang/Object");
+  vm.DefineField(context, "POWER_SERVICE", "Ljava/lang/String;", true);
+  vm.DefineField(context, "MODE_PRIVATE", "I", true);  // Android's value is zero.
+  const auto cls = vm.FindClass(context);
+  const auto power_field = vm.GetFieldID(cls, "POWER_SERVICE", "Ljava/lang/String;", true);
+  const auto power = vm.NewString(u"power");
+  vm.SetField('L', true, cls, power_field, power);
+  vm.DeleteLocalRef(power);
+  vm.DeleteLocalRef(cls);
+  vm.DefineMethod(context, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;", false,
+                  [](Java& j, int, const auto& args) {
+    return j.StringOf(j.ObjectOf(args.at(0))) == u"power" ? j.NewInstance("android/os/PowerManager") : 0;
+  });
+  vm.DefineMethod(manager, "newWakeLock", "(ILjava/lang/String;)Landroid/os/PowerManager$WakeLock;", false,
+                  [](Java& j, int, const auto&) { return j.NewInstance("android/os/PowerManager$WakeLock"); });
+  vm.DefineMethod(lock, "isHeld", "()Z", false,
+                  [](Java& j, int self, const auto&) { return j.FieldOf(self, "held") != 0; });
+  for (const auto& [name, held] : {std::pair{"acquire", true}, {"release", false}}) {
+    vm.DefineMethod(lock, name, "()V", false, [held](Java& j, int self, const auto&) {
+      j.PutField(self, "held", held);
+      return 0u;
+    });
+  }
+}
+}
+
+void UnityBootstrap::InstallJava(java::TableJava& java, const std::string& apk, const ApkIdentity& identity,
+                                 const JavaServices& services) {
   java.DefineClass("android/view/View", "java/lang/Object");
   java.DefineClass("android/view/ViewGroup", "android/view/View");
   java.DefineClass("android/widget/FrameLayout", "android/view/ViewGroup");
@@ -144,6 +219,8 @@ void UnityBootstrap::InstallJava(java::TableJava& java, const std::string& apk, 
   java.DefineClass(kSurface, "java/lang/Object");
   java.DefineClass("com/unity3d/player/ReflectionHelper", "java/lang/Object");
   InstallIntent(java);
+  InstallPlayerCallbacks(java, services);
+  InstallPowerManager(java);
   java.DefineField(kPlayer, "currentActivity", kActivitySig, true);
   const auto apk_path = std::filesystem::path(apk).u16string();
   InstallPackageManager(java, identity, apk_path);

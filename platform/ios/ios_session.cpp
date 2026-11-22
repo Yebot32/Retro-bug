@@ -599,7 +599,23 @@ bool RbIosSession::Boot(std::string* err) {
     rb::java::InstallBlockyroads(*java, env);
     rb::java::InstallPikPok(*java, env);
     rb::java::InstallHalfbrick(*java);
-    if (self->unity_apk) rb::platform::ios::UnityBootstrap::InstallJava(*java, self->apk, self->apk_identity);
+    if (self->unity_apk) {
+      rb::platform::ios::UnityBootstrap::JavaServices services;
+      services.log = [self](const std::string& line) { self->Log(line); };
+      services.load_library = [self](const std::string& name) {
+        if (!self->boot) return false;
+        const std::string library = name.starts_with("lib") && name.ends_with(".so") ? name : "lib" + name + ".so";
+        std::string why;
+        const bool loaded = self->boot->DlOpen(library, &why) != 0;
+        if (!loaded) self->Log("unity: loadLibrary " + library + ": " + why);
+        return loaded;
+      };
+      services.request_shutdown = [self] {
+        self->Log("unity: player requested shutdown");
+        self->running.store(false);
+      };
+      rb::platform::ios::UnityBootstrap::InstallJava(*java, self->apk, self->apk_identity, services);
+    }
     self->java = java.get();
     java->set_trace([self](const std::string& line) { self->Log(line); });
     // The first Java calls of a session are named in full: a title whose own Java does not run here can
