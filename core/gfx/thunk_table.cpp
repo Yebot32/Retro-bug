@@ -36,6 +36,7 @@ const std::map<std::string, ThunkEntry>& Table() {
         {"glBindBuffer", "v:uu"}, {"glBindFramebuffer", "v:uu"}, {"glBindRenderbuffer", "v:uu"},
         {"glBindTexture", "v:uu"}, {"glBlendColor", "v:ffff"}, {"glBlendEquation", "v:u"},
         {"glBlendEquationSeparate", "v:uu"}, {"glBlendFunc", "v:uu"}, {"glBlendFuncSeparate", "v:uuuu"},
+        {"glAlphaFuncQCOM", "v:uf"},
         {"glBufferData", "v:uipu"}, {"glBufferSubData", "v:uiip"}, {"glCheckFramebufferStatus", "u:u"},
         {"glClear", "v:u"}, {"glClearColor", "v:ffff"}, {"glClearDepthf", "v:f"}, {"glClearStencil", "v:i"},
         {"glColorMask", "v:uuuu"}, {"glCompileShader", "v:u"}, {"glCompressedTexImage2D", "v:uiuiiiip"},
@@ -218,16 +219,16 @@ const std::map<std::string, ThunkEntry>& Table() {
         {"ANativeWindow_getHeight", "i:h"}, {"ANativeWindow_getFormat", "i:h"},
         {"ANativeWindow_setBuffersGeometry", "i:hiii"},
         // Sensors and loopers (Cars). ASensorEvent is 104 bytes with the same offsets on armeabi and arm64, so getEvents
-        // writes the guest's array in place. createEventQueue is a special (thunks_android): its callback is guest code.
+        // writes the guest's array in place. Queue creation and destruction track guest callbacks in thunks_android.
         {"ASensorManager_getInstance", "H:"}, {"ASensorManager_getDefaultSensor", "H:hi"},
         {"ASensorEventQueue_enableSensor", "i:hh"}, {"ASensorEventQueue_disableSensor", "i:hh"},
         {"ASensorEventQueue_setEventRate", "i:hhi"}, {"ASensorEventQueue_getEvents", "i:hpu"},
         // The rest of what Unity's libunity imports (measured: Angry Birds Epic's 12 unanswered names, 2026-10-18).
         // Every one is a getter over a sensor or key handle this table issued, so the generic caller serves them:
         // the answer is the device's own, and a handle that was never issued is refused by name instead of dereferenced.
-        {"ASensorEventQueue_hasEvents", "i:h"}, {"ASensorManager_destroyEventQueue", "i:h"},
+        {"ASensorEventQueue_hasEvents", "i:h"}, {"ASensorManager_destroyEventQueue", "i:hh"},
         {"ASensor_getType", "i:h"}, {"ASensor_getMinDelay", "i:h"}, {"ASensor_getResolution", "f:h"},
-        {"AKeyEvent_getAction", "i:h"}, {"AKeyEvent_getMetaState", "i:h"},
+        {"AKeyEvent_getAction", "i:h"}, {"AKeyEvent_getKeyCode", "i:h"}, {"AKeyEvent_getMetaState", "i:h"},
         {"ALooper_forThread", "H:"}, {"ALooper_prepare", "H:i"},
     });
     return t;

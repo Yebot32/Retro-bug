@@ -1388,7 +1388,7 @@ void a_synchronous_fault_reaches_the_guest_sigsegv_handler(int tier) {
     if (!ReturnFromSignal(th, m, &why)) return syscall::Outcome::Refused(syscall::err::kEnosys, why);
     return syscall::Outcome::Emulated(0, why);
   });
-  const std::uint32_t act[5] = {kHandler | 1u, 0x0400'0000u /* SA_RESTORER */, kRestorer, 0, 0};
+  const std::uint32_t act[5] = {kHandler | 1u, 0x0400'0000u | runtime::sigframe::kSaSiginfo, kRestorer, 0, 0};
   CHECK(m.Write(kData + 0x20, act, sizeof act));
   exec::MachineState sa{};
   sa.mode = isa::Mode::Thumb;
@@ -1513,7 +1513,7 @@ void signal_delivery_enters_the_guest_handler_and_resumes(int tier) {
   // rt_sigaction(sig=30, &act, NULL) in the measured arm32 layout {handler, flags, restorer, mask}.
   // A Thumb handler is tagged |1, exactly as bionic's own `rt_sigaction` callers pass it.
   // sa_mask blocks SIGQUIT (3) in the handler: delivery must add it to the interrupted mask.
-  const std::uint32_t act[5] = {kHandler | 1u, 0x1400'0000u /* SA_RESTART|SA_RESTORER */, kRestorer,
+  const std::uint32_t act[5] = {kHandler | 1u, 0x1400'0000u | runtime::sigframe::kSaSiginfo, kRestorer,
                                 1u << (3 - 1), 0};
   CHECK(m.Write(kData + 0x20, act, sizeof act));
   exec::MachineState sa{};
@@ -1589,6 +1589,15 @@ void signal_delivery_enters_the_guest_handler_and_resumes(int tier) {
   CHECK_CTX(r.mon->signals_delivered() == 1, "the delivery is counted");
   CHECK_CTX(r.mon->TakePendingSignal(t.tid) == 0, "the signal was taken, so a second look delivers nothing");
 
+  std::uint64_t saved_frame_mask = 0;
+  CHECK(m.Read(frame + runtime::sigframe::kUcSigmask, &saved_frame_mask, sizeof saved_frame_mask));
+  CHECK(saved_frame_mask == mask_before);
+  const auto outer_mask = t.signal_mask;
+  CHECK(runtime::DeliverSignal(t, m, r.mon->disposition(30), 24, nullptr, &why));
+  CHECK(t.deliveries.size() == 2);
+  CHECK(runtime::ReturnFromSignal(t, m, &why));
+  CHECK(t.deliveries.size() == 1 && t.signal_mask == outer_mask);
+
   // --- the handler runs, returns through the restorer's `rt_sigreturn`, and the victim resumes.
   // `RunThread` is the real run loop, so the `svc #173` in the restorer is answered by the monitor and the
   // frame is restored — exactly the path a game takes.
@@ -1648,7 +1657,7 @@ void a_signal_interrupts_a_blocked_futex_and_enters_the_handler(int tier) {
       0x0060, 0x0101,          // 0x10 .word kData + 0x60 (the futex word)
       0x0000, 0x0000,          // 0x14 padding
       0x6028, 0x4770,          // 0x18 handler: str r0, [r5]; bx lr
-      0x27ad, 0xdf00, 0xe7fe,  // 0x1c restorer: movs r7, #173; svc #0; b .
+      0x2777, 0xdf00, 0xe7fe,  // 0x1c legacy restorer: movs r7, #119; svc #0; b .
   };
   CHECK_CTX(m.Write(kPage, code, sizeof code), "write the wait and handler bytes");
   CHECK_CTX(m.Protect(kPage, mem::kGuestPage, mem::kRead | mem::kExec, &perr), "make it executable: " + perr);
@@ -1657,7 +1666,7 @@ void a_signal_interrupts_a_blocked_futex_and_enters_the_handler(int tier) {
   const std::uint32_t zero = 0;
   CHECK(m.Write(kData + 0x60, &zero, 4));
 
-  // The three hooks a real launch installs: handler install, the rt_sigreturn restore, and delivery at
+  // The three hooks a real launch installs: handler install, the sigreturn restore, and delivery at
   // the ABI's boundaries.
   const std::uint32_t act[5] = {kHandler, 0x1400'0000u /* SA_RESTART|SA_RESTORER */, kRestorer, 0, 0};
   CHECK(m.Write(kData + 0x20, act, sizeof act));
@@ -1755,7 +1764,7 @@ void an_undefined_encoding_reaches_the_guest_sigill_handler(int tier) {
     if (!ReturnFromSignal(th, m, &why)) return syscall::Outcome::Refused(syscall::err::kEnosys, why);
     return syscall::Outcome::Emulated(0, why);
   });
-  const std::uint32_t act[5] = {kHandler | 1u, 0x0400'0000u /* SA_RESTORER */, kRestorer, 0, 0};
+  const std::uint32_t act[5] = {kHandler | 1u, 0x0400'0000u | runtime::sigframe::kSaSiginfo, kRestorer, 0, 0};
   CHECK(m.Write(kData + 0x20, act, sizeof act));
   exec::MachineState sa{};
   sa.mode = isa::Mode::Thumb;

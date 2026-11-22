@@ -187,12 +187,83 @@ void conditions_and_memory_round_trip() {
             "data[" + Hex64(kData) + "] = " + Hex64(stored) + ": the word str wrote");
 }
 
+void reciprocal_estimate_and_step_match_neon_lanes() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  // vrecpe.f32 q1, q0; vrecps.f32 q2, q1, q0; bx lr
+  const std::uint8_t program[] = {0xbb, 0xff, 0x40, 0x25, 0x02, 0xef, 0x50, 0x4f, 0x70, 0x47};
+  exec::MachineState in{};
+  in.d[0] = 0x4000'0000'3f80'0000ull;  // 1, 2
+  in.d[1] = 0xc000'0000'bf80'0000ull;  // -1, -2
+  const auto rr = Run(rig, program, sizeof program, in);
+  CHECK_CTX(rr.reason == exec::StopReason::Returned, rr.detail);
+  CHECK(in.d[2] == 0x3eff'8000'3f7f'8000ull);
+  CHECK(in.d[3] == 0xbeff'8000'bf7f'8000ull);
+  CHECK(in.d[4] == 0x3f80'4000'3f80'4000ull);
+  CHECK(in.d[5] == in.d[4]);
+}
+
+void reciprocal_estimate_uses_only_the_two_d_lanes() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  const std::uint8_t program[] = {0xbb, 0xff, 0x00, 0x45, 0x70, 0x47};  // vrecpe.f32 d4, d0; bx lr
+  exec::MachineState in{};
+  in.d[0] = 0x7f80'0001'3f80'0000ull;  // 1, signalling NaN
+  in.d[5] = 0x0123'4567'89ab'cdefull;
+  const auto rr = Run(rig, program, sizeof program, in);
+  CHECK_CTX(rr.reason == exec::StopReason::Returned, rr.detail);
+  CHECK(in.d[4] == 0x7fc0'0000'3f7f'8000ull);
+  CHECK(in.d[5] == 0x0123'4567'89ab'cdefull);
+  CHECK((in.fpscr & 0x9f) == 1);  // Invalid operation from the NaN, no divide-by-zero from padding.
+}
+
+void vector_extract_crosses_the_width_of_each_register() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  // vext.32 d4, d0, d2, #1; vext.8 q3, q0, q1, #11; bx lr
+  const std::uint8_t program[] = {0xb0, 0xef, 0x02, 0x44, 0xb0, 0xef, 0x42, 0x6b, 0x70, 0x47};
+  exec::MachineState in{};
+  in.d[0] = 0x0706'0504'0302'0100ull;
+  in.d[1] = 0x0f0e'0d0c'0b0a'0908ull;
+  in.d[2] = 0x1716'1514'1312'1110ull;
+  in.d[3] = 0x1f1e'1d1c'1b1a'1918ull;
+  in.d[5] = 0x0123'4567'89ab'cdefull;
+  const auto rr = Run(rig, program, sizeof program, in);
+  CHECK_CTX(rr.reason == exec::StopReason::Returned, rr.detail);
+  CHECK(in.d[4] == 0x1312'1110'0706'0504ull);
+  CHECK(in.d[5] == 0x0123'4567'89ab'cdefull);
+  CHECK(in.d[6] == 0x1211'100f'0e0d'0c0bull);
+  CHECK(in.d[7] == 0x1a19'1817'1615'1413ull);
+}
+
+void vector_comparisons_produce_lane_masks() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  // vcgt.s32 q2, q0, q1; vceq.i32 q3, q0, q1; bx lr
+  const std::uint8_t program[] = {0x20, 0xef, 0x42, 0x43, 0x20, 0xff, 0x52, 0x68, 0x70, 0x47};
+  exec::MachineState in{};
+  in.d[0] = 0x0000'0001'ffff'ffffull;  // -1, 1
+  in.d[1] = 0x8000'0000'ffff'ffffull;  // -1, INT32_MIN
+  in.d[2] = 0x0000'0000'ffff'ffffull;  // -1, 0
+  in.d[3] = 0x7fff'ffff'ffff'fffeull;  // -2, INT32_MAX
+  const auto rr = Run(rig, program, sizeof program, in);
+  CHECK_CTX(rr.reason == exec::StopReason::Returned, rr.detail);
+  CHECK(in.d[4] == 0xffff'ffff'0000'0000ull);
+  CHECK(in.d[5] == 0x0000'0000'ffff'ffffull);
+  CHECK(in.d[6] == 0x0000'0000'ffff'ffffull);
+  CHECK(in.d[7] == 0);
+}
+
 }  // namespace
 
 int main() {
   vshl_i32_shifts_each_lane_left();
   vshl_i32_shift_amount_masks_the_lane();
   vshl_i16_shifts_both_halves_of_the_quad();
+  reciprocal_estimate_and_step_match_neon_lanes();
+  reciprocal_estimate_uses_only_the_two_d_lanes();
+  vector_extract_crosses_the_width_of_each_register();
+  vector_comparisons_produce_lane_masks();
   conditions_and_memory_round_trip();
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;

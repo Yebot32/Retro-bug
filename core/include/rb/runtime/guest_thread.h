@@ -59,6 +59,7 @@ struct SignalDeliveryState {
   /// `rt_sigreturn` (a handler that edits the kernel's FP sigcontext is a named gap, not a silent one).
   std::uint64_t d[32] = {};
   std::uint32_t fpscr = 0;
+  bool realtime = false;  ///< whether the frame begins with siginfo_t
 };
 
 struct GuestThread {

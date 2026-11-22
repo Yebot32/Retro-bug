@@ -708,8 +708,8 @@ void Boot::StartMonitor() {
     ++prof->slices;
   });
   auto* jit = dynamic_cast<rb::exec::JitExecutor*>(&proc_->engine(2));
-  // The liveness supervisor: a window with no slice is a stall, and the one thing a black screen never says is
-  // which thread is waiting on what.
+  // Short guest callbacks can make progress without completing a profiled slice. Track their host calls and
+  // compare graphics counters so a black screen can be distinguished from a rendering game.
   monitor_ = std::thread([this, prof, jit] {
     std::uint64_t last_t = 0, last_i = 0, last_activity = 0;
     int quiet_windows = 0;
@@ -741,17 +741,20 @@ void Boot::StartMonitor() {
         last_t = t;
         last_i = inv;
       }
+      const std::uint64_t activity = proc_ != nullptr ? proc_->abi().host_activity() : 0;
+      const std::uint64_t host_calls = activity - last_activity;
+      last_activity = activity;
       if (slices != 0) {
         quiet_windows = 0;
         Live(line);
-      } else if (proc_ != nullptr && proc_->abi().host_activity() != last_activity) {
-        // Alive, just outside long JIT stints: a render loop that calls JNI or a GL thunk every few thousand
-        // instructions never retires a whole slice. Saying "stalled" here was the C46 investigation's biggest
-        // false trail — the game was swapping frames at 35 fps while this line said it was dead.
-        last_activity = proc_->abi().host_activity();
+      } else if (host_calls != 0) {
         quiet_windows = 0;
-        Live("alive: no slice in 10 s, " + std::to_string(last_activity) + " host call(s) so far — sub-slice "
-             "stints, not a stall");
+        std::string progress = "activity: no full guest slice in 10 s, " + std::to_string(host_calls) + " host calls";
+        if (cfg_.frame_stats) {
+          const std::string frames = cfg_.frame_stats();
+          if (!frames.empty()) progress += " | graphics totals: " + frames;
+        }
+        Live(progress);
       } else if (proc_ != nullptr && !proc_->monitor().group_exited()) {
         // No guest instruction retired for 10 s: dump every guest thread's pc and what it waits on. Three windows
         // up front, then every sixth, so a long stall does not flood the log.

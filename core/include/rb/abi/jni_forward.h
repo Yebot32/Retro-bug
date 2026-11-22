@@ -76,6 +76,9 @@ class ForwardingJni {
 
   /// A real local reference made into a guest local in the calling thread's current frame (0 stays 0).
   GuestAddr ToGuestLocal(HostRef r, std::string* err = nullptr);
+  /// Owns an ART global reference for a framework object that outlives a JNI call.
+  GuestAddr ToGuestGlobal(HostRef r, std::string* err = nullptr);
+  bool ReleaseGuestGlobal(GuestAddr handle);
   /// The real reference behind a guest handle (0 for null), or 0 with `err` set when it is not a live handle
   /// this bridge handed to this thread.
   HostRef FromGuest(GuestAddr handle, std::string* err);

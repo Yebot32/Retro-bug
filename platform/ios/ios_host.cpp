@@ -9,7 +9,10 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <string_view>
 #include <utility>
+
+#include <OpenGLES/ES3/gl.h>
 
 #include "egl_shim.h"
 #include "gl_symbols.h"
@@ -75,7 +78,23 @@ bool Waits(const std::string& name) {
   return k.count(name) != 0;
 }
 
-// GL/EGL names whose values matter to the hand-written thunks below (the guest's numbers).
+std::uint32_t GlOffsetBinding(std::string_view name) {
+  if (name == "glVertexAttribPointer" || name == "glVertexAttribIPointer" || name == "glVertexPointer" ||
+      name == "glColorPointer" || name == "glTexCoordPointer" || name == "glNormalPointer") {
+    return GL_ARRAY_BUFFER_BINDING;
+  }
+  if (name == "glDrawElements" || name == "glDrawRangeElements" || name == "glDrawElementsInstanced" ||
+      name == "glDrawElementsInstancedEXT") {
+    return GL_ELEMENT_ARRAY_BUFFER_BINDING;
+  }
+  return 0;
+}
+
+bool GlBufferBound(std::uint32_t binding) {
+  GLint buffer = 0;
+  glGetIntegerv(binding, &buffer);
+  return buffer != 0;
+}
 
 }  // namespace
 
@@ -109,7 +128,7 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
   // glGetString/glGetStringi return a host string: copied into guest memory, as a device's driver's is not.
   AddSpecial("glGetString", [this](exec::MachineState& s, std::string* why) {
     using Fn = const unsigned char* (*)(unsigned);
-    const auto f = reinterpret_cast<Fn>(HostSymbol("glGetString"));
+    static const auto f = reinterpret_cast<Fn>(HostSymbol("glGetString"));
     if (f == nullptr) {
       *why = "glGetString is not exported by OpenGLES.framework";
       return false;
@@ -119,20 +138,120 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
       s.r[0] = 0;
       return true;
     }
-    s.r[0] = GuestString("glGetString:" + std::to_string(s.r[0]), reinterpret_cast<const char*>(text));
+    s.r[0] = GuestString(reinterpret_cast<const char*>(text));
     return true;
   });
   AddSpecial("glGetStringi", [this](exec::MachineState& s, std::string*) {
     using Fn = const unsigned char* (*)(unsigned, unsigned);
-    const auto f = reinterpret_cast<Fn>(HostSymbol("glGetStringi"));
+    static const auto f = reinterpret_cast<Fn>(HostSymbol("glGetStringi"));
     const unsigned char* text = f != nullptr ? f(s.r[0], s.r[1]) : nullptr;
     if (text == nullptr) {
       s.r[0] = 0;
       return true;
     }
-    s.r[0] = GuestString("glGetStringi:" + std::to_string(s.r[0]) + ":" + std::to_string(s.r[1]),
-                         reinterpret_cast<const char*>(text));
+    s.r[0] = GuestString(reinterpret_cast<const char*>(text));
     return true;
+  });
+  // glMapBufferRange / glFlushMappedBufferRange / glUnmapBuffer: the driver's mapping is host memory the guest cannot
+  // address, so the guest gets a shadow in its own window — filled from the mapping when read access was asked for,
+  // written back on flush and on unmap when write access was requested. Record mappings by the driver's
+  // pointer: rebinding a target may select a different buffer, and a shared buffer may use another target.
+  struct GlMap { std::uint32_t guest, mapped, len, access; };
+  auto maps = std::make_shared<std::map<void*, GlMap>>();
+  using MapBuffer = void* (*)(GLenum, GLintptr, GLsizeiptr, GLbitfield);
+  using GetBufferPointer = void (*)(GLenum, GLenum, void**);
+  using UnmapBuffer = GLboolean (*)(GLenum);
+  const auto map_buffer = reinterpret_cast<MapBuffer>(GlSymbol("glMapBufferRange"));
+  const auto get_buffer_pointer = reinterpret_cast<GetBufferPointer>(GlSymbol("glGetBufferPointerv"));
+  const auto unmap_buffer = reinterpret_cast<UnmapBuffer>(GlSymbol("glUnmapBuffer"));
+  const auto bound_mapping = [get_buffer_pointer](GLenum target) -> void* {
+    void* host = nullptr;
+    if (get_buffer_pointer) get_buffer_pointer(target, GL_BUFFER_MAP_POINTER, &host);
+    return host;
+  };
+  AddSpecial("glMapBufferRange", [this, maps, map_buffer, get_buffer_pointer, unmap_buffer](exec::MachineState& s, std::string* why) {
+    if (!map_buffer || !get_buffer_pointer || !unmap_buffer) {
+      *why = "this device has no GLES buffer mapping functions";
+      return false;
+    }
+    const std::uint32_t target = s.r[0], access = s.r[3];
+    const GLintptr off = static_cast<std::int32_t>(s.r[1]);
+    const GLsizeiptr len = static_cast<std::int32_t>(s.r[2]);
+    void* host = map_buffer(target, off, len, access);
+    if (host == nullptr) { s.r[0] = 0; return true; }  // the GL error is the driver's to report
+    if (len <= 0) {
+      unmap_buffer(target);
+      s.r[0] = 0;
+      return true;
+    }
+    std::string e;
+    if (const auto stale = maps->find(host); stale != maps->end()) {
+      // A buffer deleted without an explicit unmap may have released this driver address.
+      p_.memory().Unmap(stale->second.guest, stale->second.mapped, &e);
+      maps->erase(stale);
+    }
+    std::uint32_t mapped = static_cast<std::uint32_t>((static_cast<std::size_t>(len) + mem::kGuestPage - 1) & ~std::size_t{mem::kGuestPage - 1});
+    const std::uint32_t guest = p_.MapFree(mapped, mem::kRead | mem::kWrite, &e);
+    if (guest == 0 || ((access & GL_MAP_READ_BIT) != 0 && !p_.memory().Write(guest, host, static_cast<std::size_t>(len)))) {
+      if (guest != 0) p_.memory().Unmap(guest, mapped, &e);
+      unmap_buffer(target);
+      *why = "glMapBufferRange: cannot stage " + std::to_string(len) + " bytes in guest memory: " + e;
+      return false;
+    }
+    (*maps)[host] = GlMap{guest, mapped, static_cast<std::uint32_t>(len), access};
+    s.r[0] = guest;
+    return true;
+  });
+  AddSpecial("glFlushMappedBufferRange", [this, maps, bound_mapping](exec::MachineState& s, std::string* why) {
+    using Fn = void (*)(GLenum, GLintptr, GLsizeiptr);
+    static const auto f = reinterpret_cast<Fn>(GlSymbol("glFlushMappedBufferRange"));
+    if (f == nullptr) { *why = "OpenGLES.framework has no glFlushMappedBufferRange"; return false; }
+    const GLintptr off = static_cast<std::int32_t>(s.r[1]);
+    const GLsizeiptr len = static_cast<std::int32_t>(s.r[2]);
+    if (!maps->empty() && off >= 0 && len > 0) {
+      void* host = bound_mapping(s.r[0]);
+      const auto it = maps->find(host);
+      if (it != maps->end() && (it->second.access & GL_MAP_FLUSH_EXPLICIT_BIT) != 0 &&
+          static_cast<std::uint64_t>(off + len) <= it->second.len &&
+          !p_.memory().Read(it->second.guest + static_cast<std::uint32_t>(off), static_cast<char*>(host) + off,
+                            static_cast<std::size_t>(len))) {
+        *why = "glFlushMappedBufferRange: guest shadow is unreadable";
+        return false;
+      }
+    }
+    f(s.r[0], off, len);
+    return true;
+  });
+  AddSpecial("glUnmapBuffer", [this, maps, bound_mapping, unmap_buffer](exec::MachineState& s, std::string* why) {
+    if (!unmap_buffer) { *why = "OpenGLES.framework has no glUnmapBuffer"; return false; }
+    void* host = maps->empty() ? nullptr : bound_mapping(s.r[0]);
+    const auto it = maps->find(host);
+    bool copied = true;
+    if (it != maps->end()) {
+      const GlMap m = it->second;
+      if ((m.access & GL_MAP_WRITE_BIT) != 0 && (m.access & GL_MAP_FLUSH_EXPLICIT_BIT) == 0) {
+        copied = p_.memory().Read(m.guest, host, m.len);
+      }
+      std::string e;
+      p_.memory().Unmap(m.guest, m.mapped, &e);
+      maps->erase(it);
+    }
+    s.r[0] = unmap_buffer(s.r[0]);
+    if (!copied) *why = "glUnmapBuffer: guest shadow is unreadable";
+    return copied;
+  });
+  AddSpecial("glGetBufferPointerv", [this, maps, get_buffer_pointer](exec::MachineState& s, std::string* why) {
+    if (!get_buffer_pointer) { *why = "OpenGLES.framework has no glGetBufferPointerv"; return false; }
+    // Preserve the guest's output on an invalid GL query.
+    void* const untouched = &s;
+    void* host = untouched;
+    get_buffer_pointer(s.r[0], s.r[1], &host);
+    if (host == untouched) return true;
+    const auto it = maps->find(host);
+    const std::uint32_t guest = it == maps->end() ? 0 : it->second.guest;
+    if (p_.memory().Write(s.r[2], &guest, sizeof guest)) return true;
+    *why = "glGetBufferPointerv: result is not writable guest memory";
+    return false;
   });
   AddSpecial("eglQueryString", [this](exec::MachineState& s, std::string* why) {
     void* dpy = nullptr;
@@ -141,7 +260,7 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
       return false;
     }
     const char* host = EglShim::Instance().QueryString(dpy, static_cast<std::int32_t>(s.r[1]));
-    s.r[0] = host == nullptr ? 0u : GuestString("eglQueryString:" + Hex(s.r[0]) + ":" + std::to_string(s.r[1]), host);
+    s.r[0] = host == nullptr ? 0u : GuestString(host);
     return true;  // 0 is EGL's own answer for a bad name; eglGetError says why
   });
   // eglGetProcAddress: an address the guest can call — this registry's slot for that name, 0 if none.
@@ -239,7 +358,7 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
       return true;
     }
     using Fn = void (*)(unsigned, unsigned);
-    const auto f = reinterpret_cast<Fn>(HostSymbol("glBindFramebuffer"));
+    static const auto f = reinterpret_cast<Fn>(HostSymbol("glBindFramebuffer"));
     if (f == nullptr) {
       *why = "glBindFramebuffer is not exported by OpenGLES.framework";
       return false;
@@ -256,7 +375,7 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
       return true;
     }
     using Fn = void (*)(unsigned, unsigned);
-    const auto f = reinterpret_cast<Fn>(HostSymbol("glBindFramebufferOES"));
+    static const auto f = reinterpret_cast<Fn>(HostSymbol("glBindFramebufferOES"));
     if (f == nullptr) {
       *why = "glBindFramebufferOES is not exported by OpenGLES.framework";
       return false;
@@ -277,7 +396,7 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
       return true;
     }
     using Fn = void (*)(unsigned, int*);
-    const auto f = reinterpret_cast<Fn>(GlSymbol("glGetIntegerv"));
+    static const auto f = reinterpret_cast<Fn>(GlSymbol("glGetIntegerv"));
     if (f == nullptr) {
       *why = "glGetIntegerv is not exported by OpenGLES.framework";
       return false;
@@ -291,7 +410,7 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
       return true;
     }
     using Fn = unsigned (*)(unsigned);
-    const auto f = reinterpret_cast<Fn>(GlSymbol("glCheckFramebufferStatus"));
+    static const auto f = reinterpret_cast<Fn>(GlSymbol("glCheckFramebufferStatus"));
     if (f == nullptr) {
       *why = "glCheckFramebufferStatus is not exported by OpenGLES.framework";
       return false;
@@ -616,15 +735,15 @@ std::optional<std::uint32_t> IosHost::Resolve(const std::string& name) {
   if (special != specials_.end()) {
     fn = special->second;
   } else {
-    // The host function is looked up on first call, then kept (a name may only resolve once the app runs).
-    auto host = std::make_shared<void*>(nullptr);
-    fn = [this, entry, name, host](exec::MachineState& s, std::string* why) {
-      if (*host == nullptr) *host = HostSymbol(name);
-      if (*host == nullptr) {
+    void* const host = HostSymbol(name);
+    const std::uint32_t binding = GlOffsetBinding(name);
+    fn = [this, entry, name, host, binding](exec::MachineState& s, std::string* why) {
+      if (host == nullptr) {
         *why = name + " has no iOS implementation (" + entry->lib + " on a device)";
         return false;
       }
-      return abi::ThunkCaller::Call(entry->spec, *host, s, p_.memory(), handles_, why);
+      return abi::ThunkCaller::Call(entry->spec, host, s, p_.memory(), handles_, why,
+                                    binding != 0 ? GlBufferBound : nullptr, binding);
     };
   }
   slots_.emplace(name, index);
@@ -680,12 +799,22 @@ std::vector<std::string> IosHost::RecentCallLines() const {
   return out;
 }
 
-std::uint32_t IosHost::GuestString(const std::string& key, const std::string& text) {
-  if (const auto it = strings_.find(key); it != strings_.end()) return it->second;
-  std::string e;
-  std::uint32_t at = p_.MapFree(static_cast<std::uint32_t>(text.size() + 1), mem::kRead | mem::kWrite, &e);
-  if (at != 0 && !p_.memory().Write(at, text.c_str(), text.size() + 1)) at = 0;
-  if (at != 0) strings_.emplace(key, at);
+std::uint32_t IosHost::GuestString(const std::string& text) {
+  if (const auto it = strings_.find(text); it != strings_.end()) return it->second;
+  const auto bytes = static_cast<std::uint32_t>(text.size() + 1);
+  if (bytes > string_bytes_left_) {
+    const std::uint32_t size = (bytes + mem::kGuestPage - 1) & ~(mem::kGuestPage - 1);
+    std::string why;
+    const auto page = p_.MapFree(size, mem::kRead | mem::kWrite, &why);
+    if (page == 0) return 0;
+    string_next_ = page;
+    string_bytes_left_ = size;
+  }
+  const auto at = string_next_;
+  if (!p_.memory().Write(at, text.c_str(), bytes)) return 0;
+  string_next_ += bytes;
+  string_bytes_left_ -= bytes;
+  strings_.emplace(text, at);
   return at;
 }
 

@@ -32,6 +32,7 @@
  */
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -180,6 +181,11 @@ class InterpExecutor : public Executor {
   using BlockMap = std::unordered_map<BlockKey, CachedBlock, BlockKeyHash>;
   BlockMap blocks_;      ///< the young generation: lookup first, filled by translation
   BlockMap blocks_old_;  ///< the previous generation: still a hit, promoted on use
+  struct RecentBlock {
+    BlockKey key;
+    const isa::TranslatedBlock* block = nullptr;  ///< owned by one of the two generations
+  };
+  std::array<RecentBlock, 256> recent_blocks_{};
   std::size_t translations_ = 0;
   GuestAddr return_address_;
   const HostDispatch* dispatch_;

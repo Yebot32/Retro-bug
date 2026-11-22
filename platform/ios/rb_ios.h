@@ -27,6 +27,8 @@ int rb_ios_jit_available(void);
 int rb_ios_session_jit(RbIosSession* s);
 /// The engine a session actually booted on: 0 = Tier I, 1 = AOT (offline-translated), 2 = Tier J.
 int rb_ios_session_engine(RbIosSession* s);
+/// Enables runtime JIT for this session (default), or selects AOT/interpreter only. Set before starting.
+void rb_ios_set_runtime_jit(RbIosSession* s, int enabled);
 
 /// The game's icon, read out of the APK the way the Android launcher asks PackageManager for it: the
 /// largest entry that looks like a launcher image (PNG/JPEG/WebP), adaptive-icon layers and nine-patch

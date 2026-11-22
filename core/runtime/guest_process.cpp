@@ -24,6 +24,16 @@
 namespace rb::runtime {
 namespace {
 
+constexpr struct { std::uint32_t bit; const char* name; } kArmFeatures[] = {
+    {1u << 6, "vfp"}, {1u << 12, "neon"}, {1u << 13, "vfpv3"}, {1u << 15, "tls"},
+    {1u << 16, "vfpv4"}, {1u << 17, "idiva"}, {1u << 18, "idivt"},
+};
+constexpr std::uint32_t kHwcap = [] {
+  std::uint32_t bits = 0;
+  for (const auto& feature : kArmFeatures) bits |= feature.bit;
+  return bits;
+}();
+
 std::string Hex(std::uint32_t v) {
   char buf[16];
   std::snprintf(buf, sizeof buf, "0x%x", v);
@@ -128,6 +138,17 @@ bool Contains(const mem::GuestMemory& mem, const loader::LocalSymbol& fn, const 
 }
 
 }  // namespace
+
+std::string GuestProcess::CpuInfo(unsigned processors) {
+  std::string features = "Features\t:";
+  for (const auto& feature : kArmFeatures) features += std::string{" "} + feature.name;
+  std::string info;
+  for (unsigned cpu = 0; cpu < std::max(1u, processors); ++cpu) {
+    info += "processor\t: " + std::to_string(cpu) + "\nmodel name\t: ARMv7 Processor\n" + features +
+            "\nCPU architecture: 7\n\n";
+  }
+  return info;
+}
 
 std::optional<BionicLayout> VerifyBionicLayout(const mem::GuestMemory& mem, const loader::GuestModule& libc,
                                                std::string* err) {
@@ -355,7 +376,7 @@ std::unique_ptr<GuestProcess> GuestProcess::Create(const GuestProcessOptions& op
       const std::size_t before = thread.deliveries.size();
       if (!ReturnFromSignal(thread, *owner->mem_, &why)) {
         owner->Log("sigreturn: refused with " + std::to_string(before) + " delivery(ies) open — " + why);
-        return syscall::Outcome::Refused(syscall::err::kEnosys, "rt_sigreturn: " + why);
+        return syscall::Outcome::Refused(syscall::err::kEnosys, why);
       }
       owner->Log("sigreturn: frame restored, deliveries " + std::to_string(before) + " -> " +
                  std::to_string(thread.deliveries.size()));
@@ -433,42 +454,42 @@ std::unique_ptr<GuestProcess> GuestProcess::Create(const GuestProcessOptions& op
       const int sig = illegal ? kSigill : kSigsegv;
       const std::uint32_t stop_addr = illegal ? run.illegal_pc : run.fault_addr;
       const char* const sig_name = illegal ? "SIGILL" : "SIGSEGV";
-      if (thread.deliveries.size() >= kMaxNestedSignals) return false;
+      const std::uint32_t pc = illegal ? run.illegal_pc : thread.state.pc;
+      const std::uint32_t lr = thread.state.r[14];
+      const bool thumb = (thread.state.cpsr & (1u << 5)) != 0;
+      const auto context = [&] {
+        return std::string{sig_name} + " at " + Hex(stop_addr) + "; " + run.detail +
+               "; interrupted pc " + Hex(pc) + " (" + owner->NameAddress(pc) + (thumb ? ", Thumb" : ", ARM") +
+               "), lr " + Hex(lr) + " (" + owner->NameAddress(lr & ~1u) + "), guest tid " +
+               std::to_string(thread.tid) + ", host tid " + std::to_string(thread.host_tid.load());
+      };
+      const auto undelivered = [&](const std::string& why) {
+        const std::string message = context() + "; not delivered: " + why;
+        owner->Log("signals: " + message);
+        owner->LogFaultReport(std::string{sig_name} + ":" + Hex(stop_addr) + ":" + Hex(pc), &thread, message);
+        return false;
+      };
+      if (thread.deliveries.size() >= kMaxNestedSignals) return undelivered("signal nesting limit reached");
       // The kernel's only bookkeeping for "inside its own handler" is the mask: entering a handler blocks the
       // signal (unless SA_NODEFER), and a handler that abandons its frame with siglongjmp restores the mask,
       // which ends that state without an rt_sigreturn. So the mask decides, not the delivery stack — EOS's
       // probes install a handler, try an instruction, and longjmp back, then try the next one (Among Us).
       if ((thread.signal_mask & (1ull << (sig - 1))) != 0) {
-        owner->Log("signals: " + std::string(sig_name) + " at " + Hex(stop_addr) +
-                   " not delivered — blocked in the thread's mask");
-        return false;
+        return undelivered("blocked in the thread's mask");
       }
       const syscall::Monitor::Disposition disp = owner->monitor_->disposition(sig);
-      if (!disp.catches()) {
-        owner->LogUnhandledFault(sig_name, stop_addr, thread);
-        return false;
-      }
-      std::uint32_t interrupted_pc = thread.state.pc;
-      std::uint32_t addr = run.fault_addr;
+      if (!disp.catches()) return undelivered("no handler");
       if (illegal) {
         // The tier's pc is already past the encoding; the frame must say where the undefined one is, so a
         // handler that skips it (the probe pattern) resumes after it.
         thread.state.pc = run.illegal_pc;
         thread.state.r[15] = run.illegal_pc;
-        interrupted_pc = run.illegal_pc;
-        addr = run.illegal_pc;
       }
       const int code = illegal ? sigframe::kIllIllopc : (run.fault_write ? sigframe::kSegvAccerr : sigframe::kSegvMaperr);
       std::string why;
-      if (!DeliverSignal(thread, *owner->mem_, disp, sig, nullptr, &why, code, addr)) {
-        owner->Log("signals: " + std::string(illegal ? "SIGILL" : "SIGSEGV") + " at " + Hex(addr) +
-                   " not delivered — " + why);
-        return false;
-      }
-      owner->Log("signals: " + std::string(illegal ? "SIGILL" : "SIGSEGV") + " at " + Hex(addr) + " (" +
-                 (illegal ? "ILL_ILLOPC" : run.fault_write ? "write" : "read") + ", si_code " +
-                 std::to_string(code) + ") delivered to handler " + Hex(disp.handler) +
-                 "; interrupted pc " + Hex(interrupted_pc));
+      if (!DeliverSignal(thread, *owner->mem_, disp, sig, nullptr, &why, code, stop_addr)) return undelivered(why);
+      owner->Log("signals: " + context() + "; delivered to handler " + Hex(disp.handler) + " (" +
+                 owner->NameAddress(disp.handler & ~1u) + "), si_code " + std::to_string(code));
       return true;
     });
   }
@@ -767,7 +788,6 @@ bool GuestProcess::LoadScope(const std::vector<std::uint8_t>& libc, const std::v
 bool GuestProcess::PublishAuxv(std::string* err) {
   // What the kernel hands a process and the linker publishes through `__libc_shared_globals()->auxv`:
   // AT_PAGESZ, AT_HWCAP (VFP|NEON|VFPv3|TLS|VFPv4|IDIVA|IDIVT), AT_RANDOM (16 host-entropy bytes), AT_NULL.
-  constexpr std::uint32_t kHwcap = 0x40u | 0x1000u | 0x2000u | 0x8000u | 0x1'0000u | 0x2'0000u | 0x4'0000u;
   at_random_ = auxv_ + 0x80u;
   std::random_device entropy;
   std::uint32_t random_words[4];
@@ -1108,18 +1128,6 @@ bool GuestProcess::WaitForThreads(std::chrono::milliseconds limit) {
 std::vector<std::string> GuestProcess::thread_faults() const {
   std::lock_guard<std::mutex> lk(threads_mu_);
   return thread_faults_;
-}
-
-void GuestProcess::LogUnhandledFault(const char* sig_name, std::uint32_t addr, const GuestThread& thread) {
-  const std::uint32_t pc = thread.state.pc;
-  const bool thumb = (thread.state.cpsr & (1u << 5)) != 0;  // CPSR.T: the pc names a Thumb encoding
-  char key[96];
-  std::snprintf(key, sizeof key, "%s:%08x:%08x", sig_name, addr, pc);
-  Log("signals: " + std::string{sig_name} + " at " + Hex(addr) + " not delivered — no handler; pc " + Hex(pc) +
-      (thumb ? " thumb" : " arm") + " tid " + std::to_string(thread.tid));
-  LogFaultReport(key, &thread,
-                 std::string{sig_name} + " at " + Hex(addr) + ", pc " + Hex(pc) + (thumb ? " thumb" : " arm") +
-                     ", tid " + std::to_string(thread.tid) + ", no handler");
 }
 
 void GuestProcess::LogFaultReport(const std::string& key, const GuestThread* faulted, const std::string& why) {

@@ -14,6 +14,9 @@ struct SettingsView: View {
 
     @State private var taps = 0
     @State private var toast: String?
+    @AppStorage("performanceOverlay") private var performanceOverlay = false
+    @AppStorage("renderScale") private var renderScale = 1.0
+    @AppStorage("runtimeJit") private var runtimeJit = true
 
     private var versionLine: String {
         let info = Bundle.main.infoDictionary ?? [:]
@@ -39,11 +42,30 @@ struct SettingsView: View {
                     }
                     HoloDivider()
 
+                    HoloSection(title: "Performance", accent: holo.accent)
+                    HoloRow(title: "Performance overlay", subtitle: "Show FPS and the active CPU mode",
+                            accent: holo.accent, action: { performanceOverlay.toggle() }) {
+                        HoloValue(text: performanceOverlay ? "On" : "Off", accent: holo.accent)
+                    }
+                    HoloDivider()
+                    HoloRow(title: "Render scale", subtitle: "Lower resolution reduces graphics work. Applies on launch.",
+                            accent: holo.accent, action: {
+                        renderScale = renderScale > 0.75 ? 0.75 : renderScale > 0.5 ? 0.5 : 1.0
+                    }) {
+                        HoloValue(text: "\(Int(renderScale * 100))%", accent: holo.accent)
+                    }
+                    HoloDivider()
+                    HoloRow(title: "Runtime JIT", subtitle: "Use JIT when iOS grants access. Applies on launch.",
+                            accent: holo.accent, action: { runtimeJit.toggle() }) {
+                        HoloValue(text: runtimeJit ? "Automatic" : "Off", accent: holo.accent)
+                    }
+                    HoloDivider()
+
                     HoloSection(title: "About", accent: holo.accent)
                     HoloRow(title: "RetroBug",
-                            subtitle: "Plays 32-bit Android games on a 64-bit iPhone or iPad by running their "
-                                + "ARM code in an emulator, while the game's Java runs as usual.")
+                            subtitle: "Translates 32-bit ARM game code and provides Android APIs for supported games.")
                     HoloDivider()
+
                     HoloRow(title: "Version", subtitle: nil, accent: holo.accent,
                             action: { versionTapped() }) {
                         HoloValue(text: versionLine, accent: holo.accent)
@@ -55,15 +77,18 @@ struct SettingsView: View {
                             action: onShareLog)
                     HoloDivider()
 
+                    HoloSection(title: "Community", accent: holo.accent)
+                    communityLink("Discord", "Join Yebot Studios", "https://discord.gg/hPefjfkkVs")
+                    communityLink("GitHub", "Source code and releases", "https://github.com/Yebot32/Retro-bug")
+                    communityLink("YouTube", "Watch Yebot32’s videos", "https://www.youtube.com/@Yebot32")
+                    communityLink("PayPal", "Support development", "https://www.paypal.com/paypalme/Yebot32")
+
                     if holo.developer {
                         HoloSection(title: "Developer", accent: holo.accent)
                         HoloRow(title: "Engine",
-                                subtitle: rb_ios_jit_available() != 0
-                                    ? "Tier J when this launch can run a JIT (a debugger-attached launch, "
-                                        + "e.g. AltStore's Enable JIT); otherwise the translated profile, "
-                                        + "then the interpreter"
-                                    : "The game's translated profile, then the interpreter. JIT needs a "
-                                        + "debugger-attached launch (AltStore's Enable JIT)")
+                                subtitle: runtimeJit && rb_ios_jit_available() != 0
+                                    ? "A matching translated profile runs first, followed by JIT and the interpreter."
+                                    : "A matching translated profile runs first, followed by the interpreter.")
                         HoloDivider()
                         HoloRow(title: "Library to boot",
                                 subtitle: "Empty means auto (the largest library in the APK)",
@@ -92,6 +117,15 @@ struct SettingsView: View {
             }
         }
     }
+
+    private func communityLink(_ title: String, _ subtitle: String, _ url: String) -> some View {
+        HoloRow(title: title, subtitle: subtitle, accent: holo.accent, action: {
+            guard let destination = URL(string: url) else { return }
+            openURL(destination)
+        })
+    }
+
+    @Environment(\.openURL) private var openURL
 
     private func versionTapped() {
         if holo.developer {

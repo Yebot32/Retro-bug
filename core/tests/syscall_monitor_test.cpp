@@ -108,6 +108,26 @@ void r7_is_the_number_not_a_masked_remainder() {
   CHECK_CTX(o2.r0 == -static_cast<std::int32_t>(sc::err::kEnosys), std::to_string(o2.r0));
 }
 
+void live_refusals_report_the_first_caller_and_keep_all_counts() {
+  sc::Monitor monitor;
+  std::vector<std::string> trace;
+  monitor.set_host_io_trace([&trace](const std::string& line) { trace.push_back(line); });
+  rb::runtime::GuestThread thread;
+  thread.tid = 4245;
+  auto state = State(sc::nr::kSigreturn);
+  state.r[14] = 0x1009;
+  CHECK(monitor.Handle(state, 0, &thread).r0 == -38);
+  CHECK(monitor.Handle(state, 0, &thread).r0 == -38);
+  auto other = State(376);
+  CHECK(monitor.Handle(other, 0, &thread).r0 == -38);
+  CHECK(trace.size() == 2);
+  if (trace.size() != 2) return;
+  CHECK_CTX(trace[0].find("sigreturn: no active signal frame") != std::string::npos, trace[0]);
+  CHECK_CTX(trace[0].find("guest resume pc 0x1000, lr 0x1009, guest tid 4245") != std::string::npos, trace[0]);
+  CHECK_CTX(trace[1].find("ARM syscall #376 (process_vm_readv)") != std::string::npos, trace[1]);
+  CHECK(monitor.refusals() == 3);
+}
+
 /// The measured return convention. `-36` for ENAMETOOLONG is the number that settles the
 /// kernel-versus-EABI question (see `tools/syscall_abi_probe.sh`), and the carry bit is settled by the
 /// fact that the real kernel leaves it set after a *successful* `sched_yield` returning 0. So a monitor
@@ -445,6 +465,20 @@ void mmap2_serves_real_anonymous_pages() {
   CHECK_CTX(b.verdict == sc::Verdict::kEmulated && static_cast<std::uint32_t>(b.r0) != at,
             "the second allocation landed on the first");
 
+  constexpr std::uint32_t kFixed = 0x10, kNoReplace = 0x100000;
+  const sc::Outcome no_replace = mmap(at, 0x1000, kRw, kPrivateAnon | kNoReplace, kNoFd);
+  CHECK_CTX(no_replace.r0 == -static_cast<std::int32_t>(sc::err::kEexist), no_replace.detail);
+  CHECK(window->Read(at + 0x40, &back, 4) && back == magic);
+  const sc::Outcome guard = mmap(at, 0x1000, 0, kPrivateAnon | kFixed, kNoFd);
+  CHECK_CTX(static_cast<std::uint32_t>(guard.r0) == at, guard.detail);
+  CHECK(window->IsMapped(at) && !window->Read(at + 0x40, &back, 4));
+  const sc::Outcome replace = mmap(at, 0x1000, kRw, kPrivateAnon | kFixed, kNoFd);
+  CHECK_CTX(static_cast<std::uint32_t>(replace.r0) == at, replace.detail);
+  CHECK(window->Read(at + 0x40, &back, 4) && back == 0);
+  CHECK(window->IsMapped(at + 0x1000));
+  const sc::Outcome unaligned = mmap(at + 1, 0x1000, kRw, kPrivateAnon | kFixed, kNoFd);
+  CHECK_CTX(unaligned.r0 == -static_cast<std::int32_t>(sc::err::kEinval), unaligned.detail);
+
   const sc::Outcome zero = mmap(0, 0, kRw, kPrivateAnon, kNoFd);
   CHECK_CTX(zero.r0 == -static_cast<std::int32_t>(sc::err::kEinval),
             "len=0 must be EINVAL, got " + std::to_string(zero.r0));
@@ -769,6 +803,52 @@ void sigaction_and_faccessat_answer_their_facts() {
   CHECK_CTX(m.Handle(miss, 0).r0 == -static_cast<std::int32_t>(sc::err::kEnoent), "want ENOENT");
 }
 
+void seek_moves_the_offset_of_a_served_file() {
+  sc::Monitor m;
+  auto window = Window();
+  if (!window) return;
+  m.set_memory(window.get());
+  std::string why;
+  CHECK_CTX(window->Map(0, 0x8000, mem::kRead | mem::kWrite, &why), why);
+  m.set_file_provider([](const std::string& path) -> std::optional<std::vector<std::uint8_t>> {
+    if (path == "/proc/self/cmdline") return std::vector<std::uint8_t>{'r', 'b', 0};
+    return std::nullopt;
+  });
+  constexpr char path[] = "/proc/self/cmdline";
+  CHECK(window->Write(0x500, path, sizeof path));
+  auto open = State(sc::nr::kOpenat);
+  open.r[0] = 0xffff'ff9cu;  // AT_FDCWD
+  open.r[1] = 0x500;
+  const auto fd = m.Handle(open, 0).r0;
+  CHECK(fd >= 0);
+  const auto seek = [&](std::int32_t offset, std::uint32_t whence) {
+    auto call = State(sc::nr::kLseek);
+    call.r[0] = fd;
+    call.r[1] = static_cast<std::uint32_t>(offset);
+    call.r[2] = whence;
+    return m.Handle(call, 0).r0;
+  };
+  const auto read = [&] {
+    auto call = State(sc::nr::kRead);
+    call.r[0] = fd;
+    call.r[1] = 0x600;
+    call.r[2] = 1;
+    return m.Handle(call, 0).r0;
+  };
+  CHECK(seek(-2, 2) == 1);  // SEEK_END
+  CHECK(read() == 1);
+  char byte = 0;
+  CHECK(window->Read(0x600, &byte, 1) && byte == 'b');
+  CHECK(seek(5, 1) == 7);  // SEEK_CUR past EOF
+  CHECK(read() == 0);
+  CHECK(seek(-1, 0) == -static_cast<std::int32_t>(sc::err::kEinval));
+  CHECK(seek(0, 1) == 7);
+  CHECK(seek(0x7fff'ffff, 1) == -static_cast<std::int32_t>(sc::err::kEoverflow));
+  CHECK(seek(0, 0) == 0);  // SEEK_SET
+  CHECK(read() == 1);
+  CHECK(window->Read(0x600, &byte, 1) && byte == 'r');
+}
+
 /// The ids this lane uses. `Monitor::set_ids` is what makes a tid live, and these are the values
 /// `GuestProcess` itself uses, so the lane reads like the real launch path.
 namespace GuestProcessIds {
@@ -1005,6 +1085,7 @@ void the_three_argument_signal_calls_read_the_signal_from_r2() {
 int main() {
   frame_takes_the_number_from_r7_not_the_encoding();
   r7_is_the_number_not_a_masked_remainder();
+  live_refusals_report_the_first_caller_and_keep_all_counts();
   return_value_and_the_carry_bit();
   known_numbers_are_answered_or_refused_not_guessed();
   exit_group_is_a_verdict_not_a_value();
@@ -1027,6 +1108,7 @@ int main() {
   console_writes_are_captured_and_answered_as_written();
   futex_answers_the_single_threaded_truth();
   sigaction_and_faccessat_answer_their_facts();
+  seek_moves_the_offset_of_a_served_file();
   signal_dispositions_are_what_the_guest_installed();
   a_signal_to_a_live_thread_is_queued_and_taken_once();
   the_three_argument_signal_calls_read_the_signal_from_r2();

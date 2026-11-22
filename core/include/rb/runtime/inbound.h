@@ -69,6 +69,10 @@ class Inbound {
   /// but a host whose Java is a table has no caller to read it: without this line the registers and stack of a
   /// native that faults — the only evidence of where the guest died — go to stderr, which the app does not keep.
   void set_log(std::function<void(const std::string&)> log) { log_ = std::move(log); }
+  /// A platform may adapt a changed framework callback before marshalling the guest native's arguments.
+  void set_argument_adapter(std::function<void(const InboundTarget&, CapturedArgs&)> adapt) {
+    adapt_ = std::move(adapt);
+  }
 
   /// The process's Inbound the trampolines reach (the most recently constructed live one).
   static Inbound* current();
@@ -85,6 +89,7 @@ class Inbound {
   abi::HostJava& java_;
   int tier_;
   std::function<void(const std::string&)> log_;
+  std::function<void(const InboundTarget&, CapturedArgs&)> adapt_;
   std::mutex fail_mu_;
   std::map<std::string, unsigned> fail_counts_;  ///< per native: first three logged, then every 300th
   std::function<void(int)> on_exit_;

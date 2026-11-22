@@ -351,6 +351,47 @@ GuestAddr ForwardingJni::ToGuestLocal(HostRef r, std::string* err) {
          (static_cast<std::uint32_t>(t->serials[n]) << 2);
 }
 
+GuestAddr ForwardingJni::ToGuestGlobal(HostRef r, std::string* err) {
+  if (r == 0) return 0;
+  const HostRef pinned = java_.NewGlobalRef(r);
+  if (pinned == 0) {
+    if (err != nullptr) *err = "NewGlobalRef failed";
+    return 0;
+  }
+  {
+    std::lock_guard<std::mutex> lk(globals_mu_);
+    if (!global_free_.empty()) {
+      const auto n = global_free_.back();
+      global_free_.pop_back();
+      globals_[n] = pinned;
+      return kGlobalBase + 4u * static_cast<GuestAddr>(n);
+    }
+    if (globals_.size() < (kLocalBase - kGlobalBase) / 4u) {
+      const auto n = static_cast<GuestAddr>(globals_.size());
+      globals_.push_back(pinned);
+      return kGlobalBase + 4u * n;
+    }
+  }
+  java_.DeleteGlobalRef(pinned);
+  if (err != nullptr) *err = "the global reference table is full";
+  return 0;
+}
+
+bool ForwardingJni::ReleaseGuestGlobal(GuestAddr h) {
+  if (h < kGlobalBase || h >= kLocalBase || (h & 3u) != 0) return false;
+  HostRef r = 0;
+  {
+    std::lock_guard<std::mutex> lk(globals_mu_);
+    const std::size_t n = (h - kGlobalBase) / 4u;
+    if (n >= globals_.size() || globals_[n] == 0) return false;
+    r = globals_[n];
+    globals_[n] = 0;
+    global_free_.push_back(n);
+  }
+  java_.DeleteGlobalRef(r);
+  return true;
+}
+
 HostRef ForwardingJni::FromGuest(GuestAddr h, std::string* err) {
   const auto fail = [&](const std::string& why) -> HostRef {
     if (err != nullptr) *err = why;
@@ -769,20 +810,9 @@ bool ForwardingJni::Slot(std::uint32_t i, exec::MachineState& s, std::string* er
         s.r[0] = 0;
         return true;
       }
-      const HostRef g = java_.NewGlobalRef(a);
-      std::lock_guard<std::mutex> lk(globals_mu_);
-      std::size_t n = 0;
-      if (!global_free_.empty()) {
-        n = global_free_.back();
-        global_free_.pop_back();
-        globals_[n] = g;
-      } else {
-        if (globals_.size() >= (kLocalBase - kGlobalBase) / 4u) return refuse("the global reference table is full");
-        globals_.push_back(g);
-        n = globals_.size() - 1;
-      }
-      s.r[0] = kGlobalBase + 4u * static_cast<std::uint32_t>(n);
-      return true;
+      std::string why_global;
+      s.r[0] = ToGuestGlobal(a, &why_global);
+      return why_global.empty() ? true : refuse(why_global);
     }
     case 22:  // DeleteGlobalRef
     case 227: {  // DeleteWeakGlobalRef

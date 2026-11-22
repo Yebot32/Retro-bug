@@ -112,6 +112,7 @@ constexpr std::uint32_t kExit = 1;
 constexpr std::uint32_t kRead = 3;
 constexpr std::uint32_t kWrite = 4;
 constexpr std::uint32_t kClose = 6;
+constexpr std::uint32_t kLseek = 19;
 constexpr std::uint32_t kGetpid = 20;
 /// From here down: the calls a real libc's own startup reaches for. The numbers are from the NDK's
 /// `arm-linux-androideabi/asm/unistd-eabi.h` — the header the guest itself is compiled against — and the
@@ -123,6 +124,7 @@ constexpr std::uint32_t kIoctl = 54;
 constexpr std::uint32_t kGettimeofday = 78;
 constexpr std::uint32_t kMunmap = 91;
 constexpr std::uint32_t kFstat = 108;  ///< the 32-bit-time `stat`; bionic does not use it
+constexpr std::uint32_t kSigreturn = 119;  ///< the ARM restorer for a handler without SA_SIGINFO
 /// `clone`: bionic's `__bionic_clone` (r7 = 120, measured in the tablet libc). Only `pthread_create`'s flags are served.
 constexpr std::uint32_t kClone = 120;
 constexpr std::uint32_t kMprotect = 125;
@@ -637,7 +639,7 @@ class Monitor {
   [[nodiscard]] ServedFile* FileFor(std::int32_t fd);
 
   /// Records a completed answer: the refusal count and note for a negative `r0`, then the write-back.
-  Outcome Complete(exec::MachineState& state, Outcome o);
+  Outcome Complete(exec::MachineState& state, Outcome o, const runtime::GuestThread* thread = nullptr);
 
   Invalidator invalidator_;
   std::int32_t pid_ = 0;
@@ -656,6 +658,7 @@ class Monitor {
   std::vector<ServedFile> served_;
   bool host_io_ = false;
   std::function<void(const std::string&)> host_io_trace_;
+  std::set<std::pair<std::uint32_t, std::string>> traced_refusals_;
   std::function<void(const std::string&)> signal_trace_;
   /// The runtime's restore path (see `set_signal_return`): unset means a bare monitor, and `rt_sigreturn`
   /// is then refused by name.

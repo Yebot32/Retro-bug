@@ -68,7 +68,7 @@ std::size_t HandleTable::size() const {
 }
 
 bool ThunkCaller::Call(const char* spec, void* fn, exec::MachineState& s, const mem::GuestMemory& mem,
-                       HandleTable& handles, std::string* err) {
+                       HandleTable& handles, std::string* err, BufferBound buffer_bound, std::uint32_t binding) {
   const auto refuse = [&](const std::string& why) {
     if (err != nullptr) *err = std::string{"thunk '"} + spec + "': " + why;
     return false;
@@ -122,10 +122,11 @@ bool ThunkCaller::Call(const char* spec, void* fn, exec::MachineState& s, const 
         break;
       }
       case 'o': {
-        // A buffer bound in GLES1 makes the pointer an offset, not an address: anything the guest memory
-        // model can resolve is a pointer; anything else is left as the number the driver reads as one.
+        // A valid buffer offset can have the same value as a mapped guest address.
+        // Only that case needs a driver query to distinguish an offset from a client pointer.
         void* host = w == 0 ? nullptr : mem.HostForAccess(w);
-        ints[ni] = host != nullptr ? reinterpret_cast<U>(host) : U{w};
+        const bool offset = host != nullptr && buffer_bound != nullptr && buffer_bound(binding);
+        ints[ni] = host != nullptr && !offset ? reinterpret_cast<U>(host) : U{w};
         break;
       }
       case 'h': {

@@ -11,13 +11,14 @@ import UIKit
 import UniformTypeIdentifiers
 
 struct ImportedGame: Identifiable {
-    let id = UUID()
     let url: URL
     let readable: Bool
+    var id: URL { url }
     var name: String { url.deletingPathExtension().lastPathComponent }
 }
 
 struct LauncherView: View {
+    private static let fileQueue = DispatchQueue(label: "com.retrobug.library", qos: .userInitiated)
     private enum ActiveSheet: String, Identifiable {
         case importer, importerFolder, share
         var id: String { rawValue }
@@ -35,6 +36,7 @@ struct LauncherView: View {
     @State private var libName = ""
     @State private var toast: String?
     @State private var booting = true
+    @State private var importsInFlight = 0
 
     private var gamesDir: URL {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -46,10 +48,11 @@ struct LauncherView: View {
             Holo.bg.ignoresSafeArea()
             VStack(spacing: 0) {
                 HoloActionBar(title: "RetroBug", accent: holo.accent) {
-                    HoloBarAction(label: "Add games", accent: holo.accent) {
+                    HoloBarAction(label: importsInFlight == 0 ? "Add games" : "Importing…", accent: holo.accent) {
                         AppLog.write("picker: source asked for")
                         addSource = true
                     }
+                    .disabled(importsInFlight != 0)
                     HoloBarAction(label: "Settings", accent: holo.accent) {
                         showSettings = true
                     }
@@ -151,11 +154,12 @@ struct LauncherView: View {
         ScrollView {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 128), spacing: 4, alignment: .top)],
                       spacing: 4) {
-                ForEach(games.indices, id: \.self) { index in
-                    GameTileView(game: games[index], icon: icons.icon(for: games[index].url),
+                ForEach(Array(games.enumerated()), id: \.element.id) { index, game in
+                    GameTileView(game: game, icon: icons.icon(for: game.url),
                                  accent: holo.accent, index: index,
-                                 onTap: { play(games[index]) },
-                                 onLongPress: { menuGame = games[index] })
+                                 onTap: { play(game) },
+                                 onLongPress: { menuGame = game })
+                        .onAppear { if game.readable { icons.load(game.url) } }
                 }
             }
             .padding(8)
@@ -170,7 +174,7 @@ struct LauncherView: View {
         if !fm.fileExists(atPath: readme.path) {
             let text = """
             RetroBug — put .apk files in this folder.
-            For now use a bootcheck APK (assets/rb32/ and assets/rb32sys/ inside), not a store APK.
+            Add APKs containing 32-bit ARM game code. Compatibility varies by game.
             """
             try? text.write(to: readme, atomically: true, encoding: .utf8)
         }
@@ -179,63 +183,89 @@ struct LauncherView: View {
     }
 
     private func reload() {
-        let fm = FileManager.default
-        let files = (try? fm.contentsOfDirectory(at: gamesDir, includingPropertiesForKeys: nil)) ?? []
-        games = files
-            .filter { $0.pathExtension.lowercased() == "apk" }
-            .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
-            .map { url in
-                var readable = false
-                if let head = try? FileHandle(forReadingFrom: url).read(upToCount: 4), head.count == 4 {
-                    let magic = [UInt8](head)
-                    readable = magic == [0x50, 0x4b, 0x03, 0x04] || magic == [0x50, 0x4b, 0x05, 0x06]
-                }
-                return ImportedGame(url: url, readable: readable)
+        let directory = gamesDir
+        Self.fileQueue.async {
+            let found = Self.apkFiles(in: directory).map { ImportedGame(url: $0, readable: Self.hasZipHeader($0)) }
+            DispatchQueue.main.async {
+                games = found
+                AppLog.write("library: \(found.count) game(s)")
             }
-        for game in games { icons.load(game.url) }
-        AppLog.write("library: \(games.count) game(s): \(games.map { $0.name })")
+        }
     }
 
     private func play(_ game: ImportedGame) {
+        guard game.readable else {
+            show("This APK could not be read")
+            return
+        }
         AppLog.write("play: \(game.name) lib=\(libName)")
         playing = game
     }
 
-    /// Copies an APK into the library. `asCopy` gives a URL inside our container; the extra security-scope
-    /// call is harmless and logged, because a wrong answer there is exactly the failure that used to look
-    /// like "nothing happened".
-    private func importURL(_ url: URL) {
+    private static func apkFiles(in directory: URL) -> [URL] {
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles])) ?? []
+        return files.filter {
+            $0.pathExtension.lowercased() == "apk" &&
+                (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+        }.sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
+    }
+
+    private static func hasZipHeader(_ url: URL) -> Bool {
+        guard let file = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? file.close() }
+        guard let data = try? file.read(upToCount: 4) else { return false }
+        let magic = [UInt8](data)
+        return magic == [0x50, 0x4b, 0x03, 0x04] || magic == [0x50, 0x4b, 0x05, 0x06]
+    }
+
+    /// Validate the staged copy before replacing an existing game. A failed copy leaves the old APK in place.
+    private static func copyAPK(_ source: URL, to destination: URL) throws {
         let fm = FileManager.default
-        AppLog.write("import: \(url.path) exists=\(fm.fileExists(atPath: url.path))")
+        let directory = destination.deletingLastPathComponent()
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let staging = directory.appendingPathComponent(".import-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: staging) }
+        try fm.copyItem(at: source, to: staging)
+        guard hasZipHeader(staging) else { throw CocoaError(.fileReadCorruptFile) }
+        if fm.fileExists(atPath: destination.path) {
+            _ = try fm.replaceItemAt(destination, withItemAt: staging)
+        } else {
+            try fm.moveItem(at: staging, to: destination)
+        }
+    }
+
+    private func importURL(_ url: URL) {
         guard url.pathExtension.lowercased() == "apk" else {
             show("\(url.lastPathComponent) is not an APK")
             AppLog.write("import: refused, extension is \(url.pathExtension)")
             return
         }
-        let scoped = url.startAccessingSecurityScopedResource()
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        AppLog.write("import: security-scoped=\(scoped)")
-        do {
-            try fm.createDirectory(at: gamesDir, withIntermediateDirectories: true)
-            let dest = gamesDir.appendingPathComponent(url.lastPathComponent)
-            try? fm.removeItem(at: dest)
-            try fm.copyItem(at: url, to: dest)
-            let size = ((try? fm.attributesOfItem(atPath: dest.path)[.size]) as? NSNumber)?.int64Value ?? 0
-            let readable = ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
-            var kind = ""
-            if let head = try? FileHandle(forReadingFrom: dest).read(upToCount: 4), head.count == 4 {
-                let magic = [UInt8](head)
-                if magic != [0x50, 0x4b, 0x03, 0x04] && magic != [0x50, 0x4b, 0x05, 0x06] {
-                    kind = " (not a zip/APK)"
-                }
-            }
-            show("Added \(dest.lastPathComponent) (\(readable))\(kind)")
-            AppLog.write("import: copied to \(dest.path) size=\(size)\(kind)")
-        } catch {
-            show("Could not copy \(url.lastPathComponent): \(error.localizedDescription)")
-            AppLog.write("import: FAILED: \(error)")
+        let dest = gamesDir.appendingPathComponent(url.lastPathComponent)
+        if url.standardizedFileURL == dest.standardizedFileURL {
+            reload()
+            return
         }
-        reload()
+        let scoped = url.startAccessingSecurityScopedResource()
+        importsInFlight += 1
+        Self.fileQueue.async {
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            let result = Result { try Self.copyAPK(url, to: dest) }
+            DispatchQueue.main.async {
+                importsInFlight -= 1
+                switch result {
+                case .success:
+                    icons.invalidate(dest)
+                    icons.load(dest)
+                    show("Added \(dest.lastPathComponent)")
+                    AppLog.write("import: copied \(dest.lastPathComponent)")
+                case .failure(let error):
+                    show("Could not add \(url.lastPathComponent). Check that the APK opens in Files and try again.")
+                    AppLog.write("import: FAILED \(url.lastPathComponent): \(error.localizedDescription)")
+                }
+                reload()
+            }
+        }
     }
 
     /// Imports every `.apk` directly inside a chosen folder. The picker hands the folder over as a
@@ -247,17 +277,13 @@ struct LauncherView: View {
         let scoped = folder.startAccessingSecurityScopedResource()
         AppLog.write("import: folder \(folder.path) security-scoped=\(scoped)")
         let destDir = gamesDir
-        DispatchQueue.global(qos: .userInitiated).async {
+        importsInFlight += 1
+        Self.fileQueue.async {
             defer { if scoped { folder.stopAccessingSecurityScopedResource() } }
-            let contents = (try? fm.contentsOfDirectory(
-                at: folder, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles])) ?? []
-            let apks = contents
-                .filter { $0.pathExtension.lowercased() == "apk" }
-                .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
+            let apks = Self.apkFiles(in: folder)
             var added = 0
             var skipped = 0
             var failed = 0
-            try? fm.createDirectory(at: destDir, withIntermediateDirectories: true)
             for src in apks {
                 let dest = destDir.appendingPathComponent(src.lastPathComponent)
                 if fm.fileExists(atPath: dest.path) {
@@ -266,7 +292,7 @@ struct LauncherView: View {
                     continue
                 }
                 do {
-                    try fm.copyItem(at: src, to: dest)
+                    try Self.copyAPK(src, to: dest)
                     added += 1
                     AppLog.write("import: copied \(src.lastPathComponent)")
                 } catch {
@@ -275,6 +301,7 @@ struct LauncherView: View {
                 }
             }
             DispatchQueue.main.async {
+                importsInFlight -= 1
                 if apks.isEmpty {
                     show("No APKs in that folder")
                 } else {
@@ -290,10 +317,21 @@ struct LauncherView: View {
 
     private func deleteConfirmed(_ game: ImportedGame) {
         AppLog.write("delete: \(game.url.lastPathComponent)")
-        try? FileManager.default.removeItem(at: game.url)
         pendingDelete = nil
-        show("Removed \(game.name)")
-        reload()
+        Self.fileQueue.async {
+            let result = Result { try FileManager.default.removeItem(at: game.url) }
+            DispatchQueue.main.async {
+                switch result {
+                case .success:
+                    icons.invalidate(game.url)
+                    show("Removed \(game.name)")
+                case .failure(let error):
+                    show("Could not remove \(game.name)")
+                    AppLog.write("delete: FAILED \(error.localizedDescription)")
+                }
+                reload()
+            }
+        }
     }
 
     private func show(_ text: String) {
@@ -307,6 +345,7 @@ struct LauncherView: View {
 // MARK: - One game in the grid
 
 struct GameTileView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let game: ImportedGame
     let icon: UIImage?
     let accent: Color
@@ -322,7 +361,7 @@ struct GameTileView: View {
     @State private var shown = false
 
     private var badge: (String, Color) {
-        game.readable ? ("READY", accent) : ("CAN'T READ THIS FILE", Holo.danger)
+        game.readable ? ("IMPORTED", accent) : ("CAN'T READ THIS FILE", Holo.danger)
     }
 
     var body: some View {
@@ -360,6 +399,10 @@ struct GameTileView: View {
         .opacity(shown ? 1 : 0)
         .offset(y: shown ? 0 : 24)
         .onAppear {
+            if reduceMotion {
+                shown = true
+                return
+            }
             // Holo's card entrance: fade in and rise 24 dp over 220 ms, 40 ms per index (capped at 10).
             withAnimation(.easeOut(duration: 0.22).delay(Double(min(index, 10)) * 0.04)) {
                 shown = true
@@ -381,5 +424,9 @@ struct GameTileView: View {
                                 suppressTap = true
                                 onLongPress()
                             })
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { onTap() }
+        .accessibilityAction(named: Text("Game options")) { onLongPress() }
     }
 }

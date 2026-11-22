@@ -12,10 +12,14 @@ struct GameView: View {
     let lib: String
     let accent: Color
     @Environment(\.dismiss) private var dismiss
+    @AppStorage("performanceOverlay") private var performanceOverlay = false
+    @AppStorage("renderScale") private var renderScale = 1.0
+    @AppStorage("runtimeJit") private var runtimeJit = true
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            GameSurface(apk: apk, lib: lib)
+            GameSurface(apk: apk, lib: lib, performanceOverlay: performanceOverlay,
+                        renderScale: renderScale, runtimeJit: runtimeJit)
                 .ignoresSafeArea()
             Button {
                 dismiss()
@@ -38,9 +42,13 @@ struct GameView: View {
 private struct GameSurface: UIViewRepresentable {
     let apk: URL
     let lib: String
+    let performanceOverlay: Bool
+    let renderScale: Double
+    let runtimeJit: Bool
 
     func makeUIView(context: Context) -> GameUIView {
-        GameUIView(apk: apk, lib: lib)
+        GameUIView(apk: apk, lib: lib, performanceOverlay: performanceOverlay,
+                   renderScale: renderScale, runtimeJit: runtimeJit)
     }
 
     func updateUIView(_ uiView: GameUIView, context: Context) {}
@@ -49,25 +57,32 @@ private struct GameSurface: UIViewRepresentable {
 final class GameUIView: UIView {
     private let apk: URL
     private let lib: String
+    private let performanceOverlay: Bool
+    private let runtimeJit: Bool
     private var session: OpaquePointer?
     private var started = false
     private var lastSize = CGSize.zero
 
     private let errorLabel = UILabel()
     private let bootLabel = UILabel()
+    private let performanceLabel = UILabel()
     private var timer: Timer?
+    private var lastFrameSample: (frames: Int32, time: TimeInterval)?
 
     private var touchIds: [ObjectIdentifier: Int32] = [:]
     private var nextTouch: Int32 = 0
 
     override class var layerClass: AnyClass { CAEAGLLayer.self }
 
-    init(apk: URL, lib: String) {
+    init(apk: URL, lib: String, performanceOverlay: Bool, renderScale: Double, runtimeJit: Bool) {
         self.apk = apk
         self.lib = lib
+        self.performanceOverlay = performanceOverlay
+        self.runtimeJit = runtimeJit
         super.init(frame: .zero)
         backgroundColor = .black
-        contentScaleFactor = UIScreen.main.scale
+        contentScaleFactor = UIScreen.main.scale * CGFloat(min(1.0, max(0.5, renderScale)))
+        layer.contentsScale = contentScaleFactor
         if let eagl = layer as? CAEAGLLayer {
             eagl.drawableProperties = [
                 kEAGLDrawablePropertyRetainedBacking: false,
@@ -94,6 +109,17 @@ final class GameUIView: UIView {
             bootLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
             bootLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
+        if performanceOverlay {
+            performanceLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+            performanceLabel.textColor = .white
+            performanceLabel.backgroundColor = UIColor.black.withAlphaComponent(0.7)
+            performanceLabel.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(performanceLabel)
+            NSLayoutConstraint.activate([
+                performanceLabel.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 12),
+                performanceLabel.trailingAnchor.constraint(equalTo: safeAreaLayoutGuide.trailingAnchor, constant: -12),
+            ])
+        }
         boot()
         // The render thread stops drawing and calls the game's nativeOnPause/Resume itself; this only
         // flips a flag, so a backgrounding app never blocks on the guest.
@@ -156,6 +182,7 @@ final class GameUIView: UIView {
         }
         AppLog.write("game: session created")
         session = created
+        rb_ios_set_runtime_jit(created, runtimeJit ? 1 : 0)
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             self?.refreshStatus()
         }
@@ -174,7 +201,18 @@ final class GameUIView: UIView {
             errorLabel.text = text
             bootLabel.isHidden = true
         }
-        bootLabel.isHidden = started || !(errorLabel.text ?? "").isEmpty
+        let frames = rb_ios_frame_count(s)
+        bootLabel.isHidden = frames > 0 || !(errorLabel.text ?? "").isEmpty
+        if performanceOverlay && frames > 0 {
+            let time = CACurrentMediaTime()
+            if let previous = lastFrameSample, frames >= previous.frames, time > previous.time {
+                let fps = Double(frames - previous.frames) / (time - previous.time)
+                let engine = rb_ios_session_engine(s)
+                let mode = engine == 2 ? "JIT" : engine == 1 ? "AOT" : "Interpreter"
+                performanceLabel.text = String(format: " %.1f FPS · %@ ", fps, mode)
+            }
+            lastFrameSample = (frames, time)
+        }
     }
 
     override func layoutSubviews() {
@@ -182,6 +220,7 @@ final class GameUIView: UIView {
         guard let s = session, bounds.width > 1, bounds.height > 1 else { return }
         if started && lastSize == bounds.size { return }
         lastSize = bounds.size
+        lastFrameSample = nil
         if started {
             rb_ios_stop(s)
             started = false

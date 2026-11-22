@@ -21,6 +21,8 @@ const char* ReasonText(exec::StopReason r) {
     case exec::StopReason::Syscall: return "syscall";
     case exec::StopReason::Returned: return "returned";
     case exec::StopReason::Internal: return "internal";
+    case exec::StopReason::Unimplemented: return "unimplemented";
+    case exec::StopReason::Suspended: return "suspended";
     default: return "exited";
   }
 }
@@ -160,14 +162,18 @@ void Inbound::Fail(const InboundTarget& t, const std::string& why) {
       log_("RetroBug: guest native " + t.name + " still failing — " + std::to_string(count) + " time(s)");
     }
   }
+  // JNI forbids FindClass while an exception is pending. The caller already has the original error.
+  if (java_.ExceptionCheck()) return;
   const abi::HostRef cls = java_.FindClass("java/lang/Error");
   if (cls == 0) return;
   java_.ThrowNew(cls, message);
   java_.DeleteLocalRef(cls);
 }
 
-std::uint64_t Inbound::Dispatch(const InboundTarget& t, const CapturedArgs& a) {
+std::uint64_t Inbound::Dispatch(const InboundTarget& t, const CapturedArgs& captured) {
   using abi::Value32;
+  CapturedArgs a = captured;
+  if (adapt_) adapt_(t, a);
   const char ret = t.shorty.empty() ? 'V' : t.shorty[0];
   fwd_.SyncShadows();  // Java may have written a shadowed direct buffer since the guest last ran (M4)
   fwd_.PushFrame();

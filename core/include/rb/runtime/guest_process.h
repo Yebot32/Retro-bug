@@ -121,6 +121,9 @@ class GuestProcess {
   static constexpr unsigned kInitBudget = 1u << 30;
   static constexpr unsigned kJniArenaBytes = 1u << 20;
 
+  /// Linux ARM32 CPU information for the same architecture and features reported in AT_HWCAP.
+  static std::string CpuInfo(unsigned processors);
+
   static std::unique_ptr<GuestProcess> Create(const GuestProcessOptions& options, std::string* err);
   /// Stops every guest thread and frees the process. Preconditions: the caller does not hold this process's GGL,
   /// and no host thread is inside a call into this process (an adopted host thread that is merely alive is fine:
@@ -226,7 +229,6 @@ class GuestProcess {
   [[nodiscard]] std::string CacheStats();
   /// A guest fault with no handler installed. Names the fault and, through `LogFaultReport`, prints the full
   /// state a fault needs to be understood without a second run.
-  void LogUnhandledFault(const char* sig_name, std::uint32_t addr, const GuestThread& thread);
 
   /// Everything a guest fault needs to be understood from one log: the faulting thread's whole register set,
   /// a 2 KiB stack scan as module+offset, the bytes around the pc, every guest thread's pc/lr/sp/wait state,

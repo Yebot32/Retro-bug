@@ -8,7 +8,7 @@
 // Signature: "<ret>:<args>". Argument letters:
 //   i  int32 (sign-extended)        u  uint32 (zero-extended)       f  float        d  double (aligned pair)
 //   l  int64 (aligned pair)         p  guest pointer: 0 stays null, anything else must be guest memory
-//   o  GL pointer-or-offset: translated when it is guest memory, passed as is otherwise (a buffer offset)
+//   o  GL pointer-or-offset. If both interpretations are possible, consult the caller's buffer binding.
 //   h  a handle this table issued (0 = null) -> the host pointer
 // Return letters: v, i, u, f, d, l, and H (a host pointer, returned to the guest as a handle).
 // A host pointer is never handed to the guest raw: it does not fit in 32 bits.
@@ -44,11 +44,13 @@ class HandleTable {
 
 class ThunkCaller {
  public:
+  using BufferBound = bool (*)(std::uint32_t binding);
   /// Reads the guest's arguments for `spec` from `s` (r0..r3, then the stack at sp through `mem`), calls `fn`, and
   /// writes the result to r0 (r0:r1 for `d`/`l`). False, with `err` naming the cause, for a malformed signature,
   /// an unreadable stacked word, a pointer that is not guest memory, or an unknown handle; nothing is called then.
   static bool Call(const char* spec, void* fn, exec::MachineState& s, const mem::GuestMemory& mem,
-                   HandleTable& handles, std::string* err);
+                   HandleTable& handles, std::string* err, BufferBound buffer_bound = nullptr,
+                   std::uint32_t binding = 0);
 };
 
 }  // namespace rb::abi

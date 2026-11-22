@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -544,10 +545,8 @@ void JitExecutor::SyncIn(const MachineState& state) {
   // with two different orderings here would show up as garbage doubles, not as an obvious failure.
   auto& ext = jit_->ExtRegs();
   static_assert(sizeof(JitExtRegs) == 64 * sizeof(std::uint32_t), "VFPv3-D32 is 64 words");
-  for (int i = 0; i < 32; ++i) {
-    ext[static_cast<std::size_t>(i) * 2] = static_cast<std::uint32_t>(state.d[i]);
-    ext[static_cast<std::size_t>(i) * 2 + 1] = static_cast<std::uint32_t>(state.d[i] >> 32);
-  }
+  static_assert(std::endian::native == std::endian::little && sizeof(state.d) == sizeof(JitExtRegs));
+  std::memcpy(ext.data(), state.d, sizeof(state.d));
   // PC last: setting it is what makes the core runnable, and nothing above depends on it.
   regs[15] = state.pc;
 }
@@ -565,11 +564,8 @@ void JitExecutor::SyncOut(MachineState& state) {
   // execution stops, which is a false finding with a real-looking number attached.
   state.itstate = ItStateFromCpsr(cpsr);
   state.fpscr = jit_->Fpscr();
-  auto& ext = jit_->ExtRegs();
-  for (int i = 0; i < 32; ++i) {
-    state.d[i] = static_cast<std::uint64_t>(ext[static_cast<std::size_t>(i) * 2]) |
-                 (static_cast<std::uint64_t>(ext[static_cast<std::size_t>(i) * 2 + 1]) << 32);
-  }
+  const auto& ext = jit_->ExtRegs();
+  std::memcpy(state.d, ext.data(), sizeof(state.d));
 }
 
 RunResult JitExecutor::Run(MachineState& state, unsigned max_instructions) {

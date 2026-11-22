@@ -57,11 +57,15 @@ bool DeliverSignal(GuestThread& t, mem::GuestMemory& mem, const syscall::Monitor
   std::uint64_t interrupted_d[32];
   for (unsigned i = 0; i < 32; ++i) interrupted_d[i] = t.state.d[i];
   const std::uint32_t sp = t.state.r[13] & ~(sf::kStackAlign - 1u);
-  if (sp == 0) {
-    *why = "signal " + std::to_string(sig) + ": the thread's stack pointer is 0, so no frame can be built";
+  const bool realtime = (disp.flags & sf::kSaSiginfo) != 0;
+  const std::uint32_t info_bytes = realtime ? sf::kSizeofSiginfo : 0;
+  const std::uint32_t frame_bytes = sf::kSizeofUcontext + info_bytes;
+  constexpr std::uint32_t kReturnCodeBytes = sf::kFrameFromSp - sf::kFrameBytes;
+  if (sp < frame_bytes + kReturnCodeBytes) {
+    *why = "signal " + std::to_string(sig) + ": the thread's stack pointer is too low for a signal frame";
     return false;
   }
-  const std::uint32_t frame = (sp - sf::kFrameFromSp) & ~(sf::kStackAlign - 1u);
+  const std::uint32_t frame = sp - frame_bytes - kReturnCodeBytes;
   // The info block precedes the ucontext in the kernel's layout, and the handler is handed both.
   const std::uint32_t info = frame;
 
@@ -71,11 +75,11 @@ bool DeliverSignal(GuestThread& t, mem::GuestMemory& mem, const syscall::Monitor
   // not page-aligned, and stepping by a page from an unaligned base would check the wrong page after a
   // boundary. The frame can end in a page the old loop never looked at.
   const std::uint32_t first_page = frame & ~(mem::kGuestPage - 1u);
-  for (std::uint32_t at = first_page; at < frame + sf::kFrameBytes; at += mem::kGuestPage) {
+  for (std::uint32_t at = first_page; at < frame + frame_bytes; at += mem::kGuestPage) {
     if (!mem.IsMapped(at) || (mem.ProtAt(at) & mem::kWrite) == 0) {
       *why = "signal " + std::to_string(sig) + ": the frame page at " + Hex(at) +
              " is not writable guest memory (the stack has no room for the " +
-             std::to_string(sf::kFrameBytes) + "-byte frame)";
+             std::to_string(frame_bytes) + "-byte frame)";
       return false;
     }
   }
@@ -87,16 +91,16 @@ bool DeliverSignal(GuestThread& t, mem::GuestMemory& mem, const syscall::Monitor
   // Measured on Cars 3 (SM-X710 2026-10-20): the pop loaded r4=0, and bionic's futex error path read
   // through the null errno pointer at libc+0x78468.
   std::string werr;
-  for (std::uint32_t off = 0; off < sf::kFrameBytes; off += 64) {
+  for (std::uint32_t off = 0; off < frame_bytes; off += 64) {
     const std::uint32_t zeros[16] = {};
-    const std::uint32_t n = std::min<std::uint32_t>(sizeof zeros, sf::kFrameBytes - off);
+    const std::uint32_t n = std::min<std::uint32_t>(sizeof zeros, frame_bytes - off);
     if (!Put(mem, frame + off, zeros, n, frame, &werr)) {
       *why = "signal " + std::to_string(sig) + ": " + werr;
       return false;
     }
   }
 
-  const std::uint32_t uc = info + sf::kSizeofSiginfo;
+  const std::uint32_t uc = frame + info_bytes;
   const auto Put32 = [&](std::uint32_t at, std::uint32_t v) {
     return Put(mem, at, &v, 4, frame, &werr);
   };
@@ -104,10 +108,10 @@ bool DeliverSignal(GuestThread& t, mem::GuestMemory& mem, const syscall::Monitor
   // ---- siginfo_t. The signal it got and a zero errno are always filled. A synchronous fault also fills
   // si_code and si_addr: a handler that has to tell its own fault from a sent signal reads them, and Mono's
   // SIGSEGV handler throws NullReferenceException from exactly that decision. Nothing invents si_pid.
-  if (!Put32(info + sf::kSiSigno, static_cast<std::uint32_t>(sig)) ||
+  if (realtime && (!Put32(info + sf::kSiSigno, static_cast<std::uint32_t>(sig)) ||
       !Put32(info + sf::kSiErrno, 0) ||
       (fault_code != 0 && (!Put32(info + sf::kSiCode, static_cast<std::uint32_t>(fault_code)) ||
-                           !Put32(info + sf::kSiAddr, fault_addr)))) {
+                           !Put32(info + sf::kSiAddr, fault_addr))))) {
     *why = "signal " + std::to_string(sig) + ": " + werr;
     return false;
   }
@@ -116,7 +120,8 @@ bool DeliverSignal(GuestThread& t, mem::GuestMemory& mem, const syscall::Monitor
   const auto PutSc = [&](std::uint32_t rel, std::uint32_t v) {
     return Put32(uc + sf::kUcMcontext + rel, v);
   };
-  if (!Put32(uc + sf::kUcFlags, 0) || !Put32(uc + sf::kUcLink, 0) ||
+  constexpr std::uint32_t kLegacyFrameMarker = 0x5ac3c35a;
+  if (!Put32(uc + sf::kUcFlags, realtime ? 0 : kLegacyFrameMarker) || !Put32(uc + sf::kUcLink, 0) ||
       !Put32(uc + sf::kUcStackSp, 0) || !Put32(uc + sf::kUcStackFlags, 0) ||
       !Put32(uc + sf::kUcStackSize, 0)) {
     *why = "signal " + std::to_string(sig) + ": " + werr;
@@ -136,12 +141,10 @@ bool DeliverSignal(GuestThread& t, mem::GuestMemory& mem, const syscall::Monitor
     *why = "signal " + std::to_string(sig) + ": " + werr;
     return false;
   }
-  // The blocked mask the handler runs under: the guest's current mask, with this signal added unless it
-  // asked for SA_NODEFER. Only the low 32 bits are written, which is the whole of bionic's arm32 sigset_t.
-  const std::uint64_t saved_mask = t.signal_mask;
-  // The handler's mask is the interrupted mask | the sigaction's sa_mask | this signal (unless SA_NODEFER,
-  // which leaves only the signal itself unblocked). `disp.mask` was recorded and previously unused.
-  std::uint64_t handler_mask = saved_mask | disp.mask;
+  // A signal waking sigsuspend runs with the temporary mask but returns to the pre-suspend mask.
+  // Put the latter in this frame, so a nested handler cannot consume the outer handler's restore.
+  const std::uint64_t saved_mask = t.sigsuspend_restore ? t.sigsuspend_old_mask : t.signal_mask;
+  std::uint64_t handler_mask = t.signal_mask | disp.mask;
   if ((disp.flags & 0x40000000u /* SA_NODEFER */) == 0 && sig >= 1 && sig <= 64) {
     handler_mask |= (1ull << (sig - 1));
   }
@@ -162,7 +165,7 @@ bool DeliverSignal(GuestThread& t, mem::GuestMemory& mem, const syscall::Monitor
     out->sig = sig;
     out->handler = disp.handler;
     out->restorer = disp.restorer;
-    out->sa_siginfo = (disp.flags & sf::kSaSiginfo) != 0;
+    out->sa_siginfo = realtime;
     out->frame = uc;
     for (unsigned i = 0; i < 16; ++i) out->saved[i] = t.state.r[i];
     out->saved_cpsr = t.state.cpsr;
@@ -170,13 +173,13 @@ bool DeliverSignal(GuestThread& t, mem::GuestMemory& mem, const syscall::Monitor
   }
 
   // The handler's arguments. With SA_SIGINFO it takes (sig, &info, &ucontext); without it, just the signal.
-  // r0 is the signal either way, and a handler that only takes `int` ignores the rest — passing them is what
-  // the kernel does, and it costs nothing.
+  // The legacy handler gets the signal in r0 and keeps the interrupted r1 and r2.
   t.state.r[0] = static_cast<std::uint32_t>(sig);
-  t.state.r[1] = info;
-  t.state.r[2] = uc;
-  // The return address is the restorer the guest supplied (SA_RESTORER is required on AArch32 and Mono sets
-  // it). Its code is `mov r7, #__NR_rt_sigreturn; svc 0`, which this monitor answers by restoring the frame.
+  if (realtime) {
+    t.state.r[1] = info;
+    t.state.r[2] = uc;
+  }
+  // The guest restorer calls rt_sigreturn for a realtime frame or sigreturn for a legacy frame.
   // `lr` keeps the Thumb bit: both tiers read the mode of a return address from it (`bx lr` semantics).
   t.state.r[14] = disp.restorer;
   t.state.r[13] = frame & ~(sf::kStackAlign - 1u);  // the handler's stack starts at the frame
@@ -196,6 +199,7 @@ bool DeliverSignal(GuestThread& t, mem::GuestMemory& mem, const syscall::Monitor
   t.state.itstate = 0;  // a handler never starts inside the interrupted IT block
   // The handler keeps the thread pointer and the signal mask it will run under.
   t.signal_mask = handler_mask;
+  t.sigsuspend_restore = false;
   // The record the restorer's `rt_sigreturn` reads from the calling thread. Pushed here, popped there:
   // an inner delivery (Mono's restart signal inside its suspend handler) leaves the outer one underneath.
   t.deliveries.push_back(SignalDeliveryState{true, sig, uc, disp.handler, disp.restorer, saved_mask});
@@ -203,10 +207,11 @@ bool DeliverSignal(GuestThread& t, mem::GuestMemory& mem, const syscall::Monitor
     SignalDeliveryState& rec = t.deliveries.back();
     for (unsigned i = 0; i < 32; ++i) rec.d[i] = interrupted_d[i];
     rec.fpscr = interrupted_fpscr;
+    rec.realtime = realtime;
   }
 
   *why = "signal " + std::to_string(sig) + " delivered: handler " + Hex(disp.handler) + " entered with " +
-         (out != nullptr && out->sa_siginfo ? "SA_SIGINFO (sig, &info, &ucontext)" : "the signal as r0") +
+         (realtime ? "SA_SIGINFO (sig, &info, &ucontext)" : "the signal as r0") +
          ", frame at " + Hex(frame) + ", restorer " + Hex(disp.restorer) + "; interrupted pc " +
          Hex(interrupted_pc) + " sp " + Hex(interrupted_sp) + " r4 " + Hex(interrupted_r4);
   return true;
@@ -219,6 +224,12 @@ bool ReturnFromSignal(GuestThread& t, mem::GuestMemory& mem, std::string* why) {
   }
   const SignalDeliveryState& d = t.deliveries.back();
   const std::uint32_t uc = d.frame;
+  const std::string call = d.realtime ? "rt_sigreturn: " : "sigreturn: ";
+  const std::uint32_t frame = d.realtime ? uc - sf::kSizeofSiginfo : uc;
+  if (t.state.r[13] != frame) {
+    *why = call + "restorer stack pointer does not match the active frame at " + Hex(frame);
+    return false;
+  }
   const auto Get32 = [&](std::uint32_t at, std::uint32_t* v) { return mem.Read(at, v, 4); };
   const auto GetSc = [&](std::uint32_t rel, std::uint32_t* v) { return Get32(uc + sf::kUcMcontext + rel, v); };
 
@@ -226,18 +237,16 @@ bool ReturnFromSignal(GuestThread& t, mem::GuestMemory& mem, std::string* why) {
   // the ucontext it was given (to change where the interrupted code resumes), and the kernel honours that.
   std::uint32_t sp = 0, lr = 0, pc = 0, cpsr = 0;
   bool ok = true;
-  for (std::uint32_t i = 0; i < 13 && ok; ++i) {
-    std::uint32_t v = 0;
-    ok = GetSc(sf::kScR0 + i * 4, &v);
-    if (ok) t.state.r[i] = v;
-  }
+  std::uint32_t regs[13] = {};
+  for (std::uint32_t i = 0; i < 13 && ok; ++i) ok = GetSc(sf::kScR0 + i * 4, &regs[i]);
   ok = ok && GetSc(sf::kScSp, &sp) && GetSc(sf::kScLr, &lr) && GetSc(sf::kScPc, &pc) &&
        GetSc(sf::kScCpsr, &cpsr);
   if (!ok) {
-    *why = "rt_sigreturn: the sigcontext at " + Hex(uc) + " is not readable guest memory, so the "
+    *why = call + "the sigcontext at " + Hex(uc) + " is not readable guest memory, so the "
            "interrupted state cannot be restored";
     return false;
   }
+  std::copy_n(regs, 13, t.state.r);
   t.state.r[13] = sp;
   t.state.r[14] = lr;
   t.state.pc = pc;
@@ -259,16 +268,10 @@ bool ReturnFromSignal(GuestThread& t, mem::GuestMemory& mem, std::string* why) {
   } else {
     t.signal_mask = d.saved_mask;
   }
-  // A handler entered while the thread was in rt_sigsuspend ran with the temporary mask; the kernel puts
-  // the pre-suspend mask back when the handler returns.
-  if (t.sigsuspend_restore) {
-    t.signal_mask = t.sigsuspend_old_mask;
-    t.sigsuspend_restore = false;
-  }
   // This handler is over. If an outer one is on the stack, its interrupted state is exactly what the
   // sigcontext just restored, so the next `rt_sigreturn` reads the outer frame in turn.
   t.deliveries.pop_back();
-  *why = "rt_sigreturn: restored pc " + Hex(pc) + ", sp " + Hex(sp) + ", cpsr " + Hex(cpsr) +
+  *why = call + "restored pc " + Hex(pc) + ", sp " + Hex(sp) + ", cpsr " + Hex(cpsr) +
          (t.deliveries.empty() ? "" : ", " + std::to_string(t.deliveries.size()) + " outer handler(s) still active");
   return true;
 }

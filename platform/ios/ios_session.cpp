@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <signal.h>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <fstream>
@@ -29,7 +30,9 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -425,6 +428,8 @@ struct RbIosSession {
   /// with this line rather than loading tens of megabytes and failing at a made-up entry point.
   std::string unsupported;
   bool booted = false;  ///< render thread only
+  bool runtime_jit = true;  ///< configured before the render thread starts
+  const bool profile_pc = std::getenv("RB_PROFILE_PC") != nullptr;
   /// The engine this session actually booted on: 0 Tier I, 1 AOT (offline-translated), 2 Tier J.
   /// Written on the render thread, read by the UI through rb_ios_session_engine.
   std::atomic<int> engine{0};
@@ -630,13 +635,22 @@ bool RbIosSession::Boot(std::string* err) {
     process.monitor().set_host_io(true);
     // What the guest opened, with the failures: a refused open is the difference between a title that
     // loads and one that stops in its first file manager.
-    auto left = std::make_shared<std::atomic<int>>(600);
-    process.monitor().set_host_io_trace([self, left](const std::string& line) {
-      if (left->fetch_sub(1) <= 0) return;
-      const bool error = line.find(" = -") != std::string::npos;
-      if (error || line.find("openat") != std::string::npos || line.find("mkdirat") != std::string::npos) {
-        self->Log("io: " + line);
+    process.monitor().set_host_io_trace([self, left = 600, opened = std::set<std::string>()]
+                                      (const std::string& line) mutable {
+      if (line.starts_with("ARM syscall #")) {
+        self->Log("syscall: " + line);
+        return;
       }
+      if (left == 0) return;
+      const bool error = line.find(" = -") != std::string::npos;
+      if (!error && line.starts_with("host openat('")) {
+        const auto end = line.rfind("') = ");
+        if (end != std::string::npos && !opened.insert(line.substr(0, end)).second) return;
+      } else if (!error && !line.starts_with("host mkdirat('")) {
+        return;
+      }
+      --left;
+      self->Log("io: " + line);
     });
   };
 
@@ -665,8 +679,7 @@ bool RbIosSession::Boot(std::string* err) {
     }
   }
   // A launch holds a JIT only when the kernel grants MAP_JIT; the probe says which engine list to build.
-  const bool jit_probe_ok = JitAvailable();
-  bool jit_wanted = jit_probe_ok;
+  bool jit_wanted = self->runtime_jit && JitAvailable();
   const bool jit_crashed_this_build = marker_build == build;
   if (jit_wanted && jit_crashed_this_build) {
     self->Log("jit: the previous Tier J attempt in build " + build +
@@ -675,7 +688,9 @@ bool RbIosSession::Boot(std::string* err) {
   } else if (!jit_crashed_this_build) {
     ::remove(jit_marker.c_str());
   }
-  if (jit_crashed_this_build && !jit_wanted) {
+  if (!self->runtime_jit) {
+    self->Log("jit: disabled in Settings");
+  } else if (jit_crashed_this_build && !jit_wanted) {
     // the marker explains it; no second line
   } else if (jit_wanted) {
     self->Log("jit: MAP_JIT is granted — Tier J is available (mprotect_flip=" +
@@ -820,10 +835,9 @@ bool RbIosSession::Boot(std::string* err) {
                                                       : engine == 1 ? "AOT (offline-translated AArch64)"
                                                                     : "Tier I (interpreter)"));
   }
+  // Sampling adds a lock and a map update per slice. Keep it available for profiling launches.
+  if (profile_pc) boot->process()->StartPcProfile();
   process.store(boot->process(), std::memory_order_release);
-  // A sampling profile of guest execution: one sample per slice boundary, cheap enough to leave on, and the
-  // only way to name where an interpreted title spends its minutes on a host with no JIT.
-  boot->process()->StartPcProfile();
   // Which engine the loaded library presents. The natives are the evidence, not the library's name: a
   // stock APK's engine image is whatever the Java layer would have loaded, and only its exports say what
   // the shell must call. A surface none of these matches is named, with the exports it does offer, rather
@@ -969,6 +983,8 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
     int last = -1;
     int frames_at_last_report = 0;
     int ticks = 0;
+    int quiet_windows = 0;
+    std::uint64_t last_host_activity = 0;
     while (s->running.load()) {
       for (int i = 0; i < 20 && s->running.load(); ++i) {  // leaves within 250 ms of a stop
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
@@ -990,7 +1006,7 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
           char rate[96];
           std::snprintf(rate, sizeof rate, "render: %d frames in 10 s (%.1f fps)", delta, delta / 10.0);
           s->Log(rate);
-          for (const std::string& line : p->ProfileReport()) s->Log(line);
+          if (s->profile_pc) for (const std::string& line : p->ProfileReport()) s->Log(line);
           if (s->host) {
             for (const std::string& line : s->host->CallCountLines()) s->Log(line);
           }
@@ -998,14 +1014,27 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
       }
       const int now = s->frames.load();
       if (now == last) {
-        s->Log("stall: still frame " + std::to_string(now) + " after 5 s");
+        ++quiet_windows;
         // The full report with no faulting thread: every thread's pc/lr/sp and stack while the frame is
         // stuck, so a slow load names the code it is inside instead of only the frame number. Read without
         // the GGL, as the stall supervisor does: a monitor must never block behind a guest that is itself
         // the thing being reported.
         if (rb::runtime::GuestProcess* process = s->process.load(std::memory_order_acquire)) {
-          process->LogFaultReport("stall:" + std::to_string(now), nullptr,
-                                  "frame " + std::to_string(now) + " has not advanced for 5 s");
+          const auto activity = process->abi().host_activity();
+          if (quiet_windows <= 2 || quiet_windows % 6 == 0) {
+            s->Log("render: frame " + std::to_string(now) + " unchanged for " +
+                   std::to_string(quiet_windows * 5) + " s; " +
+                   std::to_string(activity - last_host_activity) + " host calls in the last 5 s");
+          }
+          if ((quiet_windows == 2 || quiet_windows % 6 == 0) && activity == last_host_activity) {
+            for (const auto& line : process->StallReport()) s->Log("stall: " + line);
+          }
+          last_host_activity = activity;
+        }
+      } else {
+        quiet_windows = 0;
+        if (auto* process = s->process.load(std::memory_order_acquire)) {
+          last_host_activity = process->abi().host_activity();
         }
       }
       last = now;
@@ -1238,4 +1267,7 @@ extern "C" int rb_ios_session_jit(RbIosSession* s) {
 }
 extern "C" int rb_ios_session_engine(RbIosSession* s) {
   return s != nullptr ? s->engine.load(std::memory_order_relaxed) : 0;
+}
+extern "C" void rb_ios_set_runtime_jit(RbIosSession* s, int enabled) {
+  if (s != nullptr) s->runtime_jit = enabled != 0;
 }

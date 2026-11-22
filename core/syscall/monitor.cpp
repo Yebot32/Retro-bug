@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <limits>
 #include <random>
 #include <thread>
 #include <vector>
@@ -170,6 +171,7 @@ const char* Name(std::uint32_t number) {
   switch (number) {
     case nr::kExit: return "exit";
     case nr::kRead: return "read";
+    case nr::kLseek: return "lseek";
     case nr::kWrite: return "write";
     case nr::kClose: return "close";
     case nr::kGetpid: return "getpid";
@@ -178,6 +180,7 @@ const char* Name(std::uint32_t number) {
     case nr::kGettimeofday: return "gettimeofday";
     case nr::kMunmap: return "munmap";
     case nr::kFstat: return "fstat";
+    case nr::kSigreturn: return "sigreturn";
     case nr::kClone: return "clone";
     case nr::kMprotect: return "mprotect";
     case nr::kMremap: return "mremap";
@@ -203,6 +206,7 @@ const char* Name(std::uint32_t number) {
     case nr::kTgkill: return "tgkill";
     case nr::kTkill: return "tkill";
     case nr::kRtTgsigqueueinfo: return "rt_tgsigqueueinfo";
+    case 376: return "process_vm_readv";
     case nr::kClockGetres: return "clock_getres";
     case nr::kUname: return "uname";
     case nr::kSysinfo: return "sysinfo";
@@ -1133,8 +1137,7 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
       // rt_sigsuspend(mask, sigsetsize). The arm32 compat sigset is 8 bytes (the same rule as
       // rt_sigprocmask). It swaps the blocked mask, sleeps until a deliverable signal is queued, and
       // returns -EINTR; the handler runs at the next ABI boundary. The temporary mask must stay in place
-      // while the handler runs — the kernel delivers against it — and the old mask goes back after the
-      // handler's rt_sigreturn (ReturnFromSignal checks sigsuspend_restore).
+      // while the handler runs. Signal delivery saves the previous mask in that handler's frame.
       if (f.arg[1] != 8) {
         return Outcome::Answered(err::kEinval, "rt_sigsuspend(sigsetsize=" + std::to_string(f.arg[1]) +
                                                    ") = -EINVAL (-22): the arm32 compat sigset is 8 bytes");
@@ -1147,7 +1150,8 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
         return Outcome::Answered(err::kEfault, "rt_sigsuspend: the mask at 0x" + Hex(f.arg[0]) +
                                                    " is not readable guest memory");
       }
-      // A nested sigsuspend is not Mono's shape; keep the outermost old mask rather than overwriting it.
+      // A resumed signal handler can suspend independently. Preserve the old mask if this wait is retried
+      // before a frame has been delivered.
       if (!th.sigsuspend_restore) th.sigsuspend_old_mask = th.signal_mask;
       th.sigsuspend_restore = true;
       th.signal_mask = incoming;
@@ -1346,6 +1350,28 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
                                                 "in this instance");
     }
 
+    case nr::kLseek: {
+      const auto fd = static_cast<std::int32_t>(f.arg[0]);
+      ServedFile* file = FileFor(fd);
+      if (file == nullptr) return Outcome::Answered(err::kEbadf, "lseek: invalid file descriptor");
+
+      std::int64_t base = 0;
+      switch (f.arg[2]) {
+        case 0: break;  // SEEK_SET
+        case 1: base = file->offset; break;  // SEEK_CUR
+        case 2: base = file->bytes.size(); break;  // SEEK_END
+        default: return Outcome::Answered(err::kEinval, "lseek: invalid whence");
+      }
+      const std::int64_t offset = base + static_cast<std::int32_t>(f.arg[1]);
+      if (offset < 0) return Outcome::Answered(err::kEinval, "lseek: negative file offset");
+      if (offset > std::numeric_limits<std::int32_t>::max()) {
+        return Outcome::Answered(err::kEoverflow, "lseek: offset exceeds the ARM 32-bit return range");
+      }
+      file->offset = static_cast<std::size_t>(offset);
+      return Outcome::Emulated(static_cast<std::int32_t>(offset),
+                               "lseek(fd=" + std::to_string(fd) + ") -> " + std::to_string(offset));
+    }
+
     case nr::kRead: {
       const std::int32_t fd = static_cast<std::int32_t>(f.arg[0]);
       ServedFile* file = FileFor(fd);
@@ -1359,7 +1385,7 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
       }
       const std::uint32_t count = f.arg[2];
       if (count == 0) return Outcome::Emulated(0, "read(fd=" + std::to_string(fd) + ", 0) -> 0");
-      const std::size_t left = file->bytes.size() - file->offset;
+      const std::size_t left = file->bytes.size() - std::min(file->offset, file->bytes.size());
       const std::size_t n = std::min<std::size_t>(count, left);
       if (n != 0 && !memory_->Write(f.arg[1], file->bytes.data() + file->offset, n)) {
         return Outcome::Answered(err::kEfault, "read(fd=" + std::to_string(fd) + "): the buffer at 0x" +
@@ -1475,6 +1501,39 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
       const std::int32_t fd = static_cast<std::int32_t>(f.arg[4]);
       if (len == 0) return Outcome::Answered(err::kEinval, "mmap2(len=0) = -EINVAL (-22)");
       constexpr std::uint32_t kMapAnonymous = 0x20u;
+      constexpr std::uint32_t kMapFixed = 0x10u, kMapFixedNoReplace = 0x100000u;
+      const bool fixed = (flags & (kMapFixed | kMapFixedNoReplace)) != 0;
+      const std::uint64_t rounded = (static_cast<std::uint64_t>(len) + mem::kGuestPage - 1u) &
+                                    ~static_cast<std::uint64_t>(mem::kGuestPage - 1u);
+      if (rounded > UINT32_MAX) return Outcome::Answered(err::kEnomem, "mmap2: length exceeds the A32 window");
+      const auto size = static_cast<std::uint32_t>(rounded);
+      if (fixed) {
+        const std::string call = "mmap2(MAP_FIXED, addr=0x" + Hex(hint) + ", len=" + std::to_string(len) +
+                                 ", prot=0x" + Hex(prot) + ", flags=0x" + Hex(flags) + ")";
+        if (hint < mem::kGuestPage || (hint & (mem::kGuestPage - 1u))) {
+          return Outcome::Answered(err::kEinval, call + ": invalid fixed address");
+        }
+        if (static_cast<std::uint64_t>(hint) + size > AllocLimit()) {
+          return Outcome::Answered(err::kEnomem, call + ": range exceeds the guest allocation window");
+        }
+        if ((flags & kMapAnonymous) == 0) {
+          return Outcome::Refused(err::kEnosys, call + ": fixed file-backed mappings are not implemented");
+        }
+        if ((flags & kMapFixedNoReplace) != 0) {
+          for (std::uint64_t page = hint; page < static_cast<std::uint64_t>(hint) + size; page += mem::kGuestPage) {
+            if (memory_->IsMapped(static_cast<std::uint32_t>(page))) {
+              return Outcome::Answered(err::kEexist, call + ": range is already mapped");
+            }
+          }
+        }
+        const unsigned permissions = ((prot & 1u) ? mem::kRead : 0u) | ((prot & 2u) ? mem::kWrite : 0u) |
+                                     ((prot & 4u) ? mem::kExec : 0u);
+        std::string error;
+        if (!memory_->Map(hint, size, permissions, &error)) {
+          return Outcome::Answered(err::kEnomem, call + ": " + error);
+        }
+        return Outcome::Emulated(static_cast<std::int32_t>(hint), call + " -> 0x" + Hex(hint));
+      }
       bool from_file = false;
       if ((flags & kMapAnonymous) == 0 && fd != -1 && host_io_) {
         bool served = false;
@@ -1487,7 +1546,6 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
                                     ") is not implemented: this monitor serves no file mappings, and a "
                                     "zero answer would be a mapping nobody owns");
       }
-      const std::uint32_t size = (len + mem::kGuestPage - 1u) & ~(mem::kGuestPage - 1u);
       const std::uint32_t at = FindFreeRun(hint, size);
       if (at == 0) {
         return Outcome::Answered(err::kEnomem,
@@ -1711,18 +1769,21 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
       return Outcome::Emulated(0, why);
     }
 
-    // `rt_sigreturn` (173): the end of a handler. The restorer the guest registered issues it, and the
+    // The end of a handler. The restorer the guest registered issues it, and the
     // answer is "put back the state the handler interrupted" — which is the delivery's own record, not a
     // value the kernel hands back. A call with no delivery in progress is refused by name: answering 0
     // would resume the handler's own `svc` instruction in place, an infinite loop where the guest should
     // have had an error. Both are the same posture as everywhere else in this file — a fact, or a refusal
     // that names itself.
+    case nr::kSigreturn:
     case nr::kRtSigreturn: {
+      const std::string call = Name(f.number);
       if (!SignalReturnHooked() || th.deliveries.empty()) {
         return Outcome::Refused(err::kEnosys,
-                                "rt_sigreturn: no signal delivery is in progress on this thread, so there "
-                                "is no frame to restore (this build delivers a signal only into a handler "
-                                "the guest installed with rt_sigaction)");
+                                call + ": no active signal frame to restore");
+      }
+      if (th.deliveries.back().realtime != (f.number == nr::kRtSigreturn)) {
+        return Outcome::Refused(err::kEinval, call + ": syscall does not match the active signal frame");
       }
       // The runtime performs the restore: it owns the frame layout, and the monitor sits below it. A
       // sigreturn does not return, so `r0` carries nothing back from the call — but `Complete` writes the
@@ -1838,20 +1899,10 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::Gu
                              "app_data_file execute_no_trans; see 30 §Step 12");
 
     default: {
-      // The reason names the call, so a reader on a phone can tell this from "no monitor attached" and
-      // from "answered with ENOENT". The number is decimal because that is what `svc #<n>` means; the
-      // name is the same table `Describe` prints.
       const char* named = Name(f.number);
-      std::string why = "svc #" + std::to_string(f.number);
-      if (named != nullptr) {
-        why += std::string{" ("} + named +
-               ") is not implemented in this build; refused with ENOSYS (-38) rather than inventing a"
-               " result a real kernel would produce";
-      } else {
-        why += " is not implemented; refusing with ENOSYS (-38), the value this kernel answers for a"
-               " number outside its table, rather than a 0 nobody produced";
-      }
-      return Outcome::Refused(err::kEnosys, why);
+      std::string why = "ARM syscall #" + std::to_string(f.number);
+      if (named != nullptr) why += std::string{" ("} + named + ")";
+      return Outcome::Refused(err::kEnosys, why + " is not implemented; returned ENOSYS (-38)");
     }
   }
 }
@@ -2130,7 +2181,7 @@ Outcome Monitor::Begin(exec::MachineState& state, std::uint32_t svc_imm, runtime
   Note(f.number);
   Outcome o = Classify(f, state, thread);
   if (o.verdict == Verdict::kBlocking) return o;  // no write-back yet: the wait has not happened
-  return Complete(state, std::move(o));
+  return Complete(state, std::move(o), thread);
 }
 
 Outcome Monitor::Finish(exec::MachineState& state, Outcome done) {
@@ -2141,9 +2192,21 @@ Outcome Monitor::Finish(exec::MachineState& state, Outcome done) {
   return Complete(state, std::move(done));
 }
 
-Outcome Monitor::Complete(exec::MachineState& state, Outcome o) {
+Outcome Monitor::Complete(exec::MachineState& state, Outcome o, const runtime::GuestThread* thread) {
   const Frame f = Frame::Capture(state, 0);
-  if (host_io_trace_ && (o.detail.rfind("host ", 0) == 0 || o.verdict == Verdict::kUnsupported)) host_io_trace_(o.detail);
+  if (host_io_trace_) {
+    if (o.verdict == Verdict::kUnsupported) {
+      // Identical refusals can happen on every frame. Keep the first caller and count all calls in the report.
+      constexpr std::size_t kMaxTracedRefusals = 128;
+      if (traced_refusals_.size() < kMaxTracedRefusals && traced_refusals_.emplace(f.number, o.detail).second) {
+        std::string caller = " [guest resume pc 0x" + Hex(f.pc) + ", lr 0x" + Hex(state.r[14]);
+        if (thread != nullptr) caller += ", guest tid " + std::to_string(thread->tid);
+        host_io_trace_(o.detail + caller + "]");
+      }
+    } else if (o.detail.rfind("host ", 0) == 0 || o.detail.rfind("mmap2(MAP_FIXED", 0) == 0) {
+      host_io_trace_(o.detail);
+    }
+  }
   // Refusals and errno answers are recorded alongside the successes: the report's answer lines exist
   // so a run that died on an `openat` can say which path and why, not merely that openat happened.
   // Only four success sites called `Observe` before, so every refusal reached the report as a tally
@@ -2152,7 +2215,9 @@ Outcome Monitor::Complete(exec::MachineState& state, Outcome o) {
   // An mmap address above 0x80000000 is negative as an int32 and a success. rt_sigreturn's r0 is the
   // *interrupted* thread's register, restored from the frame, so a negative value there is not an error the
   // monitor answered. A refused rt_sigreturn (verdict kUnsupported) still counts.
-  if (LooksLikeError(o.r0) && !(o.verdict == Verdict::kEmulated && o.detail.rfind("rt_sigreturn:", 0) == 0)) {
+  const bool restored_signal = o.verdict == Verdict::kEmulated &&
+      (o.detail.rfind("rt_sigreturn:", 0) == 0 || o.detail.rfind("sigreturn:", 0) == 0);
+  if (LooksLikeError(o.r0) && !restored_signal) {
     ++refusals_;
     Observe(o.detail);
   }

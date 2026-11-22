@@ -355,27 +355,32 @@ struct HoloConfirm: View {
 
 /// The APK's own launcher image, read by the engine (rb_ios_apk_icon), decoded once per file and cached.
 final class IconStore: ObservableObject {
+    private static let queue = DispatchQueue(label: "com.retrobug.icons", qos: .utility)
     @Published private(set) var icons: [String: UIImage] = [:]
-    private var loading = Set<String>()
+    private var requests: [String: UUID] = [:]
 
     func icon(for url: URL) -> UIImage? { icons[url.path] }
 
+    func invalidate(_ url: URL) {
+        requests.removeValue(forKey: url.path)
+        icons.removeValue(forKey: url.path)
+    }
+
     func load(_ url: URL) {
         let key = url.path
-        if icons[key] != nil || loading.contains(key) { return }
-        loading.insert(key)
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        if requests[key] != nil { return }
+        let request = UUID()
+        requests[key] = request
+        Self.queue.async { [weak self] in
             var length: UInt32 = 0
             let bytes = key.withCString { rb_ios_apk_icon($0, &length) }
             var image: UIImage?
-            if let bytes = bytes, length > 0 {
-                let data = Data(bytes: bytes, count: Int(length))
-                rb_ios_free_bytes(UnsafeMutableRawPointer(bytes))
-                image = UIImage(data: data)
+            if let bytes = bytes {
+                defer { rb_ios_free_bytes(UnsafeMutableRawPointer(bytes)) }
+                if length > 0 { image = UIImage(data: Data(bytes: bytes, count: Int(length))) }
             }
             DispatchQueue.main.async {
-                guard let self = self else { return }
-                self.loading.remove(key)
+                guard let self = self, self.requests[key] == request else { return }
                 if let image = image { self.icons[key] = image }
             }
         }

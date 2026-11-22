@@ -38,6 +38,10 @@
 #include "rb/exec/interp.h"
 #include "rb/exec/trace.h"
 
+#include "dynarmic/common/fp/fpcr.h"
+#include "dynarmic/common/fp/fpsr.h"
+#include "dynarmic/common/fp/op/FPRecipEstimate.h"
+#include "dynarmic/common/fp/op/FPRecipStepFused.h"
 #include "dynarmic/common/variant_util.h"
 #include "dynarmic/frontend/A32/FPSCR.h"
 #include "dynarmic/frontend/A32/PSR.h"
@@ -49,6 +53,7 @@
 #include "dynarmic/ir/terminal.h"
 #include "dynarmic/ir/value.h"
 
+#include <array>
 #include <cfenv>
 #include <cmath>
 #include <cstdio>
@@ -686,18 +691,22 @@ unsigned LaneBits(Dynarmic::IR::Opcode op) {
   using Dynarmic::IR::Opcode;
   switch (op) {
     case Opcode::VectorAdd8: case Opcode::VectorSub8: case Opcode::VectorMultiply8:
+    case Opcode::VectorGreaterS8: case Opcode::VectorEqual8:
     case Opcode::VectorAbs8: case Opcode::VectorGetElement8: case Opcode::VectorSetElement8:
     case Opcode::VectorBroadcastElement8:
       return 8;
     case Opcode::VectorAdd16: case Opcode::VectorSub16: case Opcode::VectorMultiply16:
+    case Opcode::VectorGreaterS16: case Opcode::VectorEqual16:
     case Opcode::VectorAbs16: case Opcode::VectorGetElement16: case Opcode::VectorSetElement16:
     case Opcode::VectorBroadcastElement16:
       return 16;
     case Opcode::VectorAdd32: case Opcode::VectorSub32: case Opcode::VectorMultiply32:
+    case Opcode::VectorGreaterS32: case Opcode::VectorEqual32:
     case Opcode::VectorAbs32: case Opcode::VectorGetElement32: case Opcode::VectorSetElement32:
     case Opcode::VectorBroadcast32: case Opcode::VectorBroadcastElement32:
       return 32;
     case Opcode::VectorAdd64: case Opcode::VectorSub64: case Opcode::VectorMultiply64:
+    case Opcode::VectorGreaterS64: case Opcode::VectorEqual64:
     case Opcode::VectorAbs64: case Opcode::VectorGetElement64: case Opcode::VectorSetElement64:
     case Opcode::VectorBroadcast64: case Opcode::VectorBroadcastElement64:
       return 64;
@@ -812,9 +821,8 @@ std::uint64_t SignExtend(std::uint64_t value, unsigned from_bits, unsigned to_bi
 
 }  // namespace
 
-/// One basic block's interpretation, so that per-block state (temporaries, the recorded flags, the
-/// check bit) cannot leak into the next block and be read as if it belonged there. SSA values do not
-/// cross a block boundary: each block re-reads what it needs from CPSR or from its own registers.
+/// Interprets successive blocks using the same operand buffers. Each block starts with empty SSA
+/// slots and reads any state it needs from CPSR or the guest registers.
 class BlockRunner {
  public:
   BlockRunner(mem::GuestMemory& memory, MachineState& state, LocationDescriptor& location,
@@ -824,6 +832,9 @@ class BlockRunner {
   /// Returns false when execution must stop, with `stop` filled in. On true, `successor` is where to
   /// go next — already reflected in the location reference handed to the constructor.
   bool Run(const isa::TranslatedBlock& block, LocationDescriptor& successor) {
+    steps = 0;
+    check_bit = false;
+    svc_pending_ = false;
     // The IT state this block leaves behind. The translator advances IT per instruction, so the end
     // location carries the architecturally-correct value for "every instruction of this block ran" —
     // which is what anything following the block must resume with, including a target a `bx` inside
@@ -836,7 +847,7 @@ class BlockRunner {
     // and the alternative — a hash insertion and a hash lookup for every operand — was the dominant cost
     // of this interpreter).
     const std::size_t slots = block.ir.size() + 1;
-    temps_.assign(slots, V{});
+    temps_.resize(slots);  // temps_set_ gates reads, so existing operand storage needs no reset.
     temps_set_.assign(slots, std::uint8_t{0});
     produced_.assign(slots, std::optional<Flags>{});
     carry_.assign(slots, std::optional<bool>{});
@@ -1097,8 +1108,7 @@ class BlockRunner {
   mem::GuestMemory& memory_;
   MachineState& state_;
   LocationDescriptor& location_;
-  /// Passed in, not a member of this class: the exclusive reservation has to outlive a block, and this
-  /// object deliberately does not (see the comment on the class).
+  /// The exclusive reservation belongs to the executor and survives individual blocks.
   ExclusiveState& excl_;
   /// Value slots, indexed by the instruction's dense ordinal (`Inst::GetName`, assigned one per block in
   /// `isa::TranslateOne`). These were `std::unordered_map<const Inst*, …>` — a hash per operand read and
@@ -3015,6 +3025,34 @@ bool BlockRunner::Step(const Inst* inst) {
     // (`emit_x64_vector_floating_point.cpp:949-1010`): an unordered pair takes the default NaN, and the
     // equal case is `a & b` for max and `a | b` for min — the signed-zero rule `FpMax`/`FpMin` already
     // encode, so the equal case needs no separate branch here.
+    case Opcode::FPVectorRecipEstimate32:
+    case Opcode::FPVectorRecipStepFused32: {
+      const bool estimate = inst->GetOpcode() == Opcode::FPVectorRecipEstimate32;
+      V a{}, b{};
+      std::uint8_t controlled = 0;
+      if (!W128(inst, 0, a) || (!estimate && !W128(inst, 1, b)) ||
+          !ByteArg(inst, estimate ? 1 : 2, controlled)) return false;
+      const Dynarmic::FP::FPCR fpcr{state_.fpscr};
+      const auto mode = controlled ? fpcr : fpcr.ASIMDStandardValue();
+      Dynarmic::FP::FPSR status;
+      using Lanes = std::array<std::uint32_t, 4>;
+      const auto left = AsBits<Lanes>(a);
+      const auto right = AsBits<Lanes>(b);
+      Lanes result{};
+      // The A32 front end represents D registers as zero-extended Q values. The padding must not
+      // contribute a divide-by-zero flag when VRECPE processes a D register.
+      const Inst* source = inst->GetArg(0).GetInst();
+      const bool is_double = source->GetOpcode() == Opcode::A32GetVector &&
+                             Dynarmic::A32::IsDoubleExtReg(source->GetArg(0).GetA32ExtRegRef());
+      const unsigned lanes = is_double ? 2 : 4;
+      for (unsigned i = 0; i < lanes; ++i) {
+        result[i] = estimate ? Dynarmic::FP::FPRecipEstimate(left[i], mode, status)
+                             : Dynarmic::FP::FPRecipStepFused(left[i], right[i], mode, status);
+      }
+      state_.fpscr |= status.Value() & kFpStickyMask;
+      Put(inst, AsBits<V>(result));
+      return true;
+    }
     case Opcode::FPVectorAdd32: case Opcode::FPVectorSub32:
     case Opcode::FPVectorMul32: case Opcode::FPVectorDiv32: {
       // Blocky Roads stopped here (`FPVectorMul32: no Tier I semantics yet`). The scalar forms already
@@ -3338,6 +3376,44 @@ bool BlockRunner::Step(const Inst* inst) {
                         "double-precision NEON lanes, and an ARMv7 guest can encode neither; the 32-bit "
                         "plain vmax/vmin is the form that exists there and it is implemented");
 
+    case Opcode::VectorGreaterS8: case Opcode::VectorGreaterS16:
+    case Opcode::VectorGreaterS32: case Opcode::VectorGreaterS64:
+    case Opcode::VectorEqual8: case Opcode::VectorEqual16:
+    case Opcode::VectorEqual32: case Opcode::VectorEqual64: {
+      V a{}, b{};
+      if (!W128(inst, 0, a) || !W128(inst, 1, b)) return false;
+      const auto op = inst->GetOpcode();
+      const unsigned bits = LaneBits(op);
+      const std::uint64_t mask = bits == 64 ? UINT64_MAX : (1ull << bits) - 1;
+      const bool equal = op == Opcode::VectorEqual8 || op == Opcode::VectorEqual16 ||
+                         op == Opcode::VectorEqual32 || op == Opcode::VectorEqual64;
+      const auto compare = [&](std::uint64_t left, std::uint64_t right) {
+        std::uint64_t result = 0;
+        for (unsigned shift = 0; shift < 64; shift += bits) {
+          const auto x = (left >> shift) & mask;
+          const auto y = (right >> shift) & mask;
+          if (equal ? x == y : SignedAt(x, bits) > SignedAt(y, bits)) result |= mask << shift;
+        }
+        return result;
+      };
+      Put(inst, V{compare(a.lo, b.lo), compare(a.hi, b.hi)});
+      return true;
+    }
+    case Opcode::VectorExtractLower:
+    case Opcode::VectorExtract: {
+      V first{}, second{}, out{};
+      std::uint8_t bits = 0;
+      if (!W128(inst, 0, first) || !W128(inst, 1, second) || !ByteArg(inst, 2, bits)) return false;
+      const unsigned width = inst->GetOpcode() == Opcode::VectorExtractLower ? 8 : 16;
+      const unsigned offset = bits / 8;
+      if (bits % 8 != 0 || offset >= width) return Fail(inst, "invalid vector extract offset");
+      const unsigned from_first = width - offset;
+      auto* result = reinterpret_cast<std::uint8_t*>(&out);
+      std::memcpy(result, reinterpret_cast<const std::uint8_t*>(&first) + offset, from_first);
+      std::memcpy(result + from_first, &second, offset);
+      Put(inst, out);
+      return true;
+    }
     case Opcode::VectorGetElement8: case Opcode::VectorGetElement16:
     case Opcode::VectorGetElement32: case Opcode::VectorGetElement64: {
       const unsigned bits = LaneBits(inst->GetOpcode());
@@ -3494,14 +3570,17 @@ RunResult InterpExecutor::Run(MachineState& state, unsigned max_instructions) {
   unsigned steps = 0;
   // A member, not a function-local static: one executor per process serves every guest thread (under the
   // GGL), and two processes must not share one trace counter.
-  const unsigned run_index = ++run_index_;
-  const char* tenv = std::getenv("RB_T1_TRACE");
-  const bool trace = tenv != nullptr && static_cast<unsigned>(std::atoi(tenv)) == run_index;
+  static const unsigned trace_run = [] {
+    const char* value = std::getenv("RB_T1_TRACE");
+    return value == nullptr ? 0u : static_cast<unsigned>(std::atoi(value));
+  }();
+  const bool trace = trace_run != 0 && ++run_index_ == trace_run;
   unsigned shown = 0;
   // The IT state CPSR leaves this Run with: the entry descriptor's until a block runs, then the
   // successor's at each block boundary and the stopping block's end IT for a mid-block halt. The
   // tail folds it into CPSR — see the fold's comment below for why the fold exists at all.
   std::uint8_t it_fold = location.IT().Value();
+  BlockRunner runner{memory_, state, location, excl_};
   while (steps < max_instructions) {
     if (location.PC() == return_address_) {
       result.reason = StopReason::Returned;
@@ -3524,16 +3603,20 @@ RunResult InterpExecutor::Run(MachineState& state, unsigned max_instructions) {
     // cache. See the class comment in interp.h.
     const BlockKey key = MakeKey(location);
     const bool cacheable = (memory_.ProtAt(location.PC()) & mem::kWrite) == 0;
-    std::shared_ptr<isa::TranslatedBlock> block;
+    const isa::TranslatedBlock* block = nullptr;
+    std::shared_ptr<isa::TranslatedBlock> uncached;
+    const std::size_t recent_index = ((key.pc >> 1) ^ (key.pc >> 9)) % recent_blocks_.size();
+    auto& recent = recent_blocks_[recent_index];
     if (cacheable) {
-      const auto it = blocks_.find(key);
-      if (it != blocks_.end()) {
-        block = it->second.block;
+      if (recent.block != nullptr && recent.key == key) {
+        block = recent.block;
+      } else if (const auto it = blocks_.find(key); it != blocks_.end()) {
+        block = it->second.block.get();
       } else if (const auto old = blocks_old_.find(key); old != blocks_old_.end()) {
         // A hit in the previous generation: promote it, so a loop that was re-entered after a demotion
         // does not have to survive another one to stay cached.
-        block = old->second.block;
-        blocks_.emplace(key, CachedBlock{block});
+        block = old->second.block.get();
+        blocks_.emplace(key, std::move(old->second));
         blocks_old_.erase(old);
       }
     }
@@ -3545,7 +3628,8 @@ RunResult InterpExecutor::Run(MachineState& state, unsigned max_instructions) {
         result.detail = std::move(err);
         break;
       }
-      block = std::make_shared<isa::TranslatedBlock>(std::move(*translated));
+      uncached = std::make_shared<isa::TranslatedBlock>(std::move(*translated));
+      block = uncached.get();
       // AOT task 4: a translate miss is a block start. That is true for the first execution of a
       // cacheable block and for every execution of one in a writable page (never cached), and it is the
       // path the AOT executor's dispatcher falls back through. Cache *hits* deliberately do not record:
@@ -3559,12 +3643,14 @@ RunResult InterpExecutor::Run(MachineState& state, unsigned max_instructions) {
           // filled, so a working set slightly larger than the cap re-translated its hot code forever.
           // Demoting the young generation keeps everything the previous generation held for one more
           // pass, which is what an inner loop interleaved with a large working set needs.
+          recent_blocks_.fill({});
           blocks_old_ = std::move(blocks_);
           blocks_.clear();
         }
-        blocks_.emplace(key, CachedBlock{block});
+        blocks_.emplace(key, CachedBlock{std::move(uncached)});
       }
     }
+    if (cacheable) recent = {key, block};
 
     // A predicated *block*, not merely a predicated terminal. Dynarmic's A32 translator splits an IT
     // sequence into one block per leg: the block carries `GetCondition()` and a
@@ -3578,6 +3664,7 @@ RunResult InterpExecutor::Run(MachineState& state, unsigned max_instructions) {
     // 1012 where silicon returns 42, which is precisely "both legs of `ite gt` ran, and the last one
     // won". `docs/32` §2.1 predicted this class of defect from bionic's 8,387 IT instructions; it is no
     // longer a prediction.
+    // Running a block does not change the cache. Cache hits borrow its block until the next iteration.
     const Dynarmic::IR::Cond entry_cond = block->ir.GetCondition();
     if (entry_cond != Dynarmic::IR::Cond::AL) {
       if (!Holds(entry_cond, Flags::from_cpsr(state.cpsr))) {
@@ -3603,7 +3690,6 @@ RunResult InterpExecutor::Run(MachineState& state, unsigned max_instructions) {
       }
     }
 
-    BlockRunner runner{memory_, state, location, excl_};
     LocationDescriptor successor{location};
     const bool contd = trace && ++shown <= 25;
     if (contd) {
@@ -3678,6 +3764,7 @@ void InterpExecutor::Invalidate(GuestAddr from, GuestAddr to) {
   // flushes from there — an address-only comparison left the stale block in place). Flushes are page-
   // granular in practice, so evicting every block that starts on a touched page is both correct and cheap.
   if (from >= to) return;
+  recent_blocks_.fill({});
   const GuestAddr from_page = from & ~static_cast<GuestAddr>(mem::kGuestPage - 1);
   const GuestAddr to_page = (to + mem::kGuestPage - 1) & ~static_cast<GuestAddr>(mem::kGuestPage - 1);
   for (auto it = blocks_.begin(); it != blocks_.end();) {

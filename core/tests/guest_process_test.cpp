@@ -26,6 +26,7 @@
  */
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -129,6 +130,7 @@ struct Booted {
   std::unique_ptr<GuestProcess> p;
   std::string err;
   std::vector<std::string> host_asked;
+  std::shared_ptr<std::vector<std::string>> log = std::make_shared<std::vector<std::string>>();
 };
 
 Booted Boot(int tier, const std::vector<std::uint8_t>& libc, const std::vector<std::uint8_t>& libm,
@@ -149,7 +151,7 @@ Booted Boot(int tier, const std::vector<std::uint8_t>& libc, const std::vector<s
   opts.ctor_tier = tier;
   // The process's own report lines: printed for the first boot (so a run shows what was built) and for
   // any boot that fails; kept quiet otherwise, since every row boots its own process.
-  auto lines = std::make_shared<std::vector<std::string>>();
+  auto lines = b.log;
   opts.log = [lines](const std::string& line) { lines->push_back(line); };
   opts.host_resolver = [holder, asked](const std::string& name) -> std::optional<exec::GuestAddr> {
     asked->push_back(name);
@@ -537,9 +539,27 @@ void faulted_constructors_are_not_rerun(const Images& im, int tier) {
                again.c_str());
 }
 
+void fault_log_names_guest_location(const Images& im, int tier) {
+  Booted b = Boot(tier, im.libc, im.libm, im.libz);
+  CHECK_CTX(b.p != nullptr, b.err);
+  if (!b.p) return;
+  const auto call = CallLibc(*b.p, tier, "strlen", {abi::Value32::Ptr(0)}, "IL");
+  CHECK_CTX(!call.ok, call.why);
+  const std::string tid = "guest tid " + std::to_string(GuestProcess::kMainTid);
+  CHECK_CTX(std::any_of(b.log->begin(), b.log->end(), [&](const std::string& line) {
+    return line.starts_with("signals: SIGSEGV at ") && line.find("interrupted pc ") != std::string::npos &&
+           line.find("libc.so+") != std::string::npos && line.find(tid) != std::string::npos &&
+           line.find("not delivered: no handler") != std::string::npos;
+  }), call.why);
+}
+
 }  // namespace
 
 int main() {
+  const auto cpuinfo = GuestProcess::CpuInfo(2);
+  CHECK(cpuinfo.find("Features\t: vfp neon vfpv3 tls vfpv4 idiva idivt\n") != std::string::npos);
+  CHECK(cpuinfo.find("processor\t: 1\n") != std::string::npos);
+  CHECK(cpuinfo.find("asimd") == std::string::npos);
   const Images im = LoadImages();
   if (im.ok) {
     for (int tier : {1, 2}) {
@@ -548,6 +568,7 @@ int main() {
       static_tls_fields_match_libc(im, tier);
       libc_thread_locals_live_in_libcs_own_tls_block(im, tier);
       faulted_constructors_are_not_rerun(im, tier);
+      fault_log_names_guest_location(im, tier);
     }
     a_different_libc_layout_is_refused_by_name(im);
     find_local_symbol(im);

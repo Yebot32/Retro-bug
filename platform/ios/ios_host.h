@@ -73,8 +73,8 @@ class IosHost {
   std::optional<std::uint32_t> Resolve(const std::string& name);
 
   abi::HandleTable& handles() { return handles_; }
-  /// Copies `text` into guest memory once per `key` and returns its guest address; 0 when none is left.
-  std::uint32_t GuestString(const std::string& key, const std::string& text);
+  /// Interns a driver string in guest memory; 0 when none is left.
+  std::uint32_t GuestString(const std::string& text);
 
   /// A hand-written thunk. Register before Resolve sees the name; a special wins over the shared table.
   void AddSpecial(const std::string& name, Special fn) { specials_[name] = std::move(fn); }
@@ -105,6 +105,7 @@ class IosHost {
   std::map<std::string, Special> specials_;
   std::map<std::string, std::uint32_t> slots_;
   std::map<std::string, std::uint32_t> strings_;
+  std::uint32_t string_next_ = 0, string_bytes_left_ = 0;
   std::set<std::string> refused_;  ///< names already reported once (a refusal is a log line, not a flood)
   std::array<RecentHostCall, kRecentCalls> recent_{};
   std::atomic<std::uint32_t> recent_next_{0};  ///< relaxed: the crash reader accepts a torn tail
