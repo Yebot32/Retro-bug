@@ -74,7 +74,7 @@ jobs:
   darwin-host:
     name: macOS host — platform seam + boot compile + layering
     if: github.event_name == 'workflow_dispatch'
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -113,7 +113,7 @@ jobs:
   ios-compile:
     name: iOS — the same core compiles for arm64
     if: github.event_name == 'workflow_dispatch'
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
         with:

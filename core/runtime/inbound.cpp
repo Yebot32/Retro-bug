@@ -170,7 +170,7 @@ void Inbound::Fail(const InboundTarget& t, const std::string& why) {
   java_.DeleteLocalRef(cls);
 }
 
-std::uint64_t Inbound::Dispatch(const InboundTarget& t, const CapturedArgs& captured) {
+std::uint64_t Inbound::Dispatch(const InboundTarget& t, const CapturedArgs& captured, std::string* error) {
   using abi::Value32;
   CapturedArgs a = captured;
   if (adapt_) adapt_(t, a);
@@ -216,6 +216,7 @@ std::uint64_t Inbound::Dispatch(const InboundTarget& t, const CapturedArgs& capt
   if (!e.empty()) {
     fwd_.PopFrame(0);
     Fail(t, e);
+    if (error != nullptr) *error = e;
     return 0;
   }
   fwd_.ArgumentsIn();
@@ -239,6 +240,7 @@ std::uint64_t Inbound::Dispatch(const InboundTarget& t, const CapturedArgs& capt
                         rb::runtime::CurrentGuestThread(), why);
     }
     Fail(t, why);
+    if (error != nullptr) *error = why;
     return 0;
   }
   fwd_.SyncShadows();  // the guest's writes to a shadowed direct buffer reach Java before it reads them
@@ -246,6 +248,7 @@ std::uint64_t Inbound::Dispatch(const InboundTarget& t, const CapturedArgs& capt
   const abi::HostRef result = fwd_.PopFrame(ret == 'L' ? r.w() : 0, &pe);
   if (!pe.empty()) {
     Fail(t, "its return value: " + pe);
+    if (error != nullptr) *error = "its return value: " + pe;
     return 0;
   }
   switch (ret) {

@@ -111,7 +111,7 @@ std::uint64_t Boot::CallNative(const std::string& name_sig, std::uintptr_t cls,
   for (std::size_t i = 0; i < args.size(); ++i) captured.x[2 + i] = args[i];
   captured.stack = nullptr;
   if (err != nullptr) err->clear();
-  return inbound_->Dispatch(target, captured);
+  return inbound_->Dispatch(target, captured, err);
 }
 
 bool Boot::BootBridge(std::string* out) {

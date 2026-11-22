@@ -790,6 +790,35 @@ std::optional<std::uint32_t> IosHost::Resolve(const std::string& name) {
   return p_.abi().SlotFor(index);
 }
 
+void IosHost::EnableUnityWindow(int width, int height) {
+  UpdateUnityWindowSize(width, height);
+  AddSpecial("ANativeWindow_fromSurface", [this](exec::MachineState& s, std::string*) {
+    s.r[0] = s.r[1] != 0 ? handles_.Put(&unity_window_size_) : 0;
+    return true;
+  });
+  for (const char* name : {"ANativeWindow_acquire", "ANativeWindow_release"}) {
+    // iOS owns the drawable for the lifetime of this session.
+    AddSpecial(name, [](exec::MachineState&, std::string*) { return true; });
+  }
+  for (std::size_t axis = 0; axis < unity_window_size_.size(); ++axis) {
+    AddSpecial(axis == 0 ? "ANativeWindow_getWidth" : "ANativeWindow_getHeight",
+               [this, axis](exec::MachineState& s, std::string*) {
+      void* window = nullptr;
+      s.r[0] = handles_.Get(s.r[0], &window) && window == &unity_window_size_
+          ? static_cast<std::uint32_t>(unity_window_size_[axis]) : 0;
+      return true;
+    });
+  }
+  AddSpecial("ANativeWindow_setBuffersGeometry", [this](exec::MachineState& s, std::string*) {
+    void* window = nullptr;
+    const bool size_ok = (s.r[1] == 0 || s.r[1] == static_cast<std::uint32_t>(unity_window_size_[0])) &&
+                         (s.r[2] == 0 || s.r[2] == static_cast<std::uint32_t>(unity_window_size_[1]));
+    s.r[0] = handles_.Get(s.r[0], &window) && window == &unity_window_size_ && size_ok
+        ? 0 : static_cast<std::uint32_t>(-22);  // Android EINVAL
+    return true;
+  });
+}
+
 std::vector<std::string> IosHost::CallCountLines() const {
   std::vector<std::pair<std::string, std::uint64_t>> counts;
   {

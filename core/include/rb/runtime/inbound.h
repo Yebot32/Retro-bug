@@ -59,7 +59,7 @@ class Inbound {
   /// shorty is not one or the pool (kPoolSize) is exhausted.
   void* BindPool(const InboundTarget& t, std::string* err);
   /// Runs `t` with the captured arguments; the result as raw bits (a reference as a real local's bits).
-  std::uint64_t Dispatch(const InboundTarget& t, const CapturedArgs& a);
+  std::uint64_t Dispatch(const InboundTarget& t, const CapturedArgs& a, std::string* error = nullptr);
 
   /// What a guest `exit`/`exit_group` inside a native does on the host (default: a pending java.lang.Error naming
   /// it; the runtime installs `_exit`, which is what the same call does on a device).

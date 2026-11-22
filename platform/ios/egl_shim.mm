@@ -573,6 +573,7 @@ std::uint32_t EglShim::SwapBuffers(void* display, void* surface) {
     error_ = kBadSurface;
     return 0;
   }
+  presents_.fetch_add(1, std::memory_order_relaxed);
   return 1;
 }
 

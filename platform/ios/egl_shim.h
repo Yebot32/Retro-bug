@@ -10,6 +10,7 @@
 #pragma once
 
 #include <cstdint>
+#include <atomic>
 #include <functional>
 #include <string>
 
@@ -30,6 +31,7 @@ class EglShim {
   [[nodiscard]] bool has_layer() const { return layer_ != nullptr; }
   [[nodiscard]] int width() const { return width_; }
   [[nodiscard]] int height() const { return height_; }
+  [[nodiscard]] std::uint64_t presents() const { return presents_.load(std::memory_order_relaxed); }
 
   /// The host function for an `egl*` name the guest imports, or nullptr when this shim does not implement
   /// it. GL names are answered by `GlSymbol` (gl_symbols.mm), not here.
@@ -92,6 +94,7 @@ class EglShim {
   void* last_made_current_ = nullptr;  ///< the context the last logged make-current named
   int client_version_ = 1;
   int width_ = 0, height_ = 0;
+  std::atomic<std::uint64_t> presents_{0};
   std::uint32_t framebuffer_ = 0, color_buffer_ = 0, depth_buffer_ = 0;
   bool drawable_ready_ = false;
   std::int32_t swap_interval_ = 1;

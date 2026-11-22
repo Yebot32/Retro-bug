@@ -65,6 +65,7 @@
 #include "rb/runtime/guest_thread.h"
 #include "rb/runtime/inbound.h"
 #include "text_render.h"
+#include "unity_bootstrap.h"
 
 /// Defined by the AOT runtime: arms the raw-fd entry breadcrumbs (aot.cpp).
 extern "C" void rb_aot_set_debug_fd(int fd, int budget);
@@ -423,10 +424,9 @@ struct RbIosSession {
   std::unique_ptr<rb::platform::ios::DlglBootstrap> dlgl;  ///< KitKat Challenge's DLGE engine, when that is the lib
   std::unique_ptr<rb::platform::ios::PikPokBootstrap> pikpok;  ///< OREO/Turbo's Mab engine
   std::unique_ptr<rb::platform::ios::HalfbrickBootstrap> halfbrick;  ///< Fruit Ninja's Mortar engine
+  std::unique_ptr<rb::platform::ios::UnityBootstrap> unity;
+  bool unity_apk = false;
   bool dlgl_apk = false;  ///< the APK ships assets/rb32/libdlgl.so: boot the whole DLGE Java load order
-  /// Set at creation for an APK whose engine this host cannot drive (Unity): the render thread refuses
-  /// with this line rather than loading tens of megabytes and failing at a made-up entry point.
-  std::string unsupported;
   bool booted = false;  ///< render thread only
   bool runtime_jit = true;  ///< configured before the render thread starts
   const bool profile_pc = std::getenv("RB_PROFILE_PC") != nullptr;
@@ -583,6 +583,12 @@ bool RbIosSession::Boot(std::string* err) {
   cfg.enable_jit = false;
   cfg.monitor = false;
   cfg.log = [self](const std::string& line) { self->Log(line); };
+  if (self->unity_apk) {
+    cfg.on_guest_exit = [self](int status) {
+      self->Fail("Unity guest exited with status " + std::to_string(status));
+      self->running.store(false);
+    };
+  }
   cfg.make_java = [self, env](std::string*) -> std::unique_ptr<rb::abi::HostJava> {
     auto java = std::make_unique<rb::java::TableJava>();
     java->set_define_unknown_classes(self->stock_apk);
@@ -592,6 +598,7 @@ bool RbIosSession::Boot(std::string* err) {
     rb::java::InstallBlockyroads(*java, env);
     rb::java::InstallPikPok(*java, env);
     rb::java::InstallHalfbrick(*java);
+    if (self->unity_apk) rb::platform::ios::UnityBootstrap::InstallJava(*java, self->apk);
     self->java = java.get();
     java->set_trace([self](const std::string& line) { self->Log(line); });
     // The first Java calls of a session are named in full: a title whose own Java does not run here can
@@ -623,6 +630,7 @@ bool RbIosSession::Boot(std::string* err) {
   cfg.on_bridge = [self](rb::host::Boot& boot, rb::runtime::GuestProcess& process) {
     self->host = std::make_unique<rb::platform::ios::IosHost>(
         process, boot, [self](const std::string& line) { self->Log(line); });
+    if (self->unity_apk) self->host->EnableUnityWindow(self->width, self->height);
     std::string why;
     if (!self->host->OpenApk(self->apk, &why)) self->Log("assets: " + why);
     // Files are the host's, as on the Android launcher: a game's own code reads and writes its sandbox
@@ -846,7 +854,10 @@ bool RbIosSession::Boot(std::string* err) {
   const auto exports = [module](const char* name) {
     return module != nullptr && module->FindExport(name).has_value();
   };
-  if (dlgl_apk || lib == "libdlgl.so") {
+  if (unity_apk) {
+    unity = std::make_unique<rb::platform::ios::UnityBootstrap>(*boot, *java);
+    self->Log("engine: experimental UnityPlayer lifecycle");
+  } else if (dlgl_apk || lib == "libdlgl.so") {
     dlgl = std::make_unique<rb::platform::ios::DlglBootstrap>(
         *java, boot->jni()->env(), lib, [self](const std::string& line) { self->Log(line); });
     self->Log("engine: DLGE (natives registered in JNI_OnLoad)");
@@ -917,10 +928,10 @@ extern "C" RbIosSession* rb_ios_create(const char* apk_path, const char* lib_nam
           }
         }
         if (pick.empty()) continue;
-        s->lib = pick;
+        s->lib = layout_unity ? "libunity.so" : pick;
         s->lib_dir = prefix;
         unity = layout_unity;
-        s->Log("auto: " + pick + " (" + std::to_string(best) + " bytes) from " + prefix);
+        s->Log("auto: " + s->lib + " from " + prefix);
         break;
       }
     } else {
@@ -933,11 +944,7 @@ extern "C" RbIosSession* rb_ios_create(const char* apk_path, const char* lib_nam
     }
   }
   s->stock_apk = s->lib_dir != "assets/rb32/";
-  if (unity) {
-    s->unsupported =
-        "engine: Unity — its entry is libunity.so and the Java layer (UnityPlayer) needs an Android VM this "
-        "host does not have; loading the native engine alone cannot draw a frame";
-  }
+  s->unity_apk = unity || s->lib == "libunity.so";
   s->data_dir = data_dir != nullptr ? data_dir : "";
   s->client_version = client_version == 1 ? 1 : 2;
   s->dlgl_apk = rb::host::Boot::BundlesDlgl(s->apk);
@@ -1047,11 +1054,6 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
     try {
       static std::atomic<bool> probed{false};
       if (!probed.exchange(true)) ProbeWindowMemory(s);
-      if (!s->unsupported.empty()) {
-        s->Fail(s->unsupported);
-        s->running.store(false);
-        return;
-      }
       if (!s->booted) {
         s->Log("game: booting " + s->apk + " lib=" + s->lib);
         if (!s->Boot(&why)) {
@@ -1069,14 +1071,17 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
         s->running.store(false);
         return;
       }
+      if (s->unity) s->host->UpdateUnityWindowSize(egl.width(), egl.height());
       const bool started = s->dlgl        ? s->dlgl->Start(s->apk, s->width, s->height, &why)
                            : s->pikpok    ? s->pikpok->Start(s->apk, s->width, s->height, &why)
                            : s->halfbrick ? s->halfbrick->Start(s->apk, s->width, s->height, &why)
+                           : s->unity     ? s->unity->Start(s->apk, &why)
                                           : s->game->Start(s->apk, s->width, s->height, &why);
       if (!started) {
         s->Fail(std::string{s->dlgl        ? "dlxInit"
                             : s->pikpok    ? "initApplication"
                             : s->halfbrick ? "SystemInit"
+                            : s->unity     ? "Unity startup"
                                            : "nativeInit"} +
                 ": " + why);
         egl.ReleaseThread();
@@ -1093,14 +1098,20 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
             if (s->dlgl) s->dlgl->Resume(&e);
             else if (s->pikpok) s->pikpok->Resume(&e);
             else if (s->halfbrick) s->halfbrick->Resume(&e);
+            else if (s->unity) s->unity->Resume(&e);
             else s->game->Resume(&e);
             s->Log("resume");
           } else {
             if (s->dlgl) s->dlgl->Pause(&e);
             else if (s->pikpok) s->pikpok->Pause(&e);
             else if (s->halfbrick) s->halfbrick->Pause(&e);
+            else if (s->unity) s->unity->Pause(&e);
             else s->game->Pause(&e);
             s->Log("pause");
+          }
+          if (s->unity && !e.empty()) {
+            s->Fail(e);
+            break;
           }
           app_paused = !want;
         }
@@ -1114,6 +1125,7 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
           queued.swap(s->touches);
         }
         for (const RbIosSession::Touch& t : queued) {
+          if (s->unity) break;  // Unity's Android MotionEvent bridge is a separate step.
           if (s->dlgl || s->pikpok || s->halfbrick) {
             // Android's MotionEvent action: down 0, up 1, move 2, cancel 3.
             const int action = t.kind == 0 ? 0 : t.kind == 1 ? 2 : t.kind == 2 ? 1 : 3;
@@ -1130,15 +1142,21 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
           }
         }
         const auto render_start = std::chrono::steady_clock::now();
+        const auto presents_before = egl.presents();
         const bool rendered = s->dlgl        ? s->dlgl->Render(&why)
                               : s->pikpok    ? s->pikpok->Render(&why)
                               : s->halfbrick ? s->halfbrick->Render(&why)
+                              : s->unity     ? s->unity->Render(&why)
                                              : s->game->Render(&why);
         const auto render_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                    std::chrono::steady_clock::now() - render_start).count();
         if (!rendered) {
           s->Fail(std::string{s->dlgl ? "dlxDraw" : "nativeRender"} + ": " + why);
           break;
+        }
+        if (s->unity && egl.presents() == presents_before) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          continue;
         }
         const int next_frame = s->frames.load() + 1;
         if (render_ms >= 2000) {
@@ -1147,12 +1165,12 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
           s->Log("render: frame " + std::to_string(next_frame) + " spent " + std::to_string(render_ms) +
                  " ms in the guest");
         }
-        if (next_frame == 1 || next_frame == 10 || next_frame == 60 || next_frame == 300) {
+        if (!s->unity && (next_frame == 1 || next_frame == 10 || next_frame == 60 || next_frame == 300)) {
           std::string pixels;
           egl.SamplePixels(&pixels);
           s->Log("frame " + std::to_string(next_frame) + " pixels: " + pixels);
         }
-        if (!egl.Present(&why)) {
+        if (!s->unity && !egl.Present(&why)) {
           s->Fail("eglSwapBuffers: " + why);
           break;
         }
@@ -1214,6 +1232,7 @@ extern "C" void rb_ios_destroy(RbIosSession* s) {
   s->process.store(nullptr, std::memory_order_release);  // no report may reach a process about to go
   rb::platform::ios::EglShim::Instance().Detach();
   s->game.reset();
+  s->unity.reset();
   s->host.reset();
   s->boot.reset();
   s->Log("destroy");

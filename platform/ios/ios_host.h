@@ -83,6 +83,8 @@ class IosHost {
 
   /// The APK whose assets the guest's AAsset* calls read. Call before the guest's libraries load.
   bool OpenApk(const std::string& path, std::string* err);
+  void EnableUnityWindow(int width, int height);
+  void UpdateUnityWindowSize(int width, int height) { unity_window_size_ = {width, height}; }
 
   /// The ring `DumpRecentHostCalls` reads. `written` is monotonic; slot = n % kRecentCalls.
   static constexpr std::uint32_t kRecentCalls = 256;
@@ -118,6 +120,7 @@ class IosHost {
   bool FirstRefusal(const std::string& name);
   std::unique_ptr<rb::loader::ApkArchive> archive_;
   int asset_manager_marker_ = 0;
+  std::array<int, 2> unity_window_size_{};
   /// Assets are opened and closed by several guest threads at once. Ownership is shared so that a close
   /// on one thread cannot free an ApkFile while another is inside `AAsset_read` on the same handle — a
   /// use-after-free that killed Blocky Roads ~30 s into loading its 31 MB asset archive. The mutex guards
