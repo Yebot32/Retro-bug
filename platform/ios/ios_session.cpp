@@ -1313,6 +1313,7 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
       }
       s->Log("started: " + std::to_string(s->width) + "x" + std::to_string(s->height));
       bool app_paused = false;
+      std::vector<RbIosSession::Touch> queued;
       while (s->running.load()) {
         const bool want = s->want_run.load();
         if (want != !app_paused) {
@@ -1345,7 +1346,7 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
           continue;
         }
         s->host->PumpAudio();
-        std::vector<RbIosSession::Touch> queued;
+        queued.clear();
         {
           std::lock_guard<std::mutex> lk(s->touch_mu);
           queued.swap(s->touches);

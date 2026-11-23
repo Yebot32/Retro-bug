@@ -20,11 +20,7 @@ struct SettingsView: View {
     @AppStorage("runtimeJit") private var runtimeJit = true
 
     private var versionLine: String {
-        let info = Bundle.main.infoDictionary ?? [:]
-        let version = info["CFBundleShortVersionString"] as? String ?? "?"
-        let build = info["CFBundleVersion"] as? String ?? "?"
-        let commit = info["RBGitCommit"] as? String ?? "?"
-        return "\(version) (\(build)) · \(commit)"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
     }
 
     var body: some View {
