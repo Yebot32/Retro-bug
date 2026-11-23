@@ -96,6 +96,112 @@ bool GlBufferBound(std::uint32_t binding) {
   return buffer != 0;
 }
 
+unsigned PixelBytes(GLenum format, GLenum type) {
+  switch (type) {
+    case GL_UNSIGNED_SHORT_5_6_5:
+    case GL_UNSIGNED_SHORT_4_4_4_4:
+    case GL_UNSIGNED_SHORT_5_5_5_1: return 2;
+    case GL_UNSIGNED_INT_2_10_10_10_REV:
+    case GL_UNSIGNED_INT_10F_11F_11F_REV:
+    case GL_UNSIGNED_INT_5_9_9_9_REV:
+    case GL_UNSIGNED_INT_24_8: return 4;
+    case GL_FLOAT_32_UNSIGNED_INT_24_8_REV: return 8;
+  }
+  unsigned components = 0;
+  switch (format) {
+    case GL_RED:
+    case GL_RED_INTEGER:
+    case GL_ALPHA:
+    case GL_LUMINANCE:
+    case GL_DEPTH_COMPONENT: components = 1; break;
+    case GL_RG:
+    case GL_RG_INTEGER:
+    case GL_LUMINANCE_ALPHA: components = 2; break;
+    case GL_RGB:
+    case GL_RGB_INTEGER: components = 3; break;
+    case GL_RGBA:
+    case GL_RGBA_INTEGER:
+    case 0x80e1: components = 4; break;  // GL_BGRA_EXT
+  }
+  switch (type) {
+    case GL_BYTE:
+    case GL_UNSIGNED_BYTE: return components;
+    case GL_SHORT:
+    case GL_UNSIGNED_SHORT:
+    case GL_HALF_FLOAT:
+    case 0x8d61: return 2 * components;  // GL_HALF_FLOAT_OES
+    case GL_INT:
+    case GL_UNSIGNED_INT:
+    case GL_FLOAT: return 4 * components;
+    default: return 0;
+  }
+}
+
+bool TextureUpload(bool sub_image, exec::MachineState& s, const mem::GuestMemory& memory,
+                   std::string* why) {
+  std::uint32_t tail[5];  // AAPCS32 passes arguments 5–9 on the guest stack.
+  if (!memory.Read(s.r[13], tail, sizeof tail)) {
+    *why = "texture upload arguments are not readable guest memory";
+    return false;
+  }
+  const auto width = static_cast<GLsizei>(sub_image ? tail[0] : s.r[3]);
+  const auto height = static_cast<GLsizei>(sub_image ? tail[1] : tail[0]);
+  const GLenum format = tail[2], type = tail[3];
+  const std::uint32_t address = tail[4];
+  const bool es3 = EglShim::Instance().context_version() >= 3;
+  const void* pixels = nullptr;
+  // The driver consumes client pixels synchronously. Copy through GuestMemory when an upload spans
+  // pages so Darwin's split 4 KiB guest mappings need not be adjacent in host memory.
+  thread_local std::vector<std::uint8_t> staging;
+  if (es3 && GlBufferBound(GL_PIXEL_UNPACK_BUFFER_BINDING)) {
+    pixels = reinterpret_cast<const void*>(static_cast<std::uintptr_t>(address));
+  } else if (address != 0 && width > 0 && height > 0) {
+    const auto bpp = PixelBytes(format, type);
+    GLint alignment = 4, row_length = 0, skip_rows = 0, skip_pixels = 0;
+    glGetIntegerv(GL_UNPACK_ALIGNMENT, &alignment);
+    if (es3) {
+      glGetIntegerv(GL_UNPACK_ROW_LENGTH, &row_length);
+      glGetIntegerv(GL_UNPACK_SKIP_ROWS, &skip_rows);
+      glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &skip_pixels);
+    }
+    if (bpp == 0 || alignment <= 0 || row_length < 0 || skip_rows < 0 || skip_pixels < 0) {
+      *why = "unsupported texture unpack format " + Hex(format) + " type " + Hex(type);
+      return false;
+    }
+    const auto row_bytes = std::uint64_t{bpp} * (row_length == 0 ? width : row_length);
+    const auto stride = (row_bytes + alignment - 1) / alignment * alignment;
+    const auto rows = static_cast<std::uint64_t>(skip_rows) + height - 1;
+    const auto last_row = std::uint64_t{bpp} * (static_cast<std::uint64_t>(skip_pixels) + width);
+    const auto available = address < memory.window_bytes() ? memory.window_bytes() - address : 0;
+    if (last_row > available || rows > (available - last_row) / stride) {
+      *why = "texture upload " + std::to_string(width) + "x" + std::to_string(height) +
+             " extends beyond guest memory at " + Hex(address);
+      return false;
+    }
+    const std::size_t size = static_cast<std::size_t>(rows * stride + last_row);
+    if (size <= mem::kGuestPage - (address & (mem::kGuestPage - 1)) &&
+        (memory.ProtAt(address) & mem::kRead) != 0) {
+      pixels = memory.HostForAccess(address);
+    } else {
+      staging.resize(size);
+      if (!memory.Read(address, staging.data(), size)) {
+        *why = "texture upload " + std::to_string(width) + "x" + std::to_string(height) +
+               " reads an inaccessible guest range at " + Hex(address);
+        return false;
+      }
+      pixels = staging.data();
+    }
+  }
+  if (sub_image) {
+    glTexSubImage2D(s.r[0], static_cast<GLint>(s.r[1]), static_cast<GLint>(s.r[2]),
+                    static_cast<GLint>(s.r[3]), width, height, format, type, pixels);
+  } else {
+    glTexImage2D(s.r[0], static_cast<GLint>(s.r[1]), static_cast<GLint>(s.r[2]), width,
+                 height, static_cast<GLint>(tail[1]), format, type, pixels);
+  }
+  return true;
+}
+
 }  // namespace
 
 /// One AAssetDir: the immediate children under a prefix, in central-directory order, and the guest cell
@@ -124,6 +230,12 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
   // Context-version lines go to the app log; the sink lives as long as this host.
   EglShim::SetLog([this](const std::string& line) {
     if (log_) log_(line);
+  });
+  AddSpecial("glTexImage2D", [this](exec::MachineState& s, std::string* why) {
+    return TextureUpload(false, s, p_.memory(), why);
+  });
+  AddSpecial("glTexSubImage2D", [this](exec::MachineState& s, std::string* why) {
+    return TextureUpload(true, s, p_.memory(), why);
   });
   // glGetString/glGetStringi return a host string: copied into guest memory, as a device's driver's is not.
   AddSpecial("glGetString", [this](exec::MachineState& s, std::string* why) {

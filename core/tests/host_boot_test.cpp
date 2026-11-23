@@ -33,6 +33,8 @@
 #include "rb/host/boot.h"
 #include "rb/java/android_base.h"
 #include "rb/java/dlgl.h"
+#include "rb/java/halfbrick.h"
+#include "rb/java/pikpok.h"
 #include "rb/loader/guest_elf.h"
 #include "rb/mem/guest_memory.h"
 #include "rb/runtime/guest_process.h"
@@ -548,6 +550,23 @@ void proc_maps_describes_guest_addresses_and_permissions() {
   CHECK_CTX(maps.find("00042000-00043000 ---p 00000000 00:00 0\n") != std::string::npos, maps);
 }
 
+void older_game_bridges_answer_the_startup_lookups() {
+  java::TableJava java;
+  java::AndroidEnv env;
+  java::InstallAndroidBase(java, env);
+  java::InstallPikPok(java, env);
+  java::InstallHalfbrick(java);
+  for (const char* name : {"com/pikpok/turbo/DeviceOrientation", "com/pikpok/MabAlertView"}) {
+    const auto cls = java.FindClass(name);
+    CHECK_CTX(java.GetMethodID(cls, "<init>", "(J)V", false) != 0, name);
+  }
+  const auto support = java.FindClass("com/halfbrick/mortar/HBSupport");
+  const auto get_id = java.GetMethodID(support, "GetDeviceID", "()Ljava/lang/String;", true);
+  const auto id = java.Call('L', true, 0, support, get_id, {});
+  CHECK(id != 0 && java.GetStringChars(id).empty());
+  CHECK(!java.ExceptionCheck());
+}
+
 }  // namespace
 
 int main() {
@@ -555,6 +574,7 @@ int main() {
   unity_can_cache_its_player_callbacks_and_power_methods();
   unity_can_read_committed_preferences_and_probe_android_services();
   proc_maps_describes_guest_addresses_and_permissions();
+  older_game_bridges_answer_the_startup_lookups();
   const Images im = LoadImages();
   if (!im.ok) {
     std::fprintf(stderr, "# host boot lane skipped: %s is missing (run tools/run_engine_tests.sh)\n", im.missing.c_str());

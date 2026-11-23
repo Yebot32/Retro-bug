@@ -37,6 +37,7 @@ struct LauncherView: View {
     @State private var toast: String?
     @State private var booting = true
     @State private var importsInFlight = 0
+    @State private var handledQALaunch = false
 
     private var gamesDir: URL {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -189,8 +190,21 @@ struct LauncherView: View {
             DispatchQueue.main.async {
                 games = found
                 AppLog.write("library: \(found.count) game(s)")
+                runRequestedGame(in: found)
             }
         }
+    }
+
+    private func runRequestedGame(in games: [ImportedGame]) {
+        guard !handledQALaunch,
+              let fileName = ProcessInfo.processInfo.environment["RETROBUG_QA_GAME"] else { return }
+        handledQALaunch = true
+        guard let game = games.first(where: { $0.url.lastPathComponent == fileName }) else {
+            AppLog.write("QA: requested APK is missing from the library")
+            return
+        }
+        AppLog.write("QA: launching an imported APK")
+        play(game)
     }
 
     private func play(_ game: ImportedGame) {

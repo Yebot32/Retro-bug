@@ -28,9 +28,14 @@ void InstallPikPok(TableJava& java, const AndroidEnv& env) {
   // gesture detector for pinch, the text field for the keyboard. Their bodies are the game's Java, which
   // does not run here; the methods answer without doing anything, which is what an iPad without a
   // accelerometer or a text cursor needs.
-  for (const char* cls : {"com/pikpok/MabSensors", "com/pikpok/MabGesture", "com/pikpok/MabWebDownloader"}) {
+  for (const char* cls : {"com/pikpok/MabSensors", "com/pikpok/MabGesture", "com/pikpok/MabWebDownloader",
+                          "com/pikpok/turbo/DeviceOrientation", "com/pikpok/MabAlertView"}) {
     java.DefineClass(cls, "java/lang/Object");
     java.DefineMethod(cls, "<init>", "(J)V", false,
+                      [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
+  }
+  for (const char* method : {"Destroy", "onDestroy", "onPause", "onResume"}) {
+    java.DefineMethod("com/pikpok/turbo/DeviceOrientation", method, "()V", false,
                       [](TableJava&, int, const std::vector<std::uint64_t>&) { return std::uint64_t{0}; });
   }
   // The push-notification helper takes a handle and a registration id.
