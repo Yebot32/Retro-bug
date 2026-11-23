@@ -532,6 +532,10 @@ void Take(RbIosSession* s, int kind, int id, float x, float y) {
   t.x = x;
   t.y = y;
   std::lock_guard<std::mutex> lk(s->touch_mu);
+  if (kind == 1 && !s->touches.empty() && s->touches.back().kind == 1 && s->touches.back().id == id) {
+    s->touches.back() = t;
+    return;
+  }
   s->touches.push_back(t);
 }
 
@@ -654,7 +658,14 @@ bool RbIosSession::Boot(std::string* err) {
     // with the app's permissions, and a title that unpacks its resources out of the APK (Halfbrick does,
     // opening the APK path itself) cannot do that with every open refused. The app is sandboxed, so the
     // guest reaches the app's container and nothing else.
-    process.monitor().set_file_provider([](const std::string&) -> std::optional<std::vector<std::uint8_t>> {
+    const auto cpuinfo = rb::runtime::GuestProcess::CpuInfo(std::thread::hardware_concurrency());
+    process.monitor().set_file_provider([&process, cpuinfo](const std::string& path)
+                                           -> std::optional<std::vector<std::uint8_t>> {
+      if (path == "/proc/self/maps") {
+        const auto maps = process.ProcMaps();
+        return std::vector<std::uint8_t>(maps.begin(), maps.end());
+      }
+      if (path == "/proc/cpuinfo") return std::vector<std::uint8_t>(cpuinfo.begin(), cpuinfo.end());
       return std::nullopt;
     });
     process.monitor().set_host_io(true);
@@ -1158,7 +1169,10 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
           queued.swap(s->touches);
         }
         for (const RbIosSession::Touch& t : queued) {
-          if (s->unity) break;  // Unity's Android MotionEvent bridge is a separate step.
+          if (s->unity) {
+            s->unity->Touch(t.kind, t.id, t.x, t.y);
+            continue;
+          }
           if (s->dlgl || s->pikpok || s->halfbrick) {
             // Android's MotionEvent action: down 0, up 1, move 2, cancel 3.
             const int action = t.kind == 0 ? 0 : t.kind == 1 ? 2 : t.kind == 2 ? 1 : 3;

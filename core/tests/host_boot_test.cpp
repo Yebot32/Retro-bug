@@ -32,6 +32,7 @@
 #include "rb/abi/abi.h"
 #include "rb/host/boot.h"
 #include "rb/java/android_base.h"
+#include "rb/java/dlgl.h"
 #include "rb/loader/guest_elf.h"
 #include "rb/mem/guest_memory.h"
 #include "rb/runtime/guest_process.h"
@@ -476,11 +477,80 @@ void unity_can_cache_its_player_callbacks_and_power_methods() {
   CHECK(!java.ExceptionCheck());
 }
 
+void unity_can_read_committed_preferences_and_probe_android_services() {
+  java::TableJava java;
+  java::AndroidEnv env;
+  java::InstallAndroidBase(java, env);
+  java::InstallDlgl(java, env);
+  platform::ios::UnityBootstrap::InstallJava(java, "/games/test.apk", {env.package_name, u"1", 1});
+  const auto activity = java.NewInstance("com/unity3d/player/UnityPlayerActivity");
+  const auto activity_class = java.GetObjectClass(activity);
+  const auto get_prefs = java.GetMethodID(activity_class, "getSharedPreferences",
+                                         "(Ljava/lang/String;I)Landroid/content/SharedPreferences;", false);
+  const auto group = java.NewString(u"user");
+  const auto first = java.Call('L', false, activity, 0, get_prefs, {group, 0});
+  const auto second = java.Call('L', false, activity, 0, get_prefs, {group, 0});
+  CHECK(first != 0 && second != 0);
+  const auto prefs_class = java.GetObjectClass(first);
+  const auto get_int = java.GetMethodID(prefs_class, "getInt", "(Ljava/lang/String;I)I", false);
+  const auto edit = java.GetMethodID(prefs_class, "edit", "()Landroid/content/SharedPreferences$Editor;", false);
+  const auto editor = java.Call('L', false, first, 0, edit, {});
+  const auto editor_class = java.GetObjectClass(editor);
+  const auto put = java.GetMethodID(editor_class, "putInt",
+                                    "(Ljava/lang/String;I)Landroid/content/SharedPreferences$Editor;", false);
+  const auto apply = java.GetMethodID(editor_class, "apply", "()V", false);
+  const auto key = java.NewString(u"score");
+  java.Call('L', false, editor, 0, put, {key, 77});
+  CHECK(java.Call('I', false, second, 0, get_int, {key, 12}) == 12);
+  java.Call('V', false, editor, 0, apply, {});
+  CHECK(java.Call('I', false, second, 0, get_int, {key, 12}) == 77);
+
+  const auto manager = java.FindClass("android/os/PowerManager");
+  const auto wake = java.GetFieldID(manager, "FULL_WAKE_LOCK", "I", true);
+  CHECK(wake != 0 && java.GetField('I', true, manager, wake) == 0x1a);
+  const auto bridge = java.FindClass("bitter/jnibridge/JNIBridge");
+  const auto connection = java.FindClass("android/content/ServiceConnection");
+  const auto proxy = java.GetMethodID(bridge, "newInterfaceProxy", "(JLjava/lang/Class;)Ljava/lang/Object;", true);
+  CHECK(java.IsInstanceOf(java.Call('L', true, 0, bridge, proxy, {1, connection}), connection));
+  const auto proxies = java.GetMethodID(bridge, "newInterfaceProxy", "(J[Ljava/lang/Class;)Ljava/lang/Object;", true);
+  const auto classes = java.NewArray('L', 1, java.FindClass("java/lang/Object"), connection);
+  CHECK(java.IsInstanceOf(java.Call('L', true, 0, bridge, proxies, {1, classes}), connection));
+  const auto motion_class = java.FindClass("android/view/MotionEvent");
+  const auto motion = java.NewInstance("android/view/MotionEvent");
+  const auto obtain = java.GetMethodID(motion_class, "obtain",
+                                        "(Landroid/view/MotionEvent;)Landroid/view/MotionEvent;", true);
+  const auto get_action = java.GetMethodID(motion_class, "getAction", "()I", false);
+  java.PutField(java.ObjectOf(motion), "action", 2);
+  const auto copy = java.Call('L', true, 0, motion_class, obtain, {motion});
+  java.PutField(java.ObjectOf(motion), "action", 1);
+  CHECK(!java.IsSameObject(motion, copy));
+  CHECK(java.Call('I', false, copy, 0, get_action, {}) == 2);
+  CHECK(java.Call('I', false, motion, 0, get_action, {}) == 1);
+  CHECK(!java.ExceptionCheck());
+}
+
+void proc_maps_describes_guest_addresses_and_permissions() {
+  runtime::GuestProcessOptions options;
+  options.ctor_tier = 1;
+  options.enable_jit = false;
+  std::string error;
+  auto process = GuestProcess::Create(options, &error);
+  CHECK_CTX(process != nullptr, error);
+  if (!process) return;
+  CHECK_CTX(process->memory().Map(0x40000, 0x1000, mem::kRead, &error), error);
+  CHECK_CTX(process->memory().Map(0x41000, 0x1000, mem::kRead | mem::kWrite, &error), error);
+  const auto maps = process->ProcMaps();
+  CHECK(maps.find("00040000-00041000 r--p 00000000 00:00 0\n") != std::string::npos);
+  CHECK(maps.find("00041000-00042000 rw-p 00000000 00:00 0\n") != std::string::npos);
+}
+
 }  // namespace
 
 int main() {
   unity_uses_the_imports_package_and_launch_intent();
   unity_can_cache_its_player_callbacks_and_power_methods();
+  unity_can_read_committed_preferences_and_probe_android_services();
+  proc_maps_describes_guest_addresses_and_permissions();
   const Images im = LoadImages();
   if (!im.ok) {
     std::fprintf(stderr, "# host boot lane skipped: %s is missing (run tools/run_engine_tests.sh)\n", im.missing.c_str());

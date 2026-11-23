@@ -3,9 +3,17 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <map>
 #include <memory>
+#include <mutex>
+#include <optional>
+#include <set>
+#include <tuple>
+#include <variant>
 #include <utility>
 
 #include "rb/host/boot.h"
@@ -20,6 +28,9 @@ constexpr char kIntent[] = "android/content/Intent";
 constexpr char kBundle[] = "android/os/Bundle";
 constexpr char kManager[] = "android/content/pm/PackageManager";
 constexpr char kPackageInfo[] = "android/content/pm/PackageInfo";
+constexpr char kPrefs[] = "android/content/SharedPreferences";
+constexpr char kEditor[] = "android/content/SharedPreferences$Editor";
+constexpr char kMotion[] = "android/view/MotionEvent";
 
 using Java = java::TableJava;
 
@@ -184,6 +195,10 @@ void InstallPowerManager(Java& vm) {
   constexpr char lock[] = "android/os/PowerManager$WakeLock";
   vm.DefineClass(manager, "java/lang/Object");
   vm.DefineClass(lock, "java/lang/Object");
+  vm.DefineField(manager, "FULL_WAKE_LOCK", "I", true);
+  const auto power_class = vm.FindClass(manager);
+  vm.SetField('I', true, power_class, vm.GetFieldID(power_class, "FULL_WAKE_LOCK", "I", true), 0x1a);
+  vm.DeleteLocalRef(power_class);
   vm.DefineField(context, "POWER_SERVICE", "Ljava/lang/String;", true);
   vm.DefineField(context, "MODE_PRIVATE", "I", true);  // Android's value is zero.
   const auto cls = vm.FindClass(context);
@@ -207,6 +222,205 @@ void InstallPowerManager(Java& vm) {
     });
   }
 }
+
+void InstallPreferences(Java& vm) {
+  // The Unity Java profile keeps its preference groups separate within each running title.
+  using Value = std::variant<std::uint64_t, std::u16string>;
+  struct State {
+    struct Edit {
+      bool clear = false;
+      std::map<std::u16string, std::optional<Value>> changes;
+    };
+    std::mutex mutex;
+    std::map<std::u16string, std::map<std::u16string, Value>> groups;
+    std::map<int, Edit> editors;
+  };
+  const auto state = std::make_shared<State>();
+  const auto text = [](Java& j, Java::Ref ref) { return j.StringOf(j.ObjectOf(ref)); };
+  const auto group = [](Java& j, int self) { return j.StringOf(static_cast<int>(j.FieldOf(self, "group"))); };
+  vm.DefineMethod("android/content/Context", "getSharedPreferences",
+                  "(Ljava/lang/String;I)Landroid/content/SharedPreferences;", false,
+                  [](Java& j, int, const auto& args) {
+    const auto prefs = j.NewInstance(kPrefs);
+    PutObject(j, j.ObjectOf(prefs), "group", args.at(0));
+    return prefs;
+  });
+  vm.DefineMethod(kPrefs, "edit", "()Landroid/content/SharedPreferences$Editor;", false,
+                  [](Java& j, int self, const auto&) {
+    const auto editor = j.NewInstance(kEditor);
+    j.PutField(j.ObjectOf(editor), "group", j.FieldOf(self, "group"));
+    return editor;
+  });
+  vm.DefineMethod(kPrefs, "contains", "(Ljava/lang/String;)Z", false,
+                  [state, text, group](Java& j, int self, const auto& args) {
+    const auto name = group(j, self), key = text(j, args.at(0));
+    std::lock_guard<std::mutex> lock(state->mutex);
+    const auto found = state->groups.find(name);
+    return found != state->groups.end() && found->second.contains(key);
+  });
+  constexpr const char* primitives[][2] = {{"Int", "I"}, {"Boolean", "Z"}, {"Float", "F"}, {"Long", "J"}};
+  const auto install_value = [&](const std::string& name, const std::string& sig, bool string) {
+    vm.DefineMethod(kPrefs, "get" + name, "(Ljava/lang/String;" + sig + ")" + sig, false,
+                    [state, text, group, string](Java& j, int self, const auto& args) -> std::uint64_t {
+      const auto name = group(j, self), key = text(j, args.at(0));
+      std::optional<Value> value;
+      {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        const auto found = state->groups.find(name);
+        if (found != state->groups.end()) {
+          if (const auto item = found->second.find(key); item != found->second.end()) value = item->second;
+        }
+      }
+      if (!value) return args.at(1);
+      if (string && std::holds_alternative<std::u16string>(*value)) return j.NewString(std::get<std::u16string>(*value));
+      if (!string && std::holds_alternative<std::uint64_t>(*value)) return std::get<std::uint64_t>(*value);
+      return args.at(1);
+    });
+    vm.DefineMethod(kEditor, "put" + name, "(Ljava/lang/String;" + sig + ")Landroid/content/SharedPreferences$Editor;",
+                    false, [state, text, string](Java& j, int self, const auto& args) {
+      const auto key = text(j, args.at(0));
+      const auto raw = args.at(1);
+      std::optional<Value> value;
+      if (!string) value = raw;
+      else if (raw != 0) value = text(j, raw);
+      {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->editors[self].changes[key] = std::move(value);
+      }
+      return j.MakeRef(self);
+    });
+  };
+  for (const auto& [name, sig] : primitives) install_value(name, sig, false);
+  install_value("String", "Ljava/lang/String;", true);
+  vm.DefineMethod(kEditor, "remove", "(Ljava/lang/String;)Landroid/content/SharedPreferences$Editor;", false,
+                  [state, text](Java& j, int self, const auto& args) {
+    const auto key = text(j, args.at(0));
+    {
+      std::lock_guard<std::mutex> lock(state->mutex);
+      state->editors[self].changes[key] = std::nullopt;
+    }
+    return j.MakeRef(self);
+  });
+  vm.DefineMethod(kEditor, "clear", "()Landroid/content/SharedPreferences$Editor;", false,
+                  [state](Java& j, int self, const auto&) {
+    {
+      std::lock_guard<std::mutex> lock(state->mutex);
+      state->editors[self].clear = true;
+    }
+    return j.MakeRef(self);
+  });
+  const auto commit = [state, group](Java& j, int self, const auto&) {
+    const auto name = group(j, self);
+    std::lock_guard<std::mutex> lock(state->mutex);
+    if (const auto edit = state->editors.find(self); edit != state->editors.end()) {
+      auto& values = state->groups[name];
+      if (edit->second.clear) values.clear();
+      for (auto& [key, value] : edit->second.changes) {
+        if (value) values[key] = std::move(*value);
+        else values.erase(key);
+      }
+      state->editors.erase(edit);
+    }
+    return 1u;
+  };
+  vm.DefineMethod(kEditor, "commit", "()Z", false, commit);
+  vm.DefineMethod(kEditor, "apply", "()V", false, commit);
+}
+
+void InstallServiceConnection(Java& vm) {
+  constexpr char bridge[] = "bitter/jnibridge/JNIBridge";
+  vm.DefineClass(bridge, "java/lang/Object");
+  vm.DefineClass("android/content/ServiceConnection", "java/lang/Object");
+  const auto proxy = [](Java& j, Java::Ref requested) -> Java::Ref {
+    const auto connection = j.FindClass("android/content/ServiceConnection");
+    const bool matches = requested != 0 && j.IsSameObject(requested, connection);
+    j.DeleteLocalRef(connection);
+    return matches ? j.NewInstance("android/content/ServiceConnection") : 0;
+  };
+  // Android services are unavailable. Unity can still create its ServiceConnection before bindService returns false.
+  vm.DefineMethod(bridge, "newInterfaceProxy", "(JLjava/lang/Class;)Ljava/lang/Object;", true,
+                  [proxy](Java& j, int, const auto& args) { return proxy(j, args.at(1)); });
+  vm.DefineMethod(bridge, "newInterfaceProxy", "(J[Ljava/lang/Class;)Ljava/lang/Object;", true,
+                  [proxy](Java& j, int, const auto& args) -> Java::Ref {
+    if (j.GetArrayLength(args.at(1)) != 1) return 0;
+    const auto requested = j.GetObjectArrayElement(args.at(1), 0);
+    const auto result = proxy(j, requested);
+    j.DeleteLocalRef(requested);
+    return result;
+  });
+  const auto empty = [](Java&, int, const auto&) { return 0u; };
+  vm.DefineMethod(bridge, "disableInterfaceProxy", "(Ljava/lang/Object;)V", true, empty);
+  vm.DefineMethod("android/content/Context", "bindService",
+                  "(Landroid/content/Intent;Landroid/content/ServiceConnection;I)Z", false, empty);
+  vm.DefineMethod("android/content/Context", "unbindService", "(Landroid/content/ServiceConnection;)V", false, empty);
+}
+
+void InstallMotionEvent(Java& vm) {
+  vm.DefineClass("android/view/InputEvent", "java/lang/Object");
+  vm.DefineClass(kMotion, "android/view/InputEvent");
+  for (const auto& [name, field, sig] : {
+           std::tuple{"getAction", "action", "()I"}, {"getPointerCount", "count", "()I"},
+           {"getEventTime", "time", "()J"}, {"getDownTime", "down", "()J"}}) {
+    vm.DefineMethod(kMotion, name, sig, false,
+                    [field](Java& j, int self, const auto&) { return j.FieldOf(self, field); });
+  }
+  for (const auto& [name, field, sig] : {
+           std::tuple{"getPointerId", "id", "(I)I"}, {"getX", "x", "(I)F"}, {"getY", "y", "(I)F"},
+           {"getHistoricalX", "x", "(II)F"}, {"getHistoricalY", "y", "(II)F"}}) {
+    vm.DefineMethod(kMotion, name, sig, false, [field](Java& j, int self, const auto& args) {
+      return j.FieldOf(self, std::string(field) + std::to_string(args.at(0)));
+    });
+  }
+  const auto zero = [](Java&, int, const auto&) { return 0u; };
+  for (const char* name : {"getHistorySize", "getMetaState", "getButtonState", "getDeviceId"}) {
+    vm.DefineMethod(kMotion, name, "()I", false, zero);
+  }
+  vm.DefineMethod("android/view/InputEvent", "getSource", "()I", false,
+                  [](Java&, int, const auto&) { return 0x1002u; });  // SOURCE_TOUCHSCREEN
+  vm.DefineMethod(kMotion, "getToolType", "(I)I", false,
+                  [](Java&, int, const auto&) { return 1u; });  // TOOL_TYPE_FINGER
+  vm.DefineMethod(kMotion, "getHistoricalEventTime", "(I)J", false, zero);
+  vm.DefineMethod(kMotion, "getAxisValue", "(I)F", false, zero);
+  vm.DefineMethod(kMotion, "getAxisValue", "(II)F", false, zero);
+  struct Pool {
+    std::mutex mutex;
+    std::set<int> free, borrowed;
+  };
+  const auto pool = std::make_shared<Pool>();
+  vm.DefineMethod(kMotion, "obtain", "(Landroid/view/MotionEvent;)Landroid/view/MotionEvent;", true,
+                  [pool](Java& j, int, const auto& args) -> Java::Ref {
+    const int original = j.ObjectOf(args.at(0));
+    if (original == 0) return 0;
+    int copy = 0;
+    {
+      std::lock_guard<std::mutex> lock(pool->mutex);
+      if (!pool->free.empty()) {
+        copy = *pool->free.begin();
+        pool->free.erase(pool->free.begin());
+      }
+    }
+    const auto event = copy != 0 ? j.MakeRef(copy) : j.NewInstance(kMotion);
+    copy = j.ObjectOf(event);
+    {
+      std::lock_guard<std::mutex> lock(pool->mutex);
+      pool->borrowed.insert(copy);
+    }
+    for (const char* field : {"action", "time", "down", "count"}) j.PutField(copy, field, j.FieldOf(original, field));
+    const auto count = std::min<std::uint64_t>(j.FieldOf(original, "count"), 32);
+    for (std::uint64_t i = 0; i < count; ++i) {
+      for (const char* prefix : {"id", "x", "y"}) {
+        const auto field = prefix + std::to_string(i);
+        j.PutField(copy, field, j.FieldOf(original, field));
+      }
+    }
+    return event;
+  });
+  vm.DefineMethod(kMotion, "recycle", "()V", false, [pool](Java&, int self, const auto&) {
+    std::lock_guard<std::mutex> lock(pool->mutex);
+    if (pool->borrowed.erase(self) != 0) pool->free.insert(self);
+    return 0u;
+  });
+}
 }
 
 void UnityBootstrap::InstallJava(java::TableJava& java, const std::string& apk, const ApkIdentity& identity,
@@ -221,6 +435,9 @@ void UnityBootstrap::InstallJava(java::TableJava& java, const std::string& apk, 
   InstallIntent(java);
   InstallPlayerCallbacks(java, services);
   InstallPowerManager(java);
+  InstallPreferences(java);
+  InstallServiceConnection(java);
+  InstallMotionEvent(java);
   java.DefineField(kPlayer, "currentActivity", kActivitySig, true);
   const auto apk_path = std::filesystem::path(apk).u16string();
   InstallPackageManager(java, identity, apk_path);
@@ -236,6 +453,7 @@ UnityBootstrap::~UnityBootstrap() {
   if (receiver_ != 0) java_.DeleteGlobalRef(receiver_);
   if (activity_ != 0) java_.DeleteGlobalRef(activity_);
   if (surface_ != 0) java_.DeleteGlobalRef(surface_);
+  if (touch_event_ != 0) java_.DeleteGlobalRef(touch_event_);
 }
 
 bool UnityBootstrap::Has(const char* name, const char* signature) const {
@@ -283,6 +501,8 @@ bool UnityBootstrap::Start(const std::string& apk, std::string* why) {
   receiver_ = pin(kPlayer);
   activity_ = pin(kActivity);
   surface_ = pin(kSurface);
+  touch_available_ = Has("nativeInjectEvent", "(Landroid/view/InputEvent;)Z");
+  if (touch_available_) touch_event_ = pin(kMotion);
   const auto player = java_.FindClass(kPlayer);
   const auto activity_field = java_.GetFieldID(player, "currentActivity", kActivitySig, true);
   java_.SetField('L', true, player, activity_field, activity_);
@@ -318,6 +538,7 @@ bool UnityBootstrap::Render(std::string* why) {
 }
 
 bool UnityBootstrap::Pause(std::string* why) {
+  if (!pointers_.empty()) Touch(3, 0, 0, 0);
   std::uint64_t should_quit = 0;
   if (!Call("nativeFocusChanged", "(Z)V", {0}, why) ||
       !Call("nativePause", "()Z", {}, why, &should_quit)) return false;
@@ -328,6 +549,49 @@ bool UnityBootstrap::Pause(std::string* why) {
 
 bool UnityBootstrap::Resume(std::string* why) {
   return Call("nativeFocusChanged", "(Z)V", {1}, why) && Call("nativeResume", "()V", {}, why);
+}
+
+void UnityBootstrap::Touch(int kind, int id, float x, float y) {
+  if (!touch_available_) return;
+  const auto now = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count());
+  auto found = std::find_if(pointers_.begin(), pointers_.end(), [id](const Pointer& p) { return p.input_id == id; });
+  int action = 3;  // ACTION_CANCEL
+  if (kind == 0) {
+    if (found != pointers_.end() || pointers_.size() == 32) return;
+    std::uint32_t used = 0;
+    for (const auto& pointer : pointers_) used |= std::uint32_t{1} << pointer.android_id;
+    if (pointers_.empty()) down_time_ = now;
+    action = pointers_.empty() ? 0 : 5 | (static_cast<int>(pointers_.size()) << 8);
+    pointers_.push_back({id, static_cast<unsigned>(std::countr_zero(~used)), x, y});
+  } else if (kind == 1 || kind == 2) {
+    if (found == pointers_.end()) return;
+    found->x = x;
+    found->y = y;
+    const int index = static_cast<int>(found - pointers_.begin());
+    action = kind == 1 ? 2 : pointers_.size() == 1 ? 1 : 6 | (index << 8);
+  } else if (pointers_.empty()) {
+    return;
+  }
+  const int object = java_.ObjectOf(touch_event_);
+  java_.PutField(object, "action", static_cast<unsigned>(action));
+  java_.PutField(object, "time", now);
+  java_.PutField(object, "down", down_time_);
+  java_.PutField(object, "count", pointers_.size());
+  for (std::size_t i = 0; i < pointers_.size(); ++i) {
+    const auto index = std::to_string(i);
+    java_.PutField(object, "id" + index, pointers_[i].android_id);
+    java_.PutField(object, "x" + index, std::bit_cast<std::uint32_t>(pointers_[i].x));
+    java_.PutField(object, "y" + index, std::bit_cast<std::uint32_t>(pointers_[i].y));
+  }
+  if (kind == 2) pointers_.erase(found);
+  if (kind == 3) pointers_.clear();
+  std::string error;
+  if (!Call("nativeInjectEvent", "(Landroid/view/InputEvent;)Z", {touch_event_}, &error)) {
+    boot_.Live("unity: touch disabled for this session: " + error);
+    touch_available_ = false;
+    java_.ExceptionClear();
+  }
 }
 
 }  // namespace rb::platform::ios

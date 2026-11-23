@@ -81,6 +81,8 @@ constexpr std::int32_t kContextClientVersion = 0x3098;
 constexpr std::int32_t kWindowBit = 0x0004;
 constexpr std::int32_t kEs1Bit = 0x0001;
 constexpr std::int32_t kEs2Bit = 0x0004;
+constexpr std::int32_t kEs3Bit = 0x0040;
+constexpr std::int32_t kSupportedApis = kEs1Bit | kEs2Bit | kEs3Bit;
 constexpr std::uint32_t kOpenGlEsApi = 0x30A0;
 
 // Distinct non-null object identities. The guest only passes them back; nothing dereferences them.
@@ -108,7 +110,9 @@ int ConfigVersion(const std::int32_t* attribs) {
   int version = 1;
   if (attribs == nullptr) return version;
   for (int i = 0; attribs[i] != kNone; i += 2) {
-    if (attribs[i] == kRenderableType && (attribs[i + 1] & kEs2Bit) != 0) version = 2;
+    if (attribs[i] != kRenderableType) continue;
+    if ((attribs[i + 1] & kEs3Bit) != 0) version = 3;
+    else if ((attribs[i + 1] & kEs2Bit) != 0) version = 2;
   }
   return version;
 }
@@ -116,7 +120,7 @@ int ConfigVersion(const std::int32_t* attribs) {
 int ContextVersion(const std::int32_t* attribs, int fallback) {
   if (attribs == nullptr) return fallback;
   for (int i = 0; attribs[i] != kNone; i += 2) {
-    if (attribs[i] == kContextClientVersion) return attribs[i + 1] == 2 ? 2 : 1;
+    if (attribs[i] == kContextClientVersion) return attribs[i + 1];
   }
   return fallback;
 }
@@ -277,7 +281,7 @@ void EglShim::Detach() {
     CFRelease(static_cast<CFTypeRef>(layer_));
     layer_ = nullptr;
   }
-  framebuffer_ = color_buffer_ = 0;
+  framebuffer_ = color_buffer_ = depth_buffer_ = 0;
   width_ = height_ = 0;
 }
 
@@ -292,7 +296,7 @@ void EglShim::SetLayer(void* ca_eagl_layer, int client_version) {
   }
   // A restart after a resize or a stop keeps the same layer but needs the drawable rebuilt.
   if (ca_eagl_layer != nullptr) drawable_ready_ = false;
-  if (client_version == 1 || client_version == 2) client_version_ = client_version;
+  if (client_version >= 1 && client_version <= 3) config_version_ = client_version;
 }
 
 void* EglShim::Symbol(const std::string& name) {
@@ -330,12 +334,12 @@ std::uint32_t EglShim::ChooseConfig(void* display, const std::int32_t* attribs, 
       error_ = kBadMatch;
       return 1;  // "no config matched" is a successful query with zero results, as in EGL
     }
-    if (attribs[i] == kRenderableType && (attribs[i + 1] & (kEs1Bit | kEs2Bit)) == 0) {
+    if (attribs[i] == kRenderableType && (attribs[i + 1] & ~kSupportedApis) != 0) {
       if (num_config != nullptr) *num_config = 0;
       return 1;
     }
   }
-  client_version_ = ConfigVersion(attribs);
+  config_version_ = ConfigVersion(attribs);
   if (num_config != nullptr) *num_config = 1;
   if (configs != nullptr && config_size > 0) configs[0] = &g_config_marker;
   return 1;
@@ -351,13 +355,13 @@ std::uint32_t EglShim::GetConfigAttrib(void* display, void* config, std::int32_t
     case kGreenSize:
     case kBlueSize: *value = 8; break;
     case kAlphaSize: *value = 8; break;
-    case kDepthSize: *value = 16; break;
-    case kStencilSize:
+    case kDepthSize: *value = config_version_ == 3 ? 24 : 16; break;
+    case kStencilSize: *value = config_version_ == 3 ? 8 : 0; break;
     case kSamples:
     case kSampleBuffers: *value = 0; break;
     case kSurfaceType: *value = kWindowBit; break;
-    case kRenderableType: *value = kEs1Bit | kEs2Bit; break;
-    case kConformant: *value = kEs1Bit | kEs2Bit; break;
+    case kRenderableType: *value = kSupportedApis; break;
+    case kConformant: *value = kSupportedApis; break;
     case kConfigCaveat: *value = kNone; break;
     case kConfigId: *value = 1; break;
     case kNativeVisualId:
@@ -381,22 +385,27 @@ void* EglShim::CreateContext(void* display, void* config, void* share, const std
     error_ = kBadConfig;
     return nullptr;
   }
-  const int version = ContextVersion(attribs, client_version_);
-  if (context_ != nullptr) {
-    if (version == client_version_) {
-      LogLine("egl: createContext -> GLES" + std::to_string(version) + " context reused");
-      return context_;
-    }
-    [EAGLContext setCurrentContext:nil];
-    CFRelease(static_cast<CFTypeRef>(context_));
-    context_ = nullptr;
+  const int version = ContextVersion(attribs, config_version_);
+  if (version < 1 || version > 3) {
+    error_ = kBadMatch;
+    return nullptr;
   }
+  if (context_ != nullptr && version == client_version_) return context_;
+  const EAGLRenderingAPI api = version == 1 ? kEAGLRenderingAPIOpenGLES1
+                               : version == 2 ? kEAGLRenderingAPIOpenGLES2 : kEAGLRenderingAPIOpenGLES3;
   EAGLContext* ctx = [[EAGLContext alloc]
-      initWithAPI:(version == 1 ? kEAGLRenderingAPIOpenGLES1 : kEAGLRenderingAPIOpenGLES2)];
+      initWithAPI:api];
   if (ctx == nil) {
     error_ = kBadAlloc;
     return nullptr;
   }
+  if (context_ != nullptr) {
+    [EAGLContext setCurrentContext:nil];
+    CFRelease(static_cast<CFTypeRef>(context_));
+  }
+  drawable_ready_ = false;
+  last_made_current_ = nullptr;
+  framebuffer_ = color_buffer_ = depth_buffer_ = 0;
   LogLine("egl: createContext -> GLES" + std::to_string(version) + " context created");
   client_version_ = version;
   context_ = const_cast<void*>(CFBridgingRetain(ctx));
@@ -424,6 +433,7 @@ std::uint32_t EglShim::DestroyContext(void* display, void* context) {
     CFRelease(static_cast<CFTypeRef>(context_));
     context_ = nullptr;
     drawable_ready_ = false;
+    framebuffer_ = color_buffer_ = depth_buffer_ = 0;
   }
   return 1;
 }
@@ -448,16 +458,16 @@ bool EglShim::EnsureDrawable(std::string* err) {
   }
   CAEAGLLayer* layer = (__bridge CAEAGLLayer*)layer_;
   EAGLContext* ctx = (__bridge EAGLContext*)context_;
-  if (![EAGLContext setCurrentContext:ctx]) {
+  if ([EAGLContext currentContext] != ctx && ![EAGLContext setCurrentContext:ctx]) {
     if (err != nullptr) *err = "EAGLContext could not be made current";
     error_ = kBadAccess;
     return false;
   }
   if (!drawable_ready_) {
     if (client_version_ == 1) {
-      glGenFramebuffersOES(1, &framebuffer_);
+      if (framebuffer_ == 0) glGenFramebuffersOES(1, &framebuffer_);
       glBindFramebufferOES(GL_FRAMEBUFFER_OES, framebuffer_);
-      glGenRenderbuffersOES(1, &color_buffer_);
+      if (color_buffer_ == 0) glGenRenderbuffersOES(1, &color_buffer_);
       glBindRenderbufferOES(GL_RENDERBUFFER_OES, color_buffer_);
       if (![ctx renderbufferStorage:GL_RENDERBUFFER_OES fromDrawable:layer]) {
         if (err != nullptr) *err = "renderbufferStorage from the layer failed";
@@ -469,7 +479,7 @@ bool EglShim::EnsureDrawable(std::string* err) {
       glGetRenderbufferParameterivOES(GL_RENDERBUFFER_OES, GL_RENDERBUFFER_HEIGHT_OES, &height_);
       // The config promises a 16-bit depth buffer (eglGetConfigAttrib); without one the game's depth test
       // is undefined. Then bind the colour buffer back: presentRenderbuffer presents the bound one.
-      glGenRenderbuffersOES(1, &depth_buffer_);
+      if (depth_buffer_ == 0) glGenRenderbuffersOES(1, &depth_buffer_);
       glBindRenderbufferOES(GL_RENDERBUFFER_OES, depth_buffer_);
       glRenderbufferStorageOES(GL_RENDERBUFFER_OES, GL_DEPTH_COMPONENT16_OES, width_, height_);
       glFramebufferRenderbufferOES(GL_FRAMEBUFFER_OES, GL_DEPTH_ATTACHMENT_OES, GL_RENDERBUFFER_OES, depth_buffer_);
@@ -481,9 +491,9 @@ bool EglShim::EnsureDrawable(std::string* err) {
         return false;
       }
     } else {
-      glGenFramebuffers(1, &framebuffer_);
+      if (framebuffer_ == 0) glGenFramebuffers(1, &framebuffer_);
       glBindFramebuffer(0x8D40, framebuffer_);  // GL_FRAMEBUFFER
-      glGenRenderbuffers(1, &color_buffer_);
+      if (color_buffer_ == 0) glGenRenderbuffers(1, &color_buffer_);
       glBindRenderbuffer(0x8D41, color_buffer_);  // GL_RENDERBUFFER
       if (![ctx renderbufferStorage:0x8D41 fromDrawable:layer]) {
         if (err != nullptr) *err = "renderbufferStorage from the layer failed";
@@ -493,10 +503,11 @@ bool EglShim::EnsureDrawable(std::string* err) {
       glFramebufferRenderbuffer(0x8D40, 0x8CE0, 0x8D41, color_buffer_);  // FRAMEBUFFER, COLOR_ATTACHMENT0
       glGetRenderbufferParameteriv(0x8D41, 0x8D42, &width_);             // RENDERBUFFER_WIDTH
       glGetRenderbufferParameteriv(0x8D41, 0x8D43, &height_);            // RENDERBUFFER_HEIGHT
-      glGenRenderbuffers(1, &depth_buffer_);
+      if (depth_buffer_ == 0) glGenRenderbuffers(1, &depth_buffer_);
       glBindRenderbuffer(0x8D41, depth_buffer_);
-      glRenderbufferStorage(0x8D41, 0x81A5, width_, height_);              // DEPTH_COMPONENT16
-      glFramebufferRenderbuffer(0x8D40, 0x8D00, 0x8D41, depth_buffer_);    // DEPTH_ATTACHMENT
+      glRenderbufferStorage(0x8D41, client_version_ == 3 ? 0x88F0 : 0x81A5, width_, height_);
+      glFramebufferRenderbuffer(0x8D40, 0x8D00, 0x8D41, depth_buffer_);
+      if (client_version_ == 3) glFramebufferRenderbuffer(0x8D40, 0x8D20, 0x8D41, depth_buffer_);
       glBindRenderbuffer(0x8D41, color_buffer_);
       if (glCheckFramebufferStatus(0x8D40) != 0x8CD5) {                  // GL_FRAMEBUFFER_COMPLETE
         if (err != nullptr) *err = "the EAGL framebuffer is incomplete";

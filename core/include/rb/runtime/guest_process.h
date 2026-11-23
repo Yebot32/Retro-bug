@@ -123,6 +123,8 @@ class GuestProcess {
 
   /// Linux ARM32 CPU information for the same architecture and features reported in AT_HWCAP.
   static std::string CpuInfo(unsigned processors);
+  /// Linux-style view of the guest mappings. Called under the guest lock.
+  std::string ProcMaps() const;
 
   static std::unique_ptr<GuestProcess> Create(const GuestProcessOptions& options, std::string* err);
   /// Stops every guest thread and frees the process. Preconditions: the caller does not hold this process's GGL,

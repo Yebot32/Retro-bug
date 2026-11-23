@@ -29,15 +29,21 @@ class UnityBootstrap {
   bool Render(std::string* why);
   bool Pause(std::string* why);
   bool Resume(std::string* why);
+  void Touch(int kind, int id, float x, float y);
 
  private:
   bool Has(const char* name, const char* signature) const;
   bool Call(const char* name, const char* signature, const std::vector<std::uint64_t>& args,
             std::string* why, std::uint64_t* result = nullptr);
   bool Attach(std::string* why);
+  struct Pointer { int input_id; unsigned android_id; float x, y; };
   host::Boot& boot_;
   java::TableJava& java_;
   java::TableJava::Ref receiver_ = 0, activity_ = 0, surface_ = 0;
+  java::TableJava::Ref touch_event_ = 0;
+  std::vector<Pointer> pointers_;
+  std::uint64_t down_time_ = 0;
+  bool touch_available_ = false;
 };
 
 }  // namespace rb::platform::ios

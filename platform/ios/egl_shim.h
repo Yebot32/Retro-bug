@@ -26,7 +26,7 @@ class EglShim {
   static EglShim& Instance();
 
   /// The shell's drawable: the CAEAGLLayer the render thread presents into. Called on the render thread
-  /// before any guest code runs. `client_version` is 1 or 2 (the guest's EGL_CONTEXT_CLIENT_VERSION).
+  /// before any guest code runs. `client_version` is the shell's GLES default.
   void SetLayer(void* ca_eagl_layer, int client_version);
   [[nodiscard]] bool has_layer() const { return layer_ != nullptr; }
   [[nodiscard]] int width() const { return width_; }
@@ -75,7 +75,7 @@ class EglShim {
   /// A 3x3 RGBA sample of the current drawable, for the log. `out` is empty on failure.
   void SamplePixels(std::string* out);
 
-  /// The version of the context the shim holds (1 or 2), or 0 when it holds none. The crash line prints
+  /// The version of the context the shim holds, or 0 when it holds none. The crash line prints
   /// it: a GLES1 call made with an ES2 context current is a different fault from the same call with the
   /// right context.
   int context_version() const { return context_ != nullptr ? client_version_ : 0; }
@@ -93,6 +93,7 @@ class EglShim {
   void* context_ = nullptr;  ///< EAGLContext*, retained
   void* last_made_current_ = nullptr;  ///< the context the last logged make-current named
   int client_version_ = 1;
+  int config_version_ = 1;
   int width_ = 0, height_ = 0;
   std::atomic<std::uint64_t> presents_{0};
   std::uint32_t framebuffer_ = 0, color_buffer_ = 0, depth_buffer_ = 0;

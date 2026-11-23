@@ -81,6 +81,7 @@ final class GameUIView: UIView {
         self.runtimeJit = runtimeJit
         super.init(frame: .zero)
         backgroundColor = .black
+        isMultipleTouchEnabled = true
         contentScaleFactor = UIScreen.main.scale * CGFloat(min(1.0, max(0.5, renderScale)))
         layer.contentsScale = contentScaleFactor
         if let eagl = layer as? CAEAGLLayer {

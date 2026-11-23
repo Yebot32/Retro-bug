@@ -150,6 +150,41 @@ std::string GuestProcess::CpuInfo(unsigned processors) {
   return info;
 }
 
+std::string GuestProcess::ProcMaps() const {
+  std::string info;
+  for (const auto& [lo, hi] : mem_->MappedRanges()) {
+    const std::uint64_t end = hi == 0 ? (std::uint64_t{1} << 32) : hi;
+    for (std::uint64_t start = lo; start < end;) {
+      const auto prot = mem_->ProtAt(static_cast<std::uint32_t>(start));
+      const loader::GuestModule* library = nullptr;
+      std::uint64_t stop = end;
+      for (const auto& module : modules_) {
+        const std::uint64_t module_end = std::uint64_t{module->base} + module->extent;
+        if (start >= module->base && start < module_end) {
+          library = module.get();
+          stop = std::min(stop, module_end);
+        } else if (module->base > start) {
+          stop = std::min(stop, std::uint64_t{module->base});
+        }
+      }
+      std::uint64_t next = start + mem::kGuestPage;
+      while (next < stop && mem_->ProtAt(static_cast<std::uint32_t>(next)) == prot) {
+        next += mem::kGuestPage;
+      }
+      char range[96];
+      std::snprintf(range, sizeof range, "%08llx-%08llx %c%c%cp 00000000 00:00 0",
+                    static_cast<unsigned long long>(start), static_cast<unsigned long long>(next),
+                    (prot & mem::kRead) != 0 ? 'r' : '-', (prot & mem::kWrite) != 0 ? 'w' : '-',
+                    (prot & mem::kExec) != 0 ? 'x' : '-');
+      info += range;
+      if (library != nullptr) info += " /lib/" + library->soname;
+      info += '\n';
+      start = next;
+    }
+  }
+  return info;
+}
+
 std::optional<BionicLayout> VerifyBionicLayout(const mem::GuestMemory& mem, const loader::GuestModule& libc,
                                                std::string* err) {
   const auto refuse = [&](const std::string& why) -> std::optional<BionicLayout> {
