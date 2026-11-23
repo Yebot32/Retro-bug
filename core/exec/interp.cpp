@@ -36,7 +36,12 @@
  *      rather than a crash.
  */
 #include "rb/exec/interp.h"
+#include "rb/exec/trace.h"
 
+#include "dynarmic/common/fp/fpcr.h"
+#include "dynarmic/common/fp/fpsr.h"
+#include "dynarmic/common/fp/op/FPRecipEstimate.h"
+#include "dynarmic/common/fp/op/FPRecipStepFused.h"
 #include "dynarmic/common/variant_util.h"
 #include "dynarmic/frontend/A32/FPSCR.h"
 #include "dynarmic/frontend/A32/PSR.h"
@@ -48,6 +53,7 @@
 #include "dynarmic/ir/terminal.h"
 #include "dynarmic/ir/value.h"
 
+#include <array>
 #include <cfenv>
 #include <cmath>
 #include <cstdio>
@@ -685,23 +691,39 @@ unsigned LaneBits(Dynarmic::IR::Opcode op) {
   using Dynarmic::IR::Opcode;
   switch (op) {
     case Opcode::VectorAdd8: case Opcode::VectorSub8: case Opcode::VectorMultiply8:
+    case Opcode::VectorGreaterS8: case Opcode::VectorEqual8:
     case Opcode::VectorAbs8: case Opcode::VectorGetElement8: case Opcode::VectorSetElement8:
     case Opcode::VectorBroadcastElement8:
       return 8;
     case Opcode::VectorAdd16: case Opcode::VectorSub16: case Opcode::VectorMultiply16:
+    case Opcode::VectorGreaterS16: case Opcode::VectorEqual16:
     case Opcode::VectorAbs16: case Opcode::VectorGetElement16: case Opcode::VectorSetElement16:
     case Opcode::VectorBroadcastElement16:
       return 16;
     case Opcode::VectorAdd32: case Opcode::VectorSub32: case Opcode::VectorMultiply32:
+    case Opcode::VectorGreaterS32: case Opcode::VectorEqual32:
     case Opcode::VectorAbs32: case Opcode::VectorGetElement32: case Opcode::VectorSetElement32:
     case Opcode::VectorBroadcast32: case Opcode::VectorBroadcastElement32:
       return 32;
     case Opcode::VectorAdd64: case Opcode::VectorSub64: case Opcode::VectorMultiply64:
+    case Opcode::VectorGreaterS64: case Opcode::VectorEqual64:
     case Opcode::VectorAbs64: case Opcode::VectorGetElement64: case Opcode::VectorSetElement64:
     case Opcode::VectorBroadcast64: case Opcode::VectorBroadcastElement64:
       return 64;
     case Opcode::VectorBroadcast8: return 8;
     case Opcode::VectorBroadcast16: return 16;
+    case Opcode::VectorLogicalShiftRight8: case Opcode::VectorLogicalShiftLeft8:
+    case Opcode::VectorLogicalVShift8: case Opcode::VectorArithmeticVShift8:
+      return 8;
+    case Opcode::VectorLogicalShiftRight16: case Opcode::VectorLogicalShiftLeft16:
+    case Opcode::VectorLogicalVShift16: case Opcode::VectorArithmeticVShift16:
+      return 16;
+    case Opcode::VectorLogicalShiftRight32: case Opcode::VectorLogicalShiftLeft32:
+    case Opcode::VectorLogicalVShift32: case Opcode::VectorArithmeticVShift32:
+      return 32;
+    case Opcode::VectorLogicalShiftRight64: case Opcode::VectorLogicalShiftLeft64:
+    case Opcode::VectorLogicalVShift64: case Opcode::VectorArithmeticVShift64:
+      return 64;
     default: return 0;
   }
 }
@@ -799,9 +821,8 @@ std::uint64_t SignExtend(std::uint64_t value, unsigned from_bits, unsigned to_bi
 
 }  // namespace
 
-/// One basic block's interpretation, so that per-block state (temporaries, the recorded flags, the
-/// check bit) cannot leak into the next block and be read as if it belonged there. SSA values do not
-/// cross a block boundary: each block re-reads what it needs from CPSR or from its own registers.
+/// Interprets successive blocks using the same operand buffers. Each block starts with empty SSA
+/// slots and reads any state it needs from CPSR or the guest registers.
 class BlockRunner {
  public:
   BlockRunner(mem::GuestMemory& memory, MachineState& state, LocationDescriptor& location,
@@ -811,6 +832,9 @@ class BlockRunner {
   /// Returns false when execution must stop, with `stop` filled in. On true, `successor` is where to
   /// go next — already reflected in the location reference handed to the constructor.
   bool Run(const isa::TranslatedBlock& block, LocationDescriptor& successor) {
+    steps = 0;
+    check_bit = false;
+    svc_pending_ = false;
     // The IT state this block leaves behind. The translator advances IT per instruction, so the end
     // location carries the architecturally-correct value for "every instruction of this block ran" —
     // which is what anything following the block must resume with, including a target a `bx` inside
@@ -819,6 +843,19 @@ class BlockRunner {
     // and the two-tier differential caught exactly that as a one-byte disagreement at the return
     // sentinel.
     end_it_ = Dynarmic::A32::LocationDescriptor{block.ir.EndLocation()}.IT().Value();
+    // One dense slot per instruction, sized once per block execution (a block is tens of instructions,
+    // and the alternative — a hash insertion and a hash lookup for every operand — was the dominant cost
+    // of this interpreter).
+    const std::size_t slots = block.ir.size() + 1;
+    // Keep the payload arrays sized to the largest block in this run. The validity array still
+    // describes only the current block, so a smaller block cannot read a prior block's values.
+    if (temps_.size() < slots) {
+      temps_.resize(slots);
+      produced_.resize(slots);
+      carry_.resize(slots);
+      ge_.resize(slots);
+    }
+    valid_.assign(slots, std::uint8_t{0});
     for (const auto& inst : block.ir) {
       if (!Step(&inst)) return false;
       ++steps;
@@ -862,6 +899,21 @@ class BlockRunner {
     return false;
   }
 
+  /// A fault that names the guest address it could not access. `write` distinguishes a store from a
+  /// load; a fetch names its pc and is not a write. The runtime turns these into a SIGSEGV with si_addr.
+  bool FaultAt(const std::string& why, std::uint32_t addr, bool write) {
+    stop.reason = StopReason::Fault;
+    stop.detail = why;
+    stop.fault_addr = addr;
+    stop.fault_has_addr = true;
+    stop.fault_write = write;
+    return false;
+  }
+
+  /// The dense slot an instruction's result lives in, or 0 when the block was never named (a numbering
+  /// bug in `isa::TranslateOne`, not a guest state).
+  [[nodiscard]] static unsigned SlotOf(const Inst* inst) { return inst != nullptr ? inst->GetName() : 0; }
+
   [[nodiscard]] bool Read(const Value& v, V& out) {
     if (v.IsImmediate()) {
       std::uint64_t bits = 0;
@@ -878,13 +930,14 @@ class BlockRunner {
                     Hex(static_cast<std::uint64_t>(v.GetType())) + ")";
       return false;
     }
-    const auto it = temps_.find(v.GetInst());
-    if (it == temps_.end()) {
+    const unsigned slot = SlotOf(v.GetInst());
+    if (!HasValue(slot, kTemp)) {
       stop.reason = StopReason::Internal;
-      stop.detail = "IR temporary read before it was written";
+      stop.detail = slot == 0 ? "IR temporary produced by an unnamed instruction (the block was not numbered)"
+                              : "IR temporary read before it was written";
       return false;
     }
-    out = it->second;
+    out = temps_[slot];
     return true;
   }
 
@@ -932,8 +985,8 @@ class BlockRunner {
       out = Flags{};  // the empty NZCV marker contributes no bits of its own
       return true;
     }
-    if (const auto it = produced_.find(arg.GetInst()); it != produced_.end()) {
-      out = it->second;
+    if (const Flags* produced = Produced(arg.GetInst())) {
+      out = *produced;
       return true;
     }
     V value{};
@@ -950,8 +1003,8 @@ class BlockRunner {
       out = ImmediateAsU64(arg, bits) ? Flags::from_cpsr(static_cast<std::uint32_t>(bits)) : Flags{};
       return true;
     }
-    if (const auto it = produced_.find(arg.GetInst()); it != produced_.end()) {
-      out = it->second;
+    if (const Flags* produced = Produced(arg.GetInst())) {
+      out = *produced;
       return true;
     }
     V value{};
@@ -960,7 +1013,31 @@ class BlockRunner {
     return true;
   }
 
-  void Put(const Inst* inst, V value) { temps_[inst] = value; }
+  /// The flags an instruction recorded, or nullptr when it recorded none — the dense index behind the
+  /// map this file used to hash for every `GetNZCVFromOp`.
+  [[nodiscard]] const Flags* Produced(const Inst* inst) const {
+    const unsigned slot = SlotOf(inst);
+    return HasValue(slot, kFlags) ? &produced_[slot] : nullptr;
+  }
+  [[nodiscard]] const bool* Carried(const Inst* inst) const {
+    const unsigned slot = SlotOf(inst);
+    return HasValue(slot, kCarry) ? &carry_[slot].value : nullptr;
+  }
+  [[nodiscard]] const std::uint32_t* GeOf(const Inst* inst) const {
+    const unsigned slot = SlotOf(inst);
+    return HasValue(slot, kGe) ? &ge_[slot] : nullptr;
+  }
+
+  void Put(const Inst* inst, V value) {
+    const unsigned slot = SlotOf(inst);
+    // Every Put follows the block's own instruction, which TranslateOne numbered; a zero here would mean
+    // the numbering pass was skipped, and silently dropping the value would surface as a wrong answer
+    // somewhere else. Sizing guarantees the upper bound.
+    if (slot != 0 && slot < valid_.size()) {
+      temps_[slot] = value;
+      valid_[slot] |= kTemp;
+    }
+  }
 
   void WriteReg(Reg reg, std::uint32_t value);
   /// A write to the program counter. `interwork` is the `BX` rule — bit 0 of the value selects the ISA —
@@ -993,12 +1070,14 @@ class BlockRunner {
 
   [[nodiscard]] bool ReadMem(std::uint64_t addr, void* dst, std::size_t bytes, const Inst* inst) {
     if (addr > memory_.window_bytes() || bytes > memory_.window_bytes() - addr) {
-      return Fault("guest memory read past the window: 0x" + Hex(addr) + " (" + std::to_string(bytes) +
-                   " bytes, window 0x" + Hex(memory_.window_bytes()) + ") at " + Describe(inst));
+      return FaultAt("guest memory read past the window: 0x" + Hex(addr) + " (" + std::to_string(bytes) +
+                     " bytes, window 0x" + Hex(memory_.window_bytes()) + ") at " + Describe(inst),
+                     static_cast<std::uint32_t>(addr), false);
     }
     if (!memory_.Read(static_cast<GuestAddr>(addr), dst, bytes)) {
-      return Fault("guest memory read at 0x" + Hex(addr) +
-                   " refused (unmapped or not readable) at " + Describe(inst));
+      return FaultAt("guest memory read at 0x" + Hex(addr) +
+                     " refused (unmapped or not readable) at " + Describe(inst),
+                     static_cast<std::uint32_t>(addr), false);
     }
     return true;
   }
@@ -1006,13 +1085,15 @@ class BlockRunner {
   [[nodiscard]] bool WriteMem(std::uint64_t addr, const void* src, std::size_t bytes,
                                const Inst* inst) {
     if (addr > memory_.window_bytes() || bytes > memory_.window_bytes() - addr) {
-      return Fault("guest memory write past the window: 0x" + Hex(addr) + " (" +
-                   std::to_string(bytes) + " bytes, window 0x" + Hex(memory_.window_bytes()) +
-                   ") at " + Describe(inst));
+      return FaultAt("guest memory write past the window: 0x" + Hex(addr) + " (" +
+                     std::to_string(bytes) + " bytes, window 0x" + Hex(memory_.window_bytes()) +
+                     ") at " + Describe(inst),
+                     static_cast<std::uint32_t>(addr), true);
     }
     if (!memory_.Write(static_cast<GuestAddr>(addr), src, bytes)) {
-      return Fault("guest memory write at 0x" + Hex(addr) +
-                   " refused (unmapped, not writable, or an executing page) at " + Describe(inst));
+      return FaultAt("guest memory write at 0x" + Hex(addr) +
+                     " refused (unmapped, not writable, or an executing page) at " + Describe(inst),
+                     static_cast<std::uint32_t>(addr), true);
     }
     return true;
   }
@@ -1020,26 +1101,41 @@ class BlockRunner {
   /// Records the flags this instruction's flag-form would have left, for whichever pseudo-operation
   /// names it. Recorded whether or not one exists: it is a property of the instruction, and the
   /// consumer — not the producer — decides which bits it reads.
-  void NoteFlags(const Inst* inst, const Flags& f) { produced_[inst] = f; }
+  void NoteFlags(const Inst* inst, const Flags& f) {
+    const unsigned slot = SlotOf(inst);
+    if (slot != 0 && slot < valid_.size()) {
+      produced_[slot] = f;
+      valid_[slot] |= kFlags;
+    }
+  }
 
   mem::GuestMemory& memory_;
   MachineState& state_;
   LocationDescriptor& location_;
-  /// Passed in, not a member of this class: the exclusive reservation has to outlive a block, and this
-  /// object deliberately does not (see the comment on the class).
+  /// The exclusive reservation belongs to the executor and survives individual blocks.
   ExclusiveState& excl_;
-  std::unordered_map<const Inst*, V> temps_;
-  std::unordered_map<const Inst*, Flags> produced_;
+  /// Value slots, indexed by the instruction's dense ordinal (`Inst::GetName`, assigned one per block in
+  /// `isa::TranslateOne`). These were `std::unordered_map<const Inst*, …>` — a hash per operand read and
+  /// per result write — which made operand access, not the operation itself, the interpreter's cost.
+  std::vector<V> temps_;
+  enum : std::uint8_t { kTemp = 1, kFlags = 2, kCarry = 4, kGe = 8 };
+  bool HasValue(unsigned slot, std::uint8_t kind) const {
+    return slot != 0 && slot < valid_.size() && (valid_[slot] & kind) != 0;
+  }
+  // Clear one byte per IR slot between blocks. Payloads are reused until the producer writes them.
+  std::vector<std::uint8_t> valid_;
+  std::vector<Flags> produced_;
   /// Shifter carries, kept apart from `produced_` because their N/Z reach CPSR by a different route
   /// (`TST`) than their C does (`GetCarryFromOp`), and merging them would make Tier I disagree with
   /// the back end about what a `GetNZCVFromOp` on a shift means.
-  std::unordered_map<const Inst*, bool> carry_;
+  struct ShiftCarry { bool value; };
+  std::vector<ShiftCarry> carry_;
   /// The GE word a packed add/subtract produced, in dynarmic's expanded one-lane-per-bit form, keyed by
   /// the instruction that produced it — the same shape as `carry_` and for the same reason: the IR names
   /// the *producer* in `GetGEFromOp`, so the value has to be recorded where a producer can leave it and
   /// read where a consumer asks. Held apart from `produced_` because it is not a flag: it survives an
   /// unrelated `ADDS` in between, and `MRS rD, CPSR` reads it out of CPSR's own bits.
-  std::unordered_map<const Inst*, std::uint32_t> ge_;
+  std::vector<std::uint32_t> ge_;
   bool check_bit = false;
   /// An SVC noted by `A32CallSupervisor`, waiting to be surfaced at the block's `CheckHalt` terminal —
   /// see the two places that read it. Pending rather than immediate so the PC is already past the
@@ -1177,13 +1273,24 @@ bool BlockRunner::Step(const Inst* inst) {
       // The reason code is chosen to match Tier J's `ExceptionRaised` for the same event, because the
       // differential compares reasons and two tiers naming one raise differently is the thing it exists to
       // catch. That mapping is: a failed instruction fetch is a `Fault` the guest would have seen, a
-      // breakpoint suspends, and anything else -- an undefined or unmodelled encoding, an unimplemented
-      // hint -- is `Unimplemented`, not a fault. Making every raise a `Fault` was my error two revisions
-      // ago and the two lanes that caught it are `docs/30` §Step 37's record of it.
+      // breakpoint suspends, an *architecturally undefined* encoding is SIGILL (a `Fault` with
+      // `illegal_instruction`, delivered to the guest's handler when it has one), and anything else -- an
+      // unmodelled encoding, an unimplemented hint -- is `Unimplemented`, this engine's own gap, not a fault.
       const Exception raised = static_cast<Exception>(kind);
       const std::string where_text = "the A32 front end raised exception " + std::to_string(kind) +
                                      " at 0x" + Hex(static_cast<std::uint32_t>(where));
-      if (raised == Exception::NoExecuteFault) return Fault(where_text);
+      if (raised == Exception::NoExecuteFault) {
+        return FaultAt(where_text, static_cast<std::uint32_t>(where), false);
+      }
+      if (raised == Exception::UndefinedInstruction || raised == Exception::UnpredictableInstruction) {
+        // Same answer as Tier J: an encoding this CPU does not define is the guest's SIGILL, not this
+        // engine's gap. Every other raise stays `Unimplemented`, which is what the differential compares.
+        stop.reason = StopReason::Fault;
+        stop.detail = where_text;
+        stop.illegal_instruction = true;
+        stop.illegal_pc = static_cast<std::uint32_t>(where);
+        return false;
+      }
       if (raised == Exception::Breakpoint) {
         stop.reason = StopReason::Suspended;
         stop.detail = where_text;
@@ -1210,6 +1317,10 @@ bool BlockRunner::Step(const Inst* inst) {
     case Opcode::A32CoprocGetOneWord: {
       if (!HasArgs(inst, 1)) return false;
       const auto info = inst->GetArg(0).GetCoprocInfo();
+      if (IsCycleCounterRead(info[0], info[1] != 0, info[2], info[3], info[4], info[5])) {
+        Put(inst, V{static_cast<std::uint32_t>(HostVirtualCounter()), 0});
+        return true;
+      }
       if (!IsThreadPointerAccess(info)) {
         return Fail(inst, CoprocName("MRC", info) + " is not modelled");
       }
@@ -1443,8 +1554,8 @@ bool BlockRunner::Step(const Inst* inst) {
       if (!HasArgs(inst, 1)) return false;
       const Value arg = inst->GetArg(0);
       if (arg.IsImmediate()) return Fail(inst, "a GE pseudo-operation on an immediate has no producer");
-      const auto it = ge_.find(arg.GetInst());
-      if (it == ge_.end()) {
+      const std::uint32_t* ge = GeOf(arg.GetInst());
+      if (ge == nullptr) {
         // Refusing rather than answering 0: the back end asserts the producer defined the value
         // (`emit_arm64.cpp:80-84`), so a missing producer means this file computed the op without
         // recording its GE, which is a bug in the row above and not a state the guest can be in. Zero
@@ -1452,7 +1563,7 @@ bool BlockRunner::Step(const Inst* inst) {
         return Fail(inst, "no GE recorded for " +
                               std::string{Dynarmic::IR::GetNameOf(arg.GetInst()->GetOpcode())});
       }
-      Put(inst, V{it->second, 0});
+      Put(inst, V{*ge, 0});
       return true;
     }
 
@@ -1515,7 +1626,11 @@ bool BlockRunner::Step(const Inst* inst) {
       if (!W32(inst, 0, a) || !W32(inst, 1, b)) return false;
       const unsigned width = PackedLaneWidth(op);
       Put(inst, V{LaneAddSub(a, b, width, IsPackedSub(op)), 0});
-      ge_[inst] = GeOfPackedAddSub(op, a, b, width);
+      const unsigned slot = SlotOf(inst);
+      if (slot != 0 && slot < valid_.size()) {
+        ge_[slot] = GeOfPackedAddSub(op, a, b, width);
+        valid_[slot] |= kGe;
+      }
       return true;
     }
     case Opcode::PackedSaturatedAddU8:
@@ -1557,8 +1672,8 @@ bool BlockRunner::Step(const Inst* inst) {
       if (!HasArgs(inst, 1)) return false;
       const Value arg = inst->GetArg(0);
       if (!arg.IsImmediate()) {
-        if (const auto c = carry_.find(arg.GetInst()); c != carry_.end()) {
-          Put(inst, V{c->second ? 1u : 0u, 0});
+        if (const bool* c = Carried(arg.GetInst())) {
+          Put(inst, V{*c ? 1u : 0u, 0});
           return true;
         }
       }
@@ -1581,7 +1696,7 @@ bool BlockRunner::Step(const Inst* inst) {
       Flags f{};
       if (!FlagsFromOp(arg, f)) return false;
       if (Probe()) {
-        const bool attached = !arg.IsImmediate() && produced_.count(arg.GetInst()) != 0;
+        const bool attached = !arg.IsImmediate() && Produced(arg.GetInst()) != nullptr;
         std::fprintf(stderr, "  [%s] %s -> n%d z%d c%d v%d\n",
                      Dynarmic::IR::GetNameOf(op).c_str(),
                      attached ? "producer-flags" : "TST", f.n, f.z, f.c, f.v);
@@ -2159,7 +2274,13 @@ bool BlockRunner::Step(const Inst* inst) {
       }
 
       Put(inst, V{result, 0});
-      carry_[inst] = carry;
+      {
+        const unsigned slot = SlotOf(inst);
+        if (slot != 0 && slot < valid_.size()) {
+          carry_[slot].value = carry;
+          valid_[slot] |= kCarry;
+        }
+      }
       NoteFlags(inst, Tst(result, 32));  // N and Z from the result; C is published separately, V clear
       return true;
     }
@@ -2680,6 +2801,126 @@ bool BlockRunner::Step(const Inst* inst) {
       return true;
     }
 
+    case Opcode::VectorLogicalShiftRight8: case Opcode::VectorLogicalShiftRight16:
+    case Opcode::VectorLogicalShiftRight32: case Opcode::VectorLogicalShiftRight64: {
+      // Per-lane unsigned shift by a constant (USHR): what the high-narrowing ops (VADDHN and family)
+      // emit before VectorNarrow, and Tier I had none of the four when VADDHN was added.
+      const unsigned bits = LaneBits(inst->GetOpcode());
+      V a{};
+      std::uint8_t shift = 0;
+      if (!W128(inst, 0, a) || !ByteArg(inst, 1, shift)) return false;
+      if (bits == 0 || bits > 64) return Fail(inst, "unrecognised lane width in VectorLogicalShiftRight");
+      const std::uint64_t mask = bits == 64 ? ~0ull : ((1ull << bits) - 1ull);
+      const unsigned s = shift >= bits ? bits : shift;
+      const auto shr = [&](std::uint64_t w) {
+        std::uint64_t r = 0;
+        for (unsigned off = 0; off < 64; off += bits) {
+          r |= ((((w >> off) & mask) >> s) & mask) << off;
+        }
+        return r;
+      };
+      Put(inst, V{shr(a.lo), shr(a.hi)});
+      return true;
+    }
+
+    case Opcode::VectorLogicalShiftLeft8: case Opcode::VectorLogicalShiftLeft16:
+    case Opcode::VectorLogicalShiftLeft32: case Opcode::VectorLogicalShiftLeft64: {
+      // Per-lane logical shift by a constant (VSHL immediate). bionic's jemalloc computes an extent's
+      // lock hash with `vshl.i32` on every allocation path (libc.so+0x5ee72 in extent_lock2), so a title
+      // that allocates after its asset load stops here: KitKat's first malloc after the atlas load was
+      // `VectorLogicalShiftLeft32: no Tier I semantics yet`, the draw call died, and every later frame
+      // dereferenced the half-initialised scene (the SIGSEGV at 0x29). Tier J had the op; only Tier I
+      // was short.
+      const unsigned bits = LaneBits(inst->GetOpcode());
+      V a{};
+      std::uint8_t shift = 0;
+      if (!W128(inst, 0, a) || !ByteArg(inst, 1, shift)) return false;
+      if (bits == 0 || bits > 64) return Fail(inst, "unrecognised lane width in VectorLogicalShiftLeft");
+      const std::uint64_t mask = bits == 64 ? ~0ull : ((1ull << bits) - 1ull);
+      const unsigned s = shift >= bits ? bits : shift;  // a shift of the lane width clears the lane
+      const auto shl = [&](std::uint64_t w) {
+        std::uint64_t r = 0;
+        for (unsigned off = 0; off < 64; off += bits) {
+          r |= ((((w >> off) & mask) << s) & mask) << off;
+        }
+        return r;
+      };
+      Put(inst, V{shl(a.lo), shl(a.hi)});
+      return true;
+    }
+
+    /**
+     * VSHL/VQSHL by a register (USHL/SSHL): every lane of the address operand is a *signed* shift count.
+     * A positive count shifts the data lane left (a count of the lane width or more clears it); a negative
+     * count shifts right, logically for the `VectorLogical` form and with the sign replicated for the
+     * `VectorArithmetic` one (VQSHL's saturating forms are separate IR and are not emitted for A32).
+     * Blocky Roads stopped on the logical 32-bit form in nativeRender.
+     */
+    case Opcode::VectorLogicalVShift8: case Opcode::VectorLogicalVShift16:
+    case Opcode::VectorLogicalVShift32: case Opcode::VectorLogicalVShift64:
+    case Opcode::VectorArithmeticVShift8: case Opcode::VectorArithmeticVShift16:
+    case Opcode::VectorArithmeticVShift32: case Opcode::VectorArithmeticVShift64: {
+      const unsigned bits = LaneBits(inst->GetOpcode());
+      const auto op = inst->GetOpcode();
+      const bool arithmetic = op == Opcode::VectorArithmeticVShift8 ||
+                              op == Opcode::VectorArithmeticVShift16 ||
+                              op == Opcode::VectorArithmeticVShift32 ||
+                              op == Opcode::VectorArithmeticVShift64;
+      V a{}, b{}, out{};
+      if (!W128(inst, 0, a) || !W128(inst, 1, b)) return false;
+      if (bits == 0 || bits > 64) return Fail(inst, "unrecognised lane width in VectorLogicalVShift");
+      const std::uint64_t mask = bits == 64 ? ~0ull : ((1ull << bits) - 1ull);
+      const auto shifted = [&](std::uint64_t wa, std::uint64_t wb) {
+        std::uint64_t r = 0;
+        for (unsigned off = 0; off < 64; off += bits) {
+          const std::uint64_t av = (wa >> off) & mask;
+          const std::int64_t count = SignedAt((wb >> off) & mask, bits);
+          std::uint64_t lane = 0;
+          if (count >= 0) {
+            if (static_cast<std::uint64_t>(count) < bits) {
+              lane = (av << static_cast<unsigned>(count)) & mask;
+            }
+          } else {
+            // `|count|` without overflow at INT64_MIN.
+            const std::uint64_t right = static_cast<std::uint64_t>(-(count + 1)) + 1;
+            if (right < bits) {
+              lane = arithmetic ? (static_cast<std::uint64_t>(SignedAt(av, bits) >> right) & mask)
+                                : ((av >> right) & mask);
+            } else if (arithmetic && SignedAt(av, bits) < 0) {
+              lane = mask;  // an arithmetic right shift past the lane keeps only the sign
+            }
+          }
+          r |= lane << off;
+        }
+        return r;
+      };
+      Put(inst, V{shifted(a.lo, b.lo), shifted(a.hi, b.hi)});
+      return true;
+    }
+
+    case Opcode::VectorNarrow16: case Opcode::VectorNarrow32: case Opcode::VectorNarrow64: {
+      // XTN: the low half of each lane of the operand's low 64 bits, packed into the result's low
+      // lanes; the high half of the result is zero. A64's ADDHN does the shift first, then this.
+      const unsigned orig = inst->GetOpcode() == Opcode::VectorNarrow16 ? 16
+                            : inst->GetOpcode() == Opcode::VectorNarrow32 ? 32
+                                                                          : 64;
+      if (orig != 16 && orig != 32 && orig != 64) return Fail(inst, "unrecognised width in VectorNarrow");
+      V a{};
+      if (!W128(inst, 0, a)) return false;
+      const unsigned half = orig / 2;
+      const unsigned per_word = 64 / orig;
+      const std::uint64_t orig_mask = orig == 64 ? ~0ull : ((1ull << orig) - 1ull);
+      const std::uint64_t half_mask = (1ull << half) - 1ull;
+      std::uint64_t out = 0;
+      for (unsigned i = 0; i < 2 * per_word; ++i) {
+        const std::uint64_t word = i < per_word ? a.lo : a.hi;
+        const unsigned off = (i % per_word) * orig;
+        out |= ((word >> off) & orig_mask & half_mask) << (half * i);
+      }
+      Put(inst, V{out, 0});
+      return true;
+    }
+
     case Opcode::VectorAdd8: case Opcode::VectorAdd16: case Opcode::VectorAdd32:
     case Opcode::VectorAdd64: case Opcode::VectorSub8: case Opcode::VectorSub16:
     case Opcode::VectorSub32: case Opcode::VectorSub64: case Opcode::VectorMultiply8:
@@ -2800,6 +3041,303 @@ bool BlockRunner::Step(const Inst* inst) {
     // (`emit_x64_vector_floating_point.cpp:949-1010`): an unordered pair takes the default NaN, and the
     // equal case is `a & b` for max and `a | b` for min — the signed-zero rule `FpMax`/`FpMin` already
     // encode, so the equal case needs no separate branch here.
+    case Opcode::FPVectorRecipEstimate32:
+    case Opcode::FPVectorRecipStepFused32: {
+      const bool estimate = inst->GetOpcode() == Opcode::FPVectorRecipEstimate32;
+      V a{}, b{};
+      std::uint8_t controlled = 0;
+      if (!W128(inst, 0, a) || (!estimate && !W128(inst, 1, b)) ||
+          !ByteArg(inst, estimate ? 1 : 2, controlled)) return false;
+      const Dynarmic::FP::FPCR fpcr{state_.fpscr};
+      const auto mode = controlled ? fpcr : fpcr.ASIMDStandardValue();
+      Dynarmic::FP::FPSR status;
+      using Lanes = std::array<std::uint32_t, 4>;
+      const auto left = AsBits<Lanes>(a);
+      const auto right = AsBits<Lanes>(b);
+      Lanes result{};
+      // The A32 front end represents D registers as zero-extended Q values. The padding must not
+      // contribute a divide-by-zero flag when VRECPE processes a D register.
+      const Inst* source = inst->GetArg(0).GetInst();
+      const bool is_double = source->GetOpcode() == Opcode::A32GetVector &&
+                             Dynarmic::A32::IsDoubleExtReg(source->GetArg(0).GetA32ExtRegRef());
+      const unsigned lanes = is_double ? 2 : 4;
+      for (unsigned i = 0; i < lanes; ++i) {
+        result[i] = estimate ? Dynarmic::FP::FPRecipEstimate(left[i], mode, status)
+                             : Dynarmic::FP::FPRecipStepFused(left[i], right[i], mode, status);
+      }
+      state_.fpscr |= status.Value() & kFpStickyMask;
+      Put(inst, AsBits<V>(result));
+      return true;
+    }
+    case Opcode::FPVectorAdd32: case Opcode::FPVectorSub32:
+    case Opcode::FPVectorMul32: case Opcode::FPVectorDiv32: {
+      // Blocky Roads stopped here (`FPVectorMul32: no Tier I semantics yet`). The scalar forms already
+      // take their rounding and flush mode from FPSCR through FpOpScope; the back end copies the same
+      // fields into FPCR for the vector instruction, so one scope around the whole vector matches it.
+      V a{}, b{}, out{};
+      if (!W128(inst, 0, a) || !W128(inst, 1, b)) return false;
+      FpOpScope op{state_.fpscr};
+      FpOps flags{state_.fpscr};
+      const auto* pa = reinterpret_cast<const std::uint8_t*>(&a);
+      const auto* pb = reinterpret_cast<const std::uint8_t*>(&b);
+      auto* pd = reinterpret_cast<std::uint8_t*>(&out);
+      for (unsigned i = 0; i < 16; i += 4) {
+        std::uint32_t xb = 0, yb = 0;
+        for (unsigned k = 0; k < 4; ++k) {
+          xb |= static_cast<std::uint32_t>(pa[i + k]) << (8 * k);
+          yb |= static_cast<std::uint32_t>(pb[i + k]) << (8 * k);
+        }
+        const float x = op.In(BitsAs<float>(xb)), y = op.In(BitsAs<float>(yb));
+        float r{};
+        switch (inst->GetOpcode()) {
+          case Opcode::FPVectorAdd32: r = x + y; break;
+          case Opcode::FPVectorSub32: r = x - y; break;
+          case Opcode::FPVectorMul32: r = x * y; break;
+          default: r = x / y; break;
+        }
+        const std::uint32_t rb = AsBits<std::uint32_t>(op.Out(r));
+        for (unsigned k = 0; k < 4; ++k) pd[i + k] = static_cast<std::uint8_t>(rb >> (8 * k));
+      }
+      Put(inst, out);
+      return true;
+    }
+    case Opcode::FPVectorAdd64: case Opcode::FPVectorSub64:
+    case Opcode::FPVectorMul64: case Opcode::FPVectorDiv64: {
+      V a{}, b{}, out{};
+      if (!W128(inst, 0, a) || !W128(inst, 1, b)) return false;
+      FpOpScope op{state_.fpscr};
+      FpOps flags{state_.fpscr};
+      const auto* pa = reinterpret_cast<const std::uint8_t*>(&a);
+      const auto* pb = reinterpret_cast<const std::uint8_t*>(&b);
+      auto* pd = reinterpret_cast<std::uint8_t*>(&out);
+      for (unsigned i = 0; i < 16; i += 8) {
+        std::uint64_t xb = 0, yb = 0;
+        for (unsigned k = 0; k < 8; ++k) {
+          xb |= static_cast<std::uint64_t>(pa[i + k]) << (8 * k);
+          yb |= static_cast<std::uint64_t>(pb[i + k]) << (8 * k);
+        }
+        const double x = op.In(BitsAs<double>(xb)), y = op.In(BitsAs<double>(yb));
+        double r{};
+        switch (inst->GetOpcode()) {
+          case Opcode::FPVectorAdd64: r = x + y; break;
+          case Opcode::FPVectorSub64: r = x - y; break;
+          case Opcode::FPVectorMul64: r = x * y; break;
+          default: r = x / y; break;
+        }
+        const std::uint64_t rb = AsBits<std::uint64_t>(op.Out(r));
+        for (unsigned k = 0; k < 8; ++k) pd[i + k] = static_cast<std::uint8_t>(rb >> (8 * k));
+      }
+      Put(inst, out);
+      return true;
+    }
+    /**
+     * ARMv7's NEON compares (VCEQ/VCGT/VCGE): all-ones in a true lane, zero in a false one, and any NaN
+     * operand compares false in all three. The A32 front end emits them *not* FPCR-controlled, so the
+     * back end runs its host FCMEQ/FCMGT/FCMGE with the standard FPCR — denormals are compared as they
+     * are, no flush — and a signalling NaN raises the invalid-operation flag. That flag is the part a
+     * value-only comparison misses: the state diff compares FPSR too, and Blocky Roads stopped on this
+     * family in `nativeRender` before the masks could even be wrong.
+     */
+    case Opcode::FPVectorEqual32: case Opcode::FPVectorGreater32:
+    case Opcode::FPVectorGreaterEqual32: {
+      FpOps flags{state_.fpscr};
+      V a{}, b{}, out{};
+      if (!W128(inst, 0, a) || !W128(inst, 1, b)) return false;
+      const auto op = inst->GetOpcode();
+      const auto is_snan = [](std::uint32_t bits) {
+        return (bits & 0x7f80'0000u) == 0x7f80'0000u && (bits & 0x007f'ffffu) != 0 &&
+               (bits & 0x0040'0000u) == 0;
+      };
+      const auto* pa = reinterpret_cast<const std::uint8_t*>(&a);
+      const auto* pb = reinterpret_cast<const std::uint8_t*>(&b);
+      auto* pd = reinterpret_cast<std::uint8_t*>(&out);
+      for (unsigned i = 0; i < 16; i += 4) {
+        std::uint32_t xb = 0, yb = 0;
+        for (unsigned k = 0; k < 4; ++k) {
+          xb |= static_cast<std::uint32_t>(pa[i + k]) << (8 * k);
+          yb |= static_cast<std::uint32_t>(pb[i + k]) << (8 * k);
+        }
+        if (is_snan(xb) || is_snan(yb)) flags.Raise(kIoc);
+        const float x = BitsAs<float>(xb), y = BitsAs<float>(yb);
+        bool r = false;
+        switch (op) {
+          case Opcode::FPVectorEqual32: r = x == y; break;
+          case Opcode::FPVectorGreater32: r = x > y; break;
+          default: r = x >= y; break;
+        }
+        const std::uint32_t rb = r ? 0xffff'ffffu : 0u;
+        for (unsigned k = 0; k < 4; ++k) pd[i + k] = static_cast<std::uint8_t>(rb >> (8 * k));
+      }
+      Put(inst, out);
+      return true;
+    }
+    case Opcode::FPVectorEqual64: case Opcode::FPVectorGreater64:
+    case Opcode::FPVectorGreaterEqual64: {
+      FpOps flags{state_.fpscr};
+      V a{}, b{}, out{};
+      if (!W128(inst, 0, a) || !W128(inst, 1, b)) return false;
+      const auto op = inst->GetOpcode();
+      const auto is_snan = [](std::uint64_t bits) {
+        return (bits & 0x7ff0'0000'0000'0000ull) == 0x7ff0'0000'0000'0000ull &&
+               (bits & 0x000f'ffff'ffff'ffffull) != 0 &&
+               (bits & 0x0008'0000'0000'0000ull) == 0;
+      };
+      const auto* pa = reinterpret_cast<const std::uint8_t*>(&a);
+      const auto* pb = reinterpret_cast<const std::uint8_t*>(&b);
+      auto* pd = reinterpret_cast<std::uint8_t*>(&out);
+      for (unsigned i = 0; i < 16; i += 8) {
+        std::uint64_t xb = 0, yb = 0;
+        for (unsigned k = 0; k < 8; ++k) {
+          xb |= static_cast<std::uint64_t>(pa[i + k]) << (8 * k);
+          yb |= static_cast<std::uint64_t>(pb[i + k]) << (8 * k);
+        }
+        if (is_snan(xb) || is_snan(yb)) flags.Raise(kIoc);
+        const double x = BitsAs<double>(xb), y = BitsAs<double>(yb);
+        bool r = false;
+        switch (op) {
+          case Opcode::FPVectorEqual64: r = x == y; break;
+          case Opcode::FPVectorGreater64: r = x > y; break;
+          default: r = x >= y; break;
+        }
+        const std::uint64_t rb = r ? 0xffff'ffff'ffff'ffffull : 0ull;
+        for (unsigned k = 0; k < 8; ++k) pd[i + k] = static_cast<std::uint8_t>(rb >> (8 * k));
+      }
+      Put(inst, out);
+      return true;
+    }
+    // VMLA/VMLS (VMLS is the same IR with a negated addend), VABS and VNEG. The multiply-add is fused —
+    // the back end lowers this IR to FMLA under the standard FPCR — and the sign operations touch only
+    // the sign bit, raising no flag even for a NaN operand.
+    case Opcode::FPVectorMulAdd32: {
+      V acc{}, n{}, m{}, out{};
+      if (!W128(inst, 0, acc) || !W128(inst, 1, n) || !W128(inst, 2, m)) return false;
+      const auto* pa = reinterpret_cast<const std::uint8_t*>(&acc);
+      const auto* pn = reinterpret_cast<const std::uint8_t*>(&n);
+      const auto* pm = reinterpret_cast<const std::uint8_t*>(&m);
+      auto* pd = reinterpret_cast<std::uint8_t*>(&out);
+      for (unsigned i = 0; i < 16; i += 4) {
+        std::uint32_t ab = 0, nb = 0, mb = 0;
+        for (unsigned k = 0; k < 4; ++k) {
+          ab |= static_cast<std::uint32_t>(pa[i + k]) << (8 * k);
+          nb |= static_cast<std::uint32_t>(pn[i + k]) << (8 * k);
+          mb |= static_cast<std::uint32_t>(pm[i + k]) << (8 * k);
+        }
+        const float r = std::fma(BitsAs<float>(nb), BitsAs<float>(mb), BitsAs<float>(ab));
+        const std::uint32_t rb = AsBits<std::uint32_t>(r);
+        for (unsigned k = 0; k < 4; ++k) pd[i + k] = static_cast<std::uint8_t>(rb >> (8 * k));
+      }
+      Put(inst, out);
+      return true;
+    }
+    case Opcode::FPVectorAbs32: case Opcode::FPVectorNeg32: {
+      V a{}, out{};
+      if (!W128(inst, 0, a)) return false;
+      const std::uint32_t mask = inst->GetOpcode() == Opcode::FPVectorAbs32 ? 0x7fff'ffffu : 0x8000'0000u;
+      const auto* pa = reinterpret_cast<const std::uint8_t*>(&a);
+      auto* pd = reinterpret_cast<std::uint8_t*>(&out);
+      for (unsigned i = 0; i < 16; i += 4) {
+        std::uint32_t xb = 0;
+        for (unsigned k = 0; k < 4; ++k) xb |= static_cast<std::uint32_t>(pa[i + k]) << (8 * k);
+        const std::uint32_t rb = xb ^ mask;
+        for (unsigned k = 0; k < 4; ++k) pd[i + k] = static_cast<std::uint8_t>(rb >> (8 * k));
+      }
+      Put(inst, out);
+      return true;
+    }
+    // VPADD.F32 of the lower halves: [a0+a1, b0+b1, 0, 0] — the shape the back end's ZIP1/FADDP pair
+    // produces, with the upper half zeroed.
+    case Opcode::FPVectorPairedAddLower32: {
+      V a{}, b{}, out{};
+      if (!W128(inst, 0, a) || !W128(inst, 1, b)) return false;
+      const auto* pa = reinterpret_cast<const std::uint8_t*>(&a);
+      const auto* pb = reinterpret_cast<const std::uint8_t*>(&b);
+      auto* pd = reinterpret_cast<std::uint8_t*>(&out);
+      const auto lane = [](const std::uint8_t* p) {
+        std::uint32_t v = 0;
+        for (unsigned k = 0; k < 4; ++k) v |= static_cast<std::uint32_t>(p[k]) << (8 * k);
+        return BitsAs<float>(v);
+      };
+      const float r0 = lane(pa) + lane(pa + 4);
+      const float r1 = lane(pb) + lane(pb + 4);
+      const std::uint32_t words[4] = {AsBits<std::uint32_t>(r0), AsBits<std::uint32_t>(r1), 0u, 0u};
+      for (unsigned i = 0; i < 4; ++i) {
+        for (unsigned k = 0; k < 4; ++k) pd[i * 4 + k] = static_cast<std::uint8_t>(words[i] >> (8 * k));
+      }
+      Put(inst, out);
+      return true;
+    }
+    /**
+     * VCVT between float and integer/fixed lanes. The arithmetic is the scalar conversion's, lane for
+     * lane: scale by 2^fbits in double, round per the IR's mode, then saturate with `ToFixed` (which
+     * raises IOC on NaN/out-of-range exactly as ARM does); the reverse scales the integer and rounds to
+     * the destination float. VCVT raises IXC when the conversion was inexact.
+     */
+    case Opcode::FPVectorToSignedFixed32: case Opcode::FPVectorToUnsignedFixed32: {
+      V a{}, out{};
+      std::uint8_t fbits = 0, rm = 0;
+      if (!W128(inst, 0, a) || !ByteArg(inst, 1, fbits) || !ByteArg(inst, 2, rm)) return false;
+      const bool uns = inst->GetOpcode() == Opcode::FPVectorToUnsignedFixed32;
+      FpOps flags{state_.fpscr};
+      const auto* pa = reinterpret_cast<const std::uint8_t*>(&a);
+      auto* pd = reinterpret_cast<std::uint8_t*>(&out);
+      for (unsigned i = 0; i < 16; i += 4) {
+        std::uint32_t xb = 0;
+        for (unsigned k = 0; k < 4; ++k) xb |= static_cast<std::uint32_t>(pa[i + k]) << (8 * k);
+        const double scaled =
+            std::ldexp(static_cast<double>(BitsAs<float>(xb)), static_cast<int>(fbits));
+        bool inexact = false;
+        const double rounded = RoundToInt(scaled, rm, &inexact);
+        std::uint32_t raised = inexact ? kIxc : 0u;
+        const std::uint64_t v = ToFixed(rounded, !uns, 32, &raised);
+        flags.Raise(raised);
+        const std::uint32_t rb = static_cast<std::uint32_t>(v);
+        for (unsigned k = 0; k < 4; ++k) pd[i + k] = static_cast<std::uint8_t>(rb >> (8 * k));
+      }
+      Put(inst, out);
+      return true;
+    }
+    case Opcode::FPVectorFromSignedFixed32: case Opcode::FPVectorFromUnsignedFixed32: {
+      V a{}, out{};
+      std::uint8_t fbits = 0, rm = 0;
+      if (!W128(inst, 0, a) || !ByteArg(inst, 1, fbits) || !ByteArg(inst, 2, rm)) return false;
+      const bool uns = inst->GetOpcode() == Opcode::FPVectorFromUnsignedFixed32;
+      FpOps flags{state_.fpscr};
+      const auto* pa = reinterpret_cast<const std::uint8_t*>(&a);
+      auto* pd = reinterpret_cast<std::uint8_t*>(&out);
+      for (unsigned i = 0; i < 16; i += 4) {
+        std::uint32_t xb = 0;
+        for (unsigned k = 0; k < 4; ++k) xb |= static_cast<std::uint32_t>(pa[i + k]) << (8 * k);
+        const double scaled = std::ldexp(
+            uns ? static_cast<double>(xb) : static_cast<double>(static_cast<std::int32_t>(xb)),
+            -static_cast<int>(fbits));
+        bool inexact = false;
+        const float r = RoundToInt(static_cast<float>(scaled), rm, &inexact);
+        if (inexact) flags.Raise(kIxc);
+        const std::uint32_t rb = AsBits<std::uint32_t>(r);
+        for (unsigned k = 0; k < 4; ++k) pd[i + k] = static_cast<std::uint8_t>(rb >> (8 * k));
+      }
+      Put(inst, out);
+      return true;
+    }
+    case Opcode::FPVectorRoundInt32: {
+      V a{}, out{};
+      std::uint8_t rm = 0, exact = 0;
+      if (!W128(inst, 0, a) || !ByteArg(inst, 1, rm) || !ByteArg(inst, 2, exact)) return false;
+      FpOps flags{state_.fpscr};
+      const auto* pa = reinterpret_cast<const std::uint8_t*>(&a);
+      auto* pd = reinterpret_cast<std::uint8_t*>(&out);
+      for (unsigned i = 0; i < 16; i += 4) {
+        std::uint32_t xb = 0;
+        for (unsigned k = 0; k < 4; ++k) xb |= static_cast<std::uint32_t>(pa[i + k]) << (8 * k);
+        bool inexact = false;
+        const float r = RoundToInt(BitsAs<float>(xb), rm, &inexact);
+        if (exact != 0 && inexact) flags.Raise(kIxc);
+        const std::uint32_t rb = AsBits<std::uint32_t>(r);
+        for (unsigned k = 0; k < 4; ++k) pd[i + k] = static_cast<std::uint8_t>(rb >> (8 * k));
+      }
+      Put(inst, out);
+      return true;
+    }
     case Opcode::FPVectorMax32: case Opcode::FPVectorMin32: {
       FpOps flags{state_.fpscr};
       V a{}, b{}, out{};
@@ -2854,6 +3392,93 @@ bool BlockRunner::Step(const Inst* inst) {
                         "double-precision NEON lanes, and an ARMv7 guest can encode neither; the 32-bit "
                         "plain vmax/vmin is the form that exists there and it is implemented");
 
+    case Opcode::VectorGreaterS8: case Opcode::VectorGreaterS16:
+    case Opcode::VectorGreaterS32: case Opcode::VectorGreaterS64:
+    case Opcode::VectorEqual8: case Opcode::VectorEqual16:
+    case Opcode::VectorEqual32: case Opcode::VectorEqual64: {
+      V a{}, b{};
+      if (!W128(inst, 0, a) || !W128(inst, 1, b)) return false;
+      const auto op = inst->GetOpcode();
+      const unsigned bits = LaneBits(op);
+      const std::uint64_t mask = bits == 64 ? UINT64_MAX : (1ull << bits) - 1;
+      const bool equal = op == Opcode::VectorEqual8 || op == Opcode::VectorEqual16 ||
+                         op == Opcode::VectorEqual32 || op == Opcode::VectorEqual64;
+      const auto compare = [&](std::uint64_t left, std::uint64_t right) {
+        std::uint64_t result = 0;
+        for (unsigned shift = 0; shift < 64; shift += bits) {
+          const auto x = (left >> shift) & mask;
+          const auto y = (right >> shift) & mask;
+          if (equal ? x == y : SignedAt(x, bits) > SignedAt(y, bits)) result |= mask << shift;
+        }
+        return result;
+      };
+      Put(inst, V{compare(a.lo, b.lo), compare(a.hi, b.hi)});
+      return true;
+    }
+    case Opcode::VectorDeinterleaveEven8: case Opcode::VectorDeinterleaveEven16:
+    case Opcode::VectorDeinterleaveEven32: case Opcode::VectorDeinterleaveEven64:
+    case Opcode::VectorDeinterleaveEvenLower8: case Opcode::VectorDeinterleaveEvenLower16:
+    case Opcode::VectorDeinterleaveEvenLower32:
+    case Opcode::VectorDeinterleaveOdd8: case Opcode::VectorDeinterleaveOdd16:
+    case Opcode::VectorDeinterleaveOdd32: case Opcode::VectorDeinterleaveOdd64:
+    case Opcode::VectorDeinterleaveOddLower8: case Opcode::VectorDeinterleaveOddLower16:
+    case Opcode::VectorDeinterleaveOddLower32:
+    case Opcode::VectorInterleaveLower8: case Opcode::VectorInterleaveLower16:
+    case Opcode::VectorInterleaveLower32: case Opcode::VectorInterleaveLower64:
+    case Opcode::VectorInterleaveUpper8: case Opcode::VectorInterleaveUpper16:
+    case Opcode::VectorInterleaveUpper32: case Opcode::VectorInterleaveUpper64: {
+      V a{}, b{}, out{};
+      if (!W128(inst, 0, a) || !W128(inst, 1, b)) return false;
+      const auto op = inst->GetOpcode();
+      unsigned bytes = 1;
+      switch (op) {
+        case Opcode::VectorDeinterleaveEven16: case Opcode::VectorDeinterleaveEvenLower16:
+        case Opcode::VectorDeinterleaveOdd16: case Opcode::VectorDeinterleaveOddLower16:
+        case Opcode::VectorInterleaveLower16: case Opcode::VectorInterleaveUpper16: bytes = 2; break;
+        case Opcode::VectorDeinterleaveEven32: case Opcode::VectorDeinterleaveEvenLower32:
+        case Opcode::VectorDeinterleaveOdd32: case Opcode::VectorDeinterleaveOddLower32:
+        case Opcode::VectorInterleaveLower32: case Opcode::VectorInterleaveUpper32: bytes = 4; break;
+        case Opcode::VectorDeinterleaveEven64: case Opcode::VectorDeinterleaveOdd64:
+        case Opcode::VectorInterleaveLower64: case Opcode::VectorInterleaveUpper64: bytes = 8; break;
+        default: break;
+      }
+      const auto* first = reinterpret_cast<const std::uint8_t*>(&a);
+      const auto* second = reinterpret_cast<const std::uint8_t*>(&b);
+      auto* result = reinterpret_cast<std::uint8_t*>(&out);
+      if (op >= Opcode::VectorInterleaveLower8 && op <= Opcode::VectorInterleaveUpper64) {
+        const unsigned start = op >= Opcode::VectorInterleaveUpper8 ? 8 : 0;
+        for (unsigned offset = 0; offset < 8; offset += bytes) {
+          std::memcpy(result + 2 * offset, first + start + offset, bytes);
+          std::memcpy(result + 2 * offset + bytes, second + start + offset, bytes);
+        }
+      } else {
+        const bool lower = (op >= Opcode::VectorDeinterleaveEvenLower8 && op <= Opcode::VectorDeinterleaveEvenLower32) ||
+                           (op >= Opcode::VectorDeinterleaveOddLower8 && op <= Opcode::VectorDeinterleaveOddLower32);
+        const unsigned half = lower ? 4 : 8;
+        const unsigned start = op >= Opcode::VectorDeinterleaveOdd8 ? bytes : 0;
+        for (unsigned offset = 0; offset < half; offset += bytes) {
+          std::memcpy(result + offset, first + start + 2 * offset, bytes);
+          std::memcpy(result + half + offset, second + start + 2 * offset, bytes);
+        }
+      }
+      Put(inst, out);
+      return true;
+    }
+    case Opcode::VectorExtractLower:
+    case Opcode::VectorExtract: {
+      V first{}, second{}, out{};
+      std::uint8_t bits = 0;
+      if (!W128(inst, 0, first) || !W128(inst, 1, second) || !ByteArg(inst, 2, bits)) return false;
+      const unsigned width = inst->GetOpcode() == Opcode::VectorExtractLower ? 8 : 16;
+      const unsigned offset = bits / 8;
+      if (bits % 8 != 0 || offset >= width) return Fail(inst, "invalid vector extract offset");
+      const unsigned from_first = width - offset;
+      auto* result = reinterpret_cast<std::uint8_t*>(&out);
+      std::memcpy(result, reinterpret_cast<const std::uint8_t*>(&first) + offset, from_first);
+      std::memcpy(result + from_first, &second, offset);
+      Put(inst, out);
+      return true;
+    }
     case Opcode::VectorGetElement8: case Opcode::VectorGetElement16:
     case Opcode::VectorGetElement32: case Opcode::VectorGetElement64: {
       const unsigned bits = LaneBits(inst->GetOpcode());
@@ -3008,15 +3633,19 @@ RunResult InterpExecutor::Run(MachineState& state, unsigned max_instructions) {
   // and calling that number something it is not would make Tier I's telemetry and Tier J's disagree in
   // the one place the two tiers are meant to be compared. C04's code cache can carry a real count.
   unsigned steps = 0;
-  static unsigned run_index = 0;
-  ++run_index;
-  const char* tenv = std::getenv("RB_T1_TRACE");
-  const bool trace = tenv != nullptr && static_cast<unsigned>(std::atoi(tenv)) == run_index;
+  // A member, not a function-local static: one executor per process serves every guest thread (under the
+  // GGL), and two processes must not share one trace counter.
+  static const unsigned trace_run = [] {
+    const char* value = std::getenv("RB_T1_TRACE");
+    return value == nullptr ? 0u : static_cast<unsigned>(std::atoi(value));
+  }();
+  const bool trace = trace_run != 0 && ++run_index_ == trace_run;
   unsigned shown = 0;
   // The IT state CPSR leaves this Run with: the entry descriptor's until a block runs, then the
   // successor's at each block boundary and the stopping block's end IT for a mid-block halt. The
   // tail folds it into CPSR — see the fold's comment below for why the fold exists at all.
   std::uint8_t it_fold = location.IT().Value();
+  BlockRunner runner{memory_, state, location, excl_};
   while (steps < max_instructions) {
     if (location.PC() == return_address_) {
       result.reason = StopReason::Returned;
@@ -3032,13 +3661,61 @@ RunResult InterpExecutor::Run(MachineState& state, unsigned max_instructions) {
         break;
       }
     }
-    std::string err;
-    auto block = isa::TranslateOne(memory_, location, &err);
-    if (!block) {
-      result.reason = StopReason::Fault;
-      result.detail = std::move(err);
-      break;
+    // A decoded block is reusable only while its page cannot be written by the guest. That condition is
+    // the whole self-modifying-code contract here: guest text is read+exec, `Write` refuses a read-only
+    // page, and a page the guest may write (a JIT's arena, or this project's own patch tests) is decoded
+    // afresh every entry — so Tier I keeps its "no stale code without a cache flush" property even with a
+    // cache. See the class comment in interp.h.
+    const BlockKey key = MakeKey(location);
+    const bool cacheable = (memory_.ProtAt(location.PC()) & mem::kWrite) == 0;
+    const isa::TranslatedBlock* block = nullptr;
+    std::shared_ptr<isa::TranslatedBlock> uncached;
+    const std::size_t recent_index = ((key.pc >> 1) ^ (key.pc >> 9)) % recent_blocks_.size();
+    auto& recent = recent_blocks_[recent_index];
+    if (cacheable) {
+      if (recent.block != nullptr && recent.key == key) {
+        block = recent.block;
+      } else if (const auto it = blocks_.find(key); it != blocks_.end()) {
+        block = it->second.block.get();
+      } else if (const auto old = blocks_old_.find(key); old != blocks_old_.end()) {
+        // A hit in the previous generation: promote it, so a loop that was re-entered after a demotion
+        // does not have to survive another one to stay cached.
+        block = old->second.block.get();
+        blocks_.emplace(key, std::move(old->second));
+        blocks_old_.erase(old);
+      }
     }
+    if (!block) {
+      std::string err;
+      auto translated = isa::TranslateOne(memory_, location, &err);
+      if (!translated) {
+        result.reason = StopReason::Fault;
+        result.detail = std::move(err);
+        break;
+      }
+      uncached = std::make_shared<isa::TranslatedBlock>(std::move(*translated));
+      block = uncached.get();
+      // AOT task 4: a translate miss is a block start. That is true for the first execution of a
+      // cacheable block and for every execution of one in a writable page (never cached), and it is the
+      // path the AOT executor's dispatcher falls back through. Cache *hits* deliberately do not record:
+      // the start was recorded when the block was first translated, and this loop's hot path must not
+      // grow a dedupe lookup. `location` is still the block's entry descriptor here.
+      rb::exec::trace::OnBlockEntry(location.PC(), location.TFlag());
+      ++translations_;
+      if (cacheable) {
+        if (blocks_.size() >= kBlockCacheLimit) {
+          // Generational, not a wholesale clear: the old code dropped every block the moment the cache
+          // filled, so a working set slightly larger than the cap re-translated its hot code forever.
+          // Demoting the young generation keeps everything the previous generation held for one more
+          // pass, which is what an inner loop interleaved with a large working set needs.
+          recent_blocks_.fill({});
+          blocks_old_ = std::move(blocks_);
+          blocks_.clear();
+        }
+        blocks_.emplace(key, CachedBlock{std::move(uncached)});
+      }
+    }
+    if (cacheable) recent = {key, block};
 
     // A predicated *block*, not merely a predicated terminal. Dynarmic's A32 translator splits an IT
     // sequence into one block per leg: the block carries `GetCondition()` and a
@@ -3052,6 +3729,7 @@ RunResult InterpExecutor::Run(MachineState& state, unsigned max_instructions) {
     // 1012 where silicon returns 42, which is precisely "both legs of `ite gt` ran, and the last one
     // won". `docs/32` §2.1 predicted this class of defect from bionic's 8,387 IT instructions; it is no
     // longer a prediction.
+    // Running a block does not change the cache. Cache hits borrow its block until the next iteration.
     const Dynarmic::IR::Cond entry_cond = block->ir.GetCondition();
     if (entry_cond != Dynarmic::IR::Cond::AL) {
       if (!Holds(entry_cond, Flags::from_cpsr(state.cpsr))) {
@@ -3077,7 +3755,6 @@ RunResult InterpExecutor::Run(MachineState& state, unsigned max_instructions) {
       }
     }
 
-    BlockRunner runner{memory_, state, location, excl_};
     LocationDescriptor successor{location};
     const bool contd = trace && ++shown <= 25;
     if (contd) {
@@ -3092,6 +3769,14 @@ RunResult InterpExecutor::Run(MachineState& state, unsigned max_instructions) {
                    state.r[0], state.r[4], state.r[5], state.r[13], state.r[14], location.PC());
     }
     steps += runner.steps;
+    if (continued && runner.steps == 0) {
+      // A block whose translation produced no IR at all would re-enter this loop at the same location
+      // with `steps` unchanged and never terminate. No such block is known today, but the fallback
+      // path hands Tier I arbitrary guest pages, so the budget has to cover it; one step is the
+      // smallest charge that makes every iteration advance the loop's only bound. A block that stops
+      // is exempt: a refusal is reported with zero executed instructions, and the loop breaks anyway.
+      ++steps;
+    }
     if (!continued) {
       result = runner.stop;
       // A stop *inside* the block. Everything up to the halt ran — for an `svc` that includes the
@@ -3128,9 +3813,44 @@ RunResult InterpExecutor::Run(MachineState& state, unsigned max_instructions) {
   return result;
 }
 
+InterpExecutor::BlockKey InterpExecutor::MakeKey(const Dynarmic::A32::LocationDescriptor& location) {
+  BlockKey k;
+  k.pc = location.PC();
+  k.fpscr = location.FPSCR().Value();
+  k.it = static_cast<std::uint8_t>(location.IT().Value());
+  k.thumb = location.TFlag();
+  return k;
+}
+
 void InterpExecutor::Invalidate(GuestAddr from, GuestAddr to) {
-  (void)from;
-  (void)to;
+  // The guest's own statement (arm_cacheflush) that executable bytes changed. Eviction is by *page
+  // overlap*, not by start address: a flush names the bytes that were rewritten, and a block whose start
+  // lies just before the range can still contain one of them (the fixture patches a single byte at +8 and
+  // flushes from there — an address-only comparison left the stale block in place). Flushes are page-
+  // granular in practice, so evicting every block that starts on a touched page is both correct and cheap.
+  if (from >= to) return;
+  recent_blocks_.fill({});
+  const GuestAddr from_page = from & ~static_cast<GuestAddr>(mem::kGuestPage - 1);
+  const GuestAddr to_page = (to + mem::kGuestPage - 1) & ~static_cast<GuestAddr>(mem::kGuestPage - 1);
+  for (auto it = blocks_.begin(); it != blocks_.end();) {
+    const GuestAddr bpage =
+        static_cast<GuestAddr>(it->first.pc) & ~static_cast<GuestAddr>(mem::kGuestPage - 1);
+    if (bpage >= from_page && bpage < to_page) {
+      it = blocks_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  // The previous generation is evicted by the same rule: a flush names bytes, and a demoted block decoded
+  // from those bytes is exactly as stale as a young one.
+  for (auto it = blocks_old_.begin(); it != blocks_old_.end();) {
+    const GuestAddr bpage = static_cast<GuestAddr>(it->first.pc) & ~static_cast<GuestAddr>(mem::kGuestPage - 1);
+    if (bpage >= from_page && bpage < to_page) {
+      it = blocks_old_.erase(it);
+    } else {
+      ++it;
+    }
+  }
 }
 
 }  // namespace rb::exec

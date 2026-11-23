@@ -1,0 +1,62 @@
+# RetroBug iOS app (S1). SPDX-License-Identifier: Apache-2.0
+#
+# XcodeGen input: `cd ios && xcodegen generate`. The engine is one static archive (`librbengine.a`) built by
+# CMake for iOS; hand it to the app with `RB_ENGINE_DIR=<dir containing librbengine.a>` as a build setting.
+name: RetroBug
+options:
+  xcodeVersion: "16.4"
+  bundleIdPrefix: com.retrobug
+  deploymentTarget:
+    iOS: "15.0"
+  createIntermediateGroups: true
+
+targets:
+  RetroBug:
+    type: application
+    platform: iOS
+    sources:
+      - path: RetroBug
+        excludes:
+          - "Info.plist"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.retrobug.ios
+        MARKETING_VERSION: "0.1.1"
+        CURRENT_PROJECT_VERSION: "72"
+        INFOPLIST_FILE: RetroBug/Info.plist
+        SWIFT_OBJC_BRIDGING_HEADER: RetroBug/Retrobug-Bridging-Header.h
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/../platform/ios"
+          # The generated AOT profile (copied into RetroBug/AotProfile by tools/build_ios_ipa.sh) includes
+          # rb/exec/aot.h, which includes the vendored A32JitState and mcl.
+          - "$(SRCROOT)/../core/include"
+          - "$(SRCROOT)/../external/dynarmic/src"
+          - "$(SRCROOT)/../external/dynarmic/externals/mcl/include"
+          - "$(SRCROOT)/../external/dynarmic/externals/fmt/include"
+          - "$(SRCROOT)/../external/dynarmic/externals/oaknut/include"
+          - "$(SRCROOT)/../compat"
+        CLANG_CXX_LANGUAGE_STANDARD: "c++20"
+        # The AOT profile is assembly that the table object references by name. A hidden-by-default
+        # build marks the table’s references private-extern, which a default-visibility assembly
+        # definition cannot satisfy, and ld reports every block as undefined.
+        GCC_SYMBOLS_PRIVATE_EXTERN: "NO"
+        LIBRARY_SEARCH_PATHS:
+          - "$(RB_ENGINE_DIR)"
+        OTHER_LDFLAGS:
+          - "-lrbengine"
+          - "-lz"
+          - "-lc++"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SWIFT_VERSION: "5.0"
+        # The engine archive is reached only through the symbols the app calls; stripping was measured to drop
+        # a row that is installed by name (AndroidKitKatActivity.exitApp) from the linked image.
+        DEAD_CODE_STRIPPING: "NO"
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGNING_REQUIRED: "NO"
+    dependencies:
+      - sdk: OpenGLES.framework
+      - sdk: QuartzCore.framework
+      - sdk: AudioToolbox.framework
+      - sdk: AVFoundation.framework
+      - sdk: ImageIO.framework

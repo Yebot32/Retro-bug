@@ -3,11 +3,11 @@
  */
 #include "rb/loader/guest_elf.h"
 #include "rb/loader/elf_defs.h"
+#include "rb/platform/host.h"
 
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <sys/syscall.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -28,7 +28,7 @@ using elf::Ehdr32; using elf::Phdr32; using elf::Shdr32; using elf::Dyn32;
 using elf::Rel32; using elf::Rela32; using elf::Sym32;
 using elf::ET_DYN; using elf::EM_ARM; using elf::EF_ARM_MASK;
 using elf::PT_LOAD; using elf::PT_DYNAMIC; using elf::PT_NOTE;
-using elf::PT_GNU_RELRO; using elf::PT_ARM_EXIDX;
+using elf::PT_GNU_RELRO; using elf::PT_ARM_EXIDX; using elf::PT_TLS;
 using elf::PF_X; using elf::PF_W; using elf::PF_R;
 using elf::SHN_UNDEF; using elf::SHN_ABS;
 using elf::SHT_DYNSYM; using elf::SHT_SYMTAB;
@@ -140,6 +140,30 @@ std::optional<CodeAddress> GuestModule::FindExport(const std::string& name) cons
   return std::nullopt;
 }
 
+const LocalSymbol* GuestModule::FindLocalSymbolEntry(const std::string& name) const {
+  if (!local_symbols || name.empty()) return nullptr;
+  // Two stages, each refusing ambiguity: an exact spelling first, then the mangled identifier. A name that
+  // two different addresses answer (two files' `static` helpers of one name) is not something to guess at.
+  for (const bool by_ident : {false, true}) {
+    const LocalSymbol* hit = nullptr;
+    bool ambiguous = false;
+    for (const LocalSymbol& s : *local_symbols) {
+      if ((by_ident ? s.ident : s.name) != name) continue;
+      if (hit != nullptr && hit->addr != s.addr) ambiguous = true;
+      hit = hit == nullptr ? &s : hit;
+    }
+    if (ambiguous) return nullptr;
+    if (hit != nullptr) return hit;
+  }
+  return nullptr;
+}
+
+std::optional<std::uint32_t> GuestModule::FindLocalSymbol(const std::string& name) const {
+  const LocalSymbol* s = FindLocalSymbolEntry(name);
+  if (s == nullptr) return std::nullopt;
+  return s->addr;
+}
+
 std::vector<std::string> GuestModule::ExportNames() const {
   std::vector<std::string> out;
   out.reserve(exports.size());
@@ -150,31 +174,16 @@ std::vector<std::string> GuestModule::ExportNames() const {
 std::optional<GuestModule> LoadFromBytes(mem::GuestMemory& mem, const std::vector<std::uint8_t>& image,
                                          const std::string& path, const LoadOptions& opts,
                                          std::string* err) {
-  // Round-trip through a memfd so there is one mapping path. This is not a test-only shortcut:
-  // guest code reached from an APK is handed around as bytes or an asset fd, and the isolated
+  // Round-trip through an anonymous image file so there is one mapping path. This is not a test-only
+  // shortcut: guest code reached from an APK is handed around as bytes or an asset fd, and the isolated
   // environment passes the same kind of descriptor over Binder (docs/10 §C9), so an in-memory image
   // has to be loadable without ever touching a writable file — which it could not be executed from
-  // anyway (docs/10 §7).
-  //
-  // Called via syscall() because the memfd_create() wrapper is only declared from API 30 and the
-  // core builds against android-26.
-  int fd = -1;
-#if defined(SYS_memfd_create)
-  fd = static_cast<int>(syscall(SYS_memfd_create, "rb-guest-elf", MFD_CLOEXEC));
-#endif
+  // anyway (docs/10 §7). The platform decides what "anonymous" means: a memfd on Linux, an unlinked
+  // temp file on Darwin, which has no memfd_create.
+  const int fd = platform::ImageFile(image.data(), image.size());
   if (fd < 0) {
-    if (err) *err = Stage("memfd_create unavailable", std::strerror(errno));
+    if (err) *err = Stage("an anonymous image file could not be created", std::strerror(errno));
     return std::nullopt;
-  }
-  std::size_t off = 0;
-  while (off < image.size()) {
-    const ssize_t w = ::write(fd, image.data() + off, image.size() - off);
-    if (w <= 0) {
-      ::close(fd);
-      if (err) *err = Stage("memfd write failed", std::strerror(errno));
-      return std::nullopt;
-    }
-    off += static_cast<std::size_t>(w);
   }
   auto mod = LoadFromFd(mem, fd, path, opts, err);
   ::close(fd);
@@ -297,6 +306,7 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
   GuestModule mod;
   mod.path = path;
   mod.base = base + lo;  // where the image's lowest mapped byte actually sits
+  mod.load_bias = base;  // image vaddr V lives at load_bias + V
   mod.extent = span;     // so [mod.base, mod.base + mod.extent) is exactly the mapped range
 
   /// Every segment mapped below is undone if the load does not reach the end. Without this, a
@@ -363,6 +373,12 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
           !mem.Map(base + file_end, total_end - file_end, s.prot | mem::kWrite, &merr)) {
         return cannot("mapping the BSS of PT_LOAD at");
       }
+    }
+    // The writable segments bound the data segment: `data_start`/`__data_start` name its start and
+    // `_end`/`__end__` its end. Boehm and Mono use the pair as the range they scan.
+    if ((p.p_flags & PF_W) != 0) {
+      if (mod.data_start == 0) mod.data_start = base + p.p_vaddr;
+      mod.data_end = std::max(mod.data_end, base + p.p_vaddr + p.p_memsz);
     }
     rollback.ranges.emplace_back(s.vaddr, s.size);
     segs.push_back(s);
@@ -522,6 +538,17 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
     return true;
   };
 
+  // ---- PT_TLS, before relocation: a module's own TLS relocations are answered against it.
+  for (const auto& p : phdrs) {
+    if (p.p_type != PT_TLS) continue;
+    if (p.p_filesz > p.p_memsz || p.p_vaddr < lo || p.p_vaddr + p.p_filesz < p.p_vaddr ||
+        p.p_vaddr + p.p_filesz > hi) {
+      break;  // an image this module's own range does not hold: leave it absent rather than half-trusted
+    }
+    mod.tls = TlsSegment{base + p.p_vaddr, p.p_filesz, p.p_memsz, p.p_align ? p.p_align : 1u};
+    break;
+  }
+
   // ---- relocations
   if (opts.apply_relocations && dyn.present) {
     auto apply = [&](std::uint32_t table, std::uint32_t bytes, std::uint32_t entsize,
@@ -598,6 +625,19 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
         std::uint32_t sym_addr = 0;
         if (have_sym && sym.st_shndx != SHN_UNDEF) {
           sym_addr = (sym.st_shndx == SHN_ABS) ? sym.st_value : base + sym.st_value;
+        } else if (have_sym && mod.data_start != 0 &&
+                   (sname == "data_start" || sname == "__data_start")) {
+          // A linker-script data symbol with no definition in any loaded image. The unresolved-import
+          // path would bind it to a function trap slot — a code address where the guest expects its
+          // data segment. The module's own first writable PT_LOAD is the fact this name asks for;
+          // Boehm/Mono use it to bound the range they scan.
+          sym_addr = mod.data_start;
+        } else if (have_sym && mod.data_end != 0 &&
+                   (sname == "__end__" || sname == "_end" || sname == "end" || sname == "_edata" ||
+                    sname == "__edata" || sname == "edata")) {
+          // The same range's end. With only the start answered, Boehm got [data_start, trap) — a "range"
+          // whose top is a code address — and its scan/abort path followed it (TT2, 2026-10-20).
+          sym_addr = mod.data_end;
         } else if (have_sym && !opts.resolve) {
           if (ELF32_ST_BIND(sym.st_info) != STB_WEAK) {
             if (err) *err = Stage("imported symbol has no resolver", sname);
@@ -610,7 +650,7 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
               if (err) *err = Stage("unresolved symbol", sname);
               return false;
             }
-          } else if (opts.unresolved_trap != 0 && *found == opts.unresolved_trap &&
+          } else if (opts.unresolved_trap != 0 && *found - opts.unresolved_trap < opts.unresolved_trap_span &&
                      ELF32_ST_BIND(sym.st_info) == STB_WEAK) {
             sym_addr = 0;  // an unresolved weak reference is null, never the trap (see LoadOptions)
           } else {
@@ -667,6 +707,15 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
             break;
           }
           default:
+            if (tls_kind && sidx == 0 && mod.tls && opts.resolve_tls) {
+              if (const std::optional<std::uint32_t> v = opts.resolve_tls(type, addend, *mod.tls)) {
+                if (!write32(r_offset, *v)) {
+                  if (err) *err = "failed writing a TLS relocation slot";
+                  return false;
+                }
+                break;
+              }
+            }
             // Refused kinds are recorded with their address and type, and — unless the caller set
             // `tolerate_unresolved_relocs` — they fail the load at the end of relocation with every slot
             // named. That flag exists for one reason: IFUNC needs a guest call, so the linker loads the
@@ -869,6 +918,60 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
     }
   }
 
+  // ---- the full `.symtab`, when the image kept one. Read from the file through the section headers —
+  // it is not in any PT_LOAD, so guest memory never holds it — and only defined, named FUNC/OBJECT/NOTYPE
+  // entries are kept. Every bound is checked against the file; a table that does not fit is skipped
+  // (the module simply has no local symbols), because it is diagnostic data and not part of loading.
+  if (h->e_shoff != 0 && h->e_shnum != 0 && h->e_shentsize >= sizeof(Shdr32) &&
+      h->e_shoff + static_cast<std::uint64_t>(h->e_shnum) * h->e_shentsize <= img.size) {
+    const auto shdr = [&](std::uint32_t i) {
+      return img.At<Shdr32>(h->e_shoff + static_cast<std::size_t>(i) * h->e_shentsize);
+    };
+    for (std::uint16_t i = 0; i < h->e_shnum; ++i) {
+      const Shdr32* s = shdr(i);
+      if (s == nullptr || s->sh_type != SHT_SYMTAB || s->sh_link >= h->e_shnum) continue;
+      const Shdr32* str = shdr(s->sh_link);
+      if (str == nullptr || s->sh_offset + static_cast<std::uint64_t>(s->sh_size) > img.size ||
+          str->sh_offset + static_cast<std::uint64_t>(str->sh_size) > img.size) {
+        break;
+      }
+      auto table = std::make_shared<std::vector<LocalSymbol>>();
+      const std::size_t n = s->sh_size / sizeof(Sym32);
+      table->reserve(n);
+      for (std::size_t k = 1; k < n; ++k) {
+        const auto* sym = img.At<Sym32>(s->sh_offset + k * sizeof(Sym32));
+        if (sym == nullptr || sym->st_shndx == SHN_UNDEF || sym->st_name >= str->sh_size) continue;
+        const std::uint8_t type = ELF32_ST_TYPE(sym->st_info);
+        if (type != STT_FUNC && type != STT_OBJECT && type != 0 /* NOTYPE */) continue;
+        const char* p = img.CStr(str->sh_offset + sym->st_name);
+        const std::size_t room = str->sh_size - sym->st_name;
+        const std::string name(p, strnlen(p, room));
+        if (name.empty() || name[0] == '$') continue;  // `$a`/`$t`/`$d` mapping symbols, not names
+        LocalSymbol out;
+        out.name = name;
+        out.is_function = type == STT_FUNC;
+        out.thumb = out.is_function && (sym->st_value & 1u) != 0;
+        const std::uint32_t v = sym->st_shndx == SHN_ABS ? sym->st_value : base + sym->st_value;
+        out.addr = out.is_function ? (v & ~1u) : v;
+        out.size = sym->st_size;
+        // `_Z[L]<len><ident>`: the source name of a mangled plain (non-nested) symbol.
+        if (name.size() > 3 && name[0] == '_' && name[1] == 'Z') {
+          std::size_t at = 2;
+          if (name[at] == 'L') ++at;
+          std::size_t len = 0;
+          const std::size_t digits = at;
+          while (at < name.size() && name[at] >= '0' && name[at] <= '9' && len <= name.size()) {
+            len = len * 10 + static_cast<std::size_t>(name[at++] - '0');
+          }
+          if (at > digits && len != 0 && at + len <= name.size()) out.ident = name.substr(at, len);
+        }
+        table->push_back(std::move(out));
+      }
+      mod.local_symbols = std::move(table);
+      break;
+    }
+  }
+
   // ---- build-id, when present (it is absent on the NDK-built fixture)
   for (const auto& p : phdrs) {
     if (p.p_type != PT_NOTE) continue;
@@ -912,6 +1015,55 @@ std::optional<GuestModule> LoadFromFd(mem::GuestMemory& mem, int fd, const std::
 
   rollback.committed = true;
   return mod;
+}
+
+std::vector<std::string> NeededSonames(const std::vector<std::uint8_t>& img) {
+  std::vector<std::string> out;
+  const auto u16 = [&](std::size_t at) -> std::uint32_t {
+    return at + 2 <= img.size() ? (img[at] | (img[at + 1] << 8)) : 0u;
+  };
+  const auto u32 = [&](std::size_t at) -> std::uint32_t {
+    if (at + 4 > img.size()) return 0u;
+    std::uint32_t v = 0;
+    std::memcpy(&v, img.data() + at, 4);
+    return v;
+  };
+  if (img.size() < 52) return out;
+  const std::uint32_t phoff = u32(28), phentsize = u16(42), phnum = u16(44);
+  std::uint32_t dyn_off = 0, dyn_sz = 0;
+  const auto file_of = [&](std::uint32_t vaddr) -> std::size_t {
+    for (std::uint32_t i = 0; i < phnum; ++i) {
+      const std::size_t ph = phoff + std::size_t{i} * phentsize;
+      if (u32(ph) != 1u) continue;  // PT_LOAD
+      const std::uint32_t off = u32(ph + 4), va = u32(ph + 8), filesz = u32(ph + 16);
+      if (vaddr >= va && vaddr - va < filesz) return off + (vaddr - va);
+    }
+    return 0;
+  };
+  for (std::uint32_t i = 0; i < phnum; ++i) {
+    const std::size_t ph = phoff + std::size_t{i} * phentsize;
+    if (u32(ph) == 2u) {  // PT_DYNAMIC
+      dyn_off = u32(ph + 4);
+      dyn_sz = u32(ph + 16);
+    }
+  }
+  std::uint32_t strtab = 0;
+  std::vector<std::uint32_t> needed;
+  for (std::size_t at = dyn_off; dyn_off != 0 && at + 8 <= std::size_t{dyn_off} + dyn_sz; at += 8) {
+    const std::uint32_t tag = u32(at), val = u32(at + 4);
+    if (tag == 0u) break;
+    if (tag == 1u) needed.push_back(val);  // DT_NEEDED
+    if (tag == 5u) strtab = val;           // DT_STRTAB
+  }
+  const std::size_t str = strtab != 0 ? file_of(strtab) : 0;
+  if (str == 0) return out;
+  for (const std::uint32_t n : needed) {
+    std::size_t at = str + n;
+    std::string name;
+    while (at < img.size() && img[at] != 0 && name.size() < 256) name.push_back(static_cast<char>(img[at++]));
+    if (!name.empty()) out.push_back(name);
+  }
+  return out;
 }
 
 }  // namespace rb::loader

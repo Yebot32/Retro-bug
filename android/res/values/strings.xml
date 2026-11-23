@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
+
+  The launcher's name as the platform shows it: the app drawer, Settings > Apps, the uninstall prompt, and the
+  "installed from" line on a converted game. It is a resource rather than a literal in the manifest (D6) so a
+  translation or a rebrand is a resource change and not an edit to the manifest the build signs.
+
+  Only one string lives here on purpose. Every other piece of text the app shows is built in code next to the
+  logic that decides it (HoloTheme and the screen classes), because there is no layout tree and no translation
+  work yet; moving those here without a reason would separate a sentence from the condition that chooses it.
+-->
+<resources>
+    <string name="app_name">RetroBug</string>
+</resources>

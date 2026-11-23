@@ -1,0 +1,114 @@
+# Session backlog — `session/m5-m6`
+
+Status: `todo` · `doing` · `done` · `blocked` · `deferred` (out of this session's reach, kept for later).
+Sources: four read-only analyses (2026-10-18) — conversion+build (C), UI+Data tab (U), graphics/sound/input/perms +
+patch groundwork (G), emulator+bridge (E) — plus device tests. Paths are under `android/` unless they start with
+`core/` or `tools/`; `java/…` means `android/java/com/retrobug/launcher/`. "unconfirmed" = read from code, not seen
+on a device.
+
+## A. Session tasks (in order)
+
+| # | Task | Status |
+|---|---|---|
+| A1 | Analysis → this backlog | done |
+| A2 | Data tab: device edge cases, fixes, merge into the session branch | done (9ec4366) |
+| A3 | SpongeBob Game Station: playable offline (patch on the `.rb` copy only) | blocked (G-Presto anti-tamper; see spongebob-gamestation.md) |
+| A4 | M5: compatibility table for every 32-bit game on the Tab S9 (`docs/compatibility.md`) | done (rows 6 and 17 re-run 2026-10-19; 2 rows still need a clean re-run) |
+| A5 | M6: patches, mods, resolution | done (device-verified 2026-10-18) |
+| A6 | Polish | post-release: C17 (hard-coded badge colours), C20 (ArtCache per screen), C21 (empty state ignores the "Library shows" filter), C23 (shim asks for every dangerous permission at once), C1/C5/C6 (packaging), C28/C30/C32 (engine). The release-blocking ones are closed (C13/C14/C22 verified fixed). |
+| A7 | Release prep, final summary | done (2026-10-25): release build `RB_RELEASE=1 RB_VERSION_NAME=0.2.0` (versionCode 264, 2.66 MB, signed, not debuggable, `-e` diagnostics refused — device-verified on the Tab S9); notes in `docs/session/release/RELEASE_NOTES_0.2.0.md` |
+
+## B. Data tab (branch `data-tab`) — device-tested 2026-10-18
+
+Passed on the Tab S9: OBB install into the copy-owned folder (SMB Bounce 100 MB → title screen), export, import,
+byte-identical round trip, undo offered, adb shell refused, zip-slip refused, non-zip refused, another game's save
+refused, no-OBB status text.
+
+| # | Finding | Where | Status |
+|---|---|---|---|
+| B1 | Export on a copy without the save helper opens "Save as", then fails and leaves a 0-byte zip (seen: Gumball) | java/SaveClient.java:41-57, GameMenu dataTab | done |
+| B2 | No free-space check before OBB install/add; a failed copy leaves `.part` | java/ObbStore.java install/add | done |
+| B3 | Conversion says Ready even when the automatic OBB copy failed | java/ConvertJob.java OBB branch (`onDone(true…)`) | done |
+| B4 | Each 8 MB progress tick rebuilds the whole tab (PackageManager + FUSE stat + a thread each time) | GameMenu.java progress()/select | done |
+| B5 | Undo zip truncated before the new one is written; staging left on exceptions | shim RbSaveProvider.restore, SaveArchive.unpack | done (writeTo, unpack cleanup; SaveArchiveTest 46/46) |
+| B6 | Refusals not logged; "null" messages; raw ZipException text | RbSaveProvider:101, GameMenu.busyWith | done |
+| B7 | rb-report.txt exported/overwritten as a save | SaveArchive.ours | done |
+| B8 | Two OBB installs for one game can race on the same `.part` | GameMenu.busyWith vs ConvertJob | done |
+| B9 | Import while the game runs: replace races the game's own writes (kill after 300 ms) | RbSaveProvider:107-140 | deferred (risk accepted: the import kills the process right after; documented) |
+| B10 | Picker result lost if the activity is recreated | LauncherActivity picked_ | deferred (polish) |
+| B11 | Export includes Android/data/<pkg>/files which may be large | SaveArchive SECTIONS | todo (show size in the done message) |
+
+## C. Bugs and gaps found by the analysis (selected; the full reports are summarized in worklog.md)
+
+| # | Sev | Finding | Where | Status |
+|---|---|---|---|---|
+| C1 | bug | `META-INF/` dropped whole — `META-INF/services/*` (ServiceLoader) lost | java/ApkRepackager.java:248 | todo |
+| C2 | bug | versionName stamp breaks games (fixed on data-tab by the meta-data stamp) | ApkRepackager.java:226-232 | done on data-tab |
+| C3 | bug | Static repack flags set by the scripted `-e repack` path before the slot is claimed; stubCheck without a claim | LauncherActivity.java:202-205, 843 | done (25057e3) |
+| C4 | risk | Diagnostic intent extras honoured by the exported activity in release builds; parseInt crash | LauncherActivity.java:177-229 | todo (release prep) |
+| C5 | gap | Signed `<pkg>.rb.apk` kept forever in external files | ConvertJob.java:79-81 | todo |
+| C6 | gap | No free-space check before converting | ConvertJob.java:79-84 | todo |
+| C7 | gap | Base-has-v7a + other splits classified GAME (copy misses split resources) | GameCatalog/LibraryRules.classify | done (e088907) |
+| C8 | gap | `sharedUserId` kept on rename | AxmlEditor.renamePackage | done (dc8fac9) |
+| C9 | gap | `maxSdkVersion` never removed | ApkRepackager | done (dc8fac9) |
+| C10 | risk | Every entry read fully into memory (OOM on big games) | ApkRepackager.java:262-263, 305-307 | done (8b3d22e; Among Us 497 MB on device) |
+| C11 | bug | Every `show(HOME)` builds a new LibraryScreen: conversion state lost after visiting Settings | LauncherActivity.java:296-319, LibraryScreen | done (5b25229, which also fixed the crash the first C11 fix introduced) |
+| C12 | bug | Install prompt backed out → slot can stay held for the process lifetime (device dependent) | ConvertJob/RepackInstaller | done (c13842c watchdog; device: Back on the prompt frees the tile at once) |
+| C13 | bug | Menu sizes computed once; rotated menu clipped | GameMenu.java:65-85 | todo |
+| C14 | bug | Menu header action uses a stale Game after target change | GameMenu.java:130-136, 347-358 | todo |
+| C15 | bug | Added APK copied straight to its final name; a failed copy leaves a broken tile | LauncherActivity.java:1115-1149 | done (228b606; device-verified 2026-10-18) |
+| C16 | polish | Disabled primary button text invisible | HoloTheme.java:79,93-96 | done (2dcf3df) |
+| C17 | polish | Hard-coded badge colours; "Update available" same as orange accent | GameTile.java:77,85 | todo |
+| C18 | polish | Developer corner still unstyled; back from DEV goes home | LauncherActivity.java:331-512 | todo |
+| C19 | placeholder | "Coming with M6" texts | GameMenu.java:303-306,372,399-416 | done (M6 landed) |
+| C20 | polish | Stretched non-square icons; ArtCache per screen; no in-flight dedupe | ArtCache.java | todo |
+| C21 | gap | Empty state ignores the "Library shows" filter; no Add button | LibraryScreen.java:140-141 | todo |
+| C22 | risk | Catalog scan exceptions leave "Looking for your games…" forever | GameCatalog.java:52-87 | todo |
+| C23 | gap | Permission shim asks for every dangerous permission at once (SMS, contacts, location…) | shim/Shims.java:122-172 | todo (ask only what is needed) |
+| C24 | gap | Settings parsed with `contains`, 1 KiB cap — blocks M6 lists | shim RbShimProvider:39,72-74; jni/runtime_boot.cpp:66-81 | done (93d258c) |
+| C25 | gap | dlopen/dlsym stubbed → all Unity games fail (Teeny Titans 2, FC All-Stars) | jni/host_slots.cpp:315-340 | done (44096c0) |
+| C26 | gap | No signals delivered (Mono/Boehm GC). **Measured 2026-10-19: this is Unity's step one.** Mono suspends with `tkill(tid, SIGPWR)` (238), not `tgkill` (268) — a scan for 268 alone missed it. Cars 3 and MadTruck both end here. | core/syscall/monitor.cpp:507-510 | done (uncommitted 2026-10-20: dispositions recorded, signals queued, delivery at ABI slice boundaries, rt_sigframe + rt_sigreturn, futex/sleep EINTR, nested SIGPWR/SIGXCPU; Cars 3 runs through repeated Mono GC cycles, 23/23 engine lanes green) |
+| C27 | bug | JNI_OnLoad/constructors run under a 4M-step budget that poisons the process | jni/runtime_boot.cpp:753-754 | done (88106a1; the budget was hiding a real fault, see compatibility.md row 28) |
+| C28 | bug | ARM32 vs AArch64 `O_*` flags not translated (O_LARGEFILE→O_NOFOLLOW, O_DIRECTORY→O_DIRECT) | core/syscall/host_io.cpp:291,297 | todo |
+| C29 | gap | Missing GLES2 ext / GLES1 fixed-point / GLES3 / sensor teardown thunks | jni/thunks.cpp | done (sensor + weak-import halves, d11c5f9; GLES ext still open) |
+| C30 | gap | `glGetString` advertises ES 3.2 + extensions with no thunks | jni/host_slots.cpp:471-481 | todo |
+| C31 | gap | NativeActivity titles (Derby Quest, FC All-Stars, LEGO Mighty Micros, Torture the Murderer) cannot start: `ANativeActivity_onCreate` is unresolved and the tile is marked unplayable | stub writer + runtime boot + android thunks + Java host | todo, mapped 2026-10-25: no `ANativeActivity`/`android_native_app_glue`/`AInputQueue` code exists; `StubElfWriter` exports only `Java_*`+`JNI_OnLoad`; `runtime_boot` dispatch has no onCreate branch; `ALooper_pollAll` answers -3. Plan: export the symbol, add a `kStubOnCreate` branch building the `ANativeActivity` + callbacks, implement `ANativeActivity_*`/`AInputQueue_*`/`ALooper_*` in `thunks_android.cpp`, and a host activity |
+| C32 | perf | Always-on profiler map grows forever | jni/runtime_boot.cpp:542-582 | todo |
+| C33 | risk | `rb_runtime_boot` returns JNI_VERSION_1_6 even on failure | jni/runtime_boot.cpp:860 | todo |
+| C34 | gap | Many syscalls ENOSYS (uname, sysinfo, sched_*affinity, prlimit64…) | core/syscall/monitor.cpp | done (36ce9ac: clock_getres, uname, sysinfo, sched_get/setaffinity, prlimit64, sched_getparam/setscheduler/get_priority_min/max, get/setpriority, and tkill/rt_tgsigqueueinfo folded into tgkill) |
+| C35 | gap | `ALooper_pollAll`/`pollOnce`/`wake` unanswered — MadTruck's nativeRender died on the trap | jni/thunks_android.cpp | done (uncommitted 2026-10-20: poll returns ALOOPER_POLL_TIMEOUT, wake is a no-op; MadTruck renders its splash) |
+| C36 | gap | No stall visibility: a black screen named no thread | core/runtime/guest_process.cpp, jni/runtime_boot.cpp | done (uncommitted: wait markers + `stall:` report with pc/lr/sp, futex word, stack scan) |
+| C37 | gap | Cars 3 stalls in Unity scene activation/UI (libunity condvar); native original reaches MainMenu | core/runtime (guest), Unity UI | open as C46 (2026-10-21): the wait is shared by CD2, TT2, ABE and Rolling Sky; the Cars 3 NOP bypass proves it is a real startup barrier, not a render loop |
+| C38 | gap | MadTruck spins in Android Native billing/semaphore after the splash | game Java/C#, semaphore waits | done (2026-10-20: the wall was the missing `rt_sigsuspend`; MadTruck now runs menu -> level map -> level 1 on the 3D track) |
+| C39 | gap | `rt_sigsuspend` (179) refused with ENOSYS — Mono's suspend handler could not wait for its restart signal | core/syscall/monitor.cpp, futex_table | done (2026-10-20: temp mask, signal wait, EINTR, pre-suspend mask restored after rt_sigreturn; monitor lane 223 checks) |
+| C40 | gap | Teeny Titans 2 (IL2CPP) reaches its own SIGABRT handler at boot | Unity IL2CPP, libunity | done (2026-10-21: the abort was our `tgkill` decode — the tid was read as the signal, so Boehm's GC suspend got EINVAL; TT2 now reaches its title screen; see C43) |
+| C41 | gap | Crash Drive 2 / Angry Birds Epic / Rolling Sky call a null GL table entry (pc 0x4 after `blx`) | Unity libunity platform layer | done (2026-10-21: the entry was `glTexImage3DOES`; the host thunk table had only the core spelling; OES aliases added, device lane + real 3D upload; CD2 → GDPR dialog, ABE/Rolling Sky → publisher splash) |
+| C42 | bug | `data_start`/`__end__` (linker-script data symbols) bound to function trap slots; Boehm/Mono scan the data range | core/loader/guest_elf.cpp | done (2026-10-20: first/last writable PT_LOAD recorded; TT2/CD2 import lists clean; TT2's abort and CD2's null call are elsewhere) |
+| C43 | gap | A guest data/fetch fault killed the process even when the guest installed a SIGSEGV handler; Mono's null checks are built on that delivery | core/exec, core/abi/call.cpp, core/runtime/signal_frame.cpp | done (2026-10-21: RunResult fault address + `AbiContext::set_fault_deliver`; si_code/si_addr/fault_address filled; handled NREs on Cars 3; 692 thread checks) |
+| C44 | gap | Dynarmic's A32 decoder had VADDHN/VRADDHN/VSUBHN/VRSUBHN commented out, so a real `vaddhn.i16` in libunity stopped Cars 3 as "unpredictable" | external/dynarmic A32 ASIMD + Tier I IR | done (2026-10-21: four decoder entries + translator + Tier I VectorLogicalShiftRight/VectorNarrow; tier-diff 1039 checks) |
+| C45 | gap | `tgkill(tgid, tid, sig)` was decoded as `tkill(tid, sig)`, so the tid became the signal and every Boehm GC suspend aborted with EINVAL (TT2, CD2) | core/syscall/monitor.cpp | done (2026-10-21: argument order fixed for tgkill/rt_tgsigqueueinfo; monitor lane 233 checks) |
+| C46 | gap | The shared Unity startup wait: game logic parks in a `pthread_cond_wait` while workers idle (CD2 loading, TT2 title, ABE splash, Rolling Sky splash, Cars 3 unpatched) | Unity libunity/il2cpp + JNI/Choreographer | **done 2026-10-24**: `UnityPlayer.nativeRender` passes a *guest* tid to `android.os.Process.setThreadPriority`, ART throws `Given thread N does not exist`, and the pending exception leaves the engine stalled. `ForwardingJni` now translates the tid through `GuestProcess::HostTidOf()` (guest tid -> bound host tid). TT2 renders its city intro at ~53 M instr/s, CD2 reaches its main menu + name onboarding, ABE reaches its title + consent dialog; Rolling Sky reaches its level select after C47's authority patch. The slice-only false stall is fixed by `AbiContext::host_activity()` |
+| C47 | gap | Rolling Sky `.rb` copy died in `AppActivity.onCreate`: `SecurityException: opening provider com.turbochilli.rollingsky.ipc.IpcProvider ... not exported from UID 10576` — the copy opened the original install's provider, because the DEX names the authority by literal and the repack only renamed the manifest | repack (AxmlEditor/ApkRepackager/DexScanner) | **done 2026-10-24**: an authority the app names by string is renamed in place (same length, same string-table position: `...ipc_provider` -> `...rbc_provider`) and the DEX records are rewritten with fresh SHA-1/Adler-32 digests; edits that change length or order are refused. Host lane `DexStringsTest` (11 checks). Rolling Sky reaches its level-select screen |
+| C48 | gap | ABE title-screen consent dialog did not dismiss from injected taps | input path | not a defect (2026-10-24): the dialog is gated on "Checking internet connection..." which never resolves; taps do reach the window (VRI frame-rate hint fires), the game ignores them until that check ends |
+| C49 | gap | Among Us probed ARMv8-A A32 crypto (`vmull.p64`, `sha1c` in `libEOSSDK.so`) on a CPU that does not define it | external/dynarmic A32 + Tier I + signal delivery | **done 2026-10-25**: undefined/UNPREDICTABLE encodings are classified as a fault and delivered as SIGILL (ILL_ILLOPC, pc set) in both tiers; the guard is the signal mask (a `siglongjmp` handler abandons its frame without rt_sigreturn). Among Us now passes EOS and boots the Unity player. The next wall is separate: `libunity.so` faults reading 0xbfffffe4 with SIGSEGV blocked (C51) |
+| C50 | risk | Gumball's Amazing Party: `libgvradio.so` constructor (guest 0x24c900) jumps to a stack address `0xff59e476` and faults as "undefined instruction" — a bad function pointer/relocation in an obfuscated DRM library, not a missing opcode | loader/relocations, game DRM | todo (2026-10-25; keep out of C49) |
+| C51 | gap | Among Us, after EOS and the Unity player boot, dies in its render thread: `guest memory read at 0xbfffffe4 is unmapped` (pc libc.so+0x940f0, lr libunity.so+0x724189) while SIGSEGV is blocked in that thread, so the fault is not delivered | libunity bootstrap / stack top 0xbfffffe4 | todo (2026-10-25; new wall exposed by C49 — find what computes the 0xbfffffe4 pointer and why the mask has SIGSEGV blocked) |
+
+## D. Release prep (from C)
+
+| # | Finding | Where | Status |
+|---|---|---|---|
+| D1 | versionCode/versionName hard-coded 1 | tools/build_launcher_apk.sh | done: `aapt2 link --version-code/--version-name`, default `0.1.<commit count>`, `RB_VERSION_*` override; the release build reads 262 / 0.2.0 |
+| D2 | d8 without `--release`; no shrinking | tools/build_launcher_apk.sh | done for `--release` (launcher and shim dex). No shrinking on purpose: d8 does not shrink, and the APK is 2.66 MB |
+| D3 | Old "probe" text in CI release notes and build script output | build-apk.yml, build_launcher_apk.sh | done: release-notes body and script tail describe the launcher; the separate `rb_guestprobe.apk` asset keeps its name on purpose |
+| D4 | CI publishes with a throwaway key when the secret is missing | build-apk.yml:129-131 | needs-me (not touched: publishing is out of scope) |
+| D5 | App icon is the Android robot | android/res | needs-me (artwork): kept at the owner's request (2026-10-25). CC BY 3.0 attribution in NOTICE.md; `tools/make_launcher_icon.ps1 -Source <png>` regenerates densities from any near-black-background source |
+| D6 | Manifest typo "librguest.so"; label not a resource | AndroidManifest.xml:17,48 | done (2410054) |
+| D7 | No keys or passwords committed (checked) | — | done |
+
+## E. M6 plan (from G)
+- Patches: native byte patches applied in memory at load (`runtime_boot.cpp` LoadWithNeeded, gated by sha256 +
+  original bytes), manifest patches at conversion, behaviour patches in the shim (Java) — no dex rewriting.
+- Mods: asset replacement at conversion time (keep compression method), reversible by re-converting.
+- Resolution: aspect via `resizeableActivity=false` + `maxAspectRatio` at conversion; render scale via the shim
+  (`SurfaceHolder.setFixedSize` + touch scaling) for Java-surface games.

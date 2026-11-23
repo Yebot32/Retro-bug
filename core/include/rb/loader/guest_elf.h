@@ -101,12 +101,44 @@ struct IfuncSlot {
   std::uint32_t implementation = 0;
 };
 
+/// One defined entry of a module's `.symtab` (the non-allocated, full symbol table a linked image keeps
+/// unless it is stripped): locals included, which `.dynsym` never has.
+struct LocalSymbol {
+  std::string name;   ///< exactly as `.strtab` spells it, e.g. `_ZL13g_thread_list`
+  /// For a plain-or-`_Z[L]<len><ident>`-mangled name, `<ident>` (`g_thread_list`); otherwise empty.
+  std::string ident;
+  std::uint32_t addr = 0;  ///< st_value biased by the load base, bit 0 (the Thumb tag) cleared
+  std::uint32_t size = 0;
+  bool is_function = false;
+  bool thumb = false;  ///< is_function and st_value bit 0 set
+};
+
 /// The linker-facing facts about one loaded module.
+/// A module's `PT_TLS` segment: its initialization image (biased guest address, file size) and the block's
+/// size and alignment. What a linker needs to give the module a TLS block, static or dynamic.
+struct TlsSegment {
+  std::uint32_t vaddr = 0;   ///< biased: where the initialization image sits in this module
+  std::uint32_t filesz = 0;  ///< bytes copied from the image; the rest of `memsz` is zero
+  std::uint32_t memsz = 0;
+  std::uint32_t align = 1;
+};
+
 struct GuestModule {
   std::string path;
   std::string soname;
-  std::uint32_t base = 0;      ///< Guest address the image was placed at.
+  std::uint32_t base = 0;      ///< Guest address the image was placed at (its lowest mapped byte).
+  /// Guest address image-vaddr 0 maps to (the load bias): `base == load_bias + lo`, where lo is the
+  /// lowest PT_LOAD vaddr, so the two are equal only for images whose first segment starts at 0. The AOT
+  /// profile records emitted PCs against this bias, so the runtime compares it exactly.
+  std::uint32_t load_bias = 0;
   std::uint32_t extent = 0;    ///< Guest bytes covered, rounded to guest pages.
+  /// The first writable PT_LOAD's guest address. This is the fact `data_start`/`__data_start` names:
+  /// a linker-script data symbol, not a function. Boehm and Mono use it to bound the data segment, and
+  /// binding it to a function trap slot (the unresolved-import fallback) hands them a code address.
+  std::uint32_t data_start = 0;
+  /// The end of the last writable PT_LOAD. `_end`/`__end__` (and the `_edata` family) name this end of
+  /// the data segment; Boehm uses start and end together as the range it scans.
+  std::uint32_t data_end = 0;
   CodeAddress entry;           ///< e_entry, already biased by `base`.
   CodeAddress init;            ///< DT_INIT, biased. Absent (addr 0) on NDK images, which use init_array.
   CodeAddress fini;            ///< DT_FINI, biased.
@@ -153,6 +185,9 @@ struct GuestModule {
   std::uint32_t exidx = 0;
   std::uint32_t exidx_count = 0;
 
+  /// `PT_TLS`, when the image has one.
+  std::optional<TlsSegment> tls;
+
   /// Set once this module's `DT_INIT`/`DT_INIT_ARRAY` have run, and never cleared. bionic guards
   /// constructors per-soinfo the same way: a shared dependency loaded by two dependents (or a retry
   /// after a mid-way failure) must not run its allocator init, static constructors and refcounted
@@ -163,6 +198,27 @@ struct GuestModule {
   /// defined by this module.
   std::optional<CodeAddress> FindExport(const std::string& name) const;
   std::vector<std::string> ExportNames() const;
+
+  /**
+   * A defined `.symtab` symbol's guest address (load base applied, Thumb bit cleared), or nullopt.
+   *
+   * This is how libc *internals* are found by name rather than by fixed address — `g_thread_list`,
+   * `__start_thread`, `__init_static_tls` are local symbols `.dynsym` does not carry. The table is read
+   * from the section headers at load time; an image without section headers or without a `.symtab`
+   * (stripped) answers nullopt for every name.
+   *
+   * `name` matches a symbol spelled exactly so first; failing that, the identifier of an Itanium-mangled
+   * plain name (`_Z[L]<len><ident>...`, so `g_thread_list` finds `_ZL13g_thread_list` and
+   * `__libc_preinit_impl` finds `_ZL19__libc_preinit_implv.__uniq.<n>`). A name that matches more than one
+   * distinct address at the same stage is ambiguous and answers nullopt rather than picking one.
+   */
+  std::optional<std::uint32_t> FindLocalSymbol(const std::string& name) const;
+  /// The same lookup, with the symbol's size and kind.
+  const LocalSymbol* FindLocalSymbolEntry(const std::string& name) const;
+
+  /// The `.symtab` entries, shared between copies of this module (the table of a real libc is ~11,000
+  /// names). Null when the image has none.
+  std::shared_ptr<const std::vector<LocalSymbol>> local_symbols;
 };
 
 /// Supplies guest addresses for symbols the module imports. Returning nullopt means "unresolved":
@@ -184,6 +240,10 @@ struct LoadOptions {
    * non-zero trap there faulted the first guarded static initialiser. 0 (the default) means "no trap".
    */
   std::uint32_t unresolved_trap = 0;
+  /// How many bytes from `unresolved_trap` are trap addresses: a resolver that binds each miss to its own
+  /// address (`GuestProcess`: one 4-byte slot per name, so a fault names its import) answers anywhere in
+  /// `[unresolved_trap, unresolved_trap + unresolved_trap_span)`. 1 (the default): the one address.
+  std::uint32_t unresolved_trap_span = 1;
   /**
    * When false — the default — a relocation this loader cannot apply **fails the load**, naming every
    * slot involved.
@@ -223,6 +283,16 @@ struct LoadOptions {
    * worse than a refused load. Assert on `implementation != 0` before you trust an IFUNC export.
    */
   std::function<std::optional<std::uint32_t>(const IfuncSlot&)> resolve_ifunc;
+
+  /**
+   * Called for each of this module's **own** TLS relocations (`R_ARM_TLS_DTPMOD32`, `_DTPOFF32`, `_TPOFF32`
+   * with symbol 0) while the image is still writable, with the relocation type, its addend and the module's
+   * `PT_TLS`. A value is written into the slot; nullopt leaves the relocation refused exactly as without the
+   * hook. Only the caller knows where the module's block lives (the static-TLS layout is the linker's), so
+   * the loader asks instead of guessing — a guessed 0 put GWP-ASan's thread-locals on bionic's TLS slots.
+   */
+  std::function<std::optional<std::uint32_t>(std::uint32_t type, std::uint32_t addend, const TlsSegment&)>
+      resolve_tls;
 };
 
 /// Reads a whole image from `fd` (seekable) and maps it into `mem`.
@@ -237,5 +307,9 @@ std::optional<GuestModule> LoadFromBytes(mem::GuestMemory& mem, const std::vecto
 /// True for \x7fELF with class 1 (32-bit) and machine EM_ARM — the gate the import pipeline uses to
 /// decide whether an APK's `lib/armeabi-v7a` entry is loadable here at all.
 bool LooksLikeAArch32Elf(const std::uint8_t* data, std::size_t len);
+
+/// The `DT_NEEDED` sonames of an ELF32 image, read from its bytes (before it is loaded). Bounds-checked;
+/// anything malformed yields what could be read (the loader names the damage later).
+std::vector<std::string> NeededSonames(const std::vector<std::uint8_t>& image);
 
 }  // namespace rb::loader

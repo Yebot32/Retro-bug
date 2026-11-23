@@ -2,6 +2,7 @@
  * RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
  */
 #include "rb/mem/guest_memory.h"
+#include "rb/platform/host.h"
 
 #include <sys/mman.h>
 #include <unistd.h>
@@ -30,6 +31,15 @@ unsigned ToHostProt(unsigned prot) {
 std::string SysErr(const char* what, int e) {
   char buf[192];
   std::snprintf(buf, sizeof buf, "%s: %s (errno %d)", what, std::strerror(e), e);
+  return buf;
+}
+
+/// A failure that also names where: a granule mprotect that the kernel refuses is impossible to act on
+/// without the address and length it was asked about.
+std::string GranuleErr(const char* what, const void* at, std::size_t len, std::size_t granule, int e) {
+  char buf[256];
+  std::snprintf(buf, sizeof buf, "%s: %s (errno %d) at %p len %zu (granule %zu)", what,
+                std::strerror(e), e, at, len, granule);
   return buf;
 }
 
@@ -83,26 +93,35 @@ std::unique_ptr<GuestMemory> GuestMemory::Create(std::size_t window_bytes, const
     // Flat asks for the window low, so guest addresses stay in a range where a 32-bit truncation is
     // unambiguous. Address 0 itself is refused by the kernel (mmap_min_addr); the lowest hint that
     // worked on the x86_64 Android emulator was 0x10000 — the measurement behind docs/10 §17 U-2.
-    raw = mmap(reinterpret_cast<void*>(host_page), window_bytes + slack, PROT_NONE,
-               MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED_NOREPLACE, -1, 0);
-    if (raw == MAP_FAILED) {
+    // The platform supplies "fail if anything is already there": MAP_FIXED_NOREPLACE on Linux,
+    // mach_vm_allocate/hint-and-verify on Darwin (which has no such flag).
+    raw = platform::ReserveWindowAt(reinterpret_cast<void*>(host_page), window_bytes + slack);
+    if (raw == nullptr) {
       if (err) *err = SysErr("flat-model low window reservation failed", errno);
       return nullptr;
     }
   }
-  if (raw == nullptr || raw == MAP_FAILED) {
+  if (raw == nullptr) {
     // Biased, or a flat request the kernel refused: take whatever the OS offers and never assume
     // where it landed.
-    raw = mmap(nullptr, window_bytes + slack, PROT_NONE,
-               MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    if (raw == MAP_FAILED) {
+    raw = platform::ReserveWindow(window_bytes + slack);
+    if (raw == nullptr) {
       if (err) *err = SysErr("window reservation failed", errno);
       return nullptr;
     }
   }
 
+  if (raw == MAP_FAILED) {
+    if (err) *err = SysErr("window reservation failed", errno);
+    return nullptr;
+  }
   const auto raw_addr = reinterpret_cast<std::uintptr_t>(raw);
   const auto aligned = (raw_addr + host_page - 1) & ~static_cast<std::uintptr_t>(host_page - 1);
+  if (aligned == 0) {
+    if (err) *err = "window reservation aligned to address 0";
+    munmap(raw, window_bytes + slack);
+    return nullptr;
+  }
   if (aligned + window_bytes > raw_addr + window_bytes + slack) {
     if (err) *err = "window reservation could not be aligned to the host page";
     munmap(raw, window_bytes + slack);
@@ -126,6 +145,7 @@ std::unique_ptr<GuestMemory> GuestMemory::Create(std::size_t window_bytes, const
   // chunking before shipping; see the note in docs/30. Not premature here: nothing maps more than
   // a module yet, and a chunked table would make the mixed-granule logic harder to read.
   self->pages_.resize(window_bytes / kGuestPage);
+  self->live_granules_.assign((window_bytes >> model.host_page_shift) + 1, false);
   return self;
 }
 
@@ -149,6 +169,24 @@ std::size_t GuestMemory::mapped_page_count() const {
   return n;
 }
 
+std::vector<std::pair<std::uint32_t, std::uint32_t>> GuestMemory::MappedRanges() const {
+  std::vector<std::pair<std::uint32_t, std::uint32_t>> out;
+  std::size_t start = 0;
+  bool in = false;
+  for (std::size_t i = 0; i <= pages_.size(); ++i) {
+    const bool live = i < pages_.size() && pages_[i].mapped;
+    if (live && !in) {
+      start = i;
+      in = true;
+    } else if (!live && in) {
+      out.emplace_back(static_cast<std::uint32_t>(start << kGuestPageShift),
+                       static_cast<std::uint32_t>(i << kGuestPageShift));
+      in = false;
+    }
+  }
+  return out;
+}
+
 void GuestMemory::DropPage(std::size_t page_idx) {
   Page& p = pages_[page_idx];
   if (!p.backing) return;
@@ -164,6 +202,10 @@ void GuestMemory::DropPage(std::size_t page_idx) {
 }
 
 bool GuestMemory::Map(std::uint32_t at, std::size_t len, unsigned prot, std::string* err) {
+  struct NotifyOnExit {  // every exit, a failure included: a partial change still moved pages
+    const GuestMemory& m; std::uint32_t a; std::size_t n;
+    ~NotifyOnExit() { m.Notify(a, n); }
+  } notify_on_exit{*this, at, len};
   // Success is reported by leaving `err` empty, so a string that arrives already carrying last call's
   // text must not be read as this call's failure. It was: a caller reusing one `std::string` across a
   // sequence of maps had a *successful* map roll itself back and return false, and the launcher is exactly
@@ -210,6 +252,10 @@ bool GuestMemory::Map(std::uint32_t at, std::size_t len, unsigned prot, std::str
 
 bool GuestMemory::MapFile(std::uint32_t at, std::size_t len, unsigned prot, int fd,
                           std::uint64_t offset, bool shared, std::string* err) {
+  struct NotifyOnExit {  // every exit, a failure included: a partial change still moved pages
+    const GuestMemory& m; std::uint32_t a; std::size_t n;
+    ~NotifyOnExit() { m.Notify(a, n); }
+  } notify_on_exit{*this, at, len};
   // Same precondition as `Map`: the caller's error string is an output, not an input.
   if (err != nullptr) err->clear();
   if (len == 0) {
@@ -273,6 +319,10 @@ bool GuestMemory::MapFile(std::uint32_t at, std::size_t len, unsigned prot, int 
 }
 
 bool GuestMemory::Protect(std::uint32_t at, std::size_t len, unsigned prot, std::string* err) {
+  struct NotifyOnExit {  // every exit, a failure included: a partial change still moved pages
+    const GuestMemory& m; std::uint32_t a; std::size_t n;
+    ~NotifyOnExit() { m.Notify(a, n); }
+  } notify_on_exit{*this, at, len};
   if (len == 0) {
     // A zero-length mprotect is a kernel no-op; taking the unaligned-address path a first draft took
     // re-protected (or unmapped) a whole page the caller never named.
@@ -303,6 +353,10 @@ bool GuestMemory::Protect(std::uint32_t at, std::size_t len, unsigned prot, std:
 }
 
 bool GuestMemory::Unmap(std::uint32_t at, std::size_t len, std::string* err) {
+  struct NotifyOnExit {  // every exit, a failure included: a partial change still moved pages
+    const GuestMemory& m; std::uint32_t a; std::size_t n;
+    ~NotifyOnExit() { m.Notify(a, n); }
+  } notify_on_exit{*this, at, len};
   if (len == 0) {
     if (err) *err = "zero-length munmap";
     return false;
@@ -344,12 +398,25 @@ bool GuestMemory::RebalanceGranule(std::size_t granule, std::string* err,
     if (pages_[i].prot != kNone) live.push_back(i);
   }
   if (live.empty()) {
+    // A granule that never held a live page is still the reservation's PROT_NONE: withdrawing it is a
+    // no-op, and on iOS that redundant mprotect is refused with ENOMEM (measured at the first guard map
+    // of the host-entry window). The flag keeps the real withdrawal — after an unmap — unchanged.
+    if (granule < live_granules_.size() && !live_granules_[granule]) return true;
     if (mprotect(granule_host, GranuleBytes(), PROT_NONE) != 0) {
-      if (err) *err = SysErr("withdrawing an empty granule failed", errno);
-      return false;
+      const int mp_errno = errno;
+      // MAP_FIXED replaces the range with a fresh PROT_NONE reservation. It is the same end state, and a
+      // path the platform honors when the protection change itself is refused.
+      void* got = ::mmap(granule_host, GranuleBytes(), PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+      if (got != granule_host) {
+        if (err) *err = GranuleErr("withdrawing an empty granule failed (mprotect and MAP_FIXED)",
+                                   granule_host, GranuleBytes(), granule, mp_errno);
+        return false;
+      }
     }
+    if (granule < live_granules_.size()) live_granules_[granule] = false;
     return true;
   }
+  if (granule < live_granules_.size()) live_granules_[granule] = true;
 
   const unsigned prot = pages_[live.front()].prot;
   bool uniform = true;
@@ -475,8 +542,12 @@ bool GuestMemory::RebalanceGranule(std::size_t granule, std::string* err,
         }
       }
     }
-    if (mprotect(granule_host, GranuleBytes(), ToHostProt(prot)) != 0) {
-      if (err) *err = SysErr("applying in-place granule protection failed", errno);
+    const int mapped_prot = ToHostProt(prot) | PROT_WRITE;
+    const int final_prot = ToHostProt(prot);
+    // Dropping the temporary write permission is a no-op when the caller wanted write anyway; iOS
+    // refuses some protection changes on the window, so the calls that change nothing are not made.
+    if (mapped_prot != final_prot && mprotect(granule_host, GranuleBytes(), final_prot) != 0) {
+      if (err) *err = GranuleErr("applying in-place granule protection failed", granule_host, GranuleBytes(), granule, errno);
       return false;
     }
     for (std::size_t i : live) {
@@ -526,8 +597,15 @@ bool GuestMemory::RebalanceGranuleOutOfLine(std::size_t granule, std::string* er
   if (mprotect(granule_host, GranuleBytes(), PROT_NONE) != 0) {
     // Unchecked once, and the failure mode was exactly the one the comment below promises cannot
     // happen: the table said the granule was withdrawn while the host pages kept live permissions.
-    if (err) *err = SysErr("withdrawing the window granule failed", errno);
-    return false;
+    // iOS refuses this protection change on a subrange of the window reservation (ENOMEM, measured);
+    // MAP_FIXED reaches the same end state without asking the kernel to keep any of the old pages.
+    const int mp_errno = errno;
+    void* got = ::mmap(granule_host, GranuleBytes(), PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    if (got != granule_host) {
+      if (err) *err = GranuleErr("withdrawing the window granule failed (mprotect and MAP_FIXED)",
+                                 granule_host, GranuleBytes(), granule, mp_errno);
+      return false;
+    }
   }
 
   for (std::size_t i : live) {
@@ -599,6 +677,13 @@ void* GuestMemory::Host(std::uint32_t at) const {
   if (!p.backing || !IsFastmem(at)) return nullptr;
   // Intra-page offset included: the address of `at`, not of its page, so a caller can use it the way
   // it would use a pointer returned by mmap.
+  return static_cast<char*>(p.backing) + (at & (kGuestPage - 1));
+}
+
+void* GuestMemory::HostForAccess(std::uint32_t at) const {
+  if (!Contains(at)) return nullptr;
+  const Page& p = pages_[PageIndex(at)];
+  if (!p.backing) return nullptr;
   return static_cast<char*>(p.backing) + (at & (kGuestPage - 1));
 }
 
@@ -749,6 +834,28 @@ void GuestMemory::Audit(diag::Auditor& audit) const {
                   std::to_string(mapped_page_count()));
   audit.Info("mem/pages", std::to_string(live) + " live, " + std::to_string(guards) +
                              " reservation(s), window " + std::to_string(window_bytes_) + " bytes");
+}
+
+}  // namespace rb::mem
+
+namespace rb::mem {
+
+int GuestMemory::AddObserver(Observer fn) {
+  const int id = next_observer_++;
+  observers_.emplace(id, std::move(fn));
+  return id;
+}
+
+void GuestMemory::RemoveObserver(int id) { observers_.erase(id); }
+
+void GuestMemory::Notify(std::uint32_t at, std::size_t len) const {
+  if (observers_.empty() || len == 0) return;
+  const std::uint64_t g = GranuleBytes();
+  const std::uint64_t from = (static_cast<std::uint64_t>(at) / g) * g;
+  std::uint64_t to = ((static_cast<std::uint64_t>(at) + len + g - 1) / g) * g;
+  if (to > window_bytes_) to = window_bytes_;
+  if (to <= from) return;
+  for (const auto& [id, fn] : observers_) fn(static_cast<std::uint32_t>(from), static_cast<std::size_t>(to - from));
 }
 
 }  // namespace rb::mem

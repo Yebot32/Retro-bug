@@ -26,6 +26,7 @@
  */
 #pragma once
 
+#include <atomic>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -208,6 +209,18 @@ class JitExecutor : public Executor, public Dynarmic::A32::UserCallbacks {
     if (!detail.empty()) pending_detail_ = std::move(detail);
   }
 
+  /// A guest access that could not be completed, with the address a SIGSEGV handler is entitled to as
+  /// `si_addr`. First stop wins, like SetPending: a later callback from Dynarmic's cleanup must not
+  /// replace the access that actually faulted.
+  void SetFault(std::string detail, GuestAddr addr, bool write) {
+    if (pending_ != Pending::None) return;
+    pending_ = Pending::Fault;
+    pending_detail_ = std::move(detail);
+    pending_fault_addr_ = addr;
+    pending_fault_has_addr_ = true;
+    pending_fault_write_ = write;
+  }
+
   /**
    * True when `pc` is a non-code destination this tier must surface rather than execute: the call
    * sentinel, or a host entry point. Called from *both* the code-read path and the fetch-fault path,
@@ -217,6 +230,22 @@ class JitExecutor : public Executor, public Dynarmic::A32::UserCallbacks {
   bool SurfaceNonCodeDestination(GuestAddr pc);
 
   mem::GuestMemory& memory_;
+  /// Dynarmic's page table (M4): the host address of every mapped, readable guest page whose backing is directly
+  /// addressable, so compiled code loads and stores it inline; nullptr pages (unmapped, guard, out-of-line) take the
+  /// checked callbacks, which name a fault. Kept current by a GuestMemory observer.
+  std::vector<std::uint8_t*> page_table_;
+  int page_observer_ = 0;
+  std::atomic<std::uint64_t> translated_{0}, invalidations_{0};
+  void RefreshPages(std::uint32_t at, std::size_t len);
+
+ public:
+  /// Pages compiled code reaches inline (a test hook).
+  [[nodiscard]] std::size_t inline_pages() const;
+  /// Diagnostics: guest instructions translated (compiled) and cache invalidations, since construction.
+  [[nodiscard]] std::uint64_t translated() const { return translated_.load(std::memory_order_relaxed); }
+  [[nodiscard]] std::uint64_t invalidations() const { return invalidations_.load(std::memory_order_relaxed); }
+
+ private:
   GuestAddr return_address_;
   const HostDispatch* dispatch_;
 
@@ -265,6 +294,14 @@ class JitExecutor : public Executor, public Dynarmic::A32::UserCallbacks {
   std::uint32_t pending_slot_ = 0;
   std::uint32_t pending_svc_ = 0;  ///< the SVC immediate, when `pending_` is `Syscall`
   GuestAddr pending_pc_ = 0;  ///< the address that caused the stop, before Dynarmic advanced past it
+  GuestAddr pending_fault_addr_ = 0;
+  bool pending_fault_has_addr_ = false;
+  bool pending_fault_write_ = false;
+  /// Set when the raise was an architecturally undefined encoding (SIGILL), with that instruction's address:
+  /// the stop becomes a `Fault` carrying `illegal_instruction`, which a monitored process delivers to the
+  /// guest's SIGILL handler. Any other raise stays `Unimplemented` (a gap in this engine, not a guest-visible trap).
+  bool pending_illegal_ = false;
+  GuestAddr pending_illegal_pc_ = 0;
 };
 
 }  // namespace rb::exec

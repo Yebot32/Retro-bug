@@ -49,10 +49,7 @@ on:
       - "CMakeLists.txt"
       - "external/dynarmic/**"
       - ".github/workflows/build-apk.yml"
-    # Tags always build, and publish: a release asset is what makes this installable from a phone's
-    # browser with no cable and no desktop.
-    tags:
-      - "v*"
+    # Public release tags are created by the maintainer with verified APK and IPA assets.
 
 permissions:
   contents: write # only needed by the release step at the end
@@ -150,7 +147,14 @@ jobs:
 
       - name: Build launcher APK
         shell: bash
-        run: bash tools/build_launcher_apk.sh
+        env:
+          RB_RELEASE: ${{ (github.event_name == 'workflow_dispatch' && inputs.release_tag != '') && '1' || '0' }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            export RB_VERSION_NAME="${RELEASE_TAG#v}"
+          fi
+          bash tools/build_launcher_apk.sh
 
       # The script prints a table of what it packaged; the same list goes in the run's log so a build can
       # be judged without downloading anything.
@@ -168,24 +172,11 @@ jobs:
           path: build/launcher-apk/rbguest-launcher.apk
           if-no-files-found: error
 
-      # A tag, or a manual run that named one, publishes the APK as a release asset so it can be downloaded
-      # straight from a phone. Assets are what make this installable without a cable.
+      # Only an explicit manual run can attach its APK to a release.
       - name: Publish the APK as a release asset
-        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.release_tag != '' && inputs.release_tag || github.ref_name }}
-          name: ${{ inputs.release_tag != '' && inputs.release_tag || github.ref_name }}
-          body: |
-            RetroBug launcher APK, built from ${{ github.sha }} by the `build-apk` workflow.
-
-            This is a *probe*, not the emulator's release: it installs the engine inside an Android app and
-            runs a 32-bit ARM (`armeabi-v7a`) library on both execution tiers, reporting whether the values
-            match what the same bytes produced natively on hardware.
-
-            What to look for on the phone: open "RetroBug" and read the line about 32-bit support. On a
-            64-bit-only phone it says this device cannot run 32-bit ARM at all, and every ARMv7 instruction
-            behind the results below was executed by RetroBug in that process. On a 32-bit-capable phone it
-            says so, and the PASS only means the engine agrees with the phone.
+          tag_name: ${{ inputs.release_tag }}
           files: build/launcher-apk/rbguest-launcher.apk
           fail_on_unmatched_files: true

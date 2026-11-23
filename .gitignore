@@ -32,3 +32,12 @@ google-services.json
 
 # Android Profiling
 *.hprof
+
+# Downloaded tools (apktool, ilspycmd, Mono.Cecil) and the session memory folder
+tools/bin/
+tools/cecil/
+tools/ilspy/
+.workbuddy-ai/
+
+# Per-game AOT profile sources copied in by tools/build_ios_ipa.sh (translation of the game bytes).
+ios/RetroBug/AotProfile/

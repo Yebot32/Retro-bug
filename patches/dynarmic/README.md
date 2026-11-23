@@ -115,3 +115,111 @@ LDAEX/STLEX pairing; the doubleword form takes an explicit Rt2 register (`uuuu`)
 encoding's implicit `t + 1`. Retire together with 0001 and 0005 if upstream grows the set.
 
 **Retire when:** the pinned upstream grows these four rows (compare `thumb32.inc` at re-import).
+
+## 0007-ir-block-64-instruction-slab.patch
+
+**Why:** `IR::Block`'s constructor (`ir/basic_block.cpp:25`) hands its instruction pool a fixed slab of
+4096 slots, and `sizeof(IR::Inst)` is 104 B, so every block reserved 104 × 4096 = 425,984 B (~416 KiB)
+at construction whether it went on to hold ten instructions or four thousand. That number is not an
+upstream problem — the JIT emits one block and releases it, inside a code-cache budget — but Tier I
+(`rb::exec::InterpExecutor`) caches decoded `IR::Block`s for the life of the executor, so the cost is
+paid per *cached* block. It is the reason `kBlockCacheLimit` was 128: 128 × 416 KiB is ~54 MiB already,
+and the 8192 it replaced would have reserved ~3.2 GiB. A cache that small is cleared wholesale when
+full (`core/exec/interp.cpp:3215`), so an interpreted title whose working set exceeds 128 blocks
+re-translates its hot blocks continuously. This patch changes the one constant to 64 slots (~6.7 KiB)
+and nothing else. The growth path is untouched and already correct for a smaller initial slab: `Pool`
+keeps `initial_pool_size` as `slab_size`, and `Alloc` pushes the current slab onto `slabs` and calls
+`AllocateNewSlab` — the same `object_size × slab_size` bytes, malloc'd and freed normally — when
+`remaining` reaches zero (`common/memory_pool.cpp:12-42`), so a block longer than 64 instructions pays
+additional 64-instruction slabs rather than failing or being truncated. The only cost is a few more
+mallocs per long block at translation time. With it, 2048 cached blocks cost ~13 MiB before any block
+outgrows one slab, which is what lets `kBlockCacheLimit` rise from 128 to 2048
+(`core/include/rb/exec/interp.h`).
+
+**Retire when:** upstream sizes the initial slab per block or grows the pool geometrically (making the
+constant's value a non-issue), or when Tier I stops keeping whole `IR::Block`s alive across entries and
+the per-block reservation is no longer multiplied by a cache (compare `basic_block.cpp`'s `Block`
+constructor at re-import).
+
+## 0008-aot-offline-emission.patch
+
+**Why:** RetroBug's AOT path has a host tool translate a guest's code ahead of time, offline, so the
+device never JITs covered code (anything the tool does not translate stays on Tier I). The tool needs the
+JIT's own translation and emission pipeline — a copy would drift — but the emission half is unreachable
+from outside: `AddressSpace::Emit`/`Link` are protected, and the `EmitConfig`/`FastmemManager` they use
+are address-space internals (a protected pure-virtual `GetEmitConfig()` and a protected member).
+IR generation needs nothing: `AddressSpace::GenerateIR` is a public pure virtual over a descriptor, is
+unchanged by this patch, and is what the tool calls, so it gets the exact `A32::Translate` plus
+optimisation pipeline rather than a re-derivation. This patch adds exactly one
+public entry point and no logic: `AddressSpace::EmitForAot(IR::Block&, oaknut::CodeGenerator&)`
+calls `EmitArm64` with the same `GetEmitConfig()` the JIT builds (`a32_address_space.cpp`), writing into
+a caller-owned code generator and returning the `EmittedBlockInfo` relocations for the caller to link.
+Nothing in `Emit`, `Link`, `EmitPrelude`, or the emitters changes, so every byte the JIT emits is
+unchanged. The tool refuses blocks that bake a host address: the coprocessor callbacks and the vector-FP
+fallback emit absolute `MOV`s (`emit_arm64_a32_coprocessor.cpp`,
+`emit_arm64_vector_floating_point.cpp:271`) with no relocation record, and those blocks stay on Tier I
+rather than being made relocatable here. For the same reason the tool's `UserConfig` disables the page
+table and the fastmem pointer: with fastmem on, the memory emitter records a `FastmemPatchInfo` whose
+`call_pc` is an absolute host address (`emit_arm64_memory.cpp:585,635`), independent of the page table.
+
+**Retire when:** upstream exposes an offline emission API — IR generation and block emission into a
+caller-owned buffer, with relocation records, reachable without an `AddressSpace` code cache or its block
+maps (compare `address_space.h`'s `EmitForAot` at re-import).
+
+## 0009-apple-atomic-spin-lock.patch
+
+**Why:** `Dynarmic::SpinLock` emitted its own lock/unlock code into an oaknut `CodeBlock` the first time it
+was taken — a runtime `mprotect(RW)` followed by a write into an R|X page. iOS refuses both to a launch
+without a JIT grant, and the AOT tier takes that lock through `ExclusiveMonitor::ClearProcessor` on its
+first call, so every interpreter-only boot died with SIGBUS at `__init_tcb` before any translated block
+ran (the crash report's frames: CrashSignal ← SpinLock::Lock ← ClearProcessor ← AotExecutor::SyncIn;
+builds 22–36). On Apple the lock is now an atomic test-and-set with the same mutual exclusion and no
+executable memory; elsewhere the generated WFE spin stays, because it is measurably cheaper and Android's
+shipping tier is the JIT.
+
+**Retire when:** the pinned upstream gains a non-code-generating lock, or a platform admits code pages to
+non-JIT launches (it will not).
+
+## 0010-ios-no-mach-exception-port.patch
+
+**Why:** the first `ExceptionHandler::Register` (every JIT construction) installs a Mach port for
+`EXC_BAD_ACCESS` and a message-pump thread. That port takes every bad access in the process; with
+page-table fastmem there are no fake-call sites registered, so a fault is answered `KERN_FAILURE` — an
+unhandled Mach exception the kernel turns into a silent process death, before RetroBug's SIGSEGV/SIGBUS
+handlers can log it. Measured on the iPad (build 37): the Tier J boot died at its first guest call with no
+crash block in retrobug.log. On iOS the handler now registers nothing, `SupportsFastmem` is false (which
+selects the page-table fastmem path the JIT actually uses) and the callback setter is a no-op, so faults
+arrive as ordinary signals and name themselves. macOS keeps the port.
+
+**Retire when:** the vendored backend's page-table fastmem no longer coexists with an unconditional Mach
+port, or the port learns to forward unhandled faults to the signal handlers.
+
+## 0011-ios-map-jit-code-block.patch (vendored oaknut)
+
+**Why:** on iOS oaknut's `CodeBlock` mapped its code page `PROT_READ|PROT_EXEC` and emitted through
+`mprotect(RW)` → write → `mprotect(RX)`. The kernel accepts the flip, strips the page's code signature,
+and kills the process the first time that page executes — an uncatchable SIGKILL, so the Tier J boot died
+at its first guest call with no crash report (builds 36–38; `call-setup: __init_tcb` was the last line).
+iOS now maps `MAP_JIT | R|W|X` like macOS and toggles `pthread_jit_write_protect_np`, which is the
+documented JIT path and fails the `mmap` with EPERM when the launch holds no grant. That failure is also
+the honest capability test: mapping a code block, not a successful `mprotect`, is what
+`ios_session.cpp` asks before it offers Tier J. An `mmap` failure is now `bad_alloc` instead of a buffer
+at `MAP_FAILED`.
+
+**Retire when:** upstream oaknut maps MAP_JIT on iOS and toggles the write-protect itself.
+
+**iOS note:** the public SDK marks `pthread_jit_write_protect_np` unavailable (the arm64 compile lane
+caught it), although libsystem exports it and Apple's own frameworks call it. The patch resolves the
+symbol with `dlsym` in the iOS branch and keeps the declared call on macOS.
+
+## 0012-mcl-assert-hook.patch (vendored mcl)
+
+**Why:** `rb_aotgen` follows reachable code, and a path that runs off the end of a function into a
+literal pool feeds data to Dynarmic's front end or an emitter, which asserts (`ASSERT_FALSE` in
+`emit_arm64_*`) and terminates the whole translation — one such block cost the entire library's profile.
+mcl now offers `set_assert_hook`; the tool installs a hook that throws, and the emitter catches it per
+block and refuses that block (refusal kind `asserted`). No hook is installed by the engine, so an engine
+assertion still ends the process exactly as before.
+
+**Retire when:** the tool never follows a computed or fall-through path into data (a full trace-driven
+map), or Dynarmic's offline emission gains a per-block "unsupported" answer instead of an assertion.

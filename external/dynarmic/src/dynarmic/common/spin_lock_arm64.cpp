@@ -4,6 +4,9 @@
  */
 
 #include <mutex>
+#if defined(__APPLE__)
+#include <thread>
+#endif
 
 #include <oaknut/code_block.hpp>
 #include <oaknut/oaknut.hpp>
@@ -34,6 +37,35 @@ void EmitSpinLockLock(oaknut::CodeGenerator& code, oaknut::XReg ptr) {
 void EmitSpinLockUnlock(oaknut::CodeGenerator& code, oaknut::XReg ptr) {
     code.STLR(WZR, ptr);
 }
+
+#if defined(__APPLE__)
+
+/**
+ * RetroBug (patches/dynarmic/0009): an atomic test-and-set instead of a lock that emits itself.
+ *
+ * This lock used to generate its own code the first time it was taken. iOS refuses a launch without a
+ * JIT grant the writable code page that costs, and the AOT tier's first call takes this lock through
+ * `ExclusiveMonitor::ClearProcessor` before any translated block runs — so the interpreter-only path
+ * died with SIGBUS at that very call (KitKat, `__init_tcb`, builds 22-36; the crash report's frames
+ * were CrashSignal ← SpinLock::Lock ← ClearProcessor ← AotExecutor::SyncIn). The atomic has the same
+ * mutual exclusion and needs no executable memory, which is the property the AOT tier is built on.
+ *
+ * Keep the generated form where it works: Android's shipping tier is the JIT, and its WFE spin is
+ * measurably cheaper than a yield loop.
+ */
+void SpinLock::Lock() {
+    while (__atomic_exchange_n(&storage, 1, __ATOMIC_ACQUIRE) != 0) {
+        while (__atomic_load_n(&storage, __ATOMIC_RELAXED) != 0) {
+            std::this_thread::yield();
+        }
+    }
+}
+
+void SpinLock::Unlock() {
+    __atomic_store_n(&storage, 0, __ATOMIC_RELEASE);
+}
+
+#else
 
 namespace {
 
@@ -82,5 +114,7 @@ void SpinLock::Unlock() {
     std::call_once(flag, &SpinLockImpl::Initialize, impl);
     impl.unlock(&storage);
 }
+
+#endif
 
 }  // namespace Dynarmic

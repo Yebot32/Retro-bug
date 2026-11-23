@@ -1,0 +1,1334 @@
+// RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
+//
+// The offline emitter (AOT task 3): Dynarmic's own A32 front end and AArch64 back end, driven from a
+// tool, writing one assembly file.
+//
+// Why assembly text and not bytes: the blocks are position-independent instructions with two kinds of
+// fixups (branches between blocks and calls into the C++ runtime), and the prelude is Dynarmic's
+// `EmitPrelude` logic with the page-table pointer fetched from the runtime (AOT does not use the JIT's
+// signal-based fastmem) and the dispatcher call replacing `GetOrEmit`. Emitting `.word` lines plus
+// symbolic branches lets the assembler and linker resolve the final addresses; the tool bakes no host
+// address into anything it writes, so the result is a normal object file the app can link, not an
+// executable blob.
+//
+// Everything here is offline. The shipping runtime (`core/exec/aot.cpp`) contains no emitter and does
+// not allocate executable memory.
+#include "emit.h"
+
+#include <algorithm>
+#include <array>
+#include <cstdio>
+#include <cstring>
+#include <deque>
+#include <fstream>
+#include <map>
+#include <memory>
+#include <optional>
+#include <string>
+#include <stdexcept>
+#include <utility>
+#include <vector>
+
+#include <oaknut/oaknut.hpp>
+
+#include "dynarmic/backend/arm64/a32_address_space.h"
+#include "dynarmic/backend/arm64/a32_jitstate.h"
+#include "dynarmic/backend/arm64/abi.h"
+#include "dynarmic/backend/arm64/emit_arm64.h"
+#include "dynarmic/backend/arm64/stack_layout.h"
+#include "dynarmic/frontend/A32/FPSCR.h"
+#include "dynarmic/frontend/A32/PSR.h"
+#include "dynarmic/frontend/A32/a32_location_descriptor.h"
+#include "dynarmic/interface/A32/config.h"
+#include "dynarmic/interface/halt_reason.h"
+#include "dynarmic/interface/optimization_flags.h"
+#include "dynarmic/ir/basic_block.h"
+#include "dynarmic/ir/opcodes.h"
+#include "dynarmic/ir/terminal.h"
+
+#include "code_map.h"
+
+namespace rb::aotgen {
+namespace {
+
+using namespace Dynarmic;
+namespace A32 = Dynarmic::A32;
+namespace Backend = Dynarmic::Backend::Arm64;
+namespace oak = oaknut;
+namespace util = oaknut::util;
+
+/// Enough for the fixture several times over. The buffer is the tool's own scratch space, not an
+/// executable allocation: it is written and then turned into text.
+constexpr std::size_t kCodeBytes = 64u << 20;
+
+/// A block is emitted here first so a relocation the AOT prelude cannot serve refuses that block, not
+/// the whole image. Same ceiling as the main stream: the tool never trusts a single block to be small.
+constexpr std::size_t kProbeBytes = kCodeBytes;
+
+/// The `IR::Terminal` variant's index for `Interpret` (see `ir/terminal.h` and front_end.cpp's table).
+constexpr std::size_t kTerminalInterpret = 1;
+
+std::string Hex32(std::uint32_t v) {
+  char buf[16];
+  std::snprintf(buf, sizeof(buf), "0x%08x", v);
+  return buf;
+}
+
+std::string Hex64(std::uint64_t v) {
+  char buf[24];
+  std::snprintf(buf, sizeof(buf), "0x%016llx", static_cast<unsigned long long>(v));
+  return buf;
+}
+
+std::uint64_t Fnv1a64(const std::vector<std::uint8_t>& bytes) {
+  std::uint64_t h = 0xcbf2'9ce4'8422'2325ull;
+  for (const std::uint8_t b : bytes) {
+    h ^= b;
+    h *= 0x0000'0100'0000'01b3ull;
+  }
+  return h;
+}
+
+std::string BaseName(const std::string& path) {
+  const std::size_t slash = path.find_last_of("/\\");
+  return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+/// Mach-O's assembler writes labels literally while a C compiler prefixes them with '_'; the generated
+/// .S refers to both its own symbols and the runtime's C functions, so every name goes through this
+/// macro (identity on ELF, underscore on Apple).
+std::string Sym(const std::string& name) { return "RB_AOT_SYM(" + name + ")"; }
+
+std::string SymbolPrefix(const std::string& out_prefix) {
+  std::string s = BaseName(out_prefix);
+  for (char& c : s) {
+    const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+    if (!ok) c = '_';
+  }
+  if (s.empty() || (s[0] >= '0' && s[0] <= '9')) s = "rb_" + s;
+  return s;
+}
+
+std::string TableName(const std::string& out_prefix) {  std::string s = BaseName(out_prefix);
+  if (s.rfind("aot_", 0) == 0) s = s.substr(4);
+  std::string camel;
+  bool up = true;
+  for (const char c : s) {
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+      camel += up ? static_cast<char>(c >= 'a' && c <= 'z' ? c - 'a' + 'A' : c) : c;
+      up = false;
+    } else {
+      up = true;
+    }
+  }
+  if (camel.empty()) camel = "Image";
+  return "kAot" + camel + "Image";
+}
+
+/// The translator's memory view: `.text` is the only bytes it can fetch, and constant-data reads
+/// outside it answer zero. That is enough for `A32AddressSpace::GenerateIR`, whose constant-memory
+/// pass asks only when a callback claims read-only memory (this one never does).
+class ElfCallbacks final : public A32::UserCallbacks {
+ public:
+  ElfCallbacks(const std::vector<std::uint8_t>& elf, const CodeMap& map, std::uint32_t load_bias)
+      : elf_(elf),
+        text_off_(map.text_off),
+        text_len_(map.text_len),
+        text_base_(load_bias + map.text_vaddr) {}
+
+  std::optional<std::uint32_t> MemoryReadCode(std::uint32_t vaddr) override {
+    std::uint32_t v = 0;
+    if (!Read(vaddr, &v, 4)) return std::nullopt;
+    return v;
+  }
+  std::uint8_t MemoryRead8(std::uint32_t vaddr) override {
+    std::uint8_t v = 0;
+    Read(vaddr, &v, 1);
+    return v;
+  }
+  std::uint16_t MemoryRead16(std::uint32_t vaddr) override {
+    std::uint16_t v = 0;
+    Read(vaddr, &v, 2);
+    return v;
+  }
+  std::uint32_t MemoryRead32(std::uint32_t vaddr) override {
+    std::uint32_t v = 0;
+    Read(vaddr, &v, 4);
+    return v;
+  }
+  std::uint64_t MemoryRead64(std::uint32_t vaddr) override {
+    std::uint64_t v = 0;
+    Read(vaddr, &v, 8);
+    return v;
+  }
+  void MemoryWrite8(std::uint32_t, std::uint8_t) override {}
+  void MemoryWrite16(std::uint32_t, std::uint16_t) override {}
+  void MemoryWrite32(std::uint32_t, std::uint32_t) override {}
+  void MemoryWrite64(std::uint32_t, std::uint64_t) override {}
+  void InterpreterFallback(std::uint32_t, std::size_t) override {}
+  void CallSVC(std::uint32_t) override {}
+  void ExceptionRaised(std::uint32_t, A32::Exception) override {}
+  void AddTicks(std::uint64_t) override {}
+  std::uint64_t GetTicksRemaining() override { return 1; }
+
+  /// The bytes of the translated block, for the coprocessor refusal scan.
+  bool ReadBytes(std::uint32_t vaddr, void* out, std::size_t n) const { return Read(vaddr, out, n); }
+  [[nodiscard]] std::uint32_t text_base() const { return text_base_; }
+  [[nodiscard]] std::uint32_t text_len() const { return text_len_; }
+
+ private:
+  bool Read(std::uint32_t vaddr, void* out, std::size_t n) const {
+    if (vaddr < text_base_) return false;
+    const std::uint64_t off = static_cast<std::uint64_t>(vaddr - text_base_);
+    if (off + n > text_len_) return false;
+    std::memcpy(out, elf_.data() + text_off_ + off, n);
+    return true;
+  }
+
+  const std::vector<std::uint8_t>& elf_;
+  std::size_t text_off_;
+  std::size_t text_len_;
+  std::uint32_t text_base_;
+};
+
+struct ExternalFixup {
+  std::ptrdiff_t offset;
+  std::string line;  ///< e.g. "b rb_aot_mem_read32"; exactly one 4-byte instruction
+};
+
+struct TextFixup {
+  std::ptrdiff_t offset;
+  /// Assembly text for the site. Every line that is not a preprocessor directive (a line starting with
+  /// '#') is one 4-byte instruction; directives are emitted but take no space in the stream.
+  std::vector<std::string> lines;
+};
+
+enum class Refusal {
+  None,
+  Coprocessor,
+  VectorFallback,
+  Interpret,
+  OutOfRange,
+  LocationDescriptor,
+  UnsupportedRelocation,
+  /// The front end or an emitter asserted on the block (an encoding Dynarmic does not implement). Only
+  /// reachable for a target static closure followed into data; the runtime can never execute such a
+  /// block either, so refusing it costs nothing.
+  Asserted,
+};
+
+constexpr std::size_t kRefusalKinds = 8;
+
+/// The table's second key component: the descriptor's upper half — the Thumb bit, the live IT state and
+/// the FPSCR mode — with the single-stepping bit cleared (no AOT block is emitted for a single-stepping
+/// descriptor). Two blocks at one address that differ in any of those bits are different code: the first
+/// keyed blocks on ISA alone and every mid-IT entry was refused, which sent every Thumb IT continuation
+/// to Tier I on every execution (build 40: 35 M Blocky fallbacks, every top site such an entry).
+std::uint32_t KeyHi(const IR::LocationDescriptor& desc) {
+  return static_cast<std::uint32_t>(desc.Value() >> 32) & ~std::uint32_t{4};
+}
+
+struct BlockRecord {
+  IR::LocationDescriptor desc{0};
+  std::uint32_t off = 0;
+  bool thumb = false;
+  std::ptrdiff_t entry = 0;
+  std::ptrdiff_t end = 0;
+  /// Assigned by `Write` from the `(off, thumb)` sort, not by emission order: a change in queue order
+  /// must not rename every block in the generated pair.
+  std::size_t symbol = 0;
+  std::vector<Backend::Relocation> relocations;
+  std::vector<std::pair<IR::LocationDescriptor, std::vector<Backend::BlockRelocation>>> block_rels;
+};
+
+struct Prelude {
+  std::ptrdiff_t run_code = -1;
+  std::ptrdiff_t step_code = -1;
+  std::ptrdiff_t return_to_dispatcher = -1;
+  std::ptrdiff_t return_from_run_code = -1;
+  std::map<Backend::LinkTarget, std::ptrdiff_t> target;
+  std::map<Backend::LinkTarget, std::string> label;
+};
+
+/// One trampoline the emitted blocks call. The tail forms (every callback whose arguments are already
+/// in X1/X2) branch to the C function with `b`, so its `ret` goes straight back to the block's link
+/// register; the wrapped memory forms need to shuffle registers and return through `RET`.
+///
+/// `label_name` is per trampoline, not derived from `symbol`: the callback-only and wrapped memory
+/// forms call the same C function but have different ABIs (value in X0 versus Xscratch0 with every
+/// other caller-save register preserved), so they are two trampolines that need two symbols.
+struct Trampoline {
+  oaknut::Label label;
+  std::ptrdiff_t offset = 0;
+  std::string symbol;
+  std::string label_name;
+  Backend::LinkTarget target;
+};
+
+/// Encode a PC-relative B/BL immediate from two offsets in the same section.
+///
+/// AArch64 branches are relative to the address of the branch instruction itself, not to the next
+/// instruction: `b` at offset 0 with imm 2 lands on offset 8 (verified with the NDK assembler). An
+/// extra `- 4` here would put every relocation four bytes early — into the middle of a trampoline's
+/// `mov`/`b` pair, one word past a block entry, or on the dispatcher's final `br`.
+std::uint32_t EncodeBranch(std::ptrdiff_t site, std::ptrdiff_t target, bool link) {
+  const std::ptrdiff_t delta = target - site;
+  if (delta % 4 != 0) return 0;
+  const std::int64_t words = delta / 4;
+  if (words < -(1 << 25) || words >= (1 << 25)) return 0;
+  const std::uint32_t imm = static_cast<std::uint32_t>(words) & 0x03ff'ffffu;
+  return (link ? 0x9400'0000u : 0x1400'0000u) | imm;
+}
+
+bool IsThumb32(std::uint16_t hw) {
+  return (hw & 0xe000u) == 0xe000u && (hw & 0x1800u) != 0;
+}
+/// The block's last instruction is a call with a link: the callee returns through a computed `bx lr`,
+/// so the caller continues at the block's end location and that address is a real entry — a block start
+/// no direct branch names. Without it the return from every call fell back (build 41: libgame+0x30027a
+/// and neighbours, the post-call continuations of stb's inner loops).
+bool EndsWithCall(const ElfCallbacks& bytes, std::uint32_t end, bool thumb) {
+  if (end < 4) return false;
+  if (thumb) {
+    std::uint16_t hw1 = 0;
+    std::uint16_t hw2 = 0;
+    if (!bytes.ReadBytes(end - 4, &hw1, 2) || !bytes.ReadBytes(end - 2, &hw2, 2)) return false;
+    // 32-bit bl/blx: 11110... then 11... — B.W carries 10 instead.
+    if ((hw1 & 0xf800u) == 0xf000u && (hw2 & 0xc000u) == 0xc000u) return true;
+    // 16-bit `blx rN` (0x4780 | Rm).
+    return (hw1 & 0xff87u) == 0x4780u;
+  }
+  std::uint32_t word = 0;
+  if (!bytes.ReadBytes(end - 4, &word, 4)) return false;
+  if ((word & 0x0f00'0000u) == 0x0b00'0000u) return true;  // bl <imm24>
+  if ((word & 0xfe00'0000u) == 0xfa00'0000u) return true;  // blx <imm24>
+  return (word & 0x0fff'fff0u) == 0x012f'ff30u;           // blx <Rm>
+}
+/// The refusal rule's byte half: a coprocessor instruction that is *not* VFP. ARM bits 27-25 = 110 and
+/// Thumb 0xEC/0xED/0xEE cover VFP (cp10/cp11) as well as the debug and system coprocessors, and only the
+/// latter bake host callbacks: VFP is lowered to ordinary FP IR by the front end and translated like any
+/// arithmetic. Refusing all of them cost libm its 245 VFP blocks and libgame 2,295 — every float-heavy
+/// helper fell back to Tier I per call. The coprocessor number is bits 11-8 of the encoding (the second
+/// halfword in Thumb); 10 and 11 are the ones this backend implements in IR.
+bool HasCoprocessor(const ElfCallbacks& bytes, std::uint32_t start, std::uint32_t end, bool thumb,
+                    std::string* detail) {
+  std::uint32_t pc = start;
+  while (pc < end) {
+    if (thumb) {
+      std::uint16_t hw = 0;
+      if (!bytes.ReadBytes(pc, &hw, 2)) {
+        *detail = "instruction bytes outside .text";
+        return true;
+      }
+      const bool wide = IsThumb32(hw);
+      // 0xEF is Advanced SIMD (NEON), which the ASIMD front end turns into ordinary IR and the emitter
+      // translates. The old mask (0xEC00) also matched 0xEF00, so every Thumb NEON block was refused.
+      if (wide && (hw >> 8) >= 0xecu && (hw >> 8) <= 0xeeu) {
+        std::uint16_t hw2 = 0;
+        if (!bytes.ReadBytes(pc + 2, &hw2, 2)) {
+          *detail = "instruction bytes outside .text";
+          return true;
+        }
+        const unsigned coproc = (hw2 >> 8) & 0xfu;
+        if (coproc != 10 && coproc != 11) {
+          *detail = "Thumb coprocessor encoding at " + Hex32(pc);
+          return true;
+        }
+      }
+      pc += wide ? 4 : 2;
+    } else {
+      std::uint32_t word = 0;
+      if (!bytes.ReadBytes(pc, &word, 4)) {
+        *detail = "instruction bytes outside .text";
+        return true;
+      }
+      // ARM coprocessor space: bits 27-25 = 110 **and cond != 1111**. NEON shares the 110 space but always
+      // carries cond = 1111, and refusing it cost every NEON function — `__memcpy_a15`, memset, strlen —
+      // a Tier I fallback per call: the build-38 AOT log showed 52 % of dispatches in libc's memcpy
+      // variants, which is why asset loading ran at 0.1 fps.
+      const std::uint32_t cond = word >> 28;
+      const unsigned coproc = (word >> 8) & 0xfu;
+      if (cond != 0xfu && (word & 0x0e00'0000u) == 0x0c00'0000u && coproc != 10 && coproc != 11) {
+        *detail = "ARM coprocessor encoding at " + Hex32(pc);
+        return true;
+      }
+      pc += 4;
+    }
+  }
+  return false;
+}
+
+Refusal ForbiddenOpcode(const IR::Block& block, std::string* detail) {
+  for (const auto& inst : block) {
+    switch (inst.GetOpcode()) {
+      // The only vector-FP emitter that calls EmitTwoOpFallback*: it bakes a host function pointer
+      // (`emit_arm64_vector_floating_point.cpp:271`) that no relocation record covers.
+      case IR::Opcode::FPVectorRoundInt16:
+        *detail = "IR opcode FPVectorRoundInt16 (vector-FP fallback)";
+        return Refusal::VectorFallback;
+      // Emitters that are ASSERT_FALSE in this pinned Dynarmic: refusing is the only safe answer.
+      case IR::Opcode::FPVectorRecipStepFused16:
+        *detail = "IR opcode FPVectorRecipStepFused16 (unimplemented emitter)";
+        return Refusal::VectorFallback;
+      // Backstop for the byte scan: a coprocessor IR op bakes a host callback address in
+      // `emit_arm64_a32_coprocessor.cpp` with no relocation.
+      case IR::Opcode::A32CoprocInternalOperation:
+      case IR::Opcode::A32CoprocSendOneWord:
+      case IR::Opcode::A32CoprocSendTwoWords:
+      case IR::Opcode::A32CoprocGetOneWord:
+      case IR::Opcode::A32CoprocGetTwoWords:
+      case IR::Opcode::A32CoprocLoadWords:
+      case IR::Opcode::A32CoprocStoreWords:
+        *detail = "IR coprocessor operation";
+        return Refusal::Coprocessor;
+      default:
+        break;
+    }
+  }
+  return Refusal::None;
+}
+
+bool IsSupportedTarget(Backend::LinkTarget target) {
+  switch (target) {
+    case Backend::LinkTarget::ReturnToDispatcher:
+    case Backend::LinkTarget::ReturnFromRunCode:
+    case Backend::LinkTarget::ReadMemory8:
+    case Backend::LinkTarget::ReadMemory16:
+    case Backend::LinkTarget::ReadMemory32:
+    case Backend::LinkTarget::ReadMemory64:
+    case Backend::LinkTarget::WrappedReadMemory8:
+    case Backend::LinkTarget::WrappedReadMemory16:
+    case Backend::LinkTarget::WrappedReadMemory32:
+    case Backend::LinkTarget::WrappedReadMemory64:
+    case Backend::LinkTarget::ExclusiveReadMemory8:
+    case Backend::LinkTarget::ExclusiveReadMemory16:
+    case Backend::LinkTarget::ExclusiveReadMemory32:
+    case Backend::LinkTarget::ExclusiveReadMemory64:
+    case Backend::LinkTarget::WriteMemory8:
+    case Backend::LinkTarget::WriteMemory16:
+    case Backend::LinkTarget::WriteMemory32:
+    case Backend::LinkTarget::WriteMemory64:
+    case Backend::LinkTarget::WrappedWriteMemory8:
+    case Backend::LinkTarget::WrappedWriteMemory16:
+    case Backend::LinkTarget::WrappedWriteMemory32:
+    case Backend::LinkTarget::WrappedWriteMemory64:
+    case Backend::LinkTarget::ExclusiveWriteMemory8:
+    case Backend::LinkTarget::ExclusiveWriteMemory16:
+    case Backend::LinkTarget::ExclusiveWriteMemory32:
+    case Backend::LinkTarget::ExclusiveWriteMemory64:
+    case Backend::LinkTarget::CallSVC:
+    case Backend::LinkTarget::ExceptionRaised:
+    case Backend::LinkTarget::InstructionSynchronizationBarrierRaised:
+    case Backend::LinkTarget::AddTicks:
+    case Backend::LinkTarget::GetTicksRemaining:
+      return true;
+    default:
+      return false;
+  }
+}
+
+struct Emitter {
+  Emitter(const std::vector<std::uint8_t>& elf, const CodeMap& map, std::uint32_t load_bias)
+      : callbacks(elf, map, load_bias), map_(map), load_bias_(load_bias) {
+    std::memset(scratch_.get(), 0, kCodeBytes);
+    code = std::make_unique<oak::CodeGenerator>(reinterpret_cast<std::uint32_t*>(scratch_.get()));
+  }
+
+  // ---------------------------------------------------------------- prelude
+
+  /// The tail form. The block (or the prelude) reaches this trampoline with `BL`; the branch to the
+  /// C function must be a tail branch, not a `BL`: a nested `BL` would overwrite the link register
+  /// the block is waiting on and the callback would return into the next trampoline.
+  void EmitCallTrampoline(Backend::LinkTarget target, const std::string& symbol,
+                          std::vector<Trampoline>* trampolines) {
+    code->align(8);
+    Trampoline t;
+    t.target = target;
+    t.symbol = symbol;
+    t.label_name = symbol + "_tail_tramp";
+    t.offset = code->offset();
+    code->l(t.label);
+    code->MOV(util::X0, Backend::Xstate);
+    const std::ptrdiff_t at = code->offset();
+    code->dw(0x1400'0000u);  // placeholder: replaced by "b <symbol>"
+    externals.push_back(ExternalFixup{at, "b " + Sym(symbol)});
+    trampolines->push_back(t);
+    prelude.target[target] = t.offset;
+    prelude.label[target] = t.label_name;
+  }
+
+  void EmitWrappedReadTrampoline(Backend::LinkTarget target, const std::string& symbol,
+                                 std::vector<Trampoline>* trampolines) {
+    code->align(8);
+    Trampoline t;
+    t.target = target;
+    t.symbol = symbol;
+    t.label_name = symbol + "_tramp";
+    t.offset = code->offset();
+    code->l(t.label);
+    constexpr Backend::RegisterList save = Backend::ABI_CALLER_SAVE & ~Backend::ToRegList(Backend::Xscratch0);
+    Backend::ABI_PushRegisters(*code, save, 0);
+    code->MOV(util::X0, Backend::Xstate);
+    code->MOV(util::X1, Backend::Xscratch0);
+    const std::ptrdiff_t at = code->offset();
+    code->dw(0x9400'0000u);
+    externals.push_back(ExternalFixup{at, "bl " + Sym(symbol)});
+    code->MOV(Backend::Xscratch0, util::X0);
+    Backend::ABI_PopRegisters(*code, save, 0);
+    code->RET();
+    trampolines->push_back(t);
+    prelude.target[target] = t.offset;
+    prelude.label[target] = t.label_name;
+  }
+
+  void EmitWrappedWriteTrampoline(Backend::LinkTarget target, const std::string& symbol,
+                                  std::vector<Trampoline>* trampolines) {
+    code->align(8);
+    Trampoline t;
+    t.target = target;
+    t.symbol = symbol;
+    t.label_name = symbol + "_tramp";
+    t.offset = code->offset();
+    code->l(t.label);
+    constexpr Backend::RegisterList save = Backend::ABI_CALLER_SAVE;
+    Backend::ABI_PushRegisters(*code, save, 0);
+    code->MOV(util::X0, Backend::Xstate);
+    code->MOV(util::X1, Backend::Xscratch0);
+    code->MOV(util::X2, Backend::Xscratch1);
+    const std::ptrdiff_t at = code->offset();
+    code->dw(0x9400'0000u);
+    externals.push_back(ExternalFixup{at, "bl " + Sym(symbol)});
+    Backend::ABI_PopRegisters(*code, save, 0);
+    code->RET();
+    trampolines->push_back(t);
+    prelude.target[target] = t.offset;
+    prelude.label[target] = t.label_name;
+  }
+
+  void EmitPrelude() {
+    // The callback trampolines go first, as Dynarmic's EmitPrelude does; the run-code entries below
+    // call them by label, and the blocks call them through the relocation table.
+    for (const auto& [target, sym] : std::initializer_list<std::pair<Backend::LinkTarget, const char*>>{
+             {Backend::LinkTarget::ReadMemory8, "rb_aot_mem_read8"},
+             {Backend::LinkTarget::ReadMemory16, "rb_aot_mem_read16"},
+             {Backend::LinkTarget::ReadMemory32, "rb_aot_mem_read32"},
+             {Backend::LinkTarget::ReadMemory64, "rb_aot_mem_read64"},
+         }) {
+      EmitCallTrampoline(target, sym, &trampolines);
+    }
+    for (const auto& [target, sym] : std::initializer_list<std::pair<Backend::LinkTarget, const char*>>{
+             {Backend::LinkTarget::WrappedReadMemory8, "rb_aot_mem_read8"},
+             {Backend::LinkTarget::WrappedReadMemory16, "rb_aot_mem_read16"},
+             {Backend::LinkTarget::WrappedReadMemory32, "rb_aot_mem_read32"},
+             {Backend::LinkTarget::WrappedReadMemory64, "rb_aot_mem_read64"},
+         }) {
+      EmitWrappedReadTrampoline(target, sym, &trampolines);
+    }
+    for (const auto& [target, sym] : std::initializer_list<std::pair<Backend::LinkTarget, const char*>>{
+             {Backend::LinkTarget::ExclusiveReadMemory8, "rb_aot_excl_read8"},
+             {Backend::LinkTarget::ExclusiveReadMemory16, "rb_aot_excl_read16"},
+             {Backend::LinkTarget::ExclusiveReadMemory32, "rb_aot_excl_read32"},
+             {Backend::LinkTarget::ExclusiveReadMemory64, "rb_aot_excl_read64"},
+         }) {
+      EmitCallTrampoline(target, sym, &trampolines);
+    }
+    for (const auto& [target, sym] : std::initializer_list<std::pair<Backend::LinkTarget, const char*>>{
+             {Backend::LinkTarget::WriteMemory8, "rb_aot_mem_write8"},
+             {Backend::LinkTarget::WriteMemory16, "rb_aot_mem_write16"},
+             {Backend::LinkTarget::WriteMemory32, "rb_aot_mem_write32"},
+             {Backend::LinkTarget::WriteMemory64, "rb_aot_mem_write64"},
+         }) {
+      EmitCallTrampoline(target, sym, &trampolines);
+    }
+    for (const auto& [target, sym] : std::initializer_list<std::pair<Backend::LinkTarget, const char*>>{
+             {Backend::LinkTarget::WrappedWriteMemory8, "rb_aot_mem_write8"},
+             {Backend::LinkTarget::WrappedWriteMemory16, "rb_aot_mem_write16"},
+             {Backend::LinkTarget::WrappedWriteMemory32, "rb_aot_mem_write32"},
+             {Backend::LinkTarget::WrappedWriteMemory64, "rb_aot_mem_write64"},
+         }) {
+      EmitWrappedWriteTrampoline(target, sym, &trampolines);
+    }
+    for (const auto& [target, sym] : std::initializer_list<std::pair<Backend::LinkTarget, const char*>>{
+             {Backend::LinkTarget::ExclusiveWriteMemory8, "rb_aot_excl_write8"},
+             {Backend::LinkTarget::ExclusiveWriteMemory16, "rb_aot_excl_write16"},
+             {Backend::LinkTarget::ExclusiveWriteMemory32, "rb_aot_excl_write32"},
+             {Backend::LinkTarget::ExclusiveWriteMemory64, "rb_aot_excl_write64"},
+         }) {
+      EmitCallTrampoline(target, sym, &trampolines);
+    }
+    EmitCallTrampoline(Backend::LinkTarget::CallSVC, "rb_aot_call_svc", &trampolines);
+    EmitCallTrampoline(Backend::LinkTarget::ExceptionRaised, "rb_aot_exception_raised", &trampolines);
+    EmitCallTrampoline(Backend::LinkTarget::InstructionSynchronizationBarrierRaised,
+                       "rb_aot_isb_raised", &trampolines);
+    EmitCallTrampoline(Backend::LinkTarget::AddTicks, "rb_aot_add_ticks", &trampolines);
+    EmitCallTrampoline(Backend::LinkTarget::GetTicksRemaining, "rb_aot_get_ticks_remaining",
+                       &trampolines);
+
+    oak::Label return_from_run_code;
+    oak::Label ret_dispatch_label;
+    oak::Label get_ticks = FindLabel(Backend::LinkTarget::GetTicksRemaining);
+    oak::Label add_ticks = FindLabel(Backend::LinkTarget::AddTicks);
+
+    prelude.run_code = code->offset();
+    {
+      Backend::ABI_PushRegisters(*code, Backend::ABI_CALLEE_SAVE | (1u << 30), sizeof(Backend::StackLayout));
+      code->MOV(util::X19, util::X0);
+      code->MOV(Backend::Xstate, util::X1);
+      code->MOV(Backend::Xhalt, util::X2);
+      // The inline page-table fastmem every emitted memory access uses: the table lives at a host address
+      // only the runtime knows, so it is fetched once per run-code entry and kept in the reserved register.
+      // (Xfastmem is the JIT's signal-based fastmem, which AOT does not use.)
+      {
+        const std::ptrdiff_t page_table_at = code->offset();
+        code->dw(0x9400'0000u);  // bl rb_aot_page_table_ptr (replaced by the external fixup below)
+        externals.push_back(ExternalFixup{page_table_at, "bl " + Sym("rb_aot_page_table_ptr")});
+        code->MOV(Backend::Xpagetable, util::X0);
+      }
+      if (conf_.HasOptimization(OptimizationFlag::ReturnStackBuffer)) {
+        code->ADR(Backend::Xscratch0, ret_dispatch_label);
+        for (std::size_t i = 0; i < Backend::RSBCount; ++i) {
+          code->STR(Backend::Xscratch0, util::SP,
+                    offsetof(Backend::StackLayout, rsb) + offsetof(Backend::RSBEntry, code_ptr) +
+                        i * sizeof(Backend::RSBEntry));
+        }
+      }
+      if (conf_.enable_cycle_counting) {
+        code->BL(get_ticks);
+        code->MOV(Backend::Xticks, util::X0);
+        code->STR(Backend::Xticks, util::SP, offsetof(Backend::StackLayout, cycles_to_run));
+      }
+      code->LDR(Backend::Wscratch0, Backend::Xstate, offsetof(Backend::A32JitState, upper_location_descriptor));
+      code->AND(Backend::Wscratch0, Backend::Wscratch0, 0xffff'0000u);
+      code->MRS(Backend::Xscratch1, oak::SystemReg::FPCR);
+      code->STR(Backend::Wscratch1, util::SP, offsetof(Backend::StackLayout, save_host_fpcr));
+      code->MSR(oak::SystemReg::FPCR, Backend::Xscratch0);
+      code->LDAR(Backend::Wscratch0, Backend::Xhalt);
+      code->CBNZ(Backend::Wscratch0, return_from_run_code);
+      code->BR(util::X19);
+    }
+
+    prelude.step_code = code->offset();
+    {
+      Backend::ABI_PushRegisters(*code, Backend::ABI_CALLEE_SAVE | (1u << 30), sizeof(Backend::StackLayout));
+      code->MOV(util::X19, util::X0);
+      code->MOV(Backend::Xstate, util::X1);
+      code->MOV(Backend::Xhalt, util::X2);
+      {
+        const std::ptrdiff_t page_table_at = code->offset();
+        code->dw(0x9400'0000u);
+        externals.push_back(ExternalFixup{page_table_at, "bl " + Sym("rb_aot_page_table_ptr")});
+        code->MOV(Backend::Xpagetable, util::X0);
+      }
+      if (conf_.HasOptimization(OptimizationFlag::ReturnStackBuffer)) {
+        code->ADR(Backend::Xscratch0, ret_dispatch_label);
+        for (std::size_t i = 0; i < Backend::RSBCount; ++i) {
+          code->STR(Backend::Xscratch0, util::SP,
+                    offsetof(Backend::StackLayout, rsb) + offsetof(Backend::RSBEntry, code_ptr) +
+                        i * sizeof(Backend::RSBEntry));
+        }
+      }
+      if (conf_.enable_cycle_counting) {
+        code->MOV(Backend::Xticks, 1);
+        code->STR(Backend::Xticks, util::SP, offsetof(Backend::StackLayout, cycles_to_run));
+      }
+      code->LDR(Backend::Wscratch0, Backend::Xstate, offsetof(Backend::A32JitState, upper_location_descriptor));
+      code->AND(Backend::Wscratch0, Backend::Wscratch0, 0xffff'0000u);
+      code->MRS(Backend::Xscratch1, oak::SystemReg::FPCR);
+      code->STR(Backend::Wscratch1, util::SP, offsetof(Backend::StackLayout, save_host_fpcr));
+      code->MSR(oak::SystemReg::FPCR, Backend::Xscratch0);
+
+      oak::Label step_hr_loop;
+      code->l(step_hr_loop);
+      code->LDAXR(Backend::Wscratch0, Backend::Xhalt);
+      code->CBNZ(Backend::Wscratch0, return_from_run_code);
+      code->ORR(Backend::Wscratch0, Backend::Wscratch0,
+                static_cast<std::uint32_t>(Dynarmic::HaltReason::Step));
+      code->STLXR(Backend::Wscratch1, Backend::Wscratch0, Backend::Xhalt);
+      code->CBNZ(Backend::Wscratch1, step_hr_loop);
+      code->BR(util::X19);
+    }
+
+    code->align(8);
+    prelude.return_to_dispatcher = code->offset();
+    code->l(ret_dispatch_label);
+    {
+      code->LDAR(Backend::Wscratch0, Backend::Xhalt);
+      code->CBNZ(Backend::Wscratch0, return_from_run_code);
+      if (conf_.enable_cycle_counting) {
+        code->CMP(Backend::Xticks, 0);
+        code->B(oak::Cond::LE, return_from_run_code);
+      }
+      code->MOV(util::X0, Backend::Xstate);
+      const std::ptrdiff_t at = code->offset();
+      code->dw(0x9400'0000u);  // placeholder: "bl rb_aot_dispatch"
+      externals.push_back(ExternalFixup{at, "bl " + Sym("rb_aot_dispatch")});
+      code->CBZ(util::X0, return_from_run_code);
+      code->BR(util::X0);
+    }
+
+    code->align(8);
+    prelude.return_from_run_code = code->offset();
+    code->l(return_from_run_code);
+    {
+      if (conf_.enable_cycle_counting) {
+        code->LDR(util::X1, util::SP, offsetof(Backend::StackLayout, cycles_to_run));
+        code->SUB(util::X1, util::X1, Backend::Xticks);
+        code->BL(add_ticks);
+      }
+      code->LDR(Backend::Wscratch0, util::SP, offsetof(Backend::StackLayout, save_host_fpcr));
+      code->MSR(oak::SystemReg::FPCR, Backend::Xscratch0);
+
+      oak::Label exit_hr_loop;
+      code->l(exit_hr_loop);
+      code->LDAXR(util::W0, Backend::Xhalt);
+      code->STLXR(Backend::Wscratch0, util::WZR, Backend::Xhalt);
+      code->CBNZ(Backend::Wscratch0, exit_hr_loop);
+      Backend::ABI_PopRegisters(*code, Backend::ABI_CALLEE_SAVE | (1u << 30), sizeof(Backend::StackLayout));
+      code->RET();
+    }
+
+    code->align(8);
+    prelude_end = code->offset();
+  }
+
+  oak::Label FindLabel(Backend::LinkTarget target) {
+    for (auto& t : trampolines) {
+      if (t.target == target) return t.label;
+    }
+    return {};
+  }
+
+  // ---------------------------------------------------------------- blocks
+
+  bool CoprocessorRefusal(const ElfCallbacks& bytes, std::uint32_t start, std::uint32_t end,
+                          bool thumb, std::string* detail) {
+    return HasCoprocessor(bytes, start, end, thumb, detail);
+  }
+
+  bool EmitQueued(std::deque<IR::LocationDescriptor>* queue, std::string* err,
+                  std::map<std::uint64_t, std::size_t>* by_desc,
+                  std::map<std::pair<std::uint32_t, std::uint32_t>, std::size_t>* by_key,
+                  std::map<std::pair<std::uint32_t, std::uint32_t>, Refusal>* refused) {
+    const std::size_t refusal_log_cap =
+        std::getenv("RB_AOTGEN_TRACE_BLOCKS") != nullptr ? static_cast<std::size_t>(-1) : 32;
+    while (!queue->empty()) {
+      const IR::LocationDescriptor desc = queue->front();
+      queue->pop_front();
+      if (by_desc->count(desc.Value()) != 0) continue;
+      const A32::LocationDescriptor loc{desc};
+      const std::uint32_t pc = loc.PC();
+      const bool thumb = loc.TFlag();
+      if (pc < callbacks.text_base() || pc - callbacks.text_base() >= map_.text_len) {
+        const std::pair<std::uint32_t, std::uint32_t> key{pc - callbacks.text_base(), KeyHi(desc)};
+        (*refused)[key] = Refusal::OutOfRange;
+        ++refused_counts[static_cast<int>(Refusal::OutOfRange)];
+        (*by_desc)[desc.Value()] = static_cast<std::size_t>(-1);
+        continue;
+      }
+      const std::uint32_t off = pc - callbacks.text_base();
+      const std::pair<std::uint32_t, std::uint32_t> key{off, KeyHi(desc)};
+      if (const auto r = refused->find(key); r != refused->end()) {
+        (*by_desc)[desc.Value()] = static_cast<std::size_t>(-1);
+        continue;
+      }
+      if (const auto k = by_key->find(key); k != by_key->end()) {
+        (*by_desc)[desc.Value()] = k->second;
+        continue;
+      }
+
+      // A front-end assertion aborts the whole tool, so the block being translated when it happens
+      // has to be nameable. Off by default; a diagnostic for the case where a library kills the tool.
+      if (std::getenv("RB_AOTGEN_TRACE_BLOCKS") != nullptr) {
+        std::fprintf(stderr, "aotgen: translate pc=%08x thumb=%d\n", pc, thumb ? 1 : 0);
+      }
+      std::optional<IR::Block> block_holder;
+      try {
+        block_holder.emplace(address_space->GenerateIR(desc));
+      } catch (const std::exception& e) {
+        // A target that static closure followed into data. The runtime cannot execute it either — the
+        // engine's own front end would assert on the same encoding — so refusing the block is exact.
+        (*refused)[key] = Refusal::Asserted;
+        ++refused_counts[static_cast<int>(Refusal::Asserted)];
+        if (refused_log.size() < refusal_log_cap) {
+          refused_log.push_back(std::string{"front-end assertion at "} + Hex32(pc) + ": " + e.what());
+        }
+        (*by_desc)[desc.Value()] = static_cast<std::size_t>(-1);
+        continue;
+      }
+      IR::Block& block = *block_holder;
+      const A32::LocationDescriptor end_loc{block.EndLocation()};
+      const std::uint32_t end = end_loc.PC();
+      if (end <= pc || end - callbacks.text_base() > map_.text_len) {
+        (*refused)[key] = Refusal::OutOfRange;
+        ++refused_counts[static_cast<int>(Refusal::OutOfRange)];
+        (*by_desc)[desc.Value()] = static_cast<std::size_t>(-1);
+        continue;
+      }
+      std::string detail;
+      if (CoprocessorRefusal(callbacks, pc, end, thumb, &detail)) {
+        (*refused)[key] = Refusal::Coprocessor;
+        ++refused_counts[static_cast<int>(Refusal::Coprocessor)];
+        if (refused_log.size() < refusal_log_cap) refused_log.push_back(detail);
+        (*by_desc)[desc.Value()] = static_cast<std::size_t>(-1);
+        continue;
+      }
+      if (block.GetTerminal().which() == kTerminalInterpret) {
+        (*refused)[key] = Refusal::Interpret;
+        ++refused_counts[static_cast<int>(Refusal::Interpret)];
+        if (refused_log.size() < refusal_log_cap) refused_log.push_back("Term::Interpret at " + Hex32(pc));
+        (*by_desc)[desc.Value()] = static_cast<std::size_t>(-1);
+        continue;
+      }
+      const Refusal forbidden = ForbiddenOpcode(block, &detail);
+      if (forbidden != Refusal::None) {
+        (*refused)[key] = forbidden;
+        ++refused_counts[static_cast<int>(forbidden)];
+        if (refused_log.size() < refusal_log_cap) refused_log.push_back(detail + " at " + Hex32(pc));
+        (*by_desc)[desc.Value()] = static_cast<std::size_t>(-1);
+        continue;
+      }
+
+      if (code->offset() + 4096 > static_cast<std::ptrdiff_t>(kCodeBytes)) {
+        *err = "emitted code exceeds the tool's scratch buffer";
+        return false;
+      }
+      BlockRecord rec;
+      rec.desc = desc;
+      rec.off = off;
+      rec.thumb = thumb;
+
+      /**
+       * Emit into a scratch stream first. A block that needs a relocation target the prelude does not
+       * emit — the 128-bit memory forms bake a host callback with no relocation record — used to abort
+       * the whole image, so one NEON pair anywhere in a game library meant no AOT image at all. It is a
+       * per-block property, so it refuses that block (counted and printed) and the rest of the image is
+       * still emitted. Copying the finished words is exact: a block's internal branches and literal
+       * pools are relative to its own entry, and both streams start at an 8-byte-aligned offset.
+       */
+      oak::CodeGenerator probe{reinterpret_cast<std::uint32_t*>(probe_.get())};
+      const IR::Cond debug_cond = block.GetCondition();
+      const int debug_terminal = static_cast<int>(block.GetTerminal().which());
+      /**
+       * A hooked hint (PLD, PLDW, WFE, YIELD, SEV, …) ends the block with an `A32ExceptionRaised` and a
+       * `ReturnToDispatch` terminal. That terminal carries no target descriptor, so the instruction
+       * after the hint was never queued — and at run time the dispatcher is entered exactly there.
+       * memcpy's hot loops are full of `pld`, so every pass fell back to Tier I at the instruction
+       * after the hint (build 39: 2.5 M fallbacks in the first 10 s, top sites inside __memcpy_a15).
+       * The hint continues at the next instruction, so that location is a block start like any branch
+       * target. Only blocks that actually raise an exception do this; an indirect branch's "next
+       * instruction" is dead code and is not followed.
+       */
+      bool raises_exception = false;
+      for (const IR::Inst& inst : block) {
+        if (inst.GetOpcode() == IR::Opcode::A32ExceptionRaised) {
+          raises_exception = true;
+          break;
+        }
+      }
+      std::optional<Backend::EmittedBlockInfo> info_holder;
+      try {
+        info_holder.emplace(address_space->EmitForAot(block, probe));
+      } catch (const std::exception& e) {
+        (*refused)[key] = Refusal::Asserted;
+        ++refused_counts[static_cast<int>(Refusal::Asserted)];
+        if (refused_log.size() < refusal_log_cap) {
+          refused_log.push_back(std::string{"emitter assertion at "} + Hex32(pc) + ": " + e.what());
+        }
+        (*by_desc)[desc.Value()] = static_cast<std::size_t>(-1);
+        continue;
+      }
+      const Backend::EmittedBlockInfo& info = *info_holder;
+      if (info.size > kProbeBytes || probe.offset() != static_cast<std::ptrdiff_t>(info.size) ||
+          info.size % sizeof(std::uint32_t) != 0) {
+        *err = "emitted block size disagrees with EmitForAot";
+        return false;
+      }
+      bool unsupported_relocation = false;
+      for (const auto& r : info.relocations) {
+        if (IsSupportedTarget(r.target)) continue;
+        (*refused)[key] = Refusal::UnsupportedRelocation;
+        ++refused_counts[static_cast<int>(Refusal::UnsupportedRelocation)];
+        if (refused_log.size() < refusal_log_cap) {
+          refused_log.push_back(
+              std::string{"relocation target the AOT prelude does not emit (link target "} +
+              std::to_string(static_cast<int>(r.target)) + ") at " + Hex32(pc));
+        }
+        (*by_desc)[desc.Value()] = static_cast<std::size_t>(-1);
+        unsupported_relocation = true;
+        break;
+      }
+      if (unsupported_relocation) continue;
+      if (!info.fastmem_patch_info.empty()) {
+        *err = "a block recorded a fastmem patch despite the tool's null fastmem pointer";
+        return false;
+      }
+
+      code->align(8);
+      rec.entry = code->offset();
+      const std::uint32_t* words = reinterpret_cast<const std::uint32_t*>(probe_.get());
+      for (std::size_t i = 0; i < info.size / sizeof(std::uint32_t); ++i) code->dw(words[i]);
+      rec.end = code->offset();
+      if (rec.end - rec.entry != static_cast<std::ptrdiff_t>(info.size)) {
+        *err = "emitted block size disagrees with EmitForAot";
+        return false;
+      }
+      rec.relocations = info.relocations;
+
+      // `block_relocations` is a robin_map: its iteration order is not part of any contract. Sort the
+      // targets (and the recorded pairs) so a regeneration emits the same queue and the same bytes.
+      std::vector<IR::LocationDescriptor> targets;
+      targets.reserve(info.block_relocations.size());
+      for (const auto& [target_desc, list] : info.block_relocations) {
+        rec.block_rels.emplace_back(target_desc, list);
+        const A32::LocationDescriptor t{target_desc};
+        if (t.PC() < callbacks.text_base() ||
+            t.PC() - callbacks.text_base() >= map_.text_len) {
+          continue;  // a host entry or the call sentinel: the dispatcher handles it
+        }
+        targets.push_back(target_desc);
+      }
+      if (raises_exception || EndsWithCall(callbacks, end, thumb)) {
+        const std::uint32_t end_pc = end_loc.PC();
+        if (end_pc >= callbacks.text_base() && end_pc - callbacks.text_base() < map_.text_len) {
+          targets.push_back(IR::LocationDescriptor{end_loc});
+        }
+      }
+      std::sort(targets.begin(), targets.end(), [](const IR::LocationDescriptor& a,
+                                                    const IR::LocationDescriptor& b) {
+        return a.Value() < b.Value();
+      });
+      if (const char* want = std::getenv("RB_AOTGEN_TRACE_PC"); want != nullptr &&
+          pc == static_cast<std::uint32_t>(std::strtoul(want, nullptr, 16))) {
+        std::fprintf(stderr,
+                     "aotgen: block %08x: cond=%d terminal=%d end=%08x relocs=%zu block_targets=%zu\n",
+                     pc, static_cast<int>(debug_cond), debug_terminal,
+                     static_cast<std::uint32_t>(end_loc.PC()), info.relocations.size(),
+                     info.block_relocations.size());
+        for (const IR::LocationDescriptor& t : targets) {
+          const A32::LocationDescriptor td{t};
+          std::fprintf(stderr, "aotgen:   target %08x thumb=%d it=%08x fpscr=%08x\n", td.PC(),
+                       td.TFlag() ? 1 : 0, td.IT().Value(), td.FPSCR().Value());
+        }
+      }
+      for (const IR::LocationDescriptor& target : targets) queue->push_back(target);
+      targets_enqueued += targets.size();
+      std::sort(rec.block_rels.begin(), rec.block_rels.end(),
+                [](const auto& a, const auto& b) { return a.first.Value() < b.first.Value(); });
+      by_key->emplace(key, blocks.size());
+      by_desc->emplace(desc.Value(), blocks.size());
+      blocks.push_back(std::move(rec));
+    }
+    return true;
+  }
+
+  // ---------------------------------------------------------------- output
+
+  bool Write(const std::string& out_prefix, std::uint64_t fingerprint, std::string* err) {
+    // Symbol numbers are a property of the block set, not of the order it was discovered in. Sorting by
+    // `(off, thumb)` is what makes two runs of the tool over one `.so` produce the same `.S`, the same
+    // table, and the same symbol names even when a robin_map's iteration order changes.
+    std::vector<std::size_t> order(blocks.size());
+    for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+      if (blocks[a].off != blocks[b].off) return blocks[a].off < blocks[b].off;
+      return blocks[a].thumb < blocks[b].thumb;
+    });
+    for (std::size_t rank = 0; rank < order.size(); ++rank) blocks[order[rank]].symbol = rank;
+
+    // Build the permanent target names and the per-site fixups.
+    std::map<std::ptrdiff_t, std::string> offset_label;
+    offset_label[prelude.return_to_dispatcher] = prefix + "_ret_dispatch";
+    offset_label[prelude.return_from_run_code] = prefix + "_ret_run_code";
+    for (const auto& t : trampolines) offset_label[t.offset] = t.label_name;
+    for (const BlockRecord& b : blocks) {
+      offset_label[b.entry] = prefix + "_block_" + Pad(b.symbol);
+    }
+
+    std::map<std::ptrdiff_t, std::vector<std::string>> label_lines;
+    label_lines[prelude.run_code].push_back(".globl " + Sym(prefix + "_run_code"));
+    label_lines[prelude.run_code].push_back(Sym(prefix + "_run_code") + ":");
+    label_lines[prelude.step_code].push_back(Sym(prefix + "_step_code") + ":");
+    for (const auto& [at, name] : offset_label) {
+      if (at == prelude.run_code) continue;
+      label_lines[at].push_back(Sym(name) + ":");
+    }
+    for (std::size_t i = 0; i < blocks.size(); ++i) {
+      const std::ptrdiff_t at = blocks[i].entry;
+      label_lines[at].insert(label_lines[at].begin(), {".globl " + Sym(offset_label[at])});
+    }
+
+    std::map<std::ptrdiff_t, TextFixup> fixups;
+    const auto add_fixup = [&](std::ptrdiff_t at, std::vector<std::string> lines) -> bool {
+      if (fixups.count(at) != 0) {
+        *err = "two relocations at one code offset";
+        return false;
+      }
+      fixups[at] = TextFixup{at, std::move(lines)};
+      return true;
+    };
+
+    for (const BlockRecord& rec : blocks) {
+      for (const auto& r : rec.relocations) {
+        const std::ptrdiff_t at = rec.entry + r.code_offset;
+        std::ptrdiff_t target_at = 0;
+        switch (r.target) {
+          case Backend::LinkTarget::ReturnToDispatcher:
+            target_at = prelude.return_to_dispatcher;
+            break;
+          case Backend::LinkTarget::ReturnFromRunCode:
+            target_at = prelude.return_from_run_code;
+            break;
+          default:
+            target_at = prelude.target.at(r.target);
+            break;
+        }
+        const bool link = r.target != Backend::LinkTarget::ReturnToDispatcher &&
+                          r.target != Backend::LinkTarget::ReturnFromRunCode;
+        const std::uint32_t word = EncodeBranch(at, target_at, link);
+        if (word == 0) {
+          *err = "branch out of range at " + std::to_string(at);
+          return false;
+        }
+        if (!add_fixup(at, {".word " + Hex32(word)})) return false;
+      }
+      for (const auto& [target_desc, list] : rec.block_rels) {
+        const A32::LocationDescriptor target{target_desc};
+        const std::uint32_t target_pc = target.PC();
+        const std::uint32_t target_off =
+            target_pc >= callbacks.text_base() ? target_pc - callbacks.text_base() : 0xffff'ffffu;
+        const auto target_key = std::make_pair(target_off, KeyHi(target_desc));
+        const auto target_block = by_key.find(target_key);
+        // The key carries IT and the FPSCR mode, so a match is the exact descriptor the target was
+        // emitted for (compared again below, which also covers the single-stepping bit the key masks).
+        const bool linked =
+            target_block != by_key.end() && blocks[target_block->second].desc == target_desc;
+        for (const auto& br : list) {
+          const std::ptrdiff_t at = rec.entry + br.code_offset;
+          if (br.type == Backend::BlockRelocationType::Branch) {
+            if (linked) {
+              const std::uint32_t word = EncodeBranch(at, blocks[target_block->second].entry, false);
+              if (word == 0) {
+                *err = "block branch out of range at " + std::to_string(at);
+                return false;
+              }
+              if (!add_fixup(at, {".word " + Hex32(word)})) return false;
+            } else {
+              if (!add_fixup(at, {".word 0xd503201f"})) return false;  // NOP: fall through to dispatch
+            }
+          } else {
+            const std::string symbol =
+                linked ? offset_label.at(blocks[target_block->second].entry)
+                       : offset_label.at(prelude.return_to_dispatcher);
+            if (!add_fixup(at, {
+                                "#ifdef __ELF__",
+                                "adrp x17, " + Sym(symbol),
+                                "add x17, x17, :lo12:" + Sym(symbol),
+                                "#else",
+                                "adrp x17, " + Sym(symbol) + "@PAGE",
+                                "add x17, x17, " + Sym(symbol) + "@PAGEOFF",
+                                "#endif",
+                            }))
+              return false;
+          }
+        }
+      }
+    }
+
+    std::ofstream out(out_prefix + ".S", std::ios::binary);
+    if (!out) {
+      *err = "cannot write " + out_prefix + ".S";
+      return false;
+    }
+    out << "// Generated by rb_aotgen (RetroBug AOT task 3) from " << BaseName(elf_path_) << "\n";
+    out << "// fingerprint (FNV-1a-64) " << Hex64(fingerprint) << ", .text vaddr "
+        << Hex32(map_.text_vaddr) << ", load bias " << Hex32(load_bias_) << "\n";
+    out << "// Regenerate: rb_aotgen --emit <lib.so> --out " << BaseName(out_prefix)
+        << " --base " << Hex32(load_bias_) << "\n";
+    out << "// code size " << (blocks.empty() ? prelude_end : blocks.back().end) << " bytes, "
+        << blocks.size() << " blocks\n";
+    out << "#ifdef __APPLE__\n";
+    out << "#define RB_AOT_SYM(x) _##x\n";
+    out << "#else\n";
+    out << "#define RB_AOT_SYM(x) x\n";
+    out << "#endif\n";
+    out << "    .text\n    .p2align 4\n";
+
+    const std::uint32_t* words = reinterpret_cast<const std::uint32_t*>(scratch_.get());
+    // The prelude is emitted first, then every block. `prelude_end` is only the prelude's extent, so
+    // the stream must run to the last block's end; stopping at the prelude used to write a table full
+    // of block symbols that the `.S` never defined.
+    const std::ptrdiff_t total = blocks.empty() ? prelude_end : blocks.back().end;
+    std::ptrdiff_t at = 0;
+    while (at < total) {
+      if (const auto l = label_lines.find(at); l != label_lines.end()) {
+        for (const auto& line : l->second) out << line << "\n";
+      }
+      bool handled = false;
+      if (const auto f = fixups.find(at); f != fixups.end()) {
+        // Directives take no bytes. When a fixup has two assembler variants (`#ifdef __ELF__` / `#else`),
+        // only one is assembled, so the stream advances by the first branch's instructions.
+        std::size_t instructions = 0;
+        bool first_branch = true;
+        for (const auto& line : f->second.lines) {
+          if (line == "#else") {
+            first_branch = false;
+            out << line << "\n";
+            continue;
+          }
+          if (!line.empty() && line[0] == '#') {
+            out << line << "\n";
+            continue;
+          }
+          out << "    " << line << "\n";
+          if (first_branch) ++instructions;
+        }
+        at += static_cast<std::ptrdiff_t>(instructions) * 4;
+        handled = true;
+      }
+      if (!handled) {
+        if (const auto e = external_at(at); e >= 0) {
+          out << "    " << externals[static_cast<std::size_t>(e)].line << "\n";
+          at += 4;
+          handled = true;
+        }
+      }
+      if (!handled) {
+        out << "    .word " << Hex32(words[at / 4]) << "\n";
+        at += 4;
+      }
+    }
+    code_bytes = total;
+    // The block table is data in this object. Built as 74,800 cross-object function pointers it made the
+    // app's linker refuse every symbol even though the objects were present, global and listed; a `.quad`
+    // on a label in the same file resolves at assembly time on ELF and Mach-O alike, so the C++ side only
+    // needs the one array symbol. The record layout is AotBlock (16 bytes); aot.h static_asserts it.
+    std::vector<std::size_t> sorted(blocks.size());
+    for (std::size_t i = 0; i < sorted.size(); ++i) sorted[i] = i;
+    std::sort(sorted.begin(), sorted.end(), [&](std::size_t a, std::size_t b) {
+      if (blocks[a].off != blocks[b].off) return blocks[a].off < blocks[b].off;
+      return blocks[a].thumb < blocks[b].thumb;
+    });
+    out << "\n";
+    // Absolute pointers are data, not text: ELF's PIE link refuses R_AARCH64_ABS64 in `.text`, and both
+    // linkers want the relocations against a writable section. (`.S` is preprocessed on both toolchains.)
+    out << "#ifdef __ELF__\n";
+    out << "    .section .data.rel.ro,\"aw\",%progbits\n";
+    out << "#else\n";
+    out << "    .section __DATA,__data\n";
+    out << "#endif\n";
+    out << "    .p2align 3\n";
+    out << ".globl " << Sym(prefix + "_blocks") << "\n";
+    out << Sym(prefix + "_blocks") << ":\n";
+    for (const std::size_t i : sorted) {
+      const BlockRecord& b = blocks[i];
+      out << "    .word " << Hex32(b.off) << "\n";
+      out << "    .word " << Hex32(KeyHi(b.desc)) << "\n";
+      out << "    .quad " << Sym(prefix + "_block_" + Pad(b.symbol)) << "\n";
+    }
+    // The trailer is the `.S` half of the pairing check. It is data, not a label after the code: the
+    // table carries the same two numbers, and rb_aot_tests asserts this pair agrees with it.
+    //
+    // Everything this file emits has to assemble with both GNU as (Android) and Apple's assembler (the
+    // per-game IPA): Apple rejects `.type`, `.rodata` and `.note.GNU-stack`. So the words stay in
+    // `.text` (read-only in the app), and the stack note is preprocessor-guarded — `.S` is preprocessed
+    // on both toolchains, and `#ifdef __ELF__` is the portable spelling (`.ifdef __ELF__` would be
+    // macro-expanded to `.ifdef 1`).
+    out << "\n// The table carries these two numbers; rb_aot_tests asserts they agree.\n";
+    out << "    .p2align 2\n";
+    out << ".globl " << Sym(prefix + "_code_bytes") << "\n";
+    out << Sym(prefix + "_code_bytes") << ":\n";
+    out << "    .word " << total << "\n";
+    out << ".globl " << Sym(prefix + "_block_count") << "\n";
+    out << Sym(prefix + "_block_count") << ":\n";
+    out << "    .word " << blocks.size() << "\n";
+    out << "#ifdef __ELF__\n";
+    out << "    .section .note.GNU-stack,\"\",%progbits\n";
+    out << "#endif\n";
+    if (!out) {
+      *err = "write failed for " + out_prefix + ".S";
+      return false;
+    }
+    return true;
+  }
+
+  std::ptrdiff_t external_at(std::ptrdiff_t at) const {
+    for (std::size_t i = 0; i < externals.size(); ++i) {
+      if (externals[i].offset == at) return static_cast<std::ptrdiff_t>(i);
+    }
+    return -1;
+  }
+
+  static std::string Pad(std::size_t i) {
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%04zu", i);
+    return buf;
+  }
+
+  ElfCallbacks callbacks;
+  const CodeMap& map_;
+  std::uint32_t load_bias_;
+  A32::UserConfig conf_{};
+  std::unique_ptr<Backend::A32AddressSpace> address_space;
+  std::unique_ptr<std::uint8_t[]> scratch_{new std::uint8_t[kCodeBytes]};
+  std::unique_ptr<std::uint8_t[]> probe_{new std::uint8_t[kProbeBytes]};
+  std::unique_ptr<oak::CodeGenerator> code;
+  std::string prefix;
+  std::string elf_path_;
+  std::ptrdiff_t code_bytes = 0;  ///< end of the last emitted block, set by `Write`
+  std::vector<Trampoline> trampolines;
+  std::vector<ExternalFixup> externals;
+  Prelude prelude;
+  std::ptrdiff_t prelude_end = 0;
+  std::vector<BlockRecord> blocks;
+  std::size_t targets_enqueued = 0;
+  std::map<std::pair<std::uint32_t, std::uint32_t>, std::size_t> by_key;
+  std::vector<std::string> refused_log;
+  std::array<int, kRefusalKinds> refused_counts{};
+};
+
+}  // namespace
+
+bool EmitImage(const std::string& elf_path, const std::string& out_prefix, std::uint32_t load_bias,
+               const CodeMap* trace, EmitFacts* facts, std::string* err) {
+  const auto fail = [&](const std::string& msg) {
+    if (err != nullptr) *err = msg;
+    return false;
+  };
+  std::ifstream in(elf_path, std::ios::binary | std::ios::ate);
+  if (!in) return fail("cannot read " + elf_path);
+  const std::streamsize size = in.tellg();
+  if (size <= 0) return fail("empty file " + elf_path);
+  std::vector<std::uint8_t> elf(static_cast<std::size_t>(size));
+  in.seekg(0, std::ios::beg);
+  if (!in.read(reinterpret_cast<char*>(elf.data()), size)) return fail("short read " + elf_path);
+
+  CodeMap map{};
+  std::string map_err;
+  map = DiscoverCodeMap(elf, trace, &map_err);
+  if (!map_err.empty()) return fail(map_err);
+  if (map.entries.empty()) return fail("the code map has no starts");
+
+  Emitter em{elf, map, load_bias};
+  em.elf_path_ = elf_path;
+  em.prefix = SymbolPrefix(out_prefix);
+  em.conf_ = A32::UserConfig{};
+  em.conf_.callbacks = &em.callbacks;
+  em.conf_.arch_version = A32::ArchVersion::v7;
+  em.conf_.define_unpredictable_behaviour = true;
+  em.conf_.hook_hint_instructions = true;
+  em.conf_.always_little_endian = true;
+  em.conf_.check_halt_on_memory_access = true;
+  em.conf_.enable_cycle_counting = true;
+  em.conf_.very_verbose_debugging_output = false;
+  // Inline page-table fastmem — the JIT's memory-access path. The blocks load and store mapped guest
+  // pages directly through the table the runtime installs, and branch to the checked callbacks for
+  // anything the table does not cover (unmapped, guard, out-of-line, page-boundary straddles). The
+  // pointer is a tool-time dummy: only its non-nullness selects the inline path, and the prelude fetches
+  // the real table at run time through rb_aot_page_table_ptr.
+  static std::array<std::uint8_t*, A32::UserConfig::NUM_PAGE_TABLE_ENTRIES> tool_page_table{};
+  em.conf_.page_table = &tool_page_table;
+  em.conf_.absolute_offset_page_table = false;
+  em.conf_.detect_misaligned_access_via_page_table = 16 | 32 | 64 | 128;
+  em.conf_.only_detect_misalignment_via_page_table_on_page_boundary = true;
+  em.conf_.fastmem_pointer = std::nullopt;
+  em.conf_.code_cache_size = 1u << 20;
+  em.address_space = std::make_unique<Backend::A32AddressSpace>(em.conf_);
+
+  std::deque<IR::LocationDescriptor> queue;
+  for (const CodeMapEntry& entry : map.entries) {
+    if (load_bias + map.text_vaddr + entry.off < load_bias) continue;
+    A32::LocationDescriptor d{load_bias + map.text_vaddr + entry.off, A32::PSR{}, A32::FPSCR{}, false};
+    d = d.SetTFlag((entry.flags & kThumb) != 0);
+    const IR::LocationDescriptor ir_desc = d;
+    queue.push_back(ir_desc);
+  }
+  // The code map is sorted by offset already, but the queue is a traversal input, not a map invariant:
+  // sort it explicitly so the block order (and every branch displacement) is regenerable.
+  std::sort(queue.begin(), queue.end(),
+            [](const IR::LocationDescriptor& a, const IR::LocationDescriptor& b) {
+              return a.Value() < b.Value();
+            });
+
+  em.EmitPrelude();
+
+  std::map<std::uint64_t, std::size_t> by_desc;
+  std::map<std::pair<std::uint32_t, std::uint32_t>, Refusal> refused;
+  std::string emit_err;
+  if (!em.EmitQueued(&queue, &emit_err, &by_desc, &em.by_key, &refused)) return fail(emit_err);
+  if (em.blocks.empty()) return fail("no block could be emitted");
+
+  std::string write_err;
+  if (!em.Write(out_prefix, Fnv1a64(elf), &write_err)) return fail(write_err);
+
+  // The table.
+  std::string table_name = TableName(out_prefix);
+  std::ofstream table(out_prefix + "_table.cpp", std::ios::binary);
+  if (!table) return fail("cannot write " + out_prefix + "_table.cpp");
+  table << "// Generated by rb_aotgen (RetroBug AOT task 3) from " << BaseName(elf_path) << "\n";
+  table << "// fingerprint (FNV-1a-64) " << Hex64(Fnv1a64(elf)) << ", .text vaddr "
+        << Hex32(map.text_vaddr) << ", load bias " << Hex32(load_bias) << "\n";
+  table << "// Regenerate: rb_aotgen --emit <lib.so> --out " << BaseName(out_prefix)
+        << " --base " << Hex32(load_bias) << "\n";
+  table << "// code size " << em.code_bytes << " bytes, " << em.blocks.size() << " blocks\n";
+  table << "// The emitted .S must be assembled into the same binary as this table.\n";
+  table << "// Do not edit; the fixture test's header carries the full regeneration command.\n";
+  table << "#include \"rb/exec/aot.h\"\n\n";
+  table << "extern \"C\" {\n";
+  table << "extern const rb::exec::AotBlock " << em.prefix << "_blocks[];\n";
+  table << "extern const std::uint32_t " << em.prefix << "_code_bytes;\n";
+  table << "extern const std::uint32_t " << em.prefix << "_block_count;\n";
+  table << "Dynarmic::HaltReason " << em.prefix
+        << "_run_code(void*, void*, volatile std::uint32_t*);\n";
+  table << "}\n\n";
+  table << "extern const rb::exec::AotImageInfo " << table_name << ";\n";
+  table << "const rb::exec::AotImageInfo " << table_name << " = {\n";
+  table << "    " << em.prefix << "_blocks,\n";
+  table << "    " << em.blocks.size() << "u,\n";
+  table << "    " << Hex32(map.text_vaddr) << "u,\n";
+  table << "    " << Hex32(map.text_len) << "u,\n";
+  table << "    " << Hex32(load_bias) << "u,\n";
+  table << "    " << Hex64(Fnv1a64(elf)) << "ull,\n";
+  table << "    " << Hex32(static_cast<std::uint32_t>(em.code_bytes)) << "u,\n";
+  table << "    " << Hex32(static_cast<std::uint32_t>(em.blocks.size())) << "u,\n";
+  table << "    &" << em.prefix << "_run_code,\n";
+  table << "};\n";
+  if (!table) return fail("write failed for " + out_prefix + "_table.cpp");
+
+  if (std::getenv("RB_AOTGEN_TRACE_BLOCKS") != nullptr) {
+    std::fprintf(stderr, "aotgen: queue: %zu blocks emitted, %zu branch targets enqueued\n",
+                 em.blocks.size(), em.targets_enqueued);
+  }
+  std::printf(
+      "aotgen: %s: emitted %zu blocks, refused %zu (coprocessor %d, vector-fp %d, untranslated %d, "
+      "outside-text %d, location %d, relocation %d, asserted %d), .text %u bytes, prelude %lld bytes, "
+      "code %lld bytes\n",
+      map.soname.empty() ? BaseName(elf_path).c_str() : map.soname.c_str(), em.blocks.size(),
+      static_cast<std::size_t>(em.refused_counts[1] + em.refused_counts[2] + em.refused_counts[3] +
+                               em.refused_counts[4] + em.refused_counts[5] + em.refused_counts[6] +
+                               em.refused_counts[7]),
+      em.refused_counts[1], em.refused_counts[2], em.refused_counts[3], em.refused_counts[4],
+      em.refused_counts[5], em.refused_counts[6], em.refused_counts[7], map.text_len,
+      static_cast<long long>(em.prelude_end),
+      static_cast<long long>(em.blocks.empty() ? em.prelude_end : em.blocks.back().end));
+  for (const auto& line : em.refused_log) std::printf("aotgen: refused: %s\n", line.c_str());
+  if (facts != nullptr) {
+    facts->text_vaddr = map.text_vaddr;
+    facts->text_len = map.text_len;
+    facts->fingerprint = Fnv1a64(elf);
+    facts->blocks = em.blocks.size();
+    facts->refused = static_cast<std::size_t>(em.refused_counts[1] + em.refused_counts[2] +
+                                              em.refused_counts[3] + em.refused_counts[4] +
+                                              em.refused_counts[5] + em.refused_counts[6] +
+                                              em.refused_counts[7]);
+    facts->code_bytes = em.code_bytes;
+    facts->symbol = table_name;
+  }
+  if (err != nullptr) err->clear();
+  return true;
+}
+
+std::string ImageSymbol(const std::string& out_prefix) {
+  return TableName(out_prefix);
+}
+
+}  // namespace rb::aotgen

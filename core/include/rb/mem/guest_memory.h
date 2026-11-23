@@ -5,6 +5,8 @@
  */
 #pragma once
 
+#include <map>
+#include <functional>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -88,6 +90,14 @@ class GuestMemory {
   /// through Read/Write. Translation-unit hot paths cache this per block and re-check on fault.
   void* Host(std::uint32_t at) const;
 
+  /// A host address a host callee may dereference for the bytes at `at`, or nullptr when the page is not
+  /// mapped. Unlike `Host`, a page served out of line — a file-backed module page whose granule cannot be
+  /// mapped in place on this host's real page size — is answered from its backing block: a GL driver handed
+  /// a shader string or a client vertex array needs the bytes, not the fastmem property. The pointer is only
+  /// as stable as the guest page it names; a later protection change or unmap can move it, exactly as the
+  /// page's own contents can change under the callee.
+  void* HostForAccess(std::uint32_t at) const;
+
   /// Reverse mapping for host→guest pointer crossings (AD-5/AD-6). False if the pointer is not
   /// guest memory at all — including RetroBug's own allocations, which is the property that keeps
   /// a stray host pointer from being mistaken for a guest one.
@@ -102,12 +112,21 @@ class GuestMemory {
   bool IsFastmem(std::uint32_t at) const;
   unsigned ProtAt(std::uint32_t at) const;
 
+  /// Told the page range ([at, at + len), page-rounded) after every Map, MapFile, Protect and Unmap, so a cache of
+  /// translations (Tier J's page table) never outlives a mapping. Returns an id for RemoveObserver.
+  using Observer = std::function<void(std::uint32_t at, std::size_t len)>;
+  int AddObserver(Observer fn);
+  void RemoveObserver(int id);
+
   std::size_t window_bytes() const { return window_bytes_; }
   const void* window_base() const { return window_base_; }
   AddressModel::Kind model_kind() const { return kind_; }
   unsigned host_page_shift() const { return host_page_shift_; }
   std::size_t out_of_line_page_count() const { return out_of_line_.size(); }
   std::size_t mapped_page_count() const;
+  /// The mapped guest address ranges, coalesced with their protection bits — for a fault report, where every
+  /// pointer in a register can be checked against the map at a glance. One pair per contiguous run.
+  std::vector<std::pair<std::uint32_t, std::uint32_t>> MappedRanges() const;
 
   /// Walks the page table and reports named invariants into the self-audit: every live page backed,
   /// and backed in one of the two legal ways (the window itself, or an out-of-line block); guards and
@@ -140,6 +159,11 @@ class GuestMemory {
   };
 
   GuestMemory() = default;
+
+  std::map<int, Observer> observers_;
+  int next_observer_ = 1;
+  /// Tells every observer about [at, at + len) widened to whole host granules (a rebalance moves the granule's pages).
+  void Notify(std::uint32_t at, std::size_t len) const;
 
   bool Contains(std::uint32_t at) const { return at < window_bytes_; }
   std::size_t PageIndex(std::uint32_t at) const { return at >> kGuestPageShift; }
@@ -182,6 +206,10 @@ class GuestMemory {
   unsigned real_page_shift_ = kGuestPageShift;
   AddressModel::Kind kind_ = AddressModel::kFlatIdentity;
   std::vector<Page> pages_;
+  /// Granules that have held (or now hold) a live page since the reservation. A granule that never has
+  /// is still PROT_NONE from the window reservation, so withdrawing it is a no-op — and on iOS that
+  /// redundant mprotect is refused with ENOMEM (measured), which is why it is not made.
+  std::vector<bool> live_granules_;
   std::vector<OutOfLine> out_of_line_;
   /// Descriptors duplicated from the `MapFile` arguments, closed with the instance. See `MapFile`: the
   /// caller may close its own fd as soon as the mapping exists, and a later re-granulation still needs

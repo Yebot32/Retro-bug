@@ -34,18 +34,79 @@ rm -rf "$OUT"; mkdir -p "$OUT/classes" "$OUT/fixtures" "$OUT/scratch"
 
 for dir in "$ROOT"/tests/corpus/manifests/*/; do
   name="$(basename "$dir")"
+  # A fixture with res/ gets real resources (so resources.arsc has a package chunk, as a game's does).
+  RES=()
+  if [ -d "$dir/res" ]; then
+    "$BT/aapt2.exe" compile --dir "$(to_host "$dir/res")" -o "$(to_host "$OUT/fixtures/$name.res.zip")"
+    RES=("$(to_host "$OUT/fixtures/$name.res.zip")")
+  fi
   "$BT/aapt2.exe" link -I "$(to_host "$AJ")" --manifest "$(to_host "$dir/AndroidManifest.xml")" \
-    -o "$(to_host "$OUT/fixtures/$name.apk")"
+    -o "$(to_host "$OUT/fixtures/$name.apk")" ${RES[@]+"${RES[@]}"}
 done
 
 # Never trust a piped exit status: the source list is built into an array first, and javac runs bare.
 mapfile -t SRCS < <(grep -L 'import android\.' "$ROOT"/android/java/com/retrobug/launcher/*.java)
-SRCS+=("$ROOT"/tools/java-tests/*.java)
+SRCS+=("$ROOT"/tools/java-tests/*.java "$ROOT"/android/shim/com/retrobug/shim/SaveArchive.java "$ROOT"/android/shim/com/retrobug/shim/PermissionPolicy.java)
 HOST_SRCS=(); for s in "${SRCS[@]}"; do HOST_SRCS+=("$(to_host "$s")"); done
 javac -encoding UTF-8 -nowarn -Xlint:-options -d "$(to_host "$OUT/classes")" "${HOST_SRCS[@]}"
+
+# DEX fixtures for the risk scan: real javac + d8 output, as in a game's classes.dex. Compiled against
+# android.jar so the references are the platform's own descriptors; never loaded or run.
+for f in RiskyFixture CleanFixture NativeFixture JniFixture ReceiverFixture ActivityFixture AuthorityFixture; do
+  mkdir -p "$OUT/dexsrc/$f" "$OUT/dexout/$f"
+  javac -encoding UTF-8 -nowarn -Xlint:-options --release 8 -classpath "$(to_host "$AJ")" \
+    -d "$(to_host "$OUT/dexsrc/$f")" "$(to_host "$ROOT/tools/java-tests/dexfixtures/$f.java")"
+  (cd "$OUT/dexsrc/$f" && jar -cf "$(to_host "$OUT/dexsrc/$f.jar")" .)
+  "$BT/d8.bat" --lib "$(to_host "$AJ")" --min-api 24 --output "$(to_host "$OUT/dexout/$f")" \
+    "$(to_host "$OUT/dexsrc/$f.jar")" >/dev/null
+  cp "$OUT/dexout/$f/classes.dex" "$OUT/fixtures/$f.dex"
+done
+
+# A real 32-bit library with Java_rb_Fixture_* exports, for the generated-stub rows (skipped without the NDK).
+NDK_BIN="$SDK/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64/bin"
+FX32="$OUT/fixtures/libjnibridge_fixture.so"
+"$NDK_BIN/clang.exe" --target=armv7-none-linux-androideabi26 --sysroot="$(to_host "$NDK_BIN/../sysroot")" -mthumb \
+  -mfloat-abi=softfp -fPIC -shared -nostdlib -Os -fno-vectorize -fno-slp-vectorize \
+  -o "$(to_host "$FX32")" "$(to_host "$ROOT/tests/corpus/jni_bridge_fixture.c")" -lc 2>/dev/null || FX32=""
+
+# libmain.so as a NativeActivity build ships it, for the library's C31 rows (also skipped without the NDK).
+FXNA="$OUT/fixtures/libmain_native_activity.so"
+"$NDK_BIN/clang.exe" --target=armv7-none-linux-androideabi26 --sysroot="$(to_host "$NDK_BIN/../sysroot")" -mthumb \
+  -mfloat-abi=softfp -fPIC -shared -nostdlib -Os \
+  -o "$(to_host "$FXNA")" "$(to_host "$ROOT/tests/corpus/native_activity_fixture.c")" -lc 2>/dev/null || FXNA=""
+
+java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ShimPlanTest "$(to_host "$OUT/fixtures")"
 
 java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.AxmlEditorTest \
   "$(to_host "$OUT/fixtures")" "$(to_host "$OUT/scratch")" "$(to_host "$BT/aapt2.exe")"
 
 java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ApkRepackagerTest \
   "$(to_host "$OUT/fixtures")" "$(to_host "$OUT/scratch")" "$(to_host "$BT/aapt2.exe")"
+
+# A 160 MB asset under a 96 MB heap: entries are streamed, never read whole (Among Us, M5).
+java -Xmx96m -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.LargeEntryTest \
+  "$(to_host "$OUT/fixtures")" "$(to_host "$OUT/scratch")"
+
+# Generated stubs (M3 Task 5). The game rows read the human's own Gumball / ABGo files from build/games
+# (gumball-lite.apk, angry-birds-go-1.10.1.apk; never committed), read in memory, and skip without them.
+java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.NativeMethodsTest \
+  "$(to_host "$OUT/fixtures")" "$(to_host "$ROOT/build/games")"
+java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.StubElfWriterTest \
+  "$(to_host "$OUT/scratch")" "$(to_host "$NDK_BIN/llvm-readelf.exe")" "${FX32:+$(to_host "$FX32")}"
+
+# The Holo launcher's pure parts (docs/superpowers/plans/2026-10-18-holo-launcher-ui.md).
+NA_ARG=none; [ -z "$FXNA" ] || NA_ARG="$(to_host "$FXNA")"
+JNI_ARG=none; [ -z "$FX32" ] || JNI_ARG="$(to_host "$FX32")"
+java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ApkScanTest "$(to_host "$OUT/scratch")" \
+  "$(to_host "$OUT/fixtures")" "$NA_ARG" "$JNI_ARG"
+java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ArtPickerTest
+java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.GameSettingsTest
+java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.LibraryRulesTest
+# The Data tab: OBB names for the copy, and the copy's save export/import.
+java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ObbRulesTest
+java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ElfRepairTest
+java -cp "$(to_host "$OUT/classes")" com.retrobug.shim.SaveArchiveTest
+java -cp "$(to_host "$OUT/classes")" com.retrobug.shim.PermissionPolicyTest
+java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.DexStringsTest "$(to_host "$OUT/fixtures")"
+java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.PatchTest
+java -cp "$(to_host "$OUT/classes")" com.retrobug.launcher.ModTest

@@ -918,7 +918,7 @@ void the_class_model_refuses_what_it_was_not_told() {
                                                 {abi::Value32::Ptr(rig.jni->env()), abi::Value32::S32(4)},
                                                 abi::Shorty::For("LLI"), 1000, &run);
   CHECK_CTX(run.reason == exec::StopReason::Returned, run.detail);
-  const auto* fresh = rig.jni->HostArray(made.w());
+  auto fresh = rig.jni->HostArray(made.w());
   CHECK_CTX(fresh != nullptr && *fresh == std::vector<std::uint8_t>({0, 0, 0, 0}),
             "NewByteArray(4) is not a zeroed byte[4]");
   const std::uint8_t src[2] = {0x5a, 0xa5};

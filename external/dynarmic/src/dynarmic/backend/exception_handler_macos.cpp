@@ -5,6 +5,7 @@
 
 #include <mach/mach.h>
 #include <mach/message.h>
+#include <TargetConditionals.h>
 
 #include <cstring>
 #include <functional>
@@ -266,6 +267,31 @@ private:
 ExceptionHandler::ExceptionHandler() = default;
 ExceptionHandler::~ExceptionHandler() = default;
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+
+/**
+ * RetroBug (patches/dynarmic/0010): iOS does not install the Mach exception port.
+ *
+ * The port takes every EXC_BAD_ACCESS in the process. RetroBug's JIT uses the page-table fastmem path
+ * (`fastmem_pointer` is unset), so no fake-call code blocks are ever registered and a fault is answered
+ * KERN_FAILURE — an unhandled Mach exception, which the kernel turns into a silent process death
+ * *before* the SIGSEGV/SIGBUS handlers the app reports through can run. Measured on the iPad: the Tier J
+ * boot died at the first guest call with no crash block at all. Leaving the port uninstalled restores
+ * ordinary signal delivery, so a fault names itself in retrobug.log, and the page-table fastmem the JIT
+ * actually uses does not depend on this handler.
+ */
+void ExceptionHandler::Register(oaknut::CodeBlock&, std::size_t) {}
+
+bool ExceptionHandler::SupportsFastmem() const noexcept {
+    return false;
+}
+
+void ExceptionHandler::SetFastmemCallback(std::function<FakeCall(u64)> cb) {
+    (void)cb;
+}
+
+#else
+
 #if defined(MCL_ARCHITECTURE_X86_64)
 void ExceptionHandler::Register(X64::BlockOfCode& code) {
     const u64 code_begin = mcl::bit_cast<u64>(code.getCode());
@@ -289,5 +315,7 @@ bool ExceptionHandler::SupportsFastmem() const noexcept {
 void ExceptionHandler::SetFastmemCallback(std::function<FakeCall(u64)> cb) {
     impl->SetCallback(cb);
 }
+
+#endif
 
 }  // namespace Dynarmic::Backend

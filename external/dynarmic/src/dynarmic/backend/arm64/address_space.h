@@ -45,6 +45,11 @@ public:
 
     void DumpDisassembly() const;
 
+    /// AOT (RetroBug patch 0008): translate one block into `code` without touching the code cache, and
+    /// return its size and relocation records. The caller owns the buffer and the linking step; the JIT
+    /// path is unchanged and still uses Emit()/Link() below.
+    EmittedBlockInfo EmitForAot(IR::Block& ir_block, oaknut::CodeGenerator& code);
+
 protected:
     virtual EmitConfig GetEmitConfig() = 0;
     virtual void RegisterNewBasicBlock(const IR::Block& block, const EmittedBlockInfo& block_info) = 0;

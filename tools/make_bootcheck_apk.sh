@@ -33,10 +33,10 @@ done
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$STAGE/x" "$STAGE/s/assets/rb32" "$STAGE/s/assets/rb32sys"
-unzip -q -o "$IN" 'lib/armeabi-v7a/*.so' -d "$STAGE/x" 2>/dev/null || true
+unzip -q -o "$IN" 'lib/armeabi-v7a/*.so' 'lib/armeabi/*.so' -d "$STAGE/x" 2>/dev/null || true
 shopt -s nullglob
-libs=("$STAGE/x/lib/armeabi-v7a/"*.so)
-[ "${#libs[@]}" -gt 0 ] || { echo "$IN has no lib/armeabi-v7a/*.so entry" >&2; exit 1; }
+libs=("$STAGE/x/lib/armeabi-v7a/"*.so "$STAGE/x/lib/armeabi/"*.so)
+[ "${#libs[@]}" -gt 0 ] || { echo "$IN has no lib/armeabi*/*.so entry" >&2; exit 1; }
 for l in "${libs[@]}"; do cp "$l" "$STAGE/s/assets/rb32/"; done
 for f in "${SYS[@]}"; do cp "$f" "$STAGE/s/assets/rb32sys/"; done
 

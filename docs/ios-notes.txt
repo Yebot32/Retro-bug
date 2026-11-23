@@ -1,0 +1,89 @@
+RetroBug on iOS — head-start notes (written 2026-10-15)
+=======================================================
+
+Goal (the human's): run OLD 32-bit ANDROID apps/games on an iPhone, shipped as a sideloaded .ipa
+(NOT the App Store), ideally WITHOUT JIT. Not "old 32-bit iOS apps" — that is a different project.
+
+Status: parked. Finish the Android side first (M2..M5 in
+docs/superpowers/specs/2026-10-15-general-32bit-app-support-design.md). The Android work's CPU engine,
+loader, syscall monitor and thread engine (core/) are exactly what an iOS port reuses.
+
+
+1. Why it is harder than the Android version
+--------------------------------------------
+On Android, RetroBug emulates only the game's 32-bit NATIVE code (.so); the phone's own Android runs
+the game's Java/DEX, graphics, audio, input. An iPhone has none of that, so the IPA must carry the
+Android app side itself:
+  - the Android runtime (ART). A 32-bit Android image's ART is itself 32-bit ARM code -> could run
+    through RetroBug's CPU engine like the game.
+  - Linux syscalls -> Darwin (XNU), incl. Binder IPC and Android's process model (zygote, app_process).
+  - graphics: OpenGL ES -> Metal (e.g. ANGLE, or GLES-on-Metal layers; MoltenVK for Vulkan).
+  - audio (OpenSL ES/AAudio -> AVAudioEngine/AudioUnit), input, storage, the framework services the
+    app talks to (or a minimal Android system image bundled inside the app).
+This "Android userspace inside an iOS app" is the multi-year part — independent of CPU speed.
+
+
+2. JIT on iOS (state as researched 2026-10-15)
+---------------------------------------------
+  - Apple forbids normal apps from making memory writable+executable. Exception: when a debugger is
+    attached. Sideloaded emulators get JIT by attaching a debugger at launch (StikDebug, SideStore's
+    JIT enabler).
+  - iOS 26 added the Trusted Execution Monitor; JIT still works via debugger, but a page becomes
+    executable only after a debugger write to it — ~1 write per 16 KB page (a 512 MB region needs
+    32,768 one-byte writes over USB). Works, but is a workaround, and it has been getting harder
+    each iOS release. Don't build a plan that REQUIRES JIT.
+  - Increased Memory Limit entitlement matters for big emulators (crashes without it).
+
+
+3. Evidence from iOS console emulators
+---------------------------------------
+  - MeloCafe (Cemu/Wii U port for iOS, by Stossy11 / MeloNX dev, 2026): runs JIT-less via Cemu's
+    interpreter but the developer called it "extremely slow"; playable mode = JIT via StikDebug.
+    Could NOT confirm "Super Mario 3D World near full speed without JIT" — full-speed 3D World
+    reports are Cemu on PC.
+  - iCube (GameCube/Wii, from DolphiniOS): rebuilt a FAST jitless engine ("engine 5"): PowerPC
+    blocks translated into chains of small pre-written handler callbacks; fused compare+branch;
+    direct-threaded dispatch; tail calls between handlers (58 handlers, each with its own branch);
+    profile-guided optimisation; inline cache on block links (92% hit on Wind Waker). An
+    IR-based engine was ~1.7x SLOWER and was rejected. Published jitless numbers (pre-rebuild,
+    device not named): Wind Waker intro ~0.59-0.61x real time, Chibi-Robo 0.47-0.53x.
+  - Lesson: a well-built jitless engine is MUCH faster than a naive interpreter. RetroBug's Tier I
+    (interprets dynarmic IR, no block cache) is the naive kind — don't use it as the iOS engine.
+
+
+4. The key idea for Android-on-iOS: AHEAD-OF-TIME translation (no JIT needed)
+---------------------------------------------------------------------------
+Unlike a console emulator, an Android game's native code is KNOWN at build time: it is in the
+APK's lib/armeabi*/lib*.so. So:
+  1. On the PC, statically translate each 32-bit ARM .so to AArch64 code (block discovery from
+     ELF symbols, exports, relocations, exidx unwind tables, and a recorded run on the 32-bit
+     tablet to find indirect-branch targets), and compile the result INTO the IPA as ordinary
+     iOS code — no runtime code generation, no JIT.
+  2. Keep a fast fallback interpreter (iCube-style threaded handler chains) for any code the
+     static pass missed (computed jumps, self-modifying code, JIT-ing guests like Unity/Mono).
+  3. The game's Java/DEX can be compiled ahead of time too: Android's own dex2oat produces ARM32
+     code for the app, which then goes through the same static translation (or interpret DEX
+     with ART's fast interpreter if dex2oat output is awkward).
+  Potentially near-native CPU speed for native-heavy games. Existing reusable pieces: core/'s
+  loader, relocation handling, IFUNC, syscall monitor, thread engine (M2), and dynarmic's A32
+  frontend/IR as the decoder for a static translator.
+
+
+5. Suggested first spike (when iOS work starts)
+-----------------------------------------------
+One simple 2D Android game: AOT-translate its .so on the PC, link into a test IPA with RetroBug's
+loader + syscall layer + a GLES->Metal path, sideload, measure fps on a real iPhone (with and
+without the fallback interpreter). Decide go/no-go from those numbers before building the
+Android-framework-on-iOS layer.
+
+
+Sources (checked 2026-10-15)
+----------------------------
+  - https://heldgames.com/guides/melocafe-wii-u-emulator-iphone
+  - https://x.com/Stossy12/status/2030225676599722434
+  - https://x.com/Techjunkie_Aman/status/2030227101228663113
+  - https://heldgames.com/guides/icube-gamecube-wii-iphone-jitless
+  - https://emulation.gametechwiki.com/index.php/Wii_U_emulators
+  - https://en.wikipedia.org/wiki/Cemu
+  - https://www.neogaf.com/threads/wii-u-emulator-cemu-can-now-play-super-mario-3d-world-nearly-fullspeed-on-pc.1199311/
+  - https://github.com/kiddreads/cemu-ios-muffin

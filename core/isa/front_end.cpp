@@ -11,8 +11,21 @@
 #include "dynarmic/ir/opcodes.h"
 
 #include <array>
+#include <atomic>
 
 namespace rb::isa {
+namespace {
+std::atomic<std::uint32_t> g_translation_pc{0};
+std::atomic<bool> g_translation_thumb{false};
+std::atomic<std::uint8_t> g_translation_it{0};
+}  // namespace
+
+TranslationSite LastTranslationSite() noexcept {
+  return TranslationSite{g_translation_pc.load(std::memory_order_relaxed),
+                         g_translation_thumb.load(std::memory_order_relaxed),
+                         g_translation_it.load(std::memory_order_relaxed)};
+}
+
 namespace {
 
 using Dynarmic::A32::IREmitter;
@@ -118,6 +131,9 @@ std::optional<TranslatedBlock> TranslateOne(const mem::GuestMemory& memory,
     return std::nullopt;
   };
   const bool thumb = location.TFlag();
+  g_translation_pc.store(location.PC(), std::memory_order_relaxed);
+  g_translation_thumb.store(thumb, std::memory_order_relaxed);
+  g_translation_it.store(location.IT().Value(), std::memory_order_relaxed);
   // `location` is a byte address plus a mode, not a tagged symbol value: an odd address is the ABI's
   // Thumb tag left in place by a caller that should have split it off (rb::loader's CodeAddress does),
   // and a halfword address under ARM decoding is a genuine misalignment.
@@ -129,6 +145,13 @@ std::optional<TranslatedBlock> TranslateOne(const mem::GuestMemory& memory,
   TranslatedBlock block{Dynarmic::A32::Translate(location, &reader, Options())};
   block.ops.reserve(block.ir.size());
   for (const auto& inst : block.ir) block.ops.push_back(Dynarmic::IR::GetNameOf(inst.GetOpcode()));
+  // A dense ordinal per instruction (1..N). Tier I's value slots are indexed by it: the interpreter used
+  // a hash map keyed by instruction pointer for every operand read and every result write, and this field
+  // is already the dense index those maps were hashing for. Dynarmic's JIT fills the same field from its
+  // naming pass; the front-end path used here never runs that pass, so without this every block would run
+  // unnamed.
+  unsigned ordinal = 1;
+  for (auto& inst : block.ir) inst.SetName(ordinal++);
   block.terminal = TerminalName(block.ir.GetTerminal());
   block.entry = location.PC();
   block.mode = thumb ? Mode::Thumb : Mode::Arm;

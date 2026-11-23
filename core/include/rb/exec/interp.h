@@ -32,8 +32,11 @@
  */
 #pragma once
 
+#include <array>
 #include <cstdint>
+#include <memory>
 #include <string>
+#include <unordered_map>
 
 #include "rb/exec/machine_state.h"
 #include "rb/isa/front_end.h"
@@ -108,6 +111,38 @@ class InterpExecutor : public Executor {
 
   RunResult Run(MachineState& state, unsigned max_instructions) override;
 
+  /// Decoded blocks, reused across entries. A block is trusted only while the page it starts on is not
+  /// writable: code the guest can change without a protection change is re-decoded every time, which is
+  /// what keeps self-modifying code correct without a write observer (the loader maps text read+exec, and
+  /// `GuestMemory::Write` refuses a read-only page outright). Invalidation from `arm_cacheflush` evicts
+  /// every block whose start address falls in the flushed range.
+  ///
+  /// The size of this cache is a memory decision before it is a hit-rate one. Dynarmic's `IR::Block`
+  /// used to reserve a fixed 4096-instruction pool for every block, whether the block used four slots or
+  /// four thousand — 104 B per `IR::Inst`, ~416 KiB per cached block, which is what held this limit at
+  /// 128 (~54 MiB) and made a working set larger than that re-translate its hot blocks every time the
+  /// cache filled and was cleared. Patch `0007` in `patches/dynarmic` makes the initial slab 64
+  /// instructions (~6.7 KiB), and `Common::Pool` adds one more 64-instruction slab only for a block that
+  /// outgrows it, so a block costs ~6.7 KiB for the common case and ~6.7 KiB per further 64 instructions.
+  /// 2048 blocks is therefore ~13 MiB before any block outgrows its first slab and tens of MiB once long
+  /// blocks add theirs — a bounded, device-safe budget, not the gigabytes the old slab size implied.
+  /// The old hazard still governs the bound: the pool does not check `malloc`, and on iOS this much host
+  /// heap alongside the guest window once surfaced as a crash inside `PrependNewInst` when the allocation
+  /// returned null, so the cache stays bounded and hot loops stay cached. None of this relaxes the rule
+  /// above: code the guest can write is still re-decoded on every entry, and a cache flush still evicts by
+  /// range.
+  ///
+  /// Eviction is generational, not wholesale. The cache used to be cleared the moment it filled, so a
+  /// working set slightly larger than the cap re-translated everything forever; now a full young
+  /// generation is demoted and the previous one is dropped, so blocks in an inner loop survive. The bound
+  /// is therefore two generations: 4096 entries, ~27 MiB at the flat per-block cost above.
+  static constexpr std::size_t kBlockCacheLimit = 2048;
+
+  /// How many blocks this executor has translated, and how many it currently holds — the two numbers a
+  /// profile needs to say whether translation is part of a slow title's cost.
+  std::size_t translations() const { return translations_; }
+  std::size_t cached_blocks() const { return blocks_.size() + blocks_old_.size(); }
+
   /// Nothing is cached, so nothing can be stale — and that is a property of this tier, not a stub:
   /// running the same block after an invalidation call has to give the same answer, which the test
   /// asserts rather than assumes.
@@ -116,9 +151,46 @@ class InterpExecutor : public Executor {
   CodeTier tier() const override { return CodeTier::Interp; }
 
  private:
+  struct CachedBlock {
+    std::shared_ptr<isa::TranslatedBlock> block;
+  };
+  /// What a decoded block depends on besides memory: where it starts, the mode, the IT window it was
+  /// decoded inside, and FPSCR — Dynarmic bakes the rounding mode and flush-to-zero into the FP
+  /// instructions it emits, so a block decoded under one FPSCR must not be reused under another (the
+  /// tier-diff fp_rmode rows are what found this). PSR's other bits do not change a decoding.
+  struct BlockKey {
+    std::uint32_t pc = 0;
+    std::uint32_t fpscr = 0;
+    std::uint8_t it = 0;
+    bool thumb = false;
+    bool operator==(const BlockKey& o) const {
+      return pc == o.pc && fpscr == o.fpscr && it == o.it && thumb == o.thumb;
+    }
+  };
+  struct BlockKeyHash {
+    std::size_t operator()(const BlockKey& k) const noexcept {
+      std::uint64_t h = (static_cast<std::uint64_t>(k.pc) << 32) ^ k.fpscr;
+      h ^= static_cast<std::uint64_t>(k.it) << 8;
+      h ^= static_cast<std::uint64_t>(k.thumb) << 7;
+      h ^= h >> 33;
+      return static_cast<std::size_t>(h);
+    }
+  };
+  static BlockKey MakeKey(const Dynarmic::A32::LocationDescriptor& location);
   mem::GuestMemory& memory_;
+  using BlockMap = std::unordered_map<BlockKey, CachedBlock, BlockKeyHash>;
+  BlockMap blocks_;      ///< the young generation: lookup first, filled by translation
+  BlockMap blocks_old_;  ///< the previous generation: still a hit, promoted on use
+  struct RecentBlock {
+    BlockKey key;
+    const isa::TranslatedBlock* block = nullptr;  ///< owned by one of the two generations
+  };
+  std::array<RecentBlock, 256> recent_blocks_{};
+  std::size_t translations_ = 0;
   GuestAddr return_address_;
   const HostDispatch* dispatch_;
+  /// Runs so far, for `RB_T1_TRACE=<n>` (trace the n-th Run). Per executor rather than a static.
+  unsigned run_index_ = 0;
   /// The reservation `ldaex`/`strex` consult. Per-core, and outliving one block: Dynarmic's own marker
   /// lives in the JIT state for the whole `Run`, and an LL/SC retry loop whose load and store land in
   /// different basic blocks is normal for a mutex, so a per-block record would make every such store fail

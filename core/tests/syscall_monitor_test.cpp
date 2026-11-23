@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -105,6 +106,26 @@ void r7_is_the_number_not_a_masked_remainder() {
   const sc::Outcome o2 = m.Classify(sc::Frame::Capture(hi, 0), hi);
   CHECK_CTX(o2.verdict == sc::Verdict::kUnsupported, sc::Name(o2.verdict));
   CHECK_CTX(o2.r0 == -static_cast<std::int32_t>(sc::err::kEnosys), std::to_string(o2.r0));
+}
+
+void live_refusals_report_the_first_caller_and_keep_all_counts() {
+  sc::Monitor monitor;
+  std::vector<std::string> trace;
+  monitor.set_host_io_trace([&trace](const std::string& line) { trace.push_back(line); });
+  rb::runtime::GuestThread thread;
+  thread.tid = 4245;
+  auto state = State(sc::nr::kSigreturn);
+  state.r[14] = 0x1009;
+  CHECK(monitor.Handle(state, 0, &thread).r0 == -38);
+  CHECK(monitor.Handle(state, 0, &thread).r0 == -38);
+  auto other = State(376);
+  CHECK(monitor.Handle(other, 0, &thread).r0 == -38);
+  CHECK(trace.size() == 2);
+  if (trace.size() != 2) return;
+  CHECK_CTX(trace[0].find("sigreturn: no active signal frame") != std::string::npos, trace[0]);
+  CHECK_CTX(trace[0].find("guest resume pc 0x1000, lr 0x1009, guest tid 4245") != std::string::npos, trace[0]);
+  CHECK_CTX(trace[1].find("ARM syscall #376 (process_vm_readv)") != std::string::npos, trace[1]);
+  CHECK(monitor.refusals() == 3);
 }
 
 /// The measured return convention. `-36` for ENAMETOOLONG is the number that settles the
@@ -444,6 +465,20 @@ void mmap2_serves_real_anonymous_pages() {
   CHECK_CTX(b.verdict == sc::Verdict::kEmulated && static_cast<std::uint32_t>(b.r0) != at,
             "the second allocation landed on the first");
 
+  constexpr std::uint32_t kFixed = 0x10, kNoReplace = 0x100000;
+  const sc::Outcome no_replace = mmap(at, 0x1000, kRw, kPrivateAnon | kNoReplace, kNoFd);
+  CHECK_CTX(no_replace.r0 == -static_cast<std::int32_t>(sc::err::kEexist), no_replace.detail);
+  CHECK(window->Read(at + 0x40, &back, 4) && back == magic);
+  const sc::Outcome guard = mmap(at, 0x1000, 0, kPrivateAnon | kFixed, kNoFd);
+  CHECK_CTX(static_cast<std::uint32_t>(guard.r0) == at, guard.detail);
+  CHECK(window->IsMapped(at) && !window->Read(at + 0x40, &back, 4));
+  const sc::Outcome replace = mmap(at, 0x1000, kRw, kPrivateAnon | kFixed, kNoFd);
+  CHECK_CTX(static_cast<std::uint32_t>(replace.r0) == at, replace.detail);
+  CHECK(window->Read(at + 0x40, &back, 4) && back == 0);
+  CHECK(window->IsMapped(at + 0x1000));
+  const sc::Outcome unaligned = mmap(at + 1, 0x1000, kRw, kPrivateAnon | kFixed, kNoFd);
+  CHECK_CTX(unaligned.r0 == -static_cast<std::int32_t>(sc::err::kEinval), unaligned.detail);
+
   const sc::Outcome zero = mmap(0, 0, kRw, kPrivateAnon, kNoFd);
   CHECK_CTX(zero.r0 == -static_cast<std::int32_t>(sc::err::kEinval),
             "len=0 must be EINVAL, got " + std::to_string(zero.r0));
@@ -451,6 +486,98 @@ void mmap2_serves_real_anonymous_pages() {
   const sc::Outcome file = mmap(0, 0x1000, kRw, 0x02 /*MAP_PRIVATE, no ANON*/, 7);
   CHECK_CTX(file.verdict == sc::Verdict::kUnsupported, sc::Name(file.verdict));
   CHECK_CTX(file.detail.find("file descriptor") != std::string::npos, file.detail);
+}
+
+/// The runtime's window is the whole 32-bit space (4 GiB). `uint32(window_bytes)` is 0 there, so a 32-bit
+/// limit refused every allocation; and the top of that window belongs to the trap and the kuser helpers, so
+/// the monitor allocates only below its ceiling (GuestProcess's 0xfff00000), whatever the window holds.
+void mmap2_in_a_4gib_window_stays_below_the_ceiling() {
+  mem::AddressModel model;
+  model.kind = mem::AddressModel::kBiased;
+  const long host_page = sysconf(_SC_PAGESIZE);
+  model.host_page_shift = mem::kGuestPageShift;
+  while (host_page > 0 && (1L << model.host_page_shift) < host_page) ++model.host_page_shift;
+  std::string err;
+  auto window = mem::GuestMemory::Create(std::size_t{1} << 32, model, &err);
+  CHECK_CTX(window != nullptr, "a 4 GiB biased window: " + err);
+  if (!window) return;
+  constexpr std::uint32_t kCeiling = 0xfff0'0000u;
+  sc::Monitor m;
+  m.set_memory(window.get());
+  m.set_alloc_ceiling(kCeiling);
+  const auto mmap = [&](std::uint32_t hint, std::uint32_t len) {
+    exec::MachineState s = State(sc::nr::kMmap2);
+    s.r[0] = hint;
+    s.r[1] = len;
+    s.r[2] = 3;            // PROT_READ | PROT_WRITE
+    s.r[3] = 0x22;         // MAP_PRIVATE | MAP_ANONYMOUS
+    s.r[4] = 0xffff'ffffu;  // fd -1
+    return m.Handle(s, 0);
+  };
+  const sc::Outcome few = mmap(0, 4 * mem::kGuestPage);
+  CHECK_CTX(few.verdict == sc::Verdict::kEmulated, few.detail);
+  const std::uint32_t at = static_cast<std::uint32_t>(few.r0);
+  CHECK_CTX(!(few.r0 < 0 && few.r0 >= -4095) && at != 0 && static_cast<std::uint64_t>(at) + 4 * mem::kGuestPage <= kCeiling &&
+                window->IsMapped(at),
+            "few pages -> 0x" + std::to_string(at));
+  // A hint straddling the ceiling is not honoured (the kernel may ignore a hint); the answer lands below.
+  const sc::Outcome hinted = mmap(kCeiling - mem::kGuestPage, 2 * mem::kGuestPage);
+  CHECK_CTX(hinted.verdict == sc::Verdict::kEmulated &&
+                static_cast<std::uint64_t>(static_cast<std::uint32_t>(hinted.r0)) + 2 * mem::kGuestPage <= kCeiling,
+            hinted.detail);
+  // Fits in the 4 GiB window, not below the ceiling: ENOMEM.
+  const sc::Outcome big = mmap(0, kCeiling);
+  CHECK_CTX(big.r0 == -static_cast<std::int32_t>(sc::err::kEnomem), "len=0xfff00000: " + big.detail);
+}
+
+/// Anonymous mappings are placed top-down, as Linux places them (mmap_base under the stack, each new mapping
+/// in the highest gap below): the first lands just under the ceiling, the next directly below it, and a freed
+/// gap at the top is reused first. A guest that reads a little past the end of its newest heap region (Gumball's
+/// cLanguage::read scans past its last string for a non-zero byte) then reads the older region above it, as
+/// on a device, instead of running off the end of the window's used space.
+std::string Hex(std::uint32_t v) {
+  char b[16];
+  std::snprintf(b, sizeof b, "%x", v);
+  return b;
+}
+
+void mmap2_places_top_down_like_the_kernel() {
+  mem::AddressModel model;
+  model.kind = mem::AddressModel::kBiased;
+  const long host_page = sysconf(_SC_PAGESIZE);
+  model.host_page_shift = mem::kGuestPageShift;
+  while (host_page > 0 && (1L << model.host_page_shift) < host_page) ++model.host_page_shift;
+  std::string err;
+  auto window = mem::GuestMemory::Create(std::size_t{1} << 32, model, &err);
+  CHECK_CTX(window != nullptr, "a 4 GiB biased window: " + err);
+  if (!window) return;
+  constexpr std::uint32_t kCeiling = 0xfff0'0000u;
+  sc::Monitor m;
+  m.set_memory(window.get());
+  m.set_alloc_ceiling(kCeiling);
+  const auto mmap = [&](std::uint32_t len) {
+    exec::MachineState s = State(sc::nr::kMmap2);
+    s.r[1] = len;
+    s.r[2] = 3;
+    s.r[3] = 0x22;
+    s.r[4] = 0xffff'ffffu;
+    return static_cast<std::uint32_t>(m.Handle(s, 0).r0);
+  };
+  const std::uint32_t a = mmap(4 * mem::kGuestPage);
+  const std::uint32_t b = mmap(2 * mem::kGuestPage);
+  CHECK_CTX(a == kCeiling - 4 * mem::kGuestPage, "first at 0x" + Hex(a));
+  CHECK_CTX(b == a - 2 * mem::kGuestPage, "second at 0x" + Hex(b) + ", first at 0x" + Hex(a));
+  // Free the top one: a mapping that fits there goes back to the highest gap.
+  exec::MachineState u = State(sc::nr::kMunmap);
+  u.r[0] = a;
+  u.r[1] = 4 * mem::kGuestPage;
+  m.Handle(u, 0);
+  const std::uint32_t c = mmap(mem::kGuestPage);
+  CHECK_CTX(c == kCeiling - mem::kGuestPage, "after freeing the top, 0x" + Hex(c));
+  const std::uint32_t d = mmap(8 * mem::kGuestPage);  // does not fit above b: goes below it
+  CHECK_CTX(d == b - 8 * mem::kGuestPage, "a larger one at 0x" + Hex(d) + ", b at 0x" + Hex(b));
+  // An address above 0x80000000 is a negative int32 but not an error (only -4095..-1 are): never a refusal.
+  CHECK_CTX(m.refusals() == 0u, std::to_string(m.refusals()) + " refusals counted for successful mappings");
 }
 
 /// `munmap` releases what `mmap2` served: the pages stop being mapped, the call answers 0 whether or
@@ -491,8 +618,10 @@ void mremap_grows_moves_and_shrinks_like_a_kernel() {
   auto window = Window();
   if (!window) return;
   m.set_memory(window.get());
-  const auto mmap = [&](std::uint32_t len) {
+  // Placed by hint: the rows need room above a mapping, and anonymous mappings are placed top-down.
+  const auto mmap = [&](std::uint32_t len, std::uint32_t hint) {
     exec::MachineState s = State(sc::nr::kMmap2);
+    s.r[0] = hint;
     s.r[1] = len;
     s.r[2] = 3;
     s.r[3] = 0x22;
@@ -507,7 +636,7 @@ void mremap_grows_moves_and_shrinks_like_a_kernel() {
     s.r[3] = flags;
     return m.Handle(s, 0);
   };
-  const std::uint32_t a = mmap(0x1000);
+  const std::uint32_t a = mmap(0x1000, 0x4000);
   CHECK(a != 0);
   const std::uint32_t magic = 0xa7e7'1700u;
   CHECK(window->Write(a + 0x10, &magic, 4));
@@ -516,7 +645,7 @@ void mremap_grows_moves_and_shrinks_like_a_kernel() {
   CHECK_CTX(o.verdict == sc::Verdict::kEmulated && static_cast<std::uint32_t>(o.r0) == a, o.detail);
   CHECK_CTX(window->IsMapped(a + 0x1000), "grown in place, but the new page is not mapped");
 
-  const std::uint32_t blocker = mmap(0x1000);  // lands right after: mmap2 keeps arenas consecutive
+  const std::uint32_t blocker = mmap(0x1000, a + 0x2000);  // right after it, by hint
   CHECK_CTX(blocker == a + 0x2000, "the blocker landed at " + std::to_string(blocker));
   o = mremap(a, 0x2000, 0x3000, 0);
   CHECK_CTX(o.r0 == -static_cast<std::int32_t>(sc::err::kEnomem), "no MAYMOVE, no room: " + o.detail);
@@ -633,9 +762,8 @@ void futex_answers_the_single_threaded_truth() {
   CHECK_CTX(wb.r0 == 0 && wb.verdict == sc::Verdict::kEmulated, wb.detail);
 }
 
-/// `rt_sigaction` installs without a delivery mechanism: 0 back, the previous handler reads NULL
-/// rather than stale bytes, and the note says no signal is ever delivered. `faccessat` goes through
-/// the same provider as `openat` and answers ENOENT for what the provider does not serve.
+/// `rt_sigaction` records a disposition, answers a query with the previous one, and names what it recorded.
+/// `faccessat` goes through the same provider as `openat` and answers ENOENT for what the provider does not serve.
 void sigaction_and_faccessat_answer_their_facts() {
   sc::Monitor m;
   auto window = Window();
@@ -675,9 +803,289 @@ void sigaction_and_faccessat_answer_their_facts() {
   CHECK_CTX(m.Handle(miss, 0).r0 == -static_cast<std::int32_t>(sc::err::kEnoent), "want ENOENT");
 }
 
+void seek_moves_the_offset_of_a_served_file() {
+  sc::Monitor m;
+  auto window = Window();
+  if (!window) return;
+  m.set_memory(window.get());
+  std::string why;
+  CHECK_CTX(window->Map(0, 0x8000, mem::kRead | mem::kWrite, &why), why);
+  m.set_file_provider([](const std::string& path) -> std::optional<std::vector<std::uint8_t>> {
+    if (path == "/proc/self/cmdline") return std::vector<std::uint8_t>{'r', 'b', 0};
+    return std::nullopt;
+  });
+  constexpr char path[] = "/proc/self/cmdline";
+  CHECK(window->Write(0x500, path, sizeof path));
+  auto open = State(sc::nr::kOpenat);
+  open.r[0] = 0xffff'ff9cu;  // AT_FDCWD
+  open.r[1] = 0x500;
+  const auto fd = m.Handle(open, 0).r0;
+  CHECK(fd >= 0);
+  const auto seek = [&](std::int32_t offset, std::uint32_t whence) {
+    auto call = State(sc::nr::kLseek);
+    call.r[0] = fd;
+    call.r[1] = static_cast<std::uint32_t>(offset);
+    call.r[2] = whence;
+    return m.Handle(call, 0).r0;
+  };
+  const auto read = [&] {
+    auto call = State(sc::nr::kRead);
+    call.r[0] = fd;
+    call.r[1] = 0x600;
+    call.r[2] = 1;
+    return m.Handle(call, 0).r0;
+  };
+  CHECK(seek(-2, 2) == 1);  // SEEK_END
+  CHECK(read() == 1);
+  char byte = 0;
+  CHECK(window->Read(0x600, &byte, 1) && byte == 'b');
+  CHECK(seek(5, 1) == 7);  // SEEK_CUR past EOF
+  CHECK(read() == 0);
+  CHECK(seek(-1, 0) == -static_cast<std::int32_t>(sc::err::kEinval));
+  CHECK(seek(0, 1) == 7);
+  CHECK(seek(0x7fff'ffff, 1) == -static_cast<std::int32_t>(sc::err::kEoverflow));
+  CHECK(seek(0, 0) == 0);  // SEEK_SET
+  CHECK(read() == 1);
+  CHECK(window->Read(0x600, &byte, 1) && byte == 'r');
+}
+
+/// The ids this lane uses. `Monitor::set_ids` is what makes a tid live, and these are the values
+/// `GuestProcess` itself uses, so the lane reads like the real launch path.
+namespace GuestProcessIds {
+constexpr std::int32_t kPid = 4242;
+constexpr std::int32_t kMainTid = 4243;
+}  // namespace GuestProcessIds
+
+/// A signal number, passed through unchanged. It exists so the loop below reads as "the uncatchable
+/// signals" rather than as two bare integers beside an assertion about being uncatchable.
+constexpr int Uncatchable(int sig) { return sig; }
+
+/// ---- C26: signal delivery.
+///
+/// The three facts these pin down, in the order delivery needs them: (1) what the guest installed is
+/// readable back — bionic's arm32 `struct sigaction` is `{handler, flags, restorer, mask}`, which the
+/// measured probe in tests/corpus/sigframe-arm-layout.txt confirms (flags at +4, not the mask); (2) a
+/// signal aimed at a live thread is *queued*, not refused, and is taken exactly once; (3) `rt_sigreturn`
+/// with no frame in progress is refused by name rather than answered with a 0 that would resume the
+/// handler's own `svc` forever.
+void signal_dispositions_are_what_the_guest_installed() {
+  sc::Monitor m;
+  auto window = Window();
+  if (!window) return;
+  m.set_memory(window.get());
+  std::string werr;
+  CHECK_CTX(window->Map(0, 0x8000, mem::kRead | mem::kWrite, &werr),
+            "could not map the fixture pages: " + werr);
+
+  // The values libmono actually passes for SIGPWR (measured, Cars 3 on an SM-X710):
+  // act = {handler 0x5fab59, flags 0x14000000 (SA_RESTART|SA_RESTORER), restorer 0x1a7240, mask 0xffffbfd9}.
+  const std::uint32_t act[5] = {0x005f'ab59u, 0x1400'0000u, 0x001a'7240u, 0xffff'bfd9u, 0};
+  CHECK(window->Write(0x300, act, sizeof act));
+  exec::MachineState sig = State(sc::nr::kRtSigaction);
+  sig.r[0] = 30;     // SIGPWR, Mono's GC thread-suspend
+  sig.r[1] = 0x300;  // the struct a device reads
+  sig.r[2] = 0;      // no previous handler wanted
+  CHECK_CTX(m.Handle(sig, 0).r0 == 0, "rt_sigaction with a guest struct must be recorded");
+
+  const sc::Monitor::Disposition d = m.disposition(30);
+  CHECK_CTX(d.handler == 0x005f'ab59u, "handler was not read out of the guest struct");
+  CHECK_CTX(d.flags == 0x1400'0000u, "flags are at +4; reading the mask there is the classic mistake");
+  CHECK_CTX(d.restorer == 0x001a'7240u, "the restorer is required on AArch32 and is what delivery returns through");
+  CHECK_CTX(d.mask == 0x0000'0000ffff'bfd9ull, "the blocked mask is at +12, as two 32-bit words");
+  CHECK_CTX(d.catches(), "a handler above 1 catches");
+  CHECK_CTX(m.installed_handler_count() == 1, "one handler installed so far");
+
+  // A query (act == NULL) returns the recorded disposition in oldact and must not erase it.
+  exec::MachineState q = State(sc::nr::kRtSigaction);
+  q.r[0] = 30;
+  q.r[1] = 0;
+  q.r[2] = 0x340;
+  CHECK_CTX(m.Handle(q, 0).r0 == 0, "a query is answered");
+  std::uint32_t old[5] = {};
+  CHECK_CTX(window->Read(0x340, old, sizeof old), "oldact is written");
+  CHECK_CTX(old[0] == 0x005f'ab59u && old[2] == 0x001a'7240u,
+            "oldact is the previous handler and restorer");
+  CHECK_CTX(m.disposition(30).handler == 0x005f'ab59u, "a query must not erase the handler");
+
+  // SIG_DFL (0) and SIG_IGN (1) are not handler addresses; a delivery must not enter them.
+  const std::uint32_t ign[5] = {1, 0, 0, 0, 0};
+  CHECK(window->Write(0x320, ign, sizeof ign));
+  exec::MachineState s2 = State(sc::nr::kRtSigaction);
+  s2.r[0] = 15;  // SIGTERM
+  s2.r[1] = 0x320;
+  CHECK_CTX(m.Handle(s2, 0).r0 == 0, "SIG_IGN is a valid disposition");
+  CHECK_CTX(m.disposition(15).handler == 1, "SIG_IGN is recorded as 1");
+  CHECK_CTX(!m.disposition(15).catches(), "SIG_IGN does not catch, so it is dropped rather than entered");
+  CHECK_CTX(m.installed_handler_count() == 1, "SIG_IGN is not an installed handler");
+}
+
+void a_signal_to_a_live_thread_is_queued_and_taken_once() {
+  sc::Monitor m;
+  auto window = Window();
+  if (!window) return;
+  m.set_memory(window.get());
+  std::string werr;
+  CHECK_CTX(window->Map(0, 0x8000, mem::kRead | mem::kWrite, &werr), werr);
+  m.set_ids(GuestProcessIds::kPid, GuestProcessIds::kMainTid);
+
+  // Signal 0 stays the existence probe even for a live thread: it must answer 0 and queue nothing.
+  exec::MachineState probe = State(sc::nr::kTkill);
+  probe.r[0] = GuestProcessIds::kMainTid;
+  probe.r[1] = 0;
+  CHECK_CTX(m.Handle(probe, 0).r0 == 0, "signal 0 is an existence probe");
+  CHECK_CTX(m.signals_queued() == 0, "a probe queues nothing");
+  CHECK_CTX(m.TakePendingSignal(GuestProcessIds::kMainTid) == 0, "and nothing is waiting");
+
+  // A real signal, with a handler installed.
+  const std::uint32_t act[5] = {0x005f'ab59u, 0x1400'0000u, 0x001a'7240u, 0, 0};
+  CHECK(window->Write(0x300, act, sizeof act));
+  exec::MachineState sa = State(sc::nr::kRtSigaction);
+  sa.r[0] = 30;
+  sa.r[1] = 0x300;
+  CHECK(m.Handle(sa, 0).r0 == 0);
+
+  exec::MachineState kill = State(sc::nr::kTkill);
+  kill.r[0] = GuestProcessIds::kMainTid;
+  kill.r[1] = 30;
+  const sc::Outcome o = m.Handle(kill, 0);
+  // 0, which is the kernel's answer *and* the truth: the signal is pending, not delivered yet.
+  CHECK_CTX(o.r0 == 0, "tkill of a live thread with a handler must answer 0, not -ENOSYS: " + o.detail);
+  CHECK_CTX(o.verdict == sc::Verdict::kEmulated, sc::Name(o.verdict));
+  CHECK_CTX(m.signals_queued() == 1, "one signal queued");
+
+  // Taken exactly once: a second look must not re-enter the handler (Mono would deadlock on a
+  // suspend it never asked for the second time).
+  CHECK_CTX(m.TakePendingSignal(GuestProcessIds::kMainTid) == 30, "the queued signal is taken");
+  CHECK_CTX(m.TakePendingSignal(GuestProcessIds::kMainTid) == 0, "and not taken again");
+
+  // A thread that does not exist is still ESRCH — a queued signal would be a lie.
+  exec::MachineState dead = State(sc::nr::kTkill);
+  dead.r[0] = 99999;
+  dead.r[1] = 30;
+  CHECK_CTX(m.Handle(dead, 0).r0 == -static_cast<std::int32_t>(sc::err::kEsrch), "no such thread is -ESRCH");
+
+  // SIGKILL and SIGSTOP cannot be caught; this build does not run default actions, so they are refused
+  // by name rather than queued into a delivery that would never happen.
+  for (const int uncatchable : {9, 19}) {
+    exec::MachineState k = State(sc::nr::kTkill);
+    k.r[0] = GuestProcessIds::kMainTid;
+    k.r[1] = Uncatchable(uncatchable);
+    CHECK_CTX(m.Handle(k, 0).r0 == -static_cast<std::int32_t>(sc::err::kEnosys),
+              "signal " + std::to_string(uncatchable) + " cannot be caught and must be refused by name");
+  }
+
+  // Outside the ABI's 1..64 there is no signal to queue; the kernel answers EINVAL, not 0.
+  for (const int bad : {65, -1}) {
+    exec::MachineState k = State(sc::nr::kTkill);
+    k.r[0] = GuestProcessIds::kMainTid;
+    k.r[1] = static_cast<std::uint32_t>(bad);
+    CHECK_CTX(m.Handle(k, 0).r0 == -static_cast<std::int32_t>(sc::err::kEinval),
+              "signal " + std::to_string(bad) + " is EINVAL");
+  }
+}
+
+/// `rt_sigreturn` (173) closes a delivery. Without one in progress it is refused by name — answering 0
+/// would resume the handler's own `svc` in place, which is an infinite loop rather than an error.
+void sigreturn_outside_a_delivery_is_refused_by_name() {
+  sc::Monitor m;
+  auto window = Window();
+  if (!window) return;
+  m.set_memory(window.get());
+  std::string werr;
+  CHECK_CTX(window->Map(0, 0x8000, mem::kRead | mem::kWrite, &werr), werr);
+
+  exec::MachineState s = State(sc::nr::kRtSigreturn);
+  const sc::Outcome o = m.Handle(s, 0);
+  CHECK_CTX(o.verdict == sc::Verdict::kUnsupported, sc::Name(o.verdict));
+  CHECK_CTX(o.r0 == -static_cast<std::int32_t>(sc::err::kEnosys), std::to_string(o.r0));
+  CHECK_CTX(o.detail.find("rt_sigreturn") != std::string::npos, o.detail);
+}
+
+/// `rt_sigsuspend` (179) installs its temporary mask, sleeps until a deliverable signal is queued, and
+/// returns -EINTR; the signal stays pending for the delivery path. Mono's suspend handler uses this to wait
+/// for its restart signal; before C26's follow-up the call was refused with ENOSYS and the GC handshake
+/// never settled (Cars 3, `svc #179` in the runtime log).
+void sigsuspend_waits_for_a_signal_and_returns_eintr() {
+  sc::Monitor m;
+  auto window = Window();
+  if (!window) return;
+  m.set_memory(window.get());
+  std::string werr;
+  CHECK_CTX(window->Map(0, 0x8000, mem::kRead | mem::kWrite, &werr), werr);
+  m.set_ids(GuestProcessIds::kPid, GuestProcessIds::kMainTid);
+  runtime::FutexTable ft;
+  m.set_futex_table(&ft);
+  runtime::GuestThread t;
+  t.tid = GuestProcessIds::kMainTid;
+  m.set_thread_lookup([&t](std::int32_t tid) { return tid == t.tid ? &t : nullptr; });
+  const std::uint64_t mask = 0;  // everything deliverable
+  CHECK(window->Write(0x400, &mask, sizeof mask));
+  exec::MachineState s = State(sc::nr::kRtSigsuspend);
+  s.r[0] = 0x400;
+  s.r[1] = 8;
+  sc::Outcome o = m.Begin(s, 0, &t);
+  CHECK_CTX(o.verdict == sc::Verdict::kBlocking, sc::Name(o.verdict));
+  CHECK_CTX(t.sigsuspend_restore && t.signal_mask == mask, "the temporary mask is installed for the suspend");
+
+  sc::Outcome got;
+  std::thread waiter([&] { got = o.block(); });
+  m.QueueSignal(GuestProcessIds::kMainTid, 30);
+  waiter.join();
+  CHECK_CTX(got.r0 == -static_cast<std::int32_t>(sc::err::kEintr), "sigsuspend returns -EINTR");
+  CHECK_CTX(m.HasDeliverablePending(GuestProcessIds::kMainTid, mask), "the signal is still pending for delivery");
+  CHECK_CTX(m.TakePendingSignal(GuestProcessIds::kMainTid) == 30, "taken once");
+  t.sigsuspend_restore = false;  // no handler ran in this lane; a real delivery restores it at rt_sigreturn
+}
+
+/// `tgkill(tgid, tid, sig)` and `rt_tgsigqueueinfo(tgid, tid, sig, info)` carry the signal in r2, not r1.
+/// Reading them like `tkill(tid, sig)` put the target thread id where the signal belongs: a live tid is far
+/// outside 1..64, so the call was answered EINVAL. Boehm GC's thread suspend treats that as fatal and aborts
+/// the process — measured as `tgkill(4242, 4242, 4246) -> -EINVAL` immediately before SIGABRT in Crash Drive 2
+/// and Teeny Titans 2 (2026-10-20). The C26 lanes only exercised `tkill`, so the shifted decode was green.
+void the_three_argument_signal_calls_read_the_signal_from_r2() {
+  sc::Monitor m;
+  auto window = Window();
+  if (!window) return;
+  m.set_memory(window.get());
+  std::string werr;
+  CHECK_CTX(window->Map(0, 0x8000, mem::kRead | mem::kWrite, &werr), werr);
+  m.set_ids(GuestProcessIds::kPid, GuestProcessIds::kMainTid);
+  const std::int32_t other = m.AllocateThreadId();
+
+  const std::uint32_t act[5] = {0x005f'ab59u, 0x1400'0000u, 0x001a'7240u, 0, 0};
+  CHECK(window->Write(0x300, act, sizeof act));
+  exec::MachineState sa = State(sc::nr::kRtSigaction);
+  sa.r[0] = 30;
+  sa.r[1] = 0x300;
+  CHECK(m.Handle(sa, 0).r0 == 0);
+
+  for (const std::uint32_t number : {sc::nr::kTgkill, sc::nr::kRtTgsigqueueinfo}) {
+    const std::string name = number == sc::nr::kTgkill ? "tgkill" : "rt_tgsigqueueinfo";
+    exec::MachineState k = State(number);
+    k.r[0] = GuestProcessIds::kPid;  // tgid
+    k.r[1] = static_cast<std::uint32_t>(other);  // tid
+    k.r[2] = 30;                                 // sig
+    k.r[3] = 0;                                  // info (rt_tgsigqueueinfo)
+    const sc::Outcome o = m.Handle(k, 0);
+    CHECK_CTX(o.r0 == 0, name + "(tgid, tid, 30) must queue, not read the tid as the signal: " + o.detail);
+    CHECK_CTX(m.TakePendingSignal(other) == 30, name + " did not queue the signal for the named thread");
+    CHECK_CTX(m.TakePendingSignal(GuestProcessIds::kMainTid) == 0,
+              name + " queued the signal for the caller instead of the named thread");
+  }
+
+  // The group id still has to be this process's: a signal aimed at another group is ESRCH, not a delivery.
+  exec::MachineState wrong_group = State(sc::nr::kTgkill);
+  wrong_group.r[0] = 9999;
+  wrong_group.r[1] = static_cast<std::uint32_t>(other);
+  wrong_group.r[2] = 30;
+  CHECK_CTX(m.Handle(wrong_group, 0).r0 == -static_cast<std::int32_t>(sc::err::kEsrch),
+            "a tgid that is not this process is ESRCH");
+}
+
 int main() {
   frame_takes_the_number_from_r7_not_the_encoding();
   r7_is_the_number_not_a_masked_remainder();
+  live_refusals_report_the_first_caller_and_keep_all_counts();
   return_value_and_the_carry_bit();
   known_numbers_are_answered_or_refused_not_guessed();
   exit_group_is_a_verdict_not_a_value();
@@ -693,11 +1101,19 @@ int main() {
   the_policy_is_echoed_not_assumed();
   the_tally_is_per_monitor_and_in_first_seen_order();
   mmap2_serves_real_anonymous_pages();
+  mmap2_in_a_4gib_window_stays_below_the_ceiling();
+  mmap2_places_top_down_like_the_kernel();
   munmap_releases_served_pages();
   mremap_grows_moves_and_shrinks_like_a_kernel();
   console_writes_are_captured_and_answered_as_written();
   futex_answers_the_single_threaded_truth();
   sigaction_and_faccessat_answer_their_facts();
+  seek_moves_the_offset_of_a_served_file();
+  signal_dispositions_are_what_the_guest_installed();
+  a_signal_to_a_live_thread_is_queued_and_taken_once();
+  the_three_argument_signal_calls_read_the_signal_from_r2();
+  sigsuspend_waits_for_a_signal_and_returns_eintr();
+  sigreturn_outside_a_delivery_is_refused_by_name();
 
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;

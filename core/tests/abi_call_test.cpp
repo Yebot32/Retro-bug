@@ -491,6 +491,24 @@ void a_slot_range_misalignment_is_not_a_host_call() {
   CHECK_CTX(slot == 229, "slot " + std::to_string(slot));
 }
 
+/// M4's thunk tables (GLES2, EGL, OpenSL ES, libandroid) need more than 1024 host functions: slot 4000 binds,
+/// is recognised, and a guest call to it reaches its host function and returns.
+void a_slot_past_1024_is_reachable() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  CHECK(abi::AbiContext::kMaxSlots >= 4096u);
+  std::uint32_t slot = 0;
+  CHECK(rig.abi_ctx->IsHostEntry(rig.abi_ctx->SlotFor(4000), &slot) && slot == 4000);
+  rig.abi_ctx->Bind(4000, [](exec::MachineState& s, std::string*) {
+    s.r[0] = s.r[0] * 3 + 1;
+    return true;
+  });
+  exec::RunResult outcome{};
+  const abi::Ret32 r = rig.abi_ctx->CallGuest(rig.abi_ctx->SlotFor(4000), {abi::Value32::S32(14)},
+                                              abi::Shorty::For("II"), 1000, &outcome);
+  CHECK_CTX(outcome.reason == exec::StopReason::Returned && r.i() == 43, outcome.detail);
+}
+
 /// The Linux ARM kuser helpers (fixed addresses the kernel answers), which Angry Birds Go's constructors
 /// branch to: a fetch at 0xffff0fa0 faulted the 248th static initialiser before this. Each is called
 /// directly, as a guest's `blx` to the constant would reach it, and each row can fail: a cmpxchg that
@@ -606,6 +624,26 @@ void the_bridge_leaves_the_guest_stack_where_it_found_it() {
             "SP left at " + Hex(rig.abi_ctx->state().r[13]) + " by a completed call");
 }
 
+/// A call run to completion is re-entered at each turn's end instead of being cut off by the budget: with a
+/// 1000-step turn, fib(12) (which needs far more) still returns 144 and leaves SP where it found it, while
+/// the same budget on a plain call stops it.
+void a_call_to_completion_is_re_entered_across_turns() {
+  Rig rig = build(true);
+  if (!rig.ok) return;
+  const auto fib = rig.mod->FindExport("Java_com_retrobug_fixture_MainActivity_fib");
+  if (!fib) return;
+  const abi::Args32 args{abi::Value32::Ptr(0), abi::Value32::Ptr(0), abi::Value32::S32(12)};
+  exec::RunResult cut{};
+  rig.abi_ctx->CallGuest(fib->tagged(), args, abi::Shorty::For("IILLI"), 1000, &cut);
+  CHECK_CTX(cut.reason == exec::StopReason::Budget, std::string{"a 1000-step plain call stopped: "} + cut.detail);
+  exec::RunResult outcome{};
+  const auto ret = rig.abi_ctx->CallGuestToCompletion(fib->tagged(), args, abi::Shorty::For("IILLI"), 1000, &outcome);
+  CHECK_CTX(outcome.reason == exec::StopReason::Returned, outcome.detail);
+  CHECK_CTX(ret.i() == 144, "fib(12) = " + std::to_string(ret.i()));
+  CHECK_CTX(rig.abi_ctx->state().r[13] == kStackTop,
+            "SP left at " + Hex(rig.abi_ctx->state().r[13]) + " by a completed call");
+}
+
 /// The loop from the other side: a guest that makes a syscall during a JNI call, with the monitor behind
 /// it. The value asserted is 4243 rather than 4242 because the guest adds one to whatever came back — so
 /// the test proves the answer reached the guest's own arithmetic, not merely that the host noticed the
@@ -658,6 +696,18 @@ void a_guest_syscall_in_a_jni_call_is_answered() {
                  mon.TallyText().c_str());
   }
   CHECK_CTX(mon.tally().size() == 1u && mon.TallyText() == "getpid x2", mon.TallyText());
+
+  // Re-entered across many small turns, the syscall is still answered every time. (The turn-boundary-at-a-syscall
+  // case itself is the syscall cap, covered by guest_thread_test's pt_syscall_storm row: a tier ends a turn
+  // before an SVC, not on it.)
+  for (unsigned turn = 1; turn <= 64; ++turn) {
+    exec::RunResult out{};
+    const auto ret =
+        rig.abi_ctx->CallGuestToCompletion(probe->tagged(), args(), abi::Shorty::For("IILLI"), turn, &out);
+    CHECK_CTX(out.reason == exec::StopReason::Returned && ret.i() == 4243,
+              "turn budget " + std::to_string(turn) + ": guest saw " + std::to_string(ret.i()) + " (" + out.detail +
+                  ")");
+  }
 }
 
 /// `exit_group` ends the instance, so the bridge has to stop rather than resume: a guest that asked to
@@ -704,9 +754,11 @@ int main() {
   a_refused_host_call_is_a_fault_naming_the_slot();
   an_unbound_slot_says_so_and_which_one_it_was();
   a_slot_range_misalignment_is_not_a_host_call();
+  a_slot_past_1024_is_reachable();
   the_kuser_helpers_answer_like_the_kernel();
   guest_functions_called_through_the_bridge_match_hardware();
   the_bridge_leaves_the_guest_stack_where_it_found_it();
+  a_call_to_completion_is_re_entered_across_turns();
   a_guest_syscall_in_a_jni_call_is_answered();
   exit_group_stops_the_call();
 

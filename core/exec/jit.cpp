@@ -10,16 +10,19 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <utility>
 
 #include "dynarmic/frontend/A32/a32_ir_emitter.h"
+#include "dynarmic/frontend/A32/a32_location_descriptor.h"
 #include "dynarmic/interface/A32/coprocessor.h"
 #include "dynarmic/ir/terminal.h"
 
 #include "rb/exec/interp.h"
+#include "rb/exec/trace.h"
 #include "rb/isa/front_end.h"
 
 namespace rb::exec {
@@ -49,7 +52,7 @@ static_assert(sizeof(JitExtRegs) == 64 * sizeof(std::uint32_t),
 /// an arm64 host, the ceiling being how far an arm64 jump can reach). The low end is used because this is
 /// a per-instance allocation in a design where a user can have several guest instances alive, not because
 /// 8 MiB is enough for a big app — `RbCodeCache` (C04) is where sizing policy belongs.
-constexpr std::size_t kCodeCacheBytes = 8u << 20;
+constexpr std::size_t kCodeCacheBytes = 64u << 20;  // M4: Angry Birds Go's hot code outgrew 8 MiB (whole-cache clears)
 
 /**
  * The size in bytes of the instruction at `pc`.
@@ -211,6 +214,9 @@ class Arm15Coprocessor final : public Dynarmic::A32::Coprocessor {
     if (IsThreadPointer(two, opc1, CRn, CRm, opc2)) {
       return Callback{&ReadThreadPointer, Site(true, false, {})};
     }
+    if (IsCycleCounterRead(15, two, opc1, static_cast<unsigned>(CRn), static_cast<unsigned>(CRm), opc2)) {
+      return Callback{&ReadCycleCounter, Site(false, false, {})};
+    }
     return Callback{&Refuse, Site(false, false, Describe("MRC", two, opc1, CRn, CRm, opc2))};
   }
 
@@ -241,6 +247,9 @@ class Arm15Coprocessor final : public Dynarmic::A32::Coprocessor {
 
  private:
   static std::uint64_t ReadVirtualCounter(void*, std::uint32_t, std::uint32_t) { return HostVirtualCounter(); }
+  static std::uint64_t ReadCycleCounter(void*, std::uint32_t, std::uint32_t) {
+    return static_cast<std::uint32_t>(HostVirtualCounter());
+  }
 
   /// `mrc`/`mcr p15, #0, rX, c13, c0, #3`: ARMv7's user-mode thread ID register, which is what bionic's
   /// `__get_tls()` compiles to and therefore what `__errno()`, `assert`, and the property and locale
@@ -407,6 +416,18 @@ JitExecutor::JitExecutor(mem::GuestMemory& memory, GuestAddr return_address,
   // the same thing here that it claims to.
   conf.enable_cycle_counting = true;
   conf.code_cache_size = kCodeCacheBytes;
+  // M4: a page table instead of a callback per access. Mapped readable pages are loaded and stored inline;
+  // everything else (unmapped, guard, out-of-line pages, and an access straddling a page boundary) still takes
+  // the checked callbacks below, so a fault is still recorded and named. The one difference from the callbacks:
+  // a store to a read-only page succeeds inline — a write a device would have killed the process for.
+  page_table_.assign(Dynarmic::A32::UserConfig::NUM_PAGE_TABLE_ENTRIES, nullptr);
+  RefreshPages(0, memory_.window_bytes());
+  page_observer_ = memory_.AddObserver([this](std::uint32_t at, std::size_t len) { RefreshPages(at, len); });
+  conf.page_table = reinterpret_cast<std::array<std::uint8_t*, Dynarmic::A32::UserConfig::NUM_PAGE_TABLE_ENTRIES>*>(
+      page_table_.data());
+  conf.absolute_offset_page_table = false;
+  conf.detect_misaligned_access_via_page_table = 16 | 32 | 64 | 128;
+  conf.only_detect_misalignment_via_page_table_on_page_boundary = true;
   // A diagnostic, not a feature: the exclusive-load disagreement in `docs/30` §Step 30 has to be
   // attributed to either Dynarmic's IR optimizations or its AArch64 code generation before anything is
   // "fixed", and this is the only way to ask that question without editing the vendored tree.
@@ -442,7 +463,24 @@ JitExecutor::JitExecutor(mem::GuestMemory& memory, GuestAddr return_address,
   fallback_interp_ = std::make_unique<InterpExecutor>(memory_, return_address, dispatch);
 }
 
-JitExecutor::~JitExecutor() = default;
+JitExecutor::~JitExecutor() {
+  if (page_observer_ != 0) memory_.RemoveObserver(page_observer_);
+}
+
+void JitExecutor::RefreshPages(std::uint32_t at, std::size_t len) {
+  const std::uint64_t end = std::min<std::uint64_t>(std::uint64_t{at} + len, memory_.window_bytes());
+  for (std::uint64_t a = at & ~std::uint64_t{mem::kGuestPage - 1}; a < end; a += mem::kGuestPage) {
+    const auto g = static_cast<std::uint32_t>(a);
+    void* host = (memory_.ProtAt(g) & mem::kRead) != 0 ? memory_.Host(g) : nullptr;
+    page_table_[a >> mem::kGuestPageShift] = static_cast<std::uint8_t*>(host);
+  }
+}
+
+std::size_t JitExecutor::inline_pages() const {
+  std::size_t n = 0;
+  for (const std::uint8_t* p : page_table_) n += p != nullptr;
+  return n;
+}
 
 JitExecutor::CoprocSite* JitExecutor::CoprocSiteFor(bool tp_read, bool tp_write, std::string detail) {
   // One site per distinct access, because the pointer is compiled into every block that mentions the
@@ -507,10 +545,8 @@ void JitExecutor::SyncIn(const MachineState& state) {
   // with two different orderings here would show up as garbage doubles, not as an obvious failure.
   auto& ext = jit_->ExtRegs();
   static_assert(sizeof(JitExtRegs) == 64 * sizeof(std::uint32_t), "VFPv3-D32 is 64 words");
-  for (int i = 0; i < 32; ++i) {
-    ext[static_cast<std::size_t>(i) * 2] = static_cast<std::uint32_t>(state.d[i]);
-    ext[static_cast<std::size_t>(i) * 2 + 1] = static_cast<std::uint32_t>(state.d[i] >> 32);
-  }
+  static_assert(std::endian::native == std::endian::little && sizeof(state.d) == sizeof(JitExtRegs));
+  std::memcpy(ext.data(), state.d, sizeof(state.d));
   // PC last: setting it is what makes the core runnable, and nothing above depends on it.
   regs[15] = state.pc;
 }
@@ -528,11 +564,8 @@ void JitExecutor::SyncOut(MachineState& state) {
   // execution stops, which is a false finding with a real-looking number attached.
   state.itstate = ItStateFromCpsr(cpsr);
   state.fpscr = jit_->Fpscr();
-  auto& ext = jit_->ExtRegs();
-  for (int i = 0; i < 32; ++i) {
-    state.d[i] = static_cast<std::uint64_t>(ext[static_cast<std::size_t>(i) * 2]) |
-                 (static_cast<std::uint64_t>(ext[static_cast<std::size_t>(i) * 2 + 1]) << 32);
-  }
+  const auto& ext = jit_->ExtRegs();
+  std::memcpy(state.d, ext.data(), sizeof(state.d));
 }
 
 RunResult JitExecutor::Run(MachineState& state, unsigned max_instructions) {
@@ -566,6 +599,11 @@ RunResult JitExecutor::Run(MachineState& state, unsigned max_instructions) {
   pending_slot_ = 0;
   pending_svc_ = 0;
   pending_pc_ = 0;
+  pending_fault_addr_ = 0;
+  pending_fault_has_addr_ = false;
+  pending_fault_write_ = false;
+  pending_illegal_ = false;
+  pending_illegal_pc_ = 0;
 
   SyncIn(state);
   const Dynarmic::HaltReason hr = jit_->Run();
@@ -618,10 +656,21 @@ RunResult JitExecutor::MapHalt(Dynarmic::HaltReason hr, unsigned executed) {
     case Pending::Fault:
       out.reason = StopReason::Fault;
       out.detail = std::move(pending_detail_);
+      out.fault_addr = pending_fault_addr_;
+      out.fault_has_addr = pending_fault_has_addr_;
+      out.fault_write = pending_fault_write_;
       break;
     case Pending::Unimplemented:
-      out.reason = StopReason::Unimplemented;
-      out.detail = std::move(pending_detail_);
+      if (pending_illegal_) {
+        // An encoding this CPU does not define: a fault the guest can catch, not this engine's own gap.
+        out.reason = StopReason::Fault;
+        out.detail = std::move(pending_detail_);
+        out.illegal_instruction = true;
+        out.illegal_pc = pending_illegal_pc_;
+      } else {
+        out.reason = StopReason::Unimplemented;
+        out.detail = std::move(pending_detail_);
+      }
       break;
     case Pending::Suspended:
       out.reason = StopReason::Suspended;
@@ -670,8 +719,7 @@ std::optional<std::uint32_t> JitExecutor::MemoryReadCode(GuestAddr vaddr) {
 std::uint8_t JitExecutor::MemoryRead8(GuestAddr vaddr) {
   std::uint8_t v = 0;
   if (!memory_.Read(vaddr, &v, 1)) {
-    SetPending(Pending::Fault,
-               "guest memory read at 0x" + Hex(vaddr) + " is unmapped or not readable");
+    SetFault("guest memory read at 0x" + Hex(vaddr) + " is unmapped or not readable", vaddr, false);
     jit_->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
   }
   return v;
@@ -680,8 +728,7 @@ std::uint8_t JitExecutor::MemoryRead8(GuestAddr vaddr) {
 std::uint16_t JitExecutor::MemoryRead16(GuestAddr vaddr) {
   std::uint16_t v = 0;
   if (!memory_.Read(vaddr, &v, 2)) {
-    SetPending(Pending::Fault,
-               "guest memory read at 0x" + Hex(vaddr) + " is unmapped or not readable");
+    SetFault("guest memory read at 0x" + Hex(vaddr) + " is unmapped or not readable", vaddr, false);
     jit_->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
   }
   return v;
@@ -690,8 +737,7 @@ std::uint16_t JitExecutor::MemoryRead16(GuestAddr vaddr) {
 std::uint32_t JitExecutor::MemoryRead32(GuestAddr vaddr) {
   std::uint32_t v = 0;
   if (!memory_.Read(vaddr, &v, 4)) {
-    SetPending(Pending::Fault,
-               "guest memory read at 0x" + Hex(vaddr) + " is unmapped or not readable");
+    SetFault("guest memory read at 0x" + Hex(vaddr) + " is unmapped or not readable", vaddr, false);
     jit_->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
   }
   return v;
@@ -700,8 +746,7 @@ std::uint32_t JitExecutor::MemoryRead32(GuestAddr vaddr) {
 std::uint64_t JitExecutor::MemoryRead64(GuestAddr vaddr) {
   std::uint64_t v = 0;
   if (!memory_.Read(vaddr, &v, 8)) {
-    SetPending(Pending::Fault,
-               "guest memory read at 0x" + Hex(vaddr) + " is unmapped or not readable");
+    SetFault("guest memory read at 0x" + Hex(vaddr) + " is unmapped or not readable", vaddr, false);
     jit_->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
   }
   return v;
@@ -709,36 +754,32 @@ std::uint64_t JitExecutor::MemoryRead64(GuestAddr vaddr) {
 
 void JitExecutor::MemoryWrite8(GuestAddr vaddr, std::uint8_t value) {
   if (!memory_.Write(vaddr, &value, 1)) {
-    SetPending(Pending::Fault,
-               "guest memory write at 0x" + Hex(vaddr) +
-                   " is unmapped, read-only, or an executing page");
+    SetFault("guest memory write at 0x" + Hex(vaddr) +
+                 " is unmapped, read-only, or an executing page", vaddr, true);
     jit_->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
   }
 }
 
 void JitExecutor::MemoryWrite16(GuestAddr vaddr, std::uint16_t value) {
   if (!memory_.Write(vaddr, &value, 2)) {
-    SetPending(Pending::Fault,
-               "guest memory write at 0x" + Hex(vaddr) +
-                   " is unmapped, read-only, or an executing page");
+    SetFault("guest memory write at 0x" + Hex(vaddr) +
+                 " is unmapped, read-only, or an executing page", vaddr, true);
     jit_->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
   }
 }
 
 void JitExecutor::MemoryWrite32(GuestAddr vaddr, std::uint32_t value) {
   if (!memory_.Write(vaddr, &value, 4)) {
-    SetPending(Pending::Fault,
-               "guest memory write at 0x" + Hex(vaddr) +
-                   " is unmapped, read-only, or an executing page");
+    SetFault("guest memory write at 0x" + Hex(vaddr) +
+                 " is unmapped, read-only, or an executing page", vaddr, true);
     jit_->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
   }
 }
 
 void JitExecutor::MemoryWrite64(GuestAddr vaddr, std::uint64_t value) {
   if (!memory_.Write(vaddr, &value, 8)) {
-    SetPending(Pending::Fault,
-               "guest memory write at 0x" + Hex(vaddr) +
-                   " is unmapped, read-only, or an executing page");
+    SetFault("guest memory write at 0x" + Hex(vaddr) +
+                 " is unmapped, read-only, or an executing page", vaddr, true);
     jit_->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
   }
 }
@@ -750,8 +791,7 @@ bool JitExecutor::ExclusiveCompareAndStore(GuestAddr vaddr, std::uint64_t value,
   // endianness instead of over the memory model.
   unsigned char raw[8] = {};
   if (!memory_.Read(vaddr, raw, bytes)) {
-    SetPending(Pending::Fault,
-               "guest exclusive access at 0x" + Hex(vaddr) + " is unmapped or not readable");
+    SetFault("guest exclusive access at 0x" + Hex(vaddr) + " is unmapped or not readable", vaddr, false);
     jit_->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
     return false;
   }
@@ -768,9 +808,8 @@ bool JitExecutor::ExclusiveCompareAndStore(GuestAddr vaddr, std::uint64_t value,
     raw[i] = static_cast<unsigned char>(value >> (i * 8));
   }
   if (!memory_.Write(vaddr, raw, bytes)) {
-    SetPending(Pending::Fault,
-               "guest exclusive write at 0x" + Hex(vaddr) +
-                   " is unmapped, read-only, or an executing page");
+    SetFault("guest exclusive write at 0x" + Hex(vaddr) +
+                 " is unmapped, read-only, or an executing page", vaddr, true);
     jit_->HaltExecution(Dynarmic::HaltReason::MemoryAbort);
     return false;
   }
@@ -795,11 +834,22 @@ void JitExecutor::ExceptionRaised(GuestAddr pc, Dynarmic::A32::Exception excepti
   if (exception == Dynarmic::A32::Exception::NoExecuteFault) {
     // The other half of the sentinel/slot check — see MemoryReadCode for why both are needed.
     if (SurfaceNonCodeDestination(pc)) return;
-    SetPending(Pending::Fault, "instruction fetch failed at 0x" + Hex(pc) +
-                                   " (no code could be read there)");
+    SetFault("instruction fetch failed at 0x" + Hex(pc) + " (no code could be read there)", pc, false);
   } else if (exception == Dynarmic::A32::Exception::Breakpoint) {
     SetPending(Pending::Suspended, "guest breakpoint");
   } else {
+    if (exception == Dynarmic::A32::Exception::UndefinedInstruction ||
+        exception == Dynarmic::A32::Exception::UnpredictableInstruction) {
+      // The kernel's answer to an encoding this CPU does not define is SIGILL (ILL_ILLOPC), delivered to the
+      // guest's handler if it has one; code that probes instructions relies on that trap to fall back. ARM
+      // permits an UNPREDICTABLE encoding to take the undefined-instruction exception, which is what a probe
+      // for a newer encoding sees on an older CPU. First stop wins: only the raise that becomes this Run's
+      // reason may classify it (an earlier pending stop is not reclassified).
+      if (pending_ == Pending::None) {
+        pending_illegal_ = true;
+        pending_illegal_pc_ = static_cast<std::uint32_t>(pc);
+      }
+    }
     SetPending(Pending::Unimplemented, std::string{name} + " at 0x" + Hex(pc));
   }
   // Deliberately *not* recorded in `pending_pc_`: the translator emits the raising instruction's
@@ -824,6 +874,20 @@ std::uint64_t JitExecutor::GetTicksRemaining() {
 }
 
 bool JitExecutor::PreCodeReadHook(bool is_thumb, GuestAddr pc, Dynarmic::A32::IREmitter& ir) {
+  translated_.fetch_add(1, std::memory_order_relaxed);
+  /**
+   * AOT task 4's trace wants block *entries*, and this hook is called once per instruction the
+   * translator reads, not once per block. The block's location descriptor is the descriptor the block
+   * is being translated for, so the first instruction is the one whose PC equals it; every later
+   * instruction in the same block has advanced past that PC. Comparing against it records exactly the
+   * entry — whether the block was reached by a direct branch, a linked block, or a computed `bx`/`blx`
+   * target — and adds nothing to the disabled path but `trace::OnBlockEntry`'s own flag test. The
+   * downstream `SetTerm(CheckHalt)` refusals below still record the entry first, which is correct: the
+   * address is real code even on the tier that declines to translate it.
+   */
+  if (Dynarmic::A32::LocationDescriptor{ir.block.Location()}.PC() == pc) {
+    trace::OnBlockEntry(static_cast<std::uint32_t>(pc), is_thumb);
+  }
   /**
    * The ARM64 back end cannot represent `Term::Interpret`, so the six declined encodings have to be
    * stopped before the translator reaches it — see `docs/30` §Step 20a for the SIGABRT this replaces.
@@ -900,7 +964,11 @@ void JitExecutor::InterpreterFallback(GuestAddr pc, std::size_t num_instructions
         break;
       }
       if (r.reason == StopReason::Fault) {
-        SetPending(Pending::Fault, r.detail);
+        if (r.fault_has_addr) {
+          SetFault(r.detail, r.fault_addr, r.fault_write);
+        } else {
+          SetPending(Pending::Fault, r.detail);
+        }
         break;
       }
       if (r.reason == StopReason::Unimplemented) {
@@ -922,6 +990,7 @@ void JitExecutor::Invalidate(GuestAddr from, GuestAddr to) {
   if (!ok() || to <= from) return;
   // Real work, unlike Tier I's no-op: this tier has compiled code that a guest write can invalidate, and
   // AD-7's self-modifying-code story depends on this call reaching the cache that holds it.
+  invalidations_.fetch_add(1, std::memory_order_relaxed);
   jit_->InvalidateCacheRange(from, to - from);
 }
 

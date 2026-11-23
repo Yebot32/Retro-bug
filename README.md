@@ -12,13 +12,15 @@
 
 [Requirements](#requirements) • [Getting started](#getting-started) • [Current progress](#current-progress) • [Community](#community)
 
+[Download RetroBug v0.1.1](https://github.com/Yebot32/Retro-bug/releases/tag/v0.1.1)
+
 </div>
 
 ---
 
 ## About
 
-RetroBug is an open-source compatibility layer for older 32-bit Android games on ARM64 devices. On Android, it converts supported game APKs into separately installed copies and translates their ARMv7 code. The experimental iOS app imports APKs and uses an interpreter that can run without JIT.
+RetroBug is an open-source compatibility layer for older 32-bit Android games on ARM64 devices. On Android, it converts supported game APKs into separately installed copies and translates their ARMv7 code. On iOS, it imports APKs, provides part of the Android API, and runs ARM code through JIT, a matching ahead-of-time profile, or the interpreter.
 
 ## Requirements
 
@@ -26,29 +28,27 @@ RetroBug is an open-source compatibility layer for older 32-bit Android games on
 | --- | --- | --- |
 | Device | ARM64 (`arm64-v8a`) with Android 8.0 or later | ARM64 with iOS or iPadOS 15 or later |
 | Installation | Allow RetroBug to install converted games when Android prompts | Sign the unsigned IPA before installing it |
-| Game files | A compatible 32-bit ARM APK (`armeabi-v7a`) you have permission to use, plus any required game data | A compatible 32-bit ARM APK you have permission to use |
+| Game files | A compatible 32-bit ARM APK (`armeabi-v7a`) you have permission to use, plus any required game data | A supported 32-bit ARM APK and any required OBB files with their original Android filenames |
 
 Games are supplied separately. Split APKs, games that depend on retired servers, and games that need unavailable Android APIs may fail to install or run.
 
 ## Getting started
 
-1. Check [GitHub Releases](https://github.com/Yebot32/Retro-bug/releases) for published packages or [GitHub Actions](https://github.com/Yebot32/Retro-bug/actions) for available build artifacts.
+1. Download the [signed Android APK](https://github.com/Yebot32/Retro-bug/releases/download/v0.1.1/RetroBug-v0.1.1-Android.apk) or the [unsigned iOS IPA](https://github.com/Yebot32/Retro-bug/releases/download/v0.1.1/RetroBug-v0.1.1-iOS.ipa).
 2. On Android, select a game from the library or tap **Add APK**, then follow the conversion and installation prompts. The preview supports per-game CPU modes, save import and export, and experimental render scaling for supported games.
-3. On iOS, install a signed copy of the app, use **Add APK** to import a game from Files, and tap its library entry to run it.
+3. On iOS, sign and sideload the IPA, then use **Add games → Choose APK or OBB** to import from Files. Tap a game to run it. Swipe right from the left edge to return to the library.
 
-The Android performance overlay starts off. To see FPS, translation speed, and CPU mode in supported games, go to **Settings → Gameplay → Performance overlay** and restart the game. This setting is included in the updated v0.1.0 Android preview build.
+The performance overlay starts off on both platforms. On Android, enable **Settings → Gameplay → Performance overlay** and restart the game. Both apps check GitHub for newer official releases and show the release notes when an update is available for your platform.
 
 ## Current progress
 
-**v0.1.0 is a developer preview.** A Galaxy Tab S9 compatibility sweep covered 31 Android titles and verified gameplay in four, including Android KitKat Challenge, Fruit Ninja vs. Skittles, and Super Monkey Ball Bounce. Race Day rendered tracks but hit backend DNS failures. LEGO Mighty Micros started and received sensor input, but the scene remained black behind Robin. See the [Android compatibility log](https://github.com/Yebot32/Retro-bug/blob/session/m5-m6/docs/compatibility.md) for testing notes and known issues.
+**v0.1.1 is a developer preview.** Android adds compatibility fixes for APK conversion, expansion files, Unity graphics, and legacy Android APIs. Testing on the Galaxy Tab S9 reached a timed round in Oreo Twist and the tutorial in Rolling Sky. Verified results depend on the game APK version. See the [compatibility log](docs/compatibility.md) for details and outstanding issues.
 
-The iOS preview builds on macOS and now handles APK imports and library loading in the background. Device and gameplay verification for the v0.1.0 IPA is pending.
+**iOS is experimental.** Android KitKat reached gameplay in earlier device testing and classic Gumball reached its menu. Unity and Halfbrick startup fixes are included, with gameplay still unverified on the final build. The ARM interpreter works without JIT, and the bundled ahead-of-time profiles accelerate exact matches. Settings controls runtime JIT and render scale. Legacy FMOD sound output is incomplete.
 
 ## Build from source
 
-Use the [development branch](https://github.com/Yebot32/Retro-bug/tree/session/m5-m6) for the Android and iOS build scripts.
-
-- **Android** requires Windows with Git Bash, JDK 17, Android SDK Platform 36, Build Tools 36.1.0, NDK 28.2.13676358, and CMake 3.31.6. The [Android workflow](https://github.com/Yebot32/Retro-bug/blob/session/m5-m6/.github/workflows/build-apk.yml) lists the guest-image preparation steps and runs `tools/build_launcher_apk.sh`.
+- **Android** requires Windows with Git Bash, JDK 17, Android SDK Platform 36, Build Tools 36.1.0, NDK 28.2.13676358, and CMake 3.31.6. The [Android workflow](.github/workflows/build-apk.yml) lists the guest-image preparation steps and runs `tools/build_launcher_apk.sh`.
 - **iOS** requires macOS, Xcode 16, XcodeGen, and CMake. Run `tools/build_ios_ipa.sh` to produce an unsigned IPA.
 
 ## Community

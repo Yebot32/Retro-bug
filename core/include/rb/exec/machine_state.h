@@ -88,6 +88,18 @@ static_assert(sizeof(GuestAddr) == 4, "guest addresses are 32-bit by definition"
 #endif
 }
 
+/**
+ * `mrc p15, #0, rT, c9, c13, #0` — PMCCNTR, the PMU cycle counter — answered as a running 32-bit count, as a kernel
+ * with user PMU access enabled answers it. Older OpenSSL's `_armv7_tick` probes it under a SIGILL guard; a real
+ * arm64 kernel traps it and OpenSSL marks the tick missing, but synthesising that trap here would enter the
+ * guest's SIGILL handler for a read the engine can answer. The low word of the CNTVCT count keeps the probe's
+ * happy path.
+ */
+[[nodiscard]] inline bool IsCycleCounterRead(unsigned coproc, bool two, unsigned opc1, unsigned crn, unsigned crm,
+                                             unsigned opc2) {
+  return coproc == 15 && !two && opc1 == 0 && crn == 9 && crm == 13 && opc2 == 0;
+}
+
 [[nodiscard]] inline std::uint8_t ItStateFromCpsr(std::uint32_t cpsr) {
   return static_cast<std::uint8_t>(((cpsr >> 8) & 0xFCu) | ((cpsr >> 25) & 0x03u));
 }
@@ -159,6 +171,20 @@ struct RunResult {
   StopReason reason = StopReason::Budget;
   /// Op name or address involved, for `Unimplemented`/`Fault`. Empty otherwise.
   std::string detail;
+  /// Meaningful only for `Fault`: the guest address whose access failed, whether that fault has a named
+  /// address at all, and whether it was a write. A monitored process delivers such a fault to the guest's
+  /// SIGSEGV handler with `fault_addr` as `si_addr` (Mono's null-reference handling is built on that
+  /// delivery). Zero is a real address (a null dereference), so `fault_has_addr` — not the address —
+  /// says whether these are set. A fetch fault names its pc; `fault_write` is false for it.
+  std::uint32_t fault_addr = 0;
+  bool fault_has_addr = false;
+  bool fault_write = false;
+  /// Meaningful only for `Fault`: the tier stopped on an encoding this CPU does not define (the kernel's
+  /// SIGILL, si_code ILL_ILLOPC), and `illegal_pc` is that instruction's own address — the state's pc is
+  /// already the encoding after it. A monitored process delivers this to the guest's SIGILL handler; code
+  /// that probes an instruction that way (EOS's crypto stubs, OpenSSL's counter read) depends on the trap.
+  bool illegal_instruction = false;
+  std::uint32_t illegal_pc = 0;
   /// Work done against `max_instructions`, and **the tiers count different things**: Tier I advances
   /// per Dynarmic IR operation, Tier J per guest instruction (Dynarmic's cycle counting, one tick per
   /// fetched encoding). Two tiers that agree on state are not two tiers that agree on a unit, and an

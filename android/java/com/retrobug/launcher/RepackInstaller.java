@@ -42,6 +42,25 @@ final class RepackInstaller {
         void onStatus(String line, boolean done);
     }
 
+    /**
+     * The installer's confirmation for the session in flight, while it waits on the player: a confirmation backed out
+     * of leaves the session open, and showing this again is how the player gets back to it. Null when none waits.
+     */
+    static volatile Intent pendingConfirm;
+
+    /** Shows the waiting confirmation again; false when there is none. Main thread. */
+    static boolean reconfirm(Context context) {
+        Intent confirm = pendingConfirm;
+        if (confirm == null) return false;
+        try {
+            context.getApplicationContext().startActivity(confirm);
+            return true;
+        } catch (RuntimeException e) {
+            Log.w(TAG, "install: could not show the confirmation again: " + e);
+            return false;
+        }
+    }
+
     // API 31 / 33 constants, spelled out so this compiles and runs from minSdk 26.
     private static final int FLAG_MUTABLE = 0x02000000;        // PendingIntent.FLAG_MUTABLE (31)
     private static final int RECEIVER_NOT_EXPORTED = 0x4;       // Context.RECEIVER_NOT_EXPORTED (33)
@@ -116,6 +135,7 @@ final class RepackInstaller {
                     }
                     cb.onStatus("install: status=" + status + " (PENDING_USER_ACTION) — confirm on screen", false);
                     confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    pendingConfirm = confirm;
                     try {
                         app.startActivity(confirm);
                     } catch (RuntimeException e) {
@@ -123,6 +143,7 @@ final class RepackInstaller {
                     }
                     return;
                 }
+                pendingConfirm = null;
                 try {
                     app.unregisterReceiver(this);
                 } catch (IllegalArgumentException ignored) {

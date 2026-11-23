@@ -51,6 +51,7 @@ GUEST_LIBZ="$ROOT/build/guest-libs/libz.so"
 # Optional, and deliberately not in the requirement list below: the guest's real libc is the device's own
 # bionic, pulled off a 32-bit-capable phone, and no script in this tree produces one.
 GUEST_LIBC="$ROOT/build/device-libs/libc.so"
+[ -s "$GUEST_LIBC" ] || GUEST_LIBC="$ROOT/guest/system/libc.so"
 
 to_host() {
   if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi
@@ -92,10 +93,14 @@ command -v keytool >/dev/null || { echo "no keytool on PATH" >&2; exit 1; }
 # `-DRB_BUILD_TESTS=OFF` keeps the test lanes out of this build dir entirely, and `rbguest` is
 # `EXCLUDE_FROM_ALL` in `CMakeLists.txt`, so the explicit target below is the only thing that builds it.
 mkdir -p "$BUILD"
+ENGINE_REVISION="$(git -C "$ROOT" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
+if [ "$ENGINE_REVISION" != unknown ] && ! git -C "$ROOT" diff --quiet HEAD --; then
+  ENGINE_REVISION+="-dirty"
+fi
 "$CM" -S "$ROOT" -B "$BUILD" -G Ninja -DCMAKE_MAKE_PROGRAM="$NJ" \
   -DCMAKE_TOOLCHAIN_FILE="$SDK/ndk/$NDK_VER/build/cmake/android.toolchain.cmake" \
   -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-26 -DCMAKE_BUILD_TYPE=Release \
-  -DRB_BUILD_TESTS=OFF -DRB_BUILD_LAUNCHER=ON >/dev/null
+  -DRB_BUILD_TESTS=OFF -DRB_BUILD_LAUNCHER=ON -DRB_ENGINE_REVISION="$ENGINE_REVISION" >/dev/null
 "$NJ" -C "$BUILD" rbguest rbstub
 LIB="$BUILD/librbguest.so"
 [ -f "$LIB" ] || { echo "no $LIB: the rbguest target did not produce it" >&2; exit 1; }
@@ -137,6 +142,7 @@ fi
 # The device's libstdc++.so, by the same rule: pulled, never relinked or stubbed. Only games that name it
 # in DT_NEEDED get it placed (pre-r8 NDK images such as Gumball 2013 do; Angry Birds does not).
 GUEST_LIBSTDCXX="$ROOT/build/device-libs/libstdc++.so"
+[ -s "$GUEST_LIBSTDCXX" ] || GUEST_LIBSTDCXX="$ROOT/guest/system/libstdc++.so"
 if [ -s "$GUEST_LIBSTDCXX" ]; then
   cp "$GUEST_LIBSTDCXX" "$OUT/stage/assets/guest/libstdc++.so"
 else
@@ -165,7 +171,9 @@ APKSIG="$OUT/apksig.jar"
 (cd "$OUT/apksig" && jar -cf "$(to_host "$APKSIG")" com/android/apksig)
 [ -s "$APKSIG" ] || { echo "could not build $APKSIG from $APKSIG_SRC" >&2; exit 1; }
 JAVA_SRCS=()
-for s in "$SRC"/java/com/retrobug/launcher/*.java; do JAVA_SRCS+=("$(to_host "$s")"); done
+for s in "$SRC"/java/com/retrobug/launcher/*.java "$SRC"/shim/com/retrobug/shim/*.java "$SRC"/shim/libcore/util/*.java; do
+  JAVA_SRCS+=("$(to_host "$s")")
+done
 set +e
 javac_out="$(javac -encoding UTF-8 -nowarn -source 8 -target 8 -bootclasspath "$(to_host "$AJ")" \
   -classpath "$(to_host "$APKSIG")" \
@@ -180,12 +188,23 @@ fi
 # The launcher's classes go to d8 as one jar: d8.bat is a cmd script, and a growing list of .class paths
 # on its command line runs into cmd's 8191-character limit.
 (cd "$OUT/classes" && jar -cf "$(to_host "$OUT/launcher-classes.jar")" .)
-"$BT/d8.bat" --lib "$(to_host "$AJ")" --min-api 26 --output "$(to_host "$OUT/dex")" \
+"$BT/d8.bat" --release --lib "$(to_host "$AJ")" --min-api 26 --output "$(to_host "$OUT/dex")" \
   "$(to_host "$OUT/launcher-classes.jar")" "$(to_host "$APKSIG")" >/dev/null
 [ -s "$OUT/dex/classes.dex" ] || { echo "d8 produced no classes.dex" >&2; exit 1; }
 if [ -e "$OUT/dex/classes2.dex" ]; then
   echo "d8 produced more than one dex; this script packages only classes.dex" >&2; exit 1
 fi
+# The targetSdk compatibility shims (android/shim) are also dexed on their own: the repackager adds this dex
+# to a game as an extra classesN.dex (ShimPlan). The launcher's classes.dex carries the same classes for its
+# own `-e shimcheck`. --min-api 24 because that is the lowest minSdk a repackaged game declares.
+mkdir -p "$OUT/shim-classes" "$OUT/shim-dex"
+(cd "$OUT/classes" && jar -cf "$(to_host "$OUT/shim-classes.jar")" com/retrobug/shim libcore/util)
+"$BT/d8.bat" --release --lib "$(to_host "$AJ")" --min-api 24 --output "$(to_host "$OUT/shim-dex")" \
+  "$(to_host "$OUT/shim-classes.jar")" >/dev/null
+[ -s "$OUT/shim-dex/classes.dex" ] || { echo "d8 produced no shim classes.dex" >&2; exit 1; }
+cp "$OUT/shim-dex/classes.dex" "$OUT/stage/assets/rbshim.dex"
+# Built-in game patches (M6): android/patches/<package>/<id>.rbpatch, shipped as assets/patches/.
+if [ -d "$SRC/patches" ]; then mkdir -p "$OUT/stage/assets/patches"; cp -r "$SRC/patches/." "$OUT/stage/assets/patches/"; fi
 
 # ---- package
 # `aapt2 link` takes *compiled* resources, so the icon tree is compiled first. Until the icon the launcher
@@ -199,8 +218,20 @@ if [ -d "$SRC/res" ]; then
 else
   echo "note: no $SRC/res, building without an icon" >&2
 fi
+# Version: one place, and a monotonic default. `RB_VERSION_CODE` / `RB_VERSION_NAME` override both (CI does), else the
+# commit count is the code and `0.1.<count>` the name. Before this, every build was versionCode 1 / versionName 1, so
+# Android could not tell two builds apart and the launcher's own "Update available" logic had nothing to compare.
+VERSION_CODE="${RB_VERSION_CODE:-$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 1)}"
+DEFAULT_VERSION="0.1.$VERSION_CODE"
+if [ "${RB_RELEASE:-0}" = "1" ]; then DEFAULT_VERSION="0.1.1"; fi
+VERSION_NAME="${RB_VERSION_NAME:-$DEFAULT_VERSION}"
+# Dev builds are debuggable, which is what lets the `-e` diagnostic paths run (LauncherActivity gates them on
+# FLAG_DEBUGGABLE). `RB_RELEASE=1` drops both the flag and the diagnostics: that is the build to hand to someone.
+DEBUG_ARGS=(--debug-mode)
+if [ "${RB_RELEASE:-0}" = "1" ]; then DEBUG_ARGS=(); fi
 "$BT/aapt2.exe" link -I "$(to_host "$AJ")" --manifest "$(to_host "$SRC/AndroidManifest.xml")" \
-  --min-sdk-version 26 --target-sdk-version 34 --version-code 1 --version-name 1 \
+  --min-sdk-version 26 --target-sdk-version 34 --version-code "$VERSION_CODE" --version-name "$VERSION_NAME" \
+  ${DEBUG_ARGS[@]+"${DEBUG_ARGS[@]}"} \
   ${RES_ARGS[@]+"${RES_ARGS[@]}"} \
   -o "$(to_host "$OUT/base.apk")"
 cp "$OUT/dex/classes.dex" "$OUT/stage/"
@@ -266,7 +297,8 @@ echo "Not installed: this script runs no adb. To run it,"
 echo "  adb install -r -g $(to_host "$OUT/rbguest-launcher.apk")"
 echo "  adb shell am start -n com.retrobug.launcher/.LauncherActivity"
 echo "  adb logcat -s RBLAUNCH"
-echo "Expected on a PASS: for each of the six seeds, a 'JNI_OnLoad tier=I' / 'tier=J' pair and a"
-echo "'mathProbe seed=N tier=I' / 'tier=J' pair, all PASS, then 'summary: 4 PASS, 0 FAIL over 4 calls'."
-echo "The values are the ones the same bytes produced natively on the SM-X710 via"
-echo "tools/build-guest-apk.sh's oracle_linked."
+if [ "${RB_RELEASE:-0}" = "1" ]; then
+  echo "build is a release build (not debuggable; the -e diagnostic paths are refused)"
+else
+  echo "build is debuggable (the -e paths work; RB_RELEASE=1 turns that off)"
+fi

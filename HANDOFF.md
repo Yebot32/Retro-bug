@@ -6,7 +6,288 @@ hand-written IR interpreter = "Tier I"). Engine in `core/`, on-device launcher a
 (`android/jni/launcher.cpp` + `android/jni/gl_forward.cpp` + `android/java/.../LauncherActivity.java`).
 Everything below this section is older, detailed session history — read it only when you need depth.
 
-## M1 — on-device repackager + stub boot (2026-10-15, ACCEPTED) — newest state, read first
+## Launcher redesign — Holo era (2026-10-18, branch `ui-holo` off `main`) — newest state
+
+Spec `docs/superpowers/specs/2026-10-18-holo-launcher-ui-design.md`; plan `docs/superpowers/plans/2026-10-18-holo-launcher-ui.md`;
+ledger `.superpowers/sdd/2026-10-18-holo-launcher-ui/progress.md` (every ruling).
+
+The launcher is now a player's app in Android's Holo look (Theme.Holo, Roboto, Holo blue/green/orange/purple accents):
+a boot sweep, then a library of every installed 32-bit game plus added APKs with their own icons (`GameCatalog`,
+`ApkScan`, `ArtCache`). **Tap** a tile: not converted → converted and installed (`ConvertJob`; one Android prompt); ready
+→ the game opens. **Long press**: the game's menu (`GameMenu`) — its best artwork from the APK (`ArtPicker`) blurred
+behind the icon and title, and four tabs: Settings (Permissions, CPU mode Fast/Safe, Android target, performance
+overlay, clear data via Android's storage page, Resolution "coming with M6"), Mods and Patches (empty until M6), Delete
+(the `.rb` copy via Android's uninstall prompt, or the added APK; never the original). Per-game settings reach the game
+at start: the copy's shim asks the launcher's `SettingsProvider` (answers only that copy, signed with this device's
+repack key) and saves them for the runtime (`cpu=safe` → Tier I; overlay drawn by the shim). App Settings: accent,
+library contents, About; seven taps on the version reveal the old developer screens. Copies carry `-rb<N>` in their
+versionName (`ApkRepackager.RUNTIME_STAMP`) so the library knows "Update available".
+
+Known: an install from the library goes through Android's installer, where Play Protect asks to "Scan app" (upload the
+copy to Google) — the human's choice; the scripted `-e repack` path installs over adb and is not asked.
+
+**Data tab (2026-10-18, branch `data-tab`):** the game menu's fifth tab. OBB: the source is the player's added .obb
+(files/obb/<pkg>/) or the original's Android/obb/<pkg>/ (readable by the launcher, which may install apps); it goes
+into Android/obb/<pkg>.rb/ named for <pkg>.rb (`ObbRules`). The **copy** must own the file (the game reads it as
+itself; a launcher-owned file is EACCES), so the copy's `RbSaveProvider` creates getObbDir() and opens each file and
+the launcher streams the bytes in (`ObbStore.install`); conversion installs the OBB right after a successful install.
+Saves: `RbSaveProvider` (exported, answers only com.retrobug.launcher signed with the cert SHA-256 recorded in
+rbshim.properties as launcherCert) zips files/, shared_prefs/, databases/ and external files (`SaveArchive`, host
+tested, zip-slip and other-game refusals), imports via staging + an undo zip in no_backup/, then ends its process.
+Runtime stamp moved from versionName ("-rb1" broke SMB Bounce, which loads assets/dex/main-<versionName>.jar) to
+`<meta-data com.retrobug.runtime=2>`: every older copy reads "Update available". Verified on the tablet: SMB Bounce
+stuck at "Loading 0%" → title screen with the OBB; export → import → export byte-identical (CRC32s); undo offered;
+adb shell refused. Teeny Titans 2 (Unity) stops earlier: libmain dlopens libunity.so by full path (engine gap).
+
+Final-review fix pass: the library's decisions live in the host-tested `LibraryRules` (converting state across rescans,
+the target a copy really gets — shared with `ApkRepackager` — split/ABI classification, backdrop sample size). Split
+installs and non-32-bit added APKs get a tile that says why; hasCode="false" games show CPU/overlay disabled; a tap on
+"Getting ready" re-shows a waiting install prompt; the overlay reads thunk counts under the counters lock
+(`HostSlots::CallsOf`). The 12 deferred minors are in the ledger.
+
+## M4 — thunk layer (2026-10-18, branch `m4-thunks`, DONE on the tablet and the OnePlus)
+
+Plan `docs/superpowers/plans/2026-10-17-m4-thunk-layer.md`; ledger `.superpowers/sdd/2026-10-17-m4-thunk-layer/progress.md`
+(every ruling is there). Nothing merged to `main`, nothing pushed — both wait for the human.
+
+**What runs (Tab S9, repacked at target 35, renamed `.rb`):**
+- **Fruit Ninja vs Skittles** — menu and play; the human played it and could not tell it from a native 32-bit device
+  (sound included, through its Java audio).
+- **Android KitKat Challenge** — menu and play; sound through OpenSL ES (engine, PCM buffer-queue player, callbacks
+  into the guest on the audio thread). This is the OpenSL ES acceptance.
+- **Gumball** (M3), **Looney Tunes Dash** and **Where's My Mickey** boot fully and draw their own first screen (an
+  age gate each — not filled in for the human).
+- **Angry Birds Go** draws its own UI, does TLS to Rovio, shows "Download failed": its content was a server download
+  (empty OBB/data dirs). The human: "probably not a good fit" — the acceptance moved to the games above.
+
+**What M4 added:** the generic AAPCS32→AAPCS64 caller and handle table (`core/abi/thunk.*`, 4096 slots); GLES1/2 and
+EGL tables + specials (`android/jni/thunks.cpp`, `host_slots.cpp`); libandroid (assets, windows, sensors, loopers),
+jnigraphics (`thunks_android.cpp`); OpenSL ES (`thunks_sles.cpp`); direct buffers over host memory; host file/socket
+I/O (`core/syscall/host_io.cpp`), DNS through netd; CPU-time clocks; PMCCNTR as a running count; Tier J ~250x faster
+(dynarmic's block index per page). Repack: `-e target N`, `-e stage`, exported defaults (31+), `org.apache.http.legacy`
+(28+), resources.arsc always STORED (30+).
+
+**Blocked, needs the human:**
+- Play Protect (this tablet) blocks fresh sideloads at targets 24 and 33 and some apps at 35 (OREO). Never bypassed.
+- Target 34+ makes `registerReceiver` without RECEIVER_EXPORTED/NOT_EXPORTED fatal (Blocky Roads, Cars). Both fixes
+  tried (a hidden-API shim; dex call-site rewriting to RECEIVER_EXPORTED) were stopped by the session's safety
+  classifier — pick another approach with the human.
+- Legacy storage permissions are always denied at target ≥ 33 (Rabbids refuses to start without them).
+- Renamed repacks look for their OBB under the new name (Sonic Transformed's 893 MB OBB).
+- Games that extract `lib/armeabi-v7a/*.so` from their own APK at run time (Looney's crash-recovery path) find nothing.
+
+**OnePlus (2026-10-18):** 25 suites green, bridge check 11/11, Fruit Ninja vs Skittles plays a round. Its Java read the
+device ID, which throws at target ≥ 29 on a phone; the bridge now answers a refused device-identifier read with null
+(what a phone without the permission gave), and only that (`ForwardingJni::MaskIdentifierRefusal`).
+
+**Next:** M5 — run every installed 32-bit app through the repackager and keep a pass/fail table in `docs/`; fix the most
+common causes first.
+
+**Tests:** 25 tablet suites (`tools/run_engine_tests.sh arm64-v8a`, new: rb_thunk_tests, rb_host_io_tests,
+rb_sles_tests, rb_gl_thunk_tests) and `tools/run_java_tests.sh` green on 2026-10-18. **Owed:** the same on the OnePlus
+(done 2026-10-18, see above); the human's OK before any merge or push.
+
+## M3 — JNI bridge (ACCEPTED 2026-10-17 on both devices; all work on branch `m3-integration`)
+
+**Accepted:** repacked Gumball launched by its icon reaches GumballMainMenu and plays Karate Chop on the OnePlus
+(own package) and the tablet (renamed `.rb` copy beside the original). The last blocker was mmap placement: the
+monitor now places guest mmaps top-down like Linux (6ff6eb2) — Gumball's `cLanguage::read` over-reads its buffer.
+Lanes and bridge check (11/11) green on both devices. Branch `m3-integration` = m3-jni-bridge + package-rename +
+m3-stale-local-ref + vigilant-cannon (trap names) + the mmap fix; not merged to main, not pushed.
+
+Plan `docs/superpowers/plans/2026-10-16-m3-jni-bridge.md`; ledger (rulings) `.superpowers/sdd/2026-10-16-m3-jni-bridge/progress.md`.
+Tasks 1–6 done on the tablet (the OnePlus was set aside by the human; its runs are owed before merge).
+- Forwarding JNIEnv/JavaVM (`core/abi/jni_forward.*`), inbound trampolines (`core/runtime/inbound.*`), real ART
+  (`android/jni/art_java.*`), generated stubs at repack (`NativeMethods`, `StubElfWriter`, `rb_stub_capture`).
+- Bridge test app (ours, never shipped): `bash tools/build_bridge_apk.sh`; native oracle on the tablet
+  `bash tools/run_bridge_oracle.sh` → `tests/corpus/oracle-jnibridge.txt`; bridged check
+  `bash tools/run_bridge_check.sh R52Y106BECZ` (needs `jnibridge.apk` staged once via the launcher's "Add a game"
+  picker from /sdcard/Download): **10 of 10 rows match** (strings, arrays, callbacks, exceptions, globals, threads,
+  register_natives, fields, overloads). The first run differed only in strings: ART gives 4-byte UTF-8 for a
+  surrogate pair and writes a NUL after GetStringUTFRegion — the bridge now does both.
+- `-e stubcheck <game>` in the launcher: Gumball 13/13, ABGo 93/93 exports resolve to rb_stub_capture.
+- Play Protect blocks a repacked app with an old targetSdk ("built for an older version of Android"); the test
+  app targets 34. Real games keep their target ≥ 24 — watch for this on Gumball/ABGo installs.
+- Task 7: GLES1 in the runtime — `HostSlots::enable_gl()` (slots 256..319, forwarded to the device driver on the
+  game's own GL thread; a call that cannot be forwarded returns 0 and is named once in the live log). Tablet
+  bootcheck: Gumball's unanswered imports 34 → 3 (only `__cxa_*` EH helpers left), ABGo 117 → 78, both boot clean.
+- **OnePlus runs (2026-10-17; the human handed the OnePlus 75ff8cd3 over for good, "Stay awake" is on on both devices).**
+  Launcher at 0face6c. Lanes: `RB_SERIAL=75ff8cd3 run_engine_tests.sh arm64-v8a` — all 22 suites 0 failures (dynarmic
+  200,561 assertions / 47 cases). `run_bridge_check.sh 75ff8cd3`: **10 of 10 rows match** (the script now installs via
+  the PackageInstaller session API: `adb install` is a silent no-op on ColorOS; ColorOS shows its own "No risks found
+  — Continue installation" check). ABGo (`-e repack base` — staged as base.apk there): Play Protect "App scan
+  recommended" → Scan app → "looks safe" → Install; launched by its LAUNCHER intent: shims, boot, JNI_OnLoad clean,
+  **past `isDeviceAmazon()`**; end point on the GL thread in `ExientGLSurfaceView.nativeInitialize`
+  (`onSurfaceCreated`): `instruction fetch failed at 0xfffe0000` — an unanswered EGL/GLES2/OpenSL/AAsset import (78
+  remain; M4's work, as the plan expected). ~~Gap: that fault does not name the import~~ — fixed on branch
+  `claude/vigilant-cannon-683313` (off package-rename): every unanswered import shared the one trap address and nothing
+  mapped a fault back to a name, on any thread (the adopted GL thread was incidental). Now each gets its own 16-byte
+  slot from the trap (`GuestProcess::kTrapSpan`/`kTrapSlot`; 16 because both tiers leave PC one instruction past a
+  failed fetch) and `AbiContext::RunThread` appends `GuestProcess::TrapName` to any fault; lane row
+  `unresolved_import_faults_by_name` (guest_thread_test, `tests/corpus/unresolved_call.c`, main + adopted thread, I+J).
+  OnePlus re-run 2026-10-17 (launcher + repack rebuilt, camera/location/contacts/phone/files permissions denied):
+  **ABGo's first missing import is `AAssetManager_fromJava`** — `nativeInitialize stopped: fault: instruction fetch
+  failed at 0xfffe00d0 ...: called the unanswered import AAssetManager_fromJava (bound to trap slot 0xfffe00d0)`.
+  M4's first target: the AAsset* family (AAssetManager_fromJava/open/openDir, AAsset_getLength/getBuffer/close/
+  openFileDescriptor, AAssetDir_*). Lanes after the fix: OnePlus 22/22 and tablet R52Y106BECZ 22/22, 0 failures.
+  Gumball: see the rename entry below (stale local ref in `jniInit`; fix in progress on branch
+  `m3-stale-local-ref`). Still owed for Gumball: `GumballMainMenu` drawn.
+- **Install beside the original** (branch `package-rename`, off m3-jni-bridge): `-e repack <name> -e rename 1` renames
+  the package to `<orig>.rb` (`-e rename <pkg>` for another name), kept as `repack/<name>.rb.apk`. AxmlEditor.renamePackage
+  expands relative class names against the ORIGINAL package (the DEX is not renamed), renames provider authorities and
+  declared permissions (+ their uses), a GCM category equal to the package, taskAffinity/process under it;
+  resources.arsc's package name follows. Tablet 2026-10-16: Gumball repacked as `com.twentysixdigital.gumballlite.rb`,
+  installer offered a fresh "Install this app?", then Play Protect blocked it ("built for an older version of
+  Android", targetSdk 24); the human let it through on 2026-10-17 (installed 00:30:58, arm64-v8a, beside the original,
+  which was untouched: lastUpdateTime 2025-04-28). **Launched by its LAUNCHER intent** (pid 13432): five RBSHIM lines,
+  RBRUNTIME "startup finished with no fault", GL thread adopted, every texture atlas loaded, then on
+  `loadTextureImage:font.png` → **crash**: `java.lang.Error: guest native Java_..._JNIGLSurface_jniInit stopped: host
+  call at slot 671: JNIEnv->GetObjectClass: 0xf0000204 is a stale local reference` (from `onDrawFrame`). The M3 bridge
+  likely drops a local ref made during a nested Java callback before the outer native returns. No main menu yet.
+  The renamed copy stays installed on the tablet; re-run with `monkey -p com.twentysixdigital.gumballlite.rb -c
+  android.intent.category.LAUNCHER 1` (dialogs: platform "older version" OK; permissions were denied).
+- Final whole-branch review (opus) done: 5 Important findings fixed in 04c76e9 (Delete* of a stale handle
+  ignored as ART does, detach frees locals, no 4 KiB NewStringUTF cap, ID records in a deque, boot teardown on
+  every failure); 9 Minor deferred in the ledger. Tablet: 21 lanes 0 failures after the fixes.
+- The OnePlus is often in the human's hands: start OnePlus work only when they say it is free, and stop it if
+  they ask. `build/brokenscope/brokenscope.apk` (staged in the tablet's launcher) is the boot-failure test APK.
+
+## targetSdk compatibility shims (2026-10-16, branch `targetsdk-shims`, not merged, not pushed) — newest state
+
+**Problem.** The repackager raises targetSdk to 24 (install floor), which switches on every behaviour change the platform
+gates on targetSdk between the game's own target and 24. Gumball Lite (effective target 8) does an implicit
+`bindService(com.android.vending.billing.MarketBillingService.BIND)` on its **first run only** (`isFirstRun` →
+`InAppPurchase.restoreTransactions`), which threw `IllegalArgumentException: Service Intent must be explicit` in
+`onCreate`. That is why later runs reached the GL `UnsatisfiedLinkError` instead: reproduce with
+`adb shell pm clear com.twentysixdigital.gumballlite` before launching.
+
+**Design.** Decided at repackage time (`ShimPlan`, host-tested), executed in the game's process:
+- `ApkRepackager` adds `<provider com.retrobug.shim.RbShimProvider authorities=<pkg>.rbshim exported=false
+  initOrder=MAX>` (`AxmlEditor.addProvider`), the shim classes as the next free `classesN.dex` (launcher ships them as
+  `assets/rbshim.dex`, built by `tools/build_launcher_apk.sh` from `android/shim/`), and `assets/rb32/rbshim.properties`
+  (`targetSdk=<original>`, `shims=<ids>`). Providers are created before `Application.onCreate` and any activity/service.
+- Shims (`android/shim/.../Shims.java`; each logs `shim <id>: ...` or `shim <id> FAILED: ...` on tag `RBSHIM`):
+  `target-sdk` (orig < new): the process's shared `ApplicationInfo.targetSdkVersion` set back to the original — the
+  in-process checks read that field (implicit service intents 21, MODE_WORLD_* 24, @JavascriptInterface 17, legacy menu
+  key 14, View compat); re-asserted on config changes / activity creation. `strict-network` (orig < 11): main-thread
+  network allowed again. `file-uri` (orig < 24): VmPolicy LAX. `permissions` (orig < 23): declared dangerous
+  permissions not held are requested from the first activity (`requestPermissions`).
+- Not shimmed, named in the report: removed APIs (`Notification.setLatestEventInfo` → NoSuchMethodError). Not needed at
+  24: background-service limits (26), package visibility (30), Apache HTTP (platform keeps it below 28). Server-side
+  checks still see 24 (that is why runtime permissions need their own shim). Not covered: AsyncTask's parallel default
+  executor for targets <= 12 (only hidden API).
+- The repack report lists risky calls from the game's DEX (`DexScanner` + `ShimPlan.riskReport`), each "covered by
+  shim X" or "NOT covered"; "shims: NOT added — ..." when the launcher has no shim dex or the app has `hasCode="false"`.
+
+**Tests.** `bash tools/run_java_tests.sh`: ShimPlanTest 30, AxmlEditorTest 141, ApkRepackagerTest 83 checks, 0 failures
+(fixture DEXes built with javac + d8; aapt2 `dump xmltree` judges the provider; mutations of a threshold and of
+`exported` each fail a row). On-device both-ways check in the launcher process (targets 34):
+`tools/run_shimcheck.sh <serial>` — "before" rows must see IAE / SecurityException / NetworkOnMainThreadException /
+FileUriExposedException, "after" rows (shims applied, target 8) must not: **12 rows, 0 failures on the tablet
+R52Y106BECZ and on the OnePlus 75ff8cd3**. (The network probe is a DNS lookup of an `.invalid` name: the launcher has no
+INTERNET permission, so a socket is refused before StrictMode looks.)
+
+**Evidence (OnePlus 75ff8cd3, 2026-10-16, human confirmed both installs).** Launcher updated 18:53:49. Gumball
+`-e repack gumball`: report lists six risks, all covered, "shims: [target-sdk, strict-network, file-uri, permissions]
+(in-process targetSdk 8) — provider ... in classes2.dex"; `install: status=0`, firstInstallTime still 2026-10-15
+14:40:19, lastUpdateTime 18:54:19, arm64-v8a. `pm clear` + launch by icon, pid 30495: the five RBSHIM lines (permissions
+asked: CAMERA, WRITE_EXTERNAL_STORAGE and the platform's split READ_MEDIA_* set), RBRUNTIME "startup finished with no
+fault", then `Gumball: Binding to market service.` → `ContextImpl: Implicit intents with startService are not safe`
+(the platform's pre-21 path) → `Gumball: Billing - Could not bind to service.` → `onCreate activity` completes; end point
+`UnsatisfiedLinkError` at `JNIGLSurface.jniClearTextures()` on the GL thread (M3 adds the `Java_*` exports).
+
+**Next:** M3 JNI bridge. The permission dialog now appears on a repacked game's first launch (expected).
+
+## M2 — multi-entry core (2026-10-16, ACCEPTED on the tablet and the OnePlus)
+
+Branch `m2-multi-entry-core` (not merged, not pushed). Plan: `docs/superpowers/plans/2026-10-15-m2-multi-entry-core.md`.
+Ledger (git-ignored): `.superpowers/sdd/2026-10-15-m2-multi-entry-core/progress.md`. Newest notes: `NEXT-AI-HANDOFF.txt`.
+
+**What M2 delivers.**
+- `GuestProcess` (`core/runtime/guest_process.cpp`): one persistent guest process per app — 4 GiB biased window,
+  bionic's real main thread, every libc layout fact asserted against the image. The in-app runtime
+  (`android/jni/runtime_boot.cpp`) boots it once per process ("scope: booted once"), links DT_NEEDED siblings from
+  `assets/rb32`, streams zip entries, runs constructors + guest `JNI_OnLoad` only (boot-only, no per-game profile).
+- `GuestThread` + Global Guest Lock (FIFO ticket lock, 200k-step slices; released in host slots and blocking syscalls).
+- Guest pthreads on real host threads: `clone`, `futex` (`FutexTable`), `exit`/`exit_group`, sleeps; native pthread
+  oracle `tests/corpus/oracle-pthread.txt` (`tools/run_pthread_oracle.sh`).
+- Adopted ART threads: a Java thread calling into the guest gets a synthesized guest pthread made by libc's own init
+  functions; at host-thread exit its TLS-key destructors run to completion, it is unlinked, its mapping freed (kept,
+  and named, when it cannot be unlinked).
+
+**Deviations closed:** M1 (1b) isolated boot (siblings now linked), (4) profile-in-boot (boot-only mode), M1 (2) the
+64 MiB per-run window (now a process-lifetime 4 GiB window).
+
+**Evidence (tablet R52Y106BECZ, 2026-10-16, after the final-review fixes below).**
+- Launcher `RB_WAIT=100 bash tools/run_launcher_on_device.sh R52Y106BECZ gumball`: "RESULT: ran to the end — 7068
+  frame(s) on tier J, final scene GumballMainMenu, no fault, drawn on screen".
+- After the TLS fix (launcher rebuilt): ABGo bootcheck again 258 constructors, 0x10006, no fault, with the `tls:` line;
+  Gumball launcher run (2026-10-16 16:10): "RESULT: ran to the end — 7063 frame(s) on tier J, final scene
+  GumballMainMenu, no fault, drawn on screen". (The attempt before it stopped at 3827 frames on `eglSwapBuffers`
+  EGL_BAD_SURFACE 0x300d — the display surface went away right after the human unlocked the tablet; not an
+  emulation fault, did not repeat.)
+- `am start -S -n com.retrobug.launcher/.LauncherActivity -e bootcheck angry-birds-go`: scope booted once, 258
+  constructors on Tier J, `JNI_OnLoad` 0x10006, "RESULT: startup finished with no fault"; 92 `Java_*` wait for M3.
+- `bash tools/run_java_tests.sh`: 141 + 54 checks, 0 failures.
+- Engine lanes `RB_SERIAL=R52Y106BECZ bash tools/run_engine_tests.sh arm64-v8a`: exit 0, all 19 gating lanes 0 failures
+  (guest_thread 445, guest_process 159, abi_call 127, monitor 172, diff 998, dynarmic 200,561) and both advisory lanes
+  green (guest_libc 147, guest_apk 1376) — after the TLS fix below.
+- Earlier (2026-10-15, OnePlus 75ff8cd3): all 19 gating lanes 0 failures on the M2 code; new launcher installed.
+
+**Final-review fixes (2026-10-16).**
+- An adopted thread that exits while another live host thread holds its guest thread no longer frees that
+  `GuestThread` (use-after-free): it moves to `stranded_` and lives until the process goes (also after a group exit).
+  Regression check in `unlinkable_exit_keeps_the_mapping` (the holder still sees its thread after the exit).
+- `CallGuestToCompletion`'s re-entry across turn budgets now has a test (`abi_call_test`
+  `a_call_to_completion_is_re_entered_across_turns`: fib(12) with a 1000-step turn).
+- guest_libc's `librbifunclibc` row failed on 64-bit-only phones (no `/system/lib/ld-android.so`): the script now pushes
+  `build/device-libs/{libdl,ld-android}.so` (pulled from the tablet) as `/data/local/tmp/rb_device_*` and the row prefers them.
+
+**Fixed: intermittent boot fault — libc's own TLS was never registered (2026-10-16).** About 1 run in 5–10 of
+`rb_guest_thread_tests`, a fresh `GuestProcess` faulted in `__libc_preinit` (`__set_errno_internal` storing to 0x1387):
+TLS_SLOT_THREAD_ID (TP+4) held 0x10eb instead of the thread. A store watch caught the writer: **GWP-ASan**
+(`GuardedPoolAllocator::init`, `gwp_asan_malloc`), which libc turns on in a random few processes, keeps its
+thread-locals in libc's own `PT_TLS` block through an initial-exec `R_ARM_TLS_TPOFF32` slot that the loader left
+unapplied (0), so they sat on bionic's TLS slots. Fix: the loader's new `LoadOptions::resolve_tls` hook answers a
+module's own TLS relocations; GuestProcess places libc's block where the device's linker does (static-TLS offset
+0xb78 = TP+0xb6c, static TLS 0xba8 — the probe's measured values), registers it as static TLS module 1 in the shared
+globals (module table, counts, generation 1; six new [image] facts) and copies its init image with libc's own
+`__init_static_tls` (main and adopted threads; `pthread_create` already does). Runtime log: `tls: libc.so is static
+TLS module 1 ...`. Test: `guest_process_test` `libc_thread_locals_live_in_libcs_own_tls_block` (libc's
+`__tls_get_addr({1, 8})` = block + 8; TP+4 intact after constructors) plus layout rows. Evidence: 30/30 clean
+`rb_guest_thread_tests` runs with a store watch on TP+4 (before the fix: a failure within 3–7 runs).
+
+**OnePlus 75ff8cd3 acceptance (2026-10-16, human confirmed every install).** Plan Task 6 steps 1–3:
+- New launcher installed (16:12:46). Engine lanes `RB_SERIAL=75ff8cd3 bash tools/run_engine_tests.sh arm64-v8a`:
+  exit 0, all 19 gating lanes 0 failures and both advisory lanes green — guest_libc 147/0 (its `ld-android.so` row
+  failed here before the libc-sibling push), guest_apk 1376/0.
+- **M1 (a) closed: a re-repack installs as an update.** Angry Birds Go `-e repack base`: `install: status=0 (SUCCESS)`,
+  firstInstallTime still 2026-10-15 14:38:58, lastUpdateTime 2026-10-16 16:18:34, arm64-v8a. Gumball
+  `-e repack gumball`: status=0, firstInstallTime still 2026-10-15 14:40:19, lastUpdateTime 16:19:14.
+- Angry Birds Go by its icon, pid 24394: `tls:` module line, "scope: booted once", 258 constructors on Tier J
+  (16:18:45.36 → 48.36, ~3 s), `JNI_OnLoad` 0x10006, "RESULT: startup finished with no fault", no profile lines; then
+  `UnsatisfiedLinkError` at `AngryBirdsGoActivity.isDeviceAmazon()` (`Java_com_rovio_angrybirdsgo_AngryBirdsGoActivity_isDeviceAmazon`).
+- Gumball by its icon, pid 26352: scope booted once, 24 constructors on Tier J (~0.85 s), no `JNI_OnLoad` (12 `Java_*`
+  for its own Java), "RESULT: startup finished with no fault"; then on its GL thread `UnsatisfiedLinkError` at
+  `JNIGLSurface.jniClearTextures()` from `onSurfaceCreated` — this run the GL thread got there before the known
+  targetSdk billing crash (implicit `bindService`), which is still there for the shims to fix.
+**Final whole-branch review (2026-10-16, Opus reviewer over 3280c6f..3cf6218) — all four findings fixed.**
+1. CRITICAL, fixed in 8cf1273: `RunThread` returned Budget at an SVC the tier had stepped past (syscall cap of 100,000
+   per turn), so a re-entered turn skipped that syscall with r0 = arg0. Caps are now checked after the syscall is
+   answered. Row `pt_syscall_storm(150000)` (device oracle 150000) read 149999 on both tiers before the fix.
+2. IMPORTANT, fixed in 93c10b0: the in-app boot report raced with guest-thread logs (and was detached under them);
+   `runtime_boot.cpp` now guards it with a leaf mutex (`Live`, `SetReport`) and reads the tallies holding the GGL.
+   No dedicated test (needs a guest JNI_OnLoad that leaves a logging thread running) — exercised by the boot checks.
+3. MINOR, fixed in 93c10b0: static TLS rounded to libc's PT_TLS alignment; an odd alignment is refused.
+4. MINOR, fixed in 93c10b0: the libc TLS test now checks the TPOFF32 slot value (TP + 0xb6c) and that no libc TLS
+   relocation was left unapplied.
+After the fixes: all lanes green on the tablet and the OnePlus (guest_thread 457, abi_call 191, guest_process 161);
+launcher reinstalled on the OnePlus, ABGo bootcheck: 258 constructors, 0x10006, no fault. Ready to merge to `main`.
+
+**Next after M2:** targetSdk compatibility shims (DONE, see the section above) → M3 JNI bridge (see the M3 MUST
+list in `NEXT-AI-HANDOFF.txt`).
+
+## M1 — on-device repackager + stub boot (2026-10-15, ACCEPTED)
 
 Branch `m1-repackager` (not merged to `main`, not pushed). Design: `docs/superpowers/specs/2026-10-15-general-32bit-app-support-design.md`.
 
@@ -46,7 +327,7 @@ synchronously inside the game's `JNI_OnLoad` on the loading thread, after readin
 streamed/mmapped zip reads, a wider catch.
 
 **Not yet verified on a device** (each needs the human to confirm a dialog; offered as a follow-up):
-(a) re-repacking the same game installs as an update (same key `retrobug-repack`; expected status=0 SUCCESS, unchanged firstInstallTime);
+(a) ~~re-repacking the same game installs as an update~~ VERIFIED 2026-10-16 on the OnePlus (status=0, firstInstallTime unchanged; see M2);
 (b) installing a repack over a natively installed original reports the installer's own incompatible-signature text (expected
 status=5 INSTALL_FAILED_UPDATE_INCOMPATIBLE).
 

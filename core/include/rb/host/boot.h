@@ -1,0 +1,206 @@
+// RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
+//
+// `rb::host::Boot`: the in-process boot without a platform in it. Loads a 32-bit library (and the
+// `assets/rb32/` siblings its DT_NEEDED names) from an APK into one process-lifetime guest process whose
+// libc/libm/libz scope is booted on the first call, runs the constructors and the guest JNI_OnLoad.
+//
+// This is the Android runtime's boot (`android/jni/runtime_boot.cpp`) with every Android decision moved to
+// a callback: the Java implementation (ART on Android, a table shim on iOS), the host import answers
+// (GLES/EGL/dl/log), the platform services that need the bridge (audio, thunks), the log sink and where the
+// report goes. The loaded state, the poison rule and the dlopen/dlsym answers stay here, so both hosts boot
+// a library the same way.
+#pragma once
+
+#include <atomic>
+#include <condition_variable>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <set>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "rb/abi/host_java.h"
+#include "rb/exec/machine_state.h"
+#include "rb/runtime/guest_process.h"
+#include "rb/runtime/inbound.h"
+
+namespace rb::abi {
+class ForwardingJni;
+}
+namespace rb::loader {
+class GuestModule;
+class ZipReader;
+}
+namespace rb::runtime {
+class Inbound;
+}
+
+namespace rb::host {
+
+class Boot;
+
+struct BootConfig {
+  std::size_t window_bytes = std::size_t{4} << 30;
+  rb::exec::GuestAddr unresolved_trap = 0xfffe'0000u;
+  /// The tier constructors, IFUNC resolvers and guest entry points run on: 1 = Tier I, 2 = Tier J.
+  int ctor_tier = 2;
+  /// What `android_get_application_target_sdk_version` answers. Only the platform's host slots read it.
+  int target_sdk = 24;
+
+  /// One line per reportable fact. Called from the boot thread and from guest threads.
+  std::function<void(const std::string&)> log;
+  /// The Java behind the forwarding JNI bridge. Called once, on the first boot. nullptr + `err` refuses.
+  std::function<std::unique_ptr<rb::abi::HostJava>(std::string* err)> make_java;
+  /// The host's answers for imports no guest image defines (GLES/EGL/dl/log on Android; the gfx/audio
+  /// adapters on iOS). Same contract as `GuestProcessOptions::host_resolver`.
+  std::function<std::optional<rb::exec::GuestAddr>(const std::string&)> resolve_host;
+  std::function<std::optional<rb::exec::GuestAddr>(const std::string&)> resolve_dynamic_host;
+  /// A system library (`libc.so`, `libm.so`, `libz.so`, `libstdc++.so`) the APK does not carry. A
+  /// repackaged APK keeps them under `assets/rb32sys/`; a stock store APK has only its own libraries
+  /// under lib/armeabi-v7a and cannot boot without them, so the platform answers from its own copy (the
+  /// iOS app carries them in its bundle). Null: the entry must be in the APK, as before.
+  std::function<std::optional<std::vector<std::uint8_t>>(const std::string& name)> read_system_lib;
+  /// Platform services installed once the bridge is up and before any guest library loads: the host slots,
+  /// audio, file providers, thunks that need the Java bridge. `boot.jni()` and `proc` are usable here.
+  std::function<void(Boot& boot, rb::runtime::GuestProcess& proc)> on_bridge;
+  /// Appended to the report while it is still attached (the platform's own tallies).
+  std::function<void(std::string*, rb::runtime::GuestProcess&)> report_suffix;
+  /// A Java thread dump for the stall report (empty when the platform has none).
+  std::function<std::vector<std::string>()> java_thread_dump;
+  /// The frame counters the stall report prints (Java-side GL swap and draw calls). Empty when none.
+  std::function<std::string()> frame_stats;
+  /// A guest native called exit(). The default logs the line and exits the process.
+  std::function<void(int status)> on_guest_exit;
+  /// Extra lines for a guest fault report: the platform's host-call ring, GL/EGL and pending-exception state.
+  /// Called on the faulting guest thread with the GGL held; a report path, not control flow.
+  std::function<std::vector<std::string>()> fault_state;
+  /// Start the liveness supervisor (a stall dump every 10 s with no guest instruction retired).
+  bool monitor = true;
+  /// Build the JIT object. False on iOS: the backend allocates executable memory, which the platform
+  /// forbids; the boot still runs, on Tier I.
+  bool enable_jit = true;
+  /// A per-game AOT profile (AOT task 5), compiled into a per-game app. When set and every profiled
+  /// library maps at its bias, constructors and guest entry points run on the AOT executor; anything
+  /// the profile does not cover stays on Tier I. Null: the tier `ctor_tier` names decides.
+  const rb::exec::AotProfile* aot = nullptr;
+};
+
+struct BootResult {
+  bool ok = false;
+  /// False when the library had already booted in this process: no report was collected, as before.
+  bool already = false;
+  std::string report;
+};
+
+class Boot {
+ public:
+  explicit Boot(BootConfig config);
+  ~Boot();
+  Boot(const Boot&) = delete;
+  Boot& operator=(const Boot&) = delete;
+
+  /// Boots `lib` from the APK at `apk`. One at a time; a library is marked booted only on success, and a
+  /// failure after guest state changed poisons the process for every later boot.
+  BootResult BootLibrary(const std::string& apk, const std::string& lib);
+
+  /// Boots the libraries the APK's Java loads, in its order. A DLGL title's static initializer loads the
+  /// engine first and then the game library that carries the app and registers it in its JNI_OnLoad; booting
+  /// only the engine leaves the app singleton null. Every other APK is just `BootLibrary(lib)`.
+  BootResult BootJavaLibraries(const std::string& apk, const std::string& lib);
+
+  /// The `.so` files an APK carries directly under `assets/rb32/`, by file name, sorted.
+  static std::vector<std::string> BundledLibraries(const std::string& apk);
+  /// True when the APK carries `assets/rb32/libdlgl.so` (the DLGE engine family).
+  static bool BundlesDlgl(const std::string& apk);
+
+  /// A line that belongs in the live log and, while a boot is collecting one, in its report.
+  void Live(const std::string& line);
+
+  /// The guest dlopen/android_dlopen_ext answer: a handle for a library this runtime can provide (the
+  /// game's own from assets/rb32/, loaded with its DT_NEEDED and constructed), or 0 with `why`.
+  std::uint32_t DlOpen(const std::string& path, std::string* why);
+  /// The guest dlsym answer for a handle DlOpen gave out (or RTLD_DEFAULT/NEXT), then host answers.
+  std::optional<std::uint32_t> DlSym(std::uint32_t handle, const std::string& name);
+  /// Binds a guest native into the inbound pool (what a guest RegisterNatives reaches). 0 with `err`.
+  void* BindNative(rb::exec::GuestAddr fn, const std::string& name, const std::string& sig, std::string* err);
+  /// Runs a native the guest registered, from the Java side of the bridge — how a shim completes a
+  /// callback real Java would have made (an async download, a cloud load). `name_sig` is the registered
+  /// name plus its JNI signature; `cls` is the class it was registered on; references in `args` are
+  /// HostRef values. The call is nested: the engine saves the outer guest state and restores it after.
+  std::uint64_t CallNative(const std::string& name_sig, std::uintptr_t cls,
+                           const std::vector<std::uint64_t>& args, std::string* err);
+
+  /// The live guest process (null before a scope booted). Set once, never cleared.
+  rb::runtime::GuestProcess* process();
+  /// The Java the bridge talks to, and the bridge itself (both live once the first boot reached the bridge).
+  rb::abi::HostJava* java();
+  rb::abi::ForwardingJni* jni();
+  rb::runtime::Inbound* inbound();
+  /// A library that booted, by file name (null when it did not).
+  const rb::loader::GuestModule* module(const std::string& lib);
+  bool booted(const std::string& lib) const;
+  /// Why every later boot is refused, empty while the process is still usable.
+  std::string poisoned() const;
+
+ private:
+  bool BootScope(const std::string& apk, rb::loader::ZipReader& zip, std::string* out);
+  /// `name` from the APK's repack layout, else from `cfg_.read_system_lib`. `from` says which answered:
+  /// the zip entry's name, or "the app bundle". Null when neither has it.
+  std::optional<std::vector<std::uint8_t>> ReadSystemLib(rb::loader::ZipReader& zip, const std::string& name,
+                                                         std::string* from, std::string* err);
+  bool BootBridge(std::string* out);
+  const rb::loader::GuestModule* LoadWithNeeded(rb::loader::ZipReader& zip, const std::string& lib,
+                                                std::set<std::string>& in_progress, std::string* out);
+  bool BootOne(const std::string& apk, const std::string& lib, std::string* out);
+  void DropScope();
+  void StartMonitor();
+  void StopMonitor();
+  std::uint32_t DlHandle(const rb::loader::GuestModule* m);
+  void Say(const std::string& line);
+
+  BootConfig cfg_;
+
+  std::mutex boot_mu_;  ///< one boot at a time
+  std::atomic<std::thread::id> boot_owner_{};  ///< the thread in BootLibrary, for DlOpen's reentrancy rule
+
+  std::unique_ptr<rb::runtime::GuestProcess> proc_;
+  std::unique_ptr<rb::abi::HostJava> java_;
+  std::unique_ptr<rb::abi::ForwardingJni> jni_;
+  std::unique_ptr<rb::runtime::Inbound> inbound_;
+  /// Every native the guest registered, by name plus signature, for `CallNative`. Written during
+  /// JNI_OnLoad and read afterwards, so the mutex is a leaf.
+  std::mutex native_mu_;
+  std::map<std::string, rb::runtime::InboundTarget> native_targets_;
+  std::map<std::string, const rb::loader::GuestModule*> loaded_;
+  std::set<std::string> booted_;
+  /// Where this APK's 32-bit libraries live, decided once from the zip: the repack layout's
+  /// `assets/rb32/` or a stock APK's `lib/armeabi-v7a/` (its `lib/armeabi/` only when v7a is absent,
+  /// which is what the platform would load). Empty until the first boot reads the APK.
+  std::string lib_dir_;
+
+  std::mutex report_mu_;   ///< leaf: held to append a line or swap the pointer
+  std::string* report_ = nullptr;
+
+  std::mutex publish_mu_;  ///< leaf: what rb_stub_dispatch reads without waiting for a boot
+  rb::runtime::GuestProcess* published_proc_ = nullptr;
+  std::map<std::string, const rb::loader::GuestModule*> published_libs_;
+
+  std::string poisoned_;  ///< set when a boot failed after guest state changed
+  bool touched_ = false;  ///< this boot changed guest state
+  std::string failure_;   ///< this boot's failure, for `poisoned_`
+  std::string apk_;       ///< the game's APK (where a guest dlopen finds assets/rb32/<lib>)
+  std::vector<const rb::loader::GuestModule*> dl_handles_;
+
+  std::thread monitor_;
+  std::mutex monitor_mu_;
+  std::condition_variable monitor_cv_;
+  bool monitor_stop_ = false;
+};
+
+}  // namespace rb::host

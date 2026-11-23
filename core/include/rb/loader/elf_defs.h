@@ -53,7 +53,7 @@ constexpr std::uint16_t ET_DYN = 3;
 constexpr std::uint16_t EM_ARM = 40;
 constexpr std::uint16_t EF_ARM_MASK = 0xff00u;
 
-constexpr std::uint32_t PT_LOAD = 1, PT_DYNAMIC = 2, PT_NOTE = 4;
+constexpr std::uint32_t PT_LOAD = 1, PT_DYNAMIC = 2, PT_NOTE = 4, PT_TLS = 7;
 // PT_ARM_EXIDX is PT_LOPROC + 1 (the NDK's `bits/elf_common.h`; llvm-readelf prints 1879048193 for the
 // fixture's). It read 0x70000068 until `the_unwind_index_is_recorded_biased` became its first user.
 constexpr std::uint32_t PT_GNU_RELRO = 0x6474e552u, PT_ARM_EXIDX = 0x70000001u;

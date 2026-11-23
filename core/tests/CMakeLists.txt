@@ -48,6 +48,15 @@ add_executable(rb_exec_interp_tests exec_interp_test.cpp)
 target_link_libraries(rb_exec_interp_tests PRIVATE rb_exec rb_loader)
 target_compile_definitions(rb_exec_interp_tests PRIVATE RB_FIXTURE_PATH="/data/local/tmp/librb_fixture.so")
 
+# Tier I's NEON semantics, hand-assembled into a guest page: no fixture, so this runs on every host lane.
+add_executable(rb_interp_neon_tests interp_neon_test.cpp)
+target_link_libraries(rb_interp_neon_tests PRIVATE rb_exec)
+
+# Tier I throughput, hand-assembled into a guest page for the same reason: no fixture, so the host lanes
+# can print a rate. Timing is never an assertion; the loop's result is.
+add_executable(rb_interp_bench interp_bench.cpp)
+target_link_libraries(rb_interp_bench PRIVATE rb_exec)
+
 # C08's bridge is mostly register arithmetic, so most of its cases need no guest program at all; the
 # ones that do run the real fixture and assert the hardware-oracle values.
 add_executable(rb_abi_jni_tests abi_jni_test.cpp)
@@ -63,6 +72,27 @@ target_compile_definitions(rb_abi_call_tests PRIVATE RB_FIXTURE_PATH="/data/loca
 add_executable(rb_exec_tier_diff_tests exec_tier_diff_test.cpp)
 target_link_libraries(rb_exec_tier_diff_tests PRIVATE rb_exec rb_loader rb_abi rb_syscall)
 target_compile_definitions(rb_exec_tier_diff_tests PRIVATE RB_FIXTURE_PATH="/data/local/tmp/librb_fixture.so")
+
+# AOT task 3: the offline-emitted fixture `fib` through the AOT dispatcher, compared field for field
+# with Tier I on the same bytes. Device-only by construction (AArch64 code, armeabi-v7a fixture): the
+# source compiles to a skip on other hosts, and the generated `.S`/table are linked only where they can
+# be assembled. The two committed artifacts are produced by `rb_aotgen --emit`; the test's header has
+# the regeneration command and the table carries the fixture hash.
+add_executable(rb_aot_tests aot_test.cpp)
+target_link_libraries(rb_aot_tests PRIVATE rb_exec rb_loader)
+target_compile_definitions(rb_aot_tests PRIVATE RB_FIXTURE_PATH="/data/local/tmp/librb_fixture.so")
+if(RB_AARCH64_HOST)
+  target_sources(rb_aot_tests PRIVATE aot_fixture.S aot_fixture_table.cpp)
+endif()
+
+# AOT task 4: the code-map trace. It drives the fixture through Tier I — host-ISA independent — so it
+# needs the fixture but no AArch64 host, and a missing fixture is a skip with a printed line like the
+# other execution lanes. The assertions read the binary trace back and name the export entry and the
+# static `fib` its recursive `bl` reaches, past the point a static export scan would stop.
+add_executable(rb_code_map_trace_tests code_map_trace_test.cpp)
+target_link_libraries(rb_code_map_trace_tests PRIVATE rb_exec rb_loader)
+target_compile_definitions(rb_code_map_trace_tests PRIVATE
+  RB_FIXTURE_PATH="/data/local/tmp/librb_fixture.so")
 
 # C17's recorder is pure string work, so it needs neither the fixture nor a guest program — and that is
 # part of the point: the component whose job is to say what a launch did must be testable without one.
@@ -107,3 +137,138 @@ target_compile_definitions(rb_guest_libc_tests PRIVATE
   RB_DEVICE_LIBC_PATH="/data/local/tmp/rb_device_libc.so"
   RB_IFUNC_LIBC_USER_PATH="/data/local/tmp/librbifunclibc.so"
   RB_GUEST_APK_PATH="/data/local/tmp/rb_guestprobe.apk")
+
+# M2's persistent guest process: the device's own libc booted with constructors, the shared-globals page,
+# the auxv, the static-TLS layout and bionic's real main thread (`rb::runtime::GuestProcess`). Gating: every
+# row is a fact of the tablet's libc and its own native main thread. The images are pushed by
+# tools/run_engine_tests.sh (build/device-libs/libc.so, build/guest-libs/{libm,libz}.so).
+add_executable(rb_guest_process_tests guest_process_test.cpp)
+target_link_libraries(rb_guest_process_tests PRIVATE rb_runtime)
+target_compile_definitions(rb_guest_process_tests PRIVATE
+  RB_DEVICE_LIBC_PATH="/data/local/tmp/rb_device_libc.so"
+  RB_GUEST_LIBM_PATH="/data/local/tmp/libm.so"
+  RB_GUEST_LIBZ_PATH="/data/local/tmp/libz.so"
+  RB_FIXTURE_PATH="/data/local/tmp/librb_fixture.so"
+  RB_STRIPPED_FIXTURE_PATH="/data/local/tmp/librb_fixture_stripped.so")
+
+# M2 Task 3: per-thread guest contexts under one Global Guest Lock — real host threads, each bound to its own
+# `rb::runtime::GuestThread`, sharing one process on both tiers (shared counters via ldrex/strex and the kuser
+# cmpxchg, slice preemption, the GGL released around host calls and blocking syscalls). Gating; every row has
+# a watchdog that names a hang instead of hanging the run.
+add_executable(rb_guest_thread_tests guest_thread_test.cpp)
+# M2 Task 4 adds guest pthreads on a GuestProcess: the device libc + libpthread_fixture.so, compared with the
+# native oracle tests/corpus/oracle-pthread.txt (all pushed by tools/run_engine_tests.sh).
+target_link_libraries(rb_guest_thread_tests PRIVATE rb_runtime rb_abi rb_exec rb_syscall rb_guest_thread rb_mem)
+target_compile_definitions(rb_guest_thread_tests PRIVATE
+  RB_DEVICE_LIBC_PATH="/data/local/tmp/rb_device_libc.so"
+  RB_GUEST_LIBM_PATH="/data/local/tmp/libm.so"
+  RB_GUEST_LIBZ_PATH="/data/local/tmp/libz.so"
+  RB_PTHREAD_FIXTURE_PATH="/data/local/tmp/libpthread_fixture.so"
+  RB_PTHREAD_ORACLE_PATH="/data/local/tmp/oracle-pthread.txt"
+  RB_UNRESOLVED_FIXTURE_PATH="/data/local/tmp/librbunresolved.so")
+
+# M3 Task 1: the forwarding JNI bridge over a fake Java, driven by tests/corpus/jni_bridge_fixture.c.
+add_executable(rb_jni_forward_tests jni_forward_test.cpp)
+target_link_libraries(rb_jni_forward_tests PRIVATE rb_runtime rb_abi rb_java)
+target_compile_definitions(rb_jni_forward_tests PRIVATE
+  RB_DEVICE_LIBC_PATH="/data/local/tmp/rb_device_libc.so"
+  RB_GUEST_LIBM_PATH="/data/local/tmp/libm.so"
+  RB_GUEST_LIBZ_PATH="/data/local/tmp/libz.so"
+  RB_JNIBRIDGE_FIXTURE_PATH="/data/local/tmp/libjnibridge_fixture.so")
+
+# M3 Task 3: Java calling guest natives through the inbound trampolines (arm64 hosts).
+if(TARGET rb_inbound)
+  add_executable(rb_inbound_tests inbound_test.cpp)
+  target_link_libraries(rb_inbound_tests PRIVATE rb_inbound rb_runtime rb_abi rb_java)
+  target_compile_definitions(rb_inbound_tests PRIVATE
+    RB_DEVICE_LIBC_PATH="/data/local/tmp/rb_device_libc.so"
+    RB_GUEST_LIBM_PATH="/data/local/tmp/libm.so"
+    RB_GUEST_LIBZ_PATH="/data/local/tmp/libz.so"
+    RB_JNIBRIDGE_FIXTURE_PATH="/data/local/tmp/libjnibridge_fixture.so")
+endif()
+
+# M4 Task 1: the generic AAPCS32-softfp -> AAPCS64 thunk caller and handle table (host functions called directly).
+add_executable(rb_thunk_tests thunk_test.cpp)
+target_link_libraries(rb_thunk_tests PRIVATE rb_abi rb_mem)
+
+# M4 Task 3b: host file and socket pass-through (Monitor::set_host_io).
+add_executable(rb_host_io_tests host_io_test.cpp)
+target_link_libraries(rb_host_io_tests PRIVATE rb_syscall rb_mem)
+
+# S1: the muted OpenSL object model the iOS host hands a title with no audio device. It drives the same
+# guest cells and method indices as a real libOpenSLES, without the device library or Apple frameworks.
+add_executable(rb_silent_sles_tests silent_sles_test.cpp)
+target_link_libraries(rb_silent_sles_tests PRIVATE rb_audio rb_abi rb_mem)
+
+# S1n: the DLGE bootstrap's guest ABI. Fake natives record the JNIEnv pointer and call order, including
+# the GetStringUTFChars path that made a null env crash before KitKat could enter its first frame.
+add_executable(rb_dlgl_bootstrap_tests dlgl_bootstrap_test.cpp "${CMAKE_SOURCE_DIR}/platform/ios/dlgl_bootstrap.cpp")
+target_include_directories(rb_dlgl_bootstrap_tests PRIVATE "${CMAKE_SOURCE_DIR}/platform/ios")
+target_link_libraries(rb_dlgl_bootstrap_tests PRIVATE rb_java)
+
+# M4 Task 4: the OpenSL ES thunks against the device's own libOpenSLES (the module lives with the other Android
+# thunks; it depends on HandleTable/ThunkCaller and the OpenSL ES headers only, not on the launcher).
+add_executable(rb_sles_tests sles_test.cpp "${CMAKE_SOURCE_DIR}/android/jni/thunks_sles.cpp")
+target_include_directories(rb_sles_tests PRIVATE "${CMAKE_SOURCE_DIR}/android/jni")
+target_link_libraries(rb_sles_tests PRIVATE rb_abi rb_mem OpenSLES dl)
+
+# M4 Task 2: the GL/EGL thunk table against the device's driver on an offscreen pbuffer.
+add_executable(rb_gl_thunk_tests gl_thunk_test.cpp "${CMAKE_SOURCE_DIR}/android/jni/thunks.cpp")
+target_include_directories(rb_gl_thunk_tests PRIVATE "${CMAKE_SOURCE_DIR}/android/jni")
+target_link_libraries(rb_gl_thunk_tests PRIVATE rb_abi rb_mem rb_gfx EGL GLESv2 dl)
+if(ANDROID_ABI STREQUAL "arm64-v8a")
+  target_sources(rb_gl_thunk_tests PRIVATE "${CMAKE_SOURCE_DIR}/android/jni/host_slots.cpp")
+  target_link_libraries(rb_gl_thunk_tests PRIVATE rb_runtime)
+endif()
+
+# The platform seam (S0 of the iOS port): pure host tests, no guest, no device, no fixtures — the
+# only suite that can run on the build machine itself. Its contract is what makes the same core
+# compile and behave on Linux and Darwin.
+add_executable(rb_platform_tests platform_host_test.cpp)
+target_link_libraries(rb_platform_tests PRIVATE rb_platform)
+
+# S1: the APK zip reader. No guest and no device — the archive is written by the test, stored and
+# deflated, then damaged in each way the reader defines a refusal for.
+add_executable(rb_zip_tests zip_test.cpp)
+target_link_libraries(rb_zip_tests PRIVATE rb_loader)
+
+# S1: the platform-free boot, on the gate's own fixtures (the tablet's libc and the C06 chain). It is a
+# guest lane like rb_guest_process_tests, so it exists only where the inbound trampoline pool does.
+if(TARGET rb_inbound)
+  # pikpok_bootstrap.cpp is compiled here only so its calls into Boot/TableJava are type-checked on a host
+  # build; the iOS app is its one user. (halfbrick_bootstrap.cpp is not: it calls the framework's GL entry
+  # points, which live in an Objective-C++ file, so the iOS build is where it is compiled.)
+  add_executable(rb_host_boot_tests host_boot_test.cpp "${CMAKE_SOURCE_DIR}/platform/ios/pikpok_bootstrap.cpp"
+    "${CMAKE_SOURCE_DIR}/platform/ios/unity_bootstrap.cpp" "${CMAKE_SOURCE_DIR}/platform/ios/apk_identity.cpp"
+    "${CMAKE_SOURCE_DIR}/platform/ios/apk_icon.cpp")
+  target_link_libraries(rb_host_boot_tests PRIVATE rb_host rb_java)
+  target_compile_definitions(rb_host_boot_tests PRIVATE
+    RB_DEVICE_LIBC_PATH="/data/local/tmp/rb_device_libc.so"
+    RB_GUEST_LIBM_PATH="/data/local/tmp/libm.so"
+    RB_GUEST_LIBZ_PATH="/data/local/tmp/libz.so"
+    RB_LINK_LEAF_PATH="/data/local/tmp/librbleaf.so"
+    RB_LINK_MID_PATH="/data/local/tmp/librbmid.so"
+    RB_CTOR_FAULT_PATH="/data/local/tmp/librbctorfault.so")
+endif()
+
+# S1: the iOS Java replacement. `TableJava` plus the base Android profile are pure host code — no guest,
+# no device, no fixtures — so this lane runs wherever the tree builds.
+add_executable(rb_table_java_tests table_java_test.cpp)
+target_link_libraries(rb_table_java_tests PRIVATE rb_java)
+
+# S1: the APK byte-stream view the iOS AAsset thunks read through. No guest, no device.
+add_executable(rb_apk_assets_tests apk_assets_test.cpp)
+target_link_libraries(rb_apk_assets_tests PRIVATE rb_loader)
+
+# SHA-256 (AOT task 5): FIPS vectors, fixture-free, so it runs on every host lane and the device.
+add_executable(rb_sha256_tests sha256_test.cpp)
+target_link_libraries(rb_sha256_tests PRIVATE rb_crypto)
+
+# Diagnostic (build 22): boot the KitKat scope with the libc AOT image and reproduce the load-time crash
+# on Android, where adb can name the faulting instruction. Only built when the pulled image is present.
+if(RB_AARCH64_HOST AND EXISTS "${CMAKE_SOURCE_DIR}/build/aot/kitkat-full/aot_kitkat_libc.S")
+  add_executable(rb_aot_scope_tests aot_scope_test.cpp
+    "${CMAKE_SOURCE_DIR}/build/aot/kitkat-full/aot_kitkat_libc.S"
+    "${CMAKE_SOURCE_DIR}/build/aot/kitkat-full/aot_kitkat_libc_table.cpp")
+  target_link_libraries(rb_aot_scope_tests PRIVATE rb_runtime rb_exec)
+endif()

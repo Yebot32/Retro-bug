@@ -20,6 +20,16 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(RB_USE_REAL_BOOST "Use a real Boost installation instead of compat/" OFF)
 
+# The host architectures that can run a guest and reach the AArch64 inbound trampolines: Android arm64 and
+# Apple arm64 (macOS, iOS). `CMAKE_SYSTEM_PROCESSOR` is empty for an iOS cross-build, where the architecture
+# lives in `CMAKE_OSX_ARCHITECTURES` instead — so both are consulted in one place and the component
+# CMakeLists ask `RB_AARCH64_HOST` rather than repeating a check that one of them would miss.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64" OR CMAKE_OSX_ARCHITECTURES MATCHES "arm64")
+  set(RB_AARCH64_HOST ON)
+else()
+  set(RB_AARCH64_HOST OFF)
+endif()
+
 # The host-side launcher's JNI library. OFF by default, and that is the whole of the guard:
 # `tools/run_engine_tests.sh` configures with `-DRB_BUILD_TESTS=ON` and never mentions this, so the option
 # stays OFF there, the block below is never reached, and no test target gains a dependency on it.
@@ -48,7 +58,18 @@ endif()
 add_subdirectory(external/dynarmic EXCLUDE_FROM_ALL)
 
 # ---------------------------------------------------------------- RetroBug core
+add_subdirectory(platform)
 add_subdirectory(core)
+
+# The AOT code-map discovery tool: pure ELF parsing, so it builds on every host and has no engine
+# dependency (tools/aotgen/CMakeLists.txt). It is excluded from the iOS cross build, where a host
+# tool has nothing to inspect — but Android is a test *host* for this project (the binaries run on the
+# device exactly as core/tests do), even though CMake calls that configuration cross-compiling. The
+# `OR ANDROID` is that distinction, not a convenience: without it the measurement lane in
+# docs/superpowers/plans/2026-10-31-aot-native-speed.md could not build rb_aotgen_tests.
+if(NOT CMAKE_CROSSCOMPILING OR ANDROID)
+  add_subdirectory(tools/aotgen)
+endif()
 
 if(RB_BUILD_TESTS)
   add_subdirectory(core/tests)
@@ -68,14 +89,17 @@ endif()
 # which is the only way it gets built.
 if(RB_BUILD_LAUNCHER)
   add_library(rbguest SHARED EXCLUDE_FROM_ALL android/jni/launcher.cpp android/jni/gl_forward.cpp
-              android/jni/runtime_boot.cpp)
+              android/jni/runtime_boot.cpp android/jni/host_slots.cpp android/jni/thunks.cpp android/jni/thunks_android.cpp android/jni/thunks_sles.cpp
+              android/jni/art_java.cpp android/jni/native_activity.cpp android/jni/stub_entry_aarch64.S)
+  set(RB_ENGINE_REVISION "unknown" CACHE STRING "Source revision embedded in Android runtime diagnostics")
+  target_compile_definitions(rbguest PRIVATE RB_ENGINE_REVISION="${RB_ENGINE_REVISION}")
   # The same set `rb_guest_apk_tests` links (`core/tests/CMakeLists.txt`), because this target does the
   # same sequence: memory, loader, linker, executors, bridge. `rb_mem` is already implied by the others,
   # and named anyway so that a reader of this line sees which layer every address in the launcher goes
   # through. `-llog` for the two milestone lines that outlive a native crash; `-lz` (the NDK's system
   # zlib) inflates the guest APK's deflated assets for the class model's `readFile`. Static-lib link order is
   # CMake's business here, not ours: these are all CMake targets with PUBLIC dependencies.
-  target_link_libraries(rbguest PRIVATE rb_linker rb_loader rb_exec rb_abi rb_mem -llog -lz -lEGL -landroid)
+  target_link_libraries(rbguest PRIVATE rb_host rb_inbound rb_runtime rb_linker rb_loader rb_exec rb_abi rb_mem rb_gfx -llog -lz -lEGL -lGLESv2 -landroid -ljnigraphics)
   # The APK is `arm64-v8a` — RetroBug is the host — and the guest is `armeabi-v7a` *bytes*, never a
   # library this process asks the system loader for. Nothing here restricts the ABI, so an
   # `-DANDROID_ABI=x86_64` configure of this target builds and does not run: the emulator cannot execute

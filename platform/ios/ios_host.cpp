@@ -1,0 +1,1188 @@
+// RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
+//
+// The iOS host slots: see ios_host.h.
+
+#include "ios_host.h"
+
+#include <algorithm>
+#include <atomic>
+#include <cstdio>
+#include <cstring>
+#include <memory>
+#include <string_view>
+#include <utility>
+
+#include <OpenGLES/ES3/gl.h>
+
+#include "egl_shim.h"
+#include "gl_symbols.h"
+#include "pcm_output.h"
+#include "rb/abi/guest_log.h"
+#include "rb/audio/silent_sles.h"
+#include "rb/gfx/thunk_table.h"
+#include "rb/host/boot.h"
+#include "rb/loader/apk_assets.h"
+
+namespace rb::platform::ios {
+
+namespace {
+std::atomic<const char*> g_last_host_call{nullptr};
+std::atomic<const IosHost*> g_crash_host{nullptr};
+}
+
+const char* LastHostCall() noexcept {
+  return g_last_host_call.load(std::memory_order_relaxed);
+}
+
+void DumpRecentHostCalls(void (*emit)(const char*)) {
+  if (emit == nullptr) return;
+  const IosHost* host = g_crash_host.load(std::memory_order_acquire);
+  if (host == nullptr) return;
+  const std::uint32_t written = host->recent_calls_written();
+  const std::uint32_t count = written < IosHost::kRecentCalls ? written : IosHost::kRecentCalls;
+  char line[160];
+  for (std::uint32_t i = 0; i < count; ++i) {
+    const std::uint32_t slot = (written - count + i) % IosHost::kRecentCalls;
+    const RecentHostCall& call = host->recent_calls()[slot];
+    std::snprintf(line, sizeof line, "  %s 0x%08x 0x%08x 0x%08x 0x%08x\n",
+                  call.name != nullptr ? call.name : "?", call.arg[0], call.arg[1], call.arg[2], call.arg[3]);
+    emit(line);
+  }
+}
+
+namespace {
+
+std::string Hex(std::uint32_t v) {
+  char buf[16];
+  std::snprintf(buf, sizeof buf, "0x%x", v);
+  return buf;
+}
+
+/// A guest NUL-terminated string for a diagnostic line, bounded and refusal-free.
+std::string GuestStringOrEmpty(const rb::mem::GuestMemory& mem, std::uint32_t at) {
+  std::string out;
+  if (at == 0 || at >= mem.window_bytes()) return out;
+  for (unsigned i = 0; i < 256; ++i) {
+    char c = 0;
+    if (!mem.Read(at + i, &c, 1) || c == '\0') break;
+    out.push_back(c);
+  }
+  return out;
+}
+
+/// Calls that wait (a vsync, a context switch) and read no guest memory: run with the GGL released.
+bool Waits(const std::string& name) {
+  static const std::set<std::string> k = {"eglSwapBuffers", "eglMakeCurrent", "eglInitialize", "eglTerminate",
+                                          "eglWaitGL", "eglWaitClient", "eglWaitNative", "eglSwapInterval",
+                                          "eglCreateWindowSurface", "eglDestroySurface", "eglDestroyContext",
+                                          "glFinish", "glFlush"};
+  return k.count(name) != 0;
+}
+
+std::uint32_t GlOffsetBinding(std::string_view name) {
+  if (name == "glVertexAttribPointer" || name == "glVertexAttribIPointer" || name == "glVertexPointer" ||
+      name == "glColorPointer" || name == "glTexCoordPointer" || name == "glNormalPointer") {
+    return GL_ARRAY_BUFFER_BINDING;
+  }
+  if (name == "glDrawElements" || name == "glDrawRangeElements" || name == "glDrawElementsInstanced" ||
+      name == "glDrawElementsInstancedEXT") {
+    return GL_ELEMENT_ARRAY_BUFFER_BINDING;
+  }
+  return 0;
+}
+
+bool GlBufferBound(std::uint32_t binding) {
+  GLint buffer = 0;
+  glGetIntegerv(binding, &buffer);
+  return buffer != 0;
+}
+
+unsigned PixelBytes(GLenum format, GLenum type) {
+  switch (type) {
+    case GL_UNSIGNED_SHORT_5_6_5:
+    case GL_UNSIGNED_SHORT_4_4_4_4:
+    case GL_UNSIGNED_SHORT_5_5_5_1: return 2;
+    case GL_UNSIGNED_INT_2_10_10_10_REV:
+    case GL_UNSIGNED_INT_10F_11F_11F_REV:
+    case GL_UNSIGNED_INT_5_9_9_9_REV:
+    case GL_UNSIGNED_INT_24_8: return 4;
+    case GL_FLOAT_32_UNSIGNED_INT_24_8_REV: return 8;
+  }
+  unsigned components = 0;
+  switch (format) {
+    case GL_RED:
+    case GL_RED_INTEGER:
+    case GL_ALPHA:
+    case GL_LUMINANCE:
+    case GL_DEPTH_COMPONENT: components = 1; break;
+    case GL_RG:
+    case GL_RG_INTEGER:
+    case GL_LUMINANCE_ALPHA: components = 2; break;
+    case GL_RGB:
+    case GL_RGB_INTEGER: components = 3; break;
+    case GL_RGBA:
+    case GL_RGBA_INTEGER:
+    case 0x80e1: components = 4; break;  // GL_BGRA_EXT
+  }
+  switch (type) {
+    case GL_BYTE:
+    case GL_UNSIGNED_BYTE: return components;
+    case GL_SHORT:
+    case GL_UNSIGNED_SHORT:
+    case GL_HALF_FLOAT:
+    case 0x8d61: return 2 * components;  // GL_HALF_FLOAT_OES
+    case GL_INT:
+    case GL_UNSIGNED_INT:
+    case GL_FLOAT: return 4 * components;
+    default: return 0;
+  }
+}
+
+bool TextureUpload(bool sub_image, exec::MachineState& s, const mem::GuestMemory& memory,
+                   std::string* why) {
+  std::uint32_t tail[5];  // AAPCS32 passes arguments 5–9 on the guest stack.
+  if (!memory.Read(s.r[13], tail, sizeof tail)) {
+    *why = "texture upload arguments are not readable guest memory";
+    return false;
+  }
+  const auto width = static_cast<GLsizei>(sub_image ? tail[0] : s.r[3]);
+  const auto height = static_cast<GLsizei>(sub_image ? tail[1] : tail[0]);
+  const GLenum format = tail[2], type = tail[3];
+  const std::uint32_t address = tail[4];
+  const bool es3 = EglShim::Instance().context_version() >= 3;
+  const void* pixels = nullptr;
+  // The driver consumes client pixels synchronously. Copy through GuestMemory when an upload spans
+  // pages so Darwin's split 4 KiB guest mappings need not be adjacent in host memory.
+  thread_local std::vector<std::uint8_t> staging;
+  if (es3 && GlBufferBound(GL_PIXEL_UNPACK_BUFFER_BINDING)) {
+    pixels = reinterpret_cast<const void*>(static_cast<std::uintptr_t>(address));
+  } else if (address != 0 && width > 0 && height > 0) {
+    const auto bpp = PixelBytes(format, type);
+    GLint alignment = 4, row_length = 0, skip_rows = 0, skip_pixels = 0;
+    glGetIntegerv(GL_UNPACK_ALIGNMENT, &alignment);
+    if (es3) {
+      glGetIntegerv(GL_UNPACK_ROW_LENGTH, &row_length);
+      glGetIntegerv(GL_UNPACK_SKIP_ROWS, &skip_rows);
+      glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &skip_pixels);
+    }
+    if (bpp == 0 || alignment <= 0 || row_length < 0 || skip_rows < 0 || skip_pixels < 0) {
+      *why = "unsupported texture unpack format " + Hex(format) + " type " + Hex(type);
+      return false;
+    }
+    const auto row_bytes = std::uint64_t{bpp} * (row_length == 0 ? width : row_length);
+    const auto stride = (row_bytes + alignment - 1) / alignment * alignment;
+    const auto rows = static_cast<std::uint64_t>(skip_rows) + height - 1;
+    const auto last_row = std::uint64_t{bpp} * (static_cast<std::uint64_t>(skip_pixels) + width);
+    const auto available = address < memory.window_bytes() ? memory.window_bytes() - address : 0;
+    if (last_row > available || rows > (available - last_row) / stride) {
+      *why = "texture upload " + std::to_string(width) + "x" + std::to_string(height) +
+             " extends beyond guest memory at " + Hex(address);
+      return false;
+    }
+    const std::size_t size = static_cast<std::size_t>(rows * stride + last_row);
+    if (size <= mem::kGuestPage - (address & (mem::kGuestPage - 1)) &&
+        (memory.ProtAt(address) & mem::kRead) != 0) {
+      pixels = memory.HostForAccess(address);
+    } else {
+      staging.resize(size);
+      if (!memory.Read(address, staging.data(), size)) {
+        *why = "texture upload " + std::to_string(width) + "x" + std::to_string(height) +
+               " reads an inaccessible guest range at " + Hex(address);
+        return false;
+      }
+      pixels = staging.data();
+    }
+  }
+  if (sub_image) {
+    glTexSubImage2D(s.r[0], static_cast<GLint>(s.r[1]), static_cast<GLint>(s.r[2]),
+                    static_cast<GLint>(s.r[3]), width, height, format, type, pixels);
+  } else {
+    glTexImage2D(s.r[0], static_cast<GLint>(s.r[1]), static_cast<GLint>(s.r[2]), width,
+                 height, static_cast<GLint>(tail[1]), format, type, pixels);
+  }
+  return true;
+}
+
+}  // namespace
+
+/// One AAssetDir: the immediate children under a prefix, in central-directory order, and the guest cell
+/// the next name is copied to (AAssetDir_getNextFileName returns a pointer valid until the next call).
+struct IosHost::DirState {
+  std::vector<std::string> names;
+  std::size_t next = 0;
+  std::uint32_t buffer = 0;
+};
+
+ IosHost::~IosHost() {
+  EglShim::SetLog(nullptr);
+  g_crash_host.store(nullptr, std::memory_order_release);
+}
+
+void* IosHost::HostSymbol(const std::string& name) {
+  if (void* shim = EglShim::Symbol(name)) return shim;
+  return GlSymbol(name);
+}
+
+IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
+                       std::function<void(const std::string&)> log)
+    : p_(process), boot_(&boot), log_(std::move(log)) {
+  // The crash handler reads the call ring through this pointer; the host outlives every call it binds.
+  g_crash_host.store(this, std::memory_order_release);
+  // Context-version lines go to the app log; the sink lives as long as this host.
+  EglShim::SetLog([this](const std::string& line) {
+    if (log_) log_(line);
+  });
+  AddSpecial("glTexImage2D", [this](exec::MachineState& s, std::string* why) {
+    return TextureUpload(false, s, p_.memory(), why);
+  });
+  AddSpecial("glTexSubImage2D", [this](exec::MachineState& s, std::string* why) {
+    return TextureUpload(true, s, p_.memory(), why);
+  });
+  InstallLegacyClientArrays();
+  // glGetString/glGetStringi return a host string: copied into guest memory, as a device's driver's is not.
+  AddSpecial("glGetString", [this](exec::MachineState& s, std::string* why) {
+    using Fn = const unsigned char* (*)(unsigned);
+    static const auto f = reinterpret_cast<Fn>(HostSymbol("glGetString"));
+    if (f == nullptr) {
+      *why = "glGetString is not exported by OpenGLES.framework";
+      return false;
+    }
+    const unsigned char* text = f(s.r[0]);
+    if (text == nullptr) {
+      s.r[0] = 0;
+      return true;
+    }
+    s.r[0] = GuestString(reinterpret_cast<const char*>(text));
+    return true;
+  });
+  AddSpecial("glGetStringi", [this](exec::MachineState& s, std::string*) {
+    using Fn = const unsigned char* (*)(unsigned, unsigned);
+    static const auto f = reinterpret_cast<Fn>(HostSymbol("glGetStringi"));
+    const unsigned char* text = f != nullptr ? f(s.r[0], s.r[1]) : nullptr;
+    if (text == nullptr) {
+      s.r[0] = 0;
+      return true;
+    }
+    s.r[0] = GuestString(reinterpret_cast<const char*>(text));
+    return true;
+  });
+  // glMapBufferRange / glFlushMappedBufferRange / glUnmapBuffer: the driver's mapping is host memory the guest cannot
+  // address, so the guest gets a shadow in its own window — filled from the mapping when read access was asked for,
+  // written back on flush and on unmap when write access was requested. Record mappings by the driver's
+  // pointer: rebinding a target may select a different buffer, and a shared buffer may use another target.
+  struct GlMap { std::uint32_t guest, mapped, len, access; };
+  auto maps = std::make_shared<std::map<void*, GlMap>>();
+  using MapBuffer = void* (*)(GLenum, GLintptr, GLsizeiptr, GLbitfield);
+  using GetBufferPointer = void (*)(GLenum, GLenum, void**);
+  using UnmapBuffer = GLboolean (*)(GLenum);
+  const auto map_buffer = reinterpret_cast<MapBuffer>(GlSymbol("glMapBufferRange"));
+  const auto get_buffer_pointer = reinterpret_cast<GetBufferPointer>(GlSymbol("glGetBufferPointerv"));
+  const auto unmap_buffer = reinterpret_cast<UnmapBuffer>(GlSymbol("glUnmapBuffer"));
+  const auto bound_mapping = [get_buffer_pointer](GLenum target) -> void* {
+    void* host = nullptr;
+    if (get_buffer_pointer) get_buffer_pointer(target, GL_BUFFER_MAP_POINTER, &host);
+    return host;
+  };
+  AddSpecial("glMapBufferRange", [this, maps, map_buffer, get_buffer_pointer, unmap_buffer](exec::MachineState& s, std::string* why) {
+    if (!map_buffer || !get_buffer_pointer || !unmap_buffer) {
+      *why = "this device has no GLES buffer mapping functions";
+      return false;
+    }
+    const std::uint32_t target = s.r[0], access = s.r[3];
+    const GLintptr off = static_cast<std::int32_t>(s.r[1]);
+    const GLsizeiptr len = static_cast<std::int32_t>(s.r[2]);
+    void* host = map_buffer(target, off, len, access);
+    if (host == nullptr) { s.r[0] = 0; return true; }  // the GL error is the driver's to report
+    if (len <= 0) {
+      unmap_buffer(target);
+      s.r[0] = 0;
+      return true;
+    }
+    std::string e;
+    if (const auto stale = maps->find(host); stale != maps->end()) {
+      // A buffer deleted without an explicit unmap may have released this driver address.
+      p_.memory().Unmap(stale->second.guest, stale->second.mapped, &e);
+      maps->erase(stale);
+    }
+    std::uint32_t mapped = static_cast<std::uint32_t>((static_cast<std::size_t>(len) + mem::kGuestPage - 1) & ~std::size_t{mem::kGuestPage - 1});
+    const std::uint32_t guest = p_.MapFree(mapped, mem::kRead | mem::kWrite, &e);
+    if (guest == 0 || ((access & GL_MAP_READ_BIT) != 0 && !p_.memory().Write(guest, host, static_cast<std::size_t>(len)))) {
+      if (guest != 0) p_.memory().Unmap(guest, mapped, &e);
+      unmap_buffer(target);
+      *why = "glMapBufferRange: cannot stage " + std::to_string(len) + " bytes in guest memory: " + e;
+      return false;
+    }
+    (*maps)[host] = GlMap{guest, mapped, static_cast<std::uint32_t>(len), access};
+    s.r[0] = guest;
+    return true;
+  });
+  AddSpecial("glFlushMappedBufferRange", [this, maps, bound_mapping](exec::MachineState& s, std::string* why) {
+    using Fn = void (*)(GLenum, GLintptr, GLsizeiptr);
+    static const auto f = reinterpret_cast<Fn>(GlSymbol("glFlushMappedBufferRange"));
+    if (f == nullptr) { *why = "OpenGLES.framework has no glFlushMappedBufferRange"; return false; }
+    const GLintptr off = static_cast<std::int32_t>(s.r[1]);
+    const GLsizeiptr len = static_cast<std::int32_t>(s.r[2]);
+    if (!maps->empty() && off >= 0 && len > 0) {
+      void* host = bound_mapping(s.r[0]);
+      const auto it = maps->find(host);
+      if (it != maps->end() && (it->second.access & GL_MAP_FLUSH_EXPLICIT_BIT) != 0 &&
+          static_cast<std::uint64_t>(off + len) <= it->second.len &&
+          !p_.memory().Read(it->second.guest + static_cast<std::uint32_t>(off), static_cast<char*>(host) + off,
+                            static_cast<std::size_t>(len))) {
+        *why = "glFlushMappedBufferRange: guest shadow is unreadable";
+        return false;
+      }
+    }
+    f(s.r[0], off, len);
+    return true;
+  });
+  AddSpecial("glUnmapBuffer", [this, maps, bound_mapping, unmap_buffer](exec::MachineState& s, std::string* why) {
+    if (!unmap_buffer) { *why = "OpenGLES.framework has no glUnmapBuffer"; return false; }
+    void* host = maps->empty() ? nullptr : bound_mapping(s.r[0]);
+    const auto it = maps->find(host);
+    bool copied = true;
+    if (it != maps->end()) {
+      const GlMap m = it->second;
+      if ((m.access & GL_MAP_WRITE_BIT) != 0 && (m.access & GL_MAP_FLUSH_EXPLICIT_BIT) == 0) {
+        copied = p_.memory().Read(m.guest, host, m.len);
+      }
+      std::string e;
+      p_.memory().Unmap(m.guest, m.mapped, &e);
+      maps->erase(it);
+    }
+    s.r[0] = unmap_buffer(s.r[0]);
+    if (!copied) *why = "glUnmapBuffer: guest shadow is unreadable";
+    return copied;
+  });
+  AddSpecial("glGetBufferPointerv", [this, maps, get_buffer_pointer](exec::MachineState& s, std::string* why) {
+    if (!get_buffer_pointer) { *why = "OpenGLES.framework has no glGetBufferPointerv"; return false; }
+    // Preserve the guest's output on an invalid GL query.
+    void* const untouched = &s;
+    void* host = untouched;
+    get_buffer_pointer(s.r[0], s.r[1], &host);
+    if (host == untouched) return true;
+    const auto it = maps->find(host);
+    const std::uint32_t guest = it == maps->end() ? 0 : it->second.guest;
+    if (p_.memory().Write(s.r[2], &guest, sizeof guest)) return true;
+    *why = "glGetBufferPointerv: result is not writable guest memory";
+    return false;
+  });
+  const auto write_gl_pointer = [this](std::uint32_t out, void* host, std::string* why) {
+    std::uint32_t guest = 0;
+    const auto value = reinterpret_cast<std::uintptr_t>(host);
+    if (host != nullptr && !p_.memory().Translate(host, &guest) && value <= UINT32_MAX) {
+      guest = static_cast<std::uint32_t>(value);
+    }
+    if (p_.memory().Write(out, &guest, sizeof guest)) return true;
+    *why = "GL pointer result is not writable guest memory";
+    return false;
+  };
+  AddSpecial("glGetVertexAttribPointerv", [write_gl_pointer](exec::MachineState& s, std::string* why) {
+    using Fn = void (*)(unsigned, unsigned, void**);
+    static const auto f = reinterpret_cast<Fn>(GlSymbol("glGetVertexAttribPointerv"));
+    if (!f) { *why = "OpenGLES.framework has no glGetVertexAttribPointerv"; return false; }
+    void* host = &s;
+    f(s.r[0], s.r[1], &host);
+    return host == &s || write_gl_pointer(s.r[2], host, why);
+  });
+  AddSpecial("glGetPointerv", [write_gl_pointer](exec::MachineState& s, std::string* why) {
+    using Fn = void (*)(unsigned, void**);
+    static const auto f = reinterpret_cast<Fn>(GlSymbol("glGetPointerv"));
+    if (!f) { *why = "OpenGLES.framework has no glGetPointerv"; return false; }
+    void* host = &s;
+    f(s.r[0], &host);
+    return host == &s || write_gl_pointer(s.r[1], host, why);
+  });
+  AddSpecial("eglQueryString", [this](exec::MachineState& s, std::string* why) {
+    void* dpy = nullptr;
+    if (!handles_.Get(s.r[0], &dpy)) {
+      *why = "eglQueryString: display " + Hex(s.r[0]) + " was never issued";
+      return false;
+    }
+    const char* host = EglShim::Instance().QueryString(dpy, static_cast<std::int32_t>(s.r[1]));
+    s.r[0] = host == nullptr ? 0u : GuestString(host);
+    return true;  // 0 is EGL's own answer for a bad name; eglGetError says why
+  });
+  // eglGetProcAddress: an address the guest can call — this registry's slot for that name, 0 if none.
+  AddSpecial("eglGetProcAddress", [this](exec::MachineState& s, std::string*) {
+    const std::string name = GuestStringOrEmpty(p_.memory(), s.r[0]);
+    const auto at = ResolveDynamic(name);
+    if (!at && !name.empty()) {
+      if (FirstRefusal("proc:" + name) && log_) {
+        log_("egl: eglGetProcAddress(\"" + name + "\") = NULL (no iOS implementation)");
+      }
+    }
+    s.r[0] = at ? *at : 0u;
+    return true;
+  });
+  // eglChooseConfig / eglGetConfigs: the configs are host objects, so each becomes a handle the guest passes back.
+  const auto configs = [this](const char* which, bool choose) {
+    return [this, which, choose](exec::MachineState& s, std::string* why) {
+      void* dpy = nullptr;
+      if (!handles_.Get(s.r[0], &dpy)) {
+        *why = std::string{which} + ": display " + Hex(s.r[0]) + " was never issued";
+        return false;
+      }
+      // choose: (dpy, attribs, configs, size, num_config on the stack); get: (dpy, configs, size, num_config)
+      const std::uint32_t attribs = choose ? s.r[1] : 0;
+      const std::uint32_t out = choose ? s.r[2] : s.r[1];
+      const auto size = static_cast<std::int32_t>(choose ? s.r[3] : s.r[2]);
+      std::uint32_t num = choose ? 0u : s.r[3];
+      if (choose && !p_.memory().Read(s.r[13], &num, 4)) {
+        *why = std::string{which} + ": the num_config argument on the stack is unreadable";
+        return false;
+      }
+      void* host = nullptr;
+      std::int32_t n = 0;
+      std::uint32_t ok = 0;
+      if (choose) {
+        using Fn = std::uint32_t (*)(void*, const std::int32_t*, void**, std::int32_t, std::int32_t*);
+        const auto f = reinterpret_cast<Fn>(HostSymbol(which));
+        std::array<std::int32_t, 129> attributes;
+        if (!ReadEglAttributes(attribs, attributes, why)) return false;
+        ok = f != nullptr ? f(dpy, attribs != 0 ? attributes.data() : nullptr,
+                              out != 0 ? &host : nullptr, std::min(size, 1), num != 0 ? &n : nullptr) : 0u;
+      } else {
+        using Fn = std::uint32_t (*)(void*, void**, std::int32_t, std::int32_t*);
+        const auto f = reinterpret_cast<Fn>(HostSymbol(which));
+        ok = f != nullptr ? f(dpy, out != 0 ? &host : nullptr, std::min(size, 1), num != 0 ? &n : nullptr) : 0u;
+      }
+      if (ok != 0 && out != 0 && host != nullptr) {
+        const std::uint32_t h = handles_.Put(host);
+        if (!p_.memory().Write(out, &h, sizeof h)) {
+          *why = std::string(which) + ": could not write the config handle";
+          return false;
+        }
+      }
+      if (ok != 0 && num != 0 && !p_.memory().Write(num, &n, sizeof n)) {
+        *why = std::string(which) + ": could not write the config count";
+        return false;
+      }
+      s.r[0] = ok;
+      return true;
+    };
+  };
+  AddSpecial("eglChooseConfig", configs("eglChooseConfig", true));
+  AddSpecial("eglGetConfigs", configs("eglGetConfigs", false));
+  AddSpecial("eglCreateContext", [this](exec::MachineState& s, std::string* why) {
+    void* display = nullptr;
+    void* config = nullptr;
+    void* share = nullptr;
+    if (!handles_.Get(s.r[0], &display) || !handles_.Get(s.r[1], &config) || !handles_.Get(s.r[2], &share)) {
+      *why = "eglCreateContext: unknown EGL handle";
+      return false;
+    }
+    std::array<std::int32_t, 129> attributes;
+    if (!ReadEglAttributes(s.r[3], attributes, why)) return false;
+    s.r[0] = handles_.Put(EglShim::Instance().CreateContext(
+        display, config, share, s.r[3] != 0 ? attributes.data() : nullptr));
+    return true;
+  });
+
+  // glShaderSource(shader, count, const char* const* strings, const GLint* lengths): an array of guest pointers.
+  AddSpecial("glShaderSource", [this](exec::MachineState& s, std::string* why) {
+    const std::uint32_t shader = s.r[0], count = s.r[1], strings = s.r[2], lengths = s.r[3];
+    if (count > 4096) {
+      *why = "glShaderSource: count " + std::to_string(count) + " is absurd";
+      return false;
+    }
+    if (EglShim::Instance().GetCurrentContext() == nullptr) return true;
+    const auto& mem = p_.memory();
+    std::vector<std::uint32_t> addresses(count);
+    std::vector<int> lens(count, -1);
+    if (count != 0 && (!mem.Read(strings, addresses.data(), addresses.size() * sizeof addresses[0]) ||
+        (lengths != 0 && !mem.Read(lengths, lens.data(), lens.size() * sizeof lens[0])))) {
+      *why = "glShaderSource: unreadable guest string or length array";
+      return false;
+    }
+    constexpr std::size_t kMaxSources = 8u << 20;
+    std::size_t remaining = kMaxSources;
+    std::vector<std::string> source(count);
+    std::vector<const char*> ptrs(count);
+    std::array<char, mem::kGuestPage> page;
+    for (std::uint32_t i = 0; i < count; ++i) {
+      std::uint64_t at = addresses[i];
+      auto& text = source[i];
+      if (lens[i] >= 0) {
+        const auto size = static_cast<std::size_t>(lens[i]);
+        if (size > remaining || (size != 0 && at == 0)) {
+          *why = "glShaderSource: invalid length or pointer for source " + std::to_string(i);
+          return false;
+        }
+        text.resize(size);
+        if (size != 0 && !mem.Read(addresses[i], text.data(), size)) {
+          *why = "glShaderSource: unreadable explicit source " + std::to_string(i);
+          return false;
+        }
+      } else {
+        bool terminated = false;
+        while (at != 0 && at < mem.window_bytes() && text.size() < remaining) {
+          const auto n = std::min<std::size_t>(mem::kGuestPage - (at & (mem::kGuestPage - 1)),
+                                               remaining - text.size());
+          if (!mem.Read(static_cast<std::uint32_t>(at), page.data(), n)) break;
+          const auto end = std::find(page.begin(), page.begin() + n, '\0');
+          text.append(page.begin(), end);
+          if (end != page.begin() + n) { terminated = true; break; }
+          at += n;
+        }
+        if (!terminated) {
+          *why = "glShaderSource: unreadable or unterminated guest source " + std::to_string(i);
+          return false;
+        }
+      }
+      remaining -= text.size();
+      ptrs[i] = text.c_str();
+    }
+    using Fn = void (*)(unsigned, int, const char* const*, const int*);
+    const auto f = reinterpret_cast<Fn>(HostSymbol("glShaderSource"));
+    if (f == nullptr) {
+      *why = "glShaderSource is not exported by OpenGLES.framework";
+      return false;
+    }
+    f(shader, static_cast<int>(count), ptrs.data(), lens.data());
+    return true;
+  });
+
+  // ---- framebuffer 0. A device's default framebuffer is the window surface; EAGL has no such object,
+  // and the shim's drawable is its own FBO. The game (Horde3D) binds 0 to return to the screen, so 0 is
+  // answered with that FBO and GL_FRAMEBUFFER_BINDING reports 0 back.
+  AddSpecial("glBindFramebuffer", [this](exec::MachineState& s, std::string* why) {
+    const std::uint32_t fbo = s.r[1];
+    if (fbo == 0) {
+      return EglShim::Instance().BindDrawable(why, s.r[0]);
+    }
+    using Fn = void (*)(unsigned, unsigned);
+    static const auto f = reinterpret_cast<Fn>(HostSymbol("glBindFramebuffer"));
+    if (f == nullptr) {
+      *why = "glBindFramebuffer is not exported by OpenGLES.framework";
+      return false;
+    }
+    f(static_cast<unsigned>(s.r[0]), fbo);
+    return true;
+  });
+  AddSpecial("glBindFramebufferOES", [this](exec::MachineState& s, std::string* why) {
+    const std::uint32_t fbo = s.r[1];
+    if (fbo == 0) {
+      return EglShim::Instance().BindDrawable(why, s.r[0]);
+    }
+    using Fn = void (*)(unsigned, unsigned);
+    static const auto f = reinterpret_cast<Fn>(HostSymbol("glBindFramebufferOES"));
+    if (f == nullptr) {
+      *why = "glBindFramebufferOES is not exported by OpenGLES.framework";
+      return false;
+    }
+    f(static_cast<unsigned>(s.r[0]), fbo);
+    return true;
+  });
+  AddSpecial("glGetIntegerv", [this](exec::MachineState& s, std::string* why) {
+    const std::uint32_t pname = s.r[0];
+    int* out = s.r[1] == 0 ? nullptr : static_cast<int*>(p_.memory().HostForAccess(s.r[1]));
+    if (out == nullptr) {
+      *why = "glGetIntegerv: the out pointer is not guest memory";
+      return false;
+    }
+    using Fn = void (*)(unsigned, int*);
+    static const auto f = reinterpret_cast<Fn>(GlSymbol("glGetIntegerv"));
+    if (f == nullptr) {
+      *why = "glGetIntegerv is not exported by OpenGLES.framework";
+      return false;
+    }
+    f(pname, out);
+    const auto& egl = EglShim::Instance();
+    if ((pname == GL_FRAMEBUFFER_BINDING || (pname == GL_READ_FRAMEBUFFER_BINDING && egl.context_version() == 3)) &&
+        static_cast<std::uint32_t>(*out) == egl.drawable_framebuffer()) *out = 0;
+    return true;
+  });
+
+  // ---- liblog. A game's own log lines become the boot's log, formatted on the host (shared with Android).
+  AddSpecial("__android_log_write", [this](exec::MachineState& s, std::string*) {
+    const auto& mem = p_.memory();
+    EmitLog(static_cast<int>(s.r[0]), abi::GuestStringOrEmpty(mem, s.r[1]), abi::GuestStringOrEmpty(mem, s.r[2]));
+    s.r[0] = 1;  // liblog answers a positive byte count; 1 is truthful for "written"
+    return true;
+  });
+  AddSpecial("__android_log_print", [this](exec::MachineState& s, std::string*) {
+    const auto& mem = p_.memory();
+    abi::GuestVarargs va;
+    va.mem = &mem;
+    va.reg_free = true;  // the fourth argument is in r3, then the stack
+    va.reg = s.r[3];
+    va.at = s.r[13];
+    EmitLog(static_cast<int>(s.r[0]), abi::GuestStringOrEmpty(mem, s.r[1]), abi::GuestFormat(mem, s.r[2], va));
+    s.r[0] = 1;
+    return true;
+  });
+  AddSpecial("__android_log_vprint", [this](exec::MachineState& s, std::string*) {
+    const auto& mem = p_.memory();
+    abi::GuestVarargs va;
+    va.mem = &mem;
+    va.at = s.r[3];  // AAPCS va_list: one pointer into the argument area
+    EmitLog(static_cast<int>(s.r[0]), abi::GuestStringOrEmpty(mem, s.r[1]), abi::GuestFormat(mem, s.r[2], va));
+    s.r[0] = 1;
+    return true;
+  });
+
+  // ---- libandroid's asset API, over the APK's entries (rb::loader::ApkArchive). A game asks Java for its
+  // AssetManager and passes the object to AAssetManager_fromJava; there is one APK per process, so the object
+  // is only checked for being a known reference and the answer is this host's manager.
+  AddSpecial("AAssetManager_fromJava", [this](exec::MachineState& s, std::string*) {
+    s.r[0] = handles_.Put(&asset_manager_marker_);
+    if (!manager_logged_) {
+      manager_logged_ = true;
+      if (log_) log_("assets: manager requested by the guest");
+    }
+    return true;
+  });
+  AddSpecial("AAssetManager_open", [this](exec::MachineState& s, std::string* why) {
+    void* manager = nullptr;
+    if (!handles_.Get(s.r[0], &manager)) {
+      *why = "AAssetManager_open: manager " + Hex(s.r[0]) + " was never issued";
+      return false;
+    }
+    if (!archive_) {
+      *why = "AAssetManager_open: no APK is open";
+      return false;
+    }
+    std::string name = GuestStringOrEmpty(p_.memory(), s.r[1]);
+    if (!name.empty() && name.front() == '/') name.erase(0, 1);
+    if (name.rfind("assets/", 0) != 0) name = "assets/" + name;
+    std::string e;
+    auto file = archive_->OpenFile(name, &e);
+    if (!file) {
+      s.r[0] = 0;  // AAssetManager_open answers NULL, as on a device
+      if (refused_.insert("asset:" + name).second && log_) log_("assets: open(\"" + name + "\") = NULL: " + e);
+      return true;
+    }
+    const std::uint32_t handle = handles_.Put(file.get());
+    if (asset_logs_ < 40 && log_) {
+      ++asset_logs_;
+      log_("assets: open(\"" + name + "\") = " + std::to_string(file->Length()) + " bytes");
+    }
+    {
+      std::shared_ptr<loader::ApkFile> owned = std::move(file);
+      std::lock_guard<std::mutex> lk(assets_mu_);
+      assets_[owned.get()] = std::move(owned);
+    }
+    s.r[0] = handle;
+    return true;
+  });
+  // The entry must be taken under the map's lock, but the returned reference is what keeps the file
+  // alive after the lock drops: a close on another thread removes the map entry, and the object dies
+  // only when the last read that borrowed it returns.
+  const auto asset = [this](std::uint32_t handle, void** host, std::string* why,
+                            const char* what) -> std::shared_ptr<loader::ApkFile> {
+    if (!handles_.Get(handle, host)) {
+      *why = std::string{what} + ": asset " + Hex(handle) + " was never issued or was closed";
+      return nullptr;
+    }
+    auto file = FindAsset(*host);
+    if (!file) {
+      *why = std::string{what} + ": asset " + Hex(handle) + " was closed while in use";
+      return nullptr;
+    }
+    return file;
+  };
+  AddSpecial("AAsset_read", [this, asset](exec::MachineState& s, std::string* why) {
+    void* host = nullptr;
+    auto file = asset(s.r[0], &host, why, "AAsset_read");
+    if (!file) return false;
+    const std::uint32_t dst = s.r[1];
+    const auto got = file->ReadTo(s.r[2], [this, dst](auto bytes) {
+      return p_.memory().Write(dst, bytes.data(), bytes.size());
+    });
+    if (got < 0 && FirstRefusal("AAsset_read destination") && log_) {
+      log_("assets: AAsset_read could not write to guest address " + Hex(dst) +
+           " (requested " + std::to_string(s.r[2]) + " bytes)");
+    }
+    s.r[0] = static_cast<std::uint32_t>(got);
+    return true;
+  });
+  AddSpecial("AAsset_getLength", [this, asset](exec::MachineState& s, std::string* why) {
+    void* host = nullptr;
+    auto file = asset(s.r[0], &host, why, "AAsset_getLength");
+    if (!file) return false;
+    s.r[0] = static_cast<std::uint32_t>(file->Length());
+    return true;
+  });
+  AddSpecial("AAsset_getRemainingLength", [this, asset](exec::MachineState& s, std::string* why) {
+    void* host = nullptr;
+    auto file = asset(s.r[0], &host, why, "AAsset_getRemainingLength");
+    if (!file) return false;
+    s.r[0] = static_cast<std::uint32_t>(file->Length() - file->Position());
+    return true;
+  });
+  AddSpecial("AAsset_seek", [this, asset](exec::MachineState& s, std::string* why) {
+    void* host = nullptr;
+    auto file = asset(s.r[0], &host, why, "AAsset_seek");
+    if (!file) return false;
+    const auto at = file->Seek(static_cast<std::int32_t>(s.r[1]), static_cast<int>(s.r[2]));
+    s.r[0] = static_cast<std::uint32_t>(static_cast<std::int32_t>(at));
+    return true;
+  });
+  AddSpecial("AAsset_close", [this](exec::MachineState& s, std::string*) {
+    void* host = nullptr;
+    if (handles_.Get(s.r[0], &host)) {
+      handles_.Forget(host);
+      std::lock_guard<std::mutex> lk(assets_mu_);
+      assets_.erase(static_cast<loader::ApkFile*>(host));
+    }
+    return true;
+  });
+  AddSpecial("AAsset_isAllocated", [](exec::MachineState& s, std::string*) {
+    s.r[0] = 1;
+    return true;
+  });
+  // Directory listing over an APK needs a per-manager cursor and a name filter; until it lands, answering
+  // "no directory" makes an engine fall back to its own file list rather than fail.
+  AddSpecial("AAssetManager_openDir", [this](exec::MachineState& s, std::string*) {
+    if (!archive_) {
+      s.r[0] = 0;
+      return true;
+    }
+    std::string dir = GuestStringOrEmpty(p_.memory(), s.r[1]);
+    if (!dir.empty() && dir.front() == '/') dir.erase(0, 1);
+    if (dir.rfind("assets/", 0) != 0) dir = "assets/" + dir;
+    if (!dir.empty() && dir.back() != '/') dir.push_back('/');
+    auto state = std::make_unique<DirState>();
+    std::set<std::string> seen;
+    for (const std::string& name : archive_->Names()) {
+      if (name.size() <= dir.size() || name.compare(0, dir.size(), dir) != 0) continue;
+      const std::string rest = name.substr(dir.size());
+      const std::string child = rest.substr(0, rest.find('/'));
+      if (!child.empty() && seen.insert(child).second) state->names.push_back(child);
+    }
+    const std::uint32_t handle = handles_.Put(state.get());
+    if (asset_logs_ < 40 && log_) {
+      ++asset_logs_;
+      log_("assets: openDir(\"" + dir + "\") = " + std::to_string(state->names.size()) + " entr(y|ies)");
+    }
+    dirs_[handle] = std::move(state);
+    s.r[0] = handle;
+    return true;
+  });
+  AddSpecial("AAssetDir_getNextFileName", [this](exec::MachineState& s, std::string*) {
+    const auto it = dirs_.find(s.r[0]);
+    if (it == dirs_.end() || it->second->next >= it->second->names.size()) {
+      s.r[0] = 0;
+      return true;
+    }
+    DirState& d = *it->second;
+    const std::string& name = d.names[d.next++];
+    if (d.buffer == 0) {
+      std::string e;
+      d.buffer = p_.MapFree(256, mem::kRead | mem::kWrite, &e);
+      if (d.buffer == 0) {
+        if (log_) log_("assets: no guest memory for a directory name: " + e);
+        s.r[0] = 0;
+        return true;
+      }
+    }
+    p_.memory().Write(d.buffer, name.c_str(), name.size() + 1);
+    s.r[0] = d.buffer;
+    return true;
+  });
+  AddSpecial("AAssetDir_close", [this](exec::MachineState& s, std::string*) {
+    const auto it = dirs_.find(s.r[0]);
+    if (it != dirs_.end()) {
+      handles_.Forget(it->second.get());
+      dirs_.erase(it);
+    }
+    return true;
+  });
+
+  // OpenSL ES buffer-queue players publish their PCM through iOS AudioQueue.
+  {
+    rb::audio::SilentSlesHost h;
+    h.mem = &p_.memory();
+    h.alloc = [this](std::size_t bytes) -> std::uint32_t {
+      std::string e;
+      return p_.MapFree(static_cast<std::uint32_t>(bytes), mem::kRead | mem::kWrite, &e);
+    };
+    h.bind = [this](const std::string& name, rb::audio::SilentSlesHost::Method fn) -> std::uint32_t {
+      AddSpecial(name, std::move(fn));
+      const auto slot = Resolve(name);
+      return slot ? *slot : 0u;
+    };
+    h.data_symbol = [this](const std::string& name, std::uint32_t at) { AddDataSymbol(name, at); };
+    h.log = log_;
+    h.open_pcm = [this](audio::PcmFormat format) { return OpenPcmOutput(format, log_); };
+    sles_ = std::make_unique<rb::audio::SilentSles>(std::move(h));
+  }
+
+  // ---- the dynamic-linker interface libc and the game import. The boot answers the game's own
+  // libraries from the APK; anything else is NULL, which callers that probe (bionic's netd init) check.
+  AddSpecial("dlopen", [this](exec::MachineState& s, std::string*) {
+    const std::string path = GuestStringOrEmpty(p_.memory(), s.r[0]);
+    std::string why;
+    const std::uint32_t handle = boot_ != nullptr ? boot_->DlOpen(path, &why) : 0u;
+    if (handle == 0 && !path.empty() && refused_.insert("dlopen:" + path).second && log_) {
+      log_("dl: dlopen(\"" + path + "\") = NULL: " + (why.empty() ? std::string{"not provided"} : why));
+    }
+    s.r[0] = handle;
+    return true;
+  });
+  AddSpecial("android_dlopen_ext", [this](exec::MachineState& s, std::string*) {
+    // (path, flags, const android_dlextinfo*): the extinfo is ignored — the libraries live in the APK.
+    const std::string path = GuestStringOrEmpty(p_.memory(), s.r[0]);
+    std::string why;
+    const std::uint32_t handle = boot_ != nullptr ? boot_->DlOpen(path, &why) : 0u;
+    if (handle == 0 && !path.empty() && refused_.insert("dlopen:" + path).second && log_) {
+      log_("dl: android_dlopen_ext(\"" + path + "\") = NULL: " + (why.empty() ? std::string{"not provided"} : why));
+    }
+    s.r[0] = handle;
+    return true;
+  });
+  AddSpecial("dlsym", [this](exec::MachineState& s, std::string*) {
+    const std::string name = GuestStringOrEmpty(p_.memory(), s.r[1]);
+    const auto at = boot_ != nullptr ? boot_->DlSym(s.r[0], name) : std::nullopt;
+    s.r[0] = at ? *at : 0u;
+    return true;
+  });
+  AddSpecial("dlclose", [](exec::MachineState& s, std::string*) { s.r[0] = 0; return true; });
+  AddSpecial("dladdr", [](exec::MachineState& s, std::string*) { s.r[0] = 0; return true; });
+  AddSpecial("dlerror", [](exec::MachineState& s, std::string*) { s.r[0] = 0; return true; });
+  AddSpecial("dl_unwind_find_exidx", [this](exec::MachineState& s, std::string* why) {
+    // `_Unwind_Ptr dl_unwind_find_exidx(_Unwind_Ptr pc, int* pcount)`: the module whose range holds pc
+    // gives its `.ARM.exidx`; no module, NULL and 0. Without this every C++ throw terminates.
+    const std::uint32_t pc = s.r[0] & ~1u;
+    std::uint32_t at = 0, count = 0;
+    for (const auto& m : p_.modules()) {
+      if (pc >= m->base && pc - m->base < m->extent && m->exidx != 0) {
+        at = m->exidx;
+        count = m->exidx_count;
+        break;
+      }
+    }
+    if (s.r[1] != 0 && !p_.memory().Write(s.r[1], &count, 4)) {
+      if (why != nullptr) *why = "dl_unwind_find_exidx: pcount is not writable";
+      return false;
+    }
+    s.r[0] = at;
+    return true;
+  });
+  AddSpecial("android_get_application_target_sdk_version", [](exec::MachineState& s, std::string*) {
+    s.r[0] = 34;
+    return true;
+  });
+  for (const char* name : {"__loader_add_thread_local_dtor", "__loader_remove_thread_local_dtor",
+                           "__loader_android_get_exported_namespace"}) {
+    AddSpecial(name, [](exec::MachineState& s, std::string*) { s.r[0] = 0; return true; });
+  }
+}
+
+void IosHost::PumpAudio() {
+  runtime::Ggl::Held lock(p_.ggl());
+  sles_->Pump([this](std::uint32_t fn, std::uint32_t queue, std::uint32_t context) {
+    exec::RunResult result{};
+    p_.abi().CallGuest(fn, {abi::Value32::Ptr(queue), abi::Value32::Ptr(context)},
+                       abi::Shorty::For("VII"), 10000000, &result);
+    if (result.reason != exec::StopReason::Returned && FirstRefusal("audio callback") && log_) {
+      log_("audio: OpenSL queue callback stopped: " + result.detail);
+    }
+  });
+}
+
+void IosHost::InstallLegacyClientArrays() {
+  using Pointer = void (*)(GLint, GLenum, GLsizei, const void*);
+  using NormalPointer = void (*)(GLenum, GLsizei, const void*);
+  using ClientTexture = void (*)(GLenum);
+  struct Array {
+    std::string name;
+    void* method = nullptr;
+    unsigned width = 0;
+    GLenum type = 0;
+    unsigned stride = 0;
+    std::uint32_t address = 0;
+    const void* direct_host = nullptr;
+    std::vector<std::uint8_t> storage;
+  };
+  struct State {
+    std::map<std::pair<GLenum, GLenum>, Array> arrays;
+    std::vector<std::pair<GLenum, Array*>> staged;
+    GLenum texture = GL_TEXTURE0;
+  };
+  const auto state = std::make_shared<State>();
+  const auto apply = [](const Array& array, const void* data) {
+    if (array.name == "glNormalPointer") {
+      reinterpret_cast<NormalPointer>(array.method)(array.type, array.stride, data);
+    } else {
+      reinterpret_cast<Pointer>(array.method)(array.width, array.type, array.stride, data);
+    }
+  };
+  for (const auto& [name, kind] : {std::pair{"glVertexPointer", 0x8074u}, {"glNormalPointer", 0x8075u},
+                                  {"glColorPointer", 0x8076u}, {"glTexCoordPointer", 0x8078u}}) {
+    void* const method = HostSymbol(name);
+    if (method == nullptr) continue;
+    AddSpecial(name, [this, state, apply, name, kind, method](exec::MachineState& s, std::string*) {
+      const bool normal = kind == 0x8075;
+      const auto key = std::make_pair(kind, kind == 0x8078 ? state->texture : 0u);
+      auto& array = state->arrays[key];
+      array.name = name;
+      array.method = method;
+      array.width = normal ? 3 : s.r[0];
+      array.type = s.r[normal ? 0 : 1];
+      array.stride = s.r[normal ? 1 : 2];
+      const auto ptr = s.r[normal ? 2 : 3];
+      const bool vbo = GlBufferBound(GL_ARRAY_BUFFER_BINDING);
+      array.address = vbo ? 0 : ptr;
+      array.direct_host = vbo ? reinterpret_cast<const void*>(static_cast<std::uintptr_t>(ptr))
+                              : p_.memory().HostForAccess(ptr);
+      apply(array, array.direct_host);
+      return true;
+    });
+  }
+  const auto client_texture = reinterpret_cast<ClientTexture>(HostSymbol("glClientActiveTexture"));
+  if (client_texture) {
+    AddSpecial("glClientActiveTexture", [state, client_texture](exec::MachineState& s, std::string*) {
+      client_texture(s.r[0]);
+      if (s.r[0] >= GL_TEXTURE0 && s.r[0] < GL_TEXTURE0 + 32) state->texture = s.r[0];
+      return true;
+    });
+  }
+  AddSpecial("glDrawArrays", [this, state, apply, client_texture](exec::MachineState& s, std::string* why) {
+    const auto first = static_cast<GLint>(s.r[1]);
+    const auto count = static_cast<GLsizei>(s.r[2]);
+    if (EglShim::Instance().context_version() != 1 || state->arrays.empty() || first < 0 || count <= 0) {
+      glDrawArrays(s.r[0], first, count);
+      return true;
+    }
+    auto& staged = state->staged;
+    staged.clear();
+    for (auto& [key, array] : state->arrays) {
+      if (array.address == 0) continue;
+      if (key.second && client_texture) client_texture(key.second);
+      GLboolean enabled = GL_FALSE;
+      glGetBooleanv(key.first, &enabled);
+      if (!enabled) continue;
+      const unsigned scalar = array.type == GL_BYTE || array.type == GL_UNSIGNED_BYTE ? 1 :
+                              array.type == GL_SHORT || array.type == GL_UNSIGNED_SHORT ? 2 : 4;
+      if (array.width == 0 || array.width > 4) continue;
+      const auto stride = array.stride ? array.stride : array.width * scalar;
+      const auto start = std::uint64_t{stride} * first;
+      const auto end = std::uint64_t{stride} * (std::uint64_t{static_cast<unsigned>(first)} + count - 1) +
+                       array.width * scalar;
+      const auto available = p_.memory().window_bytes();
+      if (array.address >= available || end > available - array.address || end > (32u << 20)) {
+        if (client_texture) client_texture(state->texture);
+        *why = "GLES1 client array outside guest memory for " + array.name;
+        return false;
+      }
+      const auto& memory = p_.memory();
+      if (end <= mem::kGuestPage - (array.address & (mem::kGuestPage - 1)) &&
+          (memory.ProtAt(array.address) & mem::kRead) &&
+          memory.HostForAccess(array.address) == array.direct_host) continue;
+      array.storage.resize(static_cast<std::size_t>(end));
+      if (!memory.Read(array.address + static_cast<std::uint32_t>(start),
+                           array.storage.data() + start, static_cast<std::size_t>(end - start))) {
+        if (client_texture) client_texture(state->texture);
+        *why = "GLES1 client array is unreadable for " + array.name;
+        return false;
+      }
+      staged.emplace_back(key.second, &array);
+    }
+    GLint original = 0;
+    if (!staged.empty()) {
+      glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &original);
+      if (original != 0) glBindBuffer(GL_ARRAY_BUFFER, 0);
+      for (const auto& [unit, array] : staged) {
+        if (unit && client_texture) client_texture(unit);
+        apply(*array, array->storage.data());
+      }
+    }
+    if (client_texture) client_texture(state->texture);
+    glDrawArrays(s.r[0], first, count);
+    for (const auto& [unit, array] : staged) {
+      if (unit && client_texture) client_texture(unit);
+      apply(*array, array->direct_host);
+    }
+    if (original != 0) glBindBuffer(GL_ARRAY_BUFFER, static_cast<GLuint>(original));
+    if (!staged.empty() && client_texture) client_texture(state->texture);
+    return true;
+  });
+}
+
+void IosHost::SetAudioPaused(bool paused) {
+  runtime::Ggl::Held lock(p_.ggl());
+  sles_->SetPaused(paused);
+}
+
+bool IosHost::OpenApk(const std::string& path, std::string* err) {
+  if (path.empty()) {
+    if (err != nullptr) *err = "no APK path";
+    return false;
+  }
+  archive_ = loader::ApkArchive::Open(path, err);
+  return archive_ != nullptr;
+}
+
+std::shared_ptr<loader::ApkFile> IosHost::FindAsset(void* host) const {
+  std::lock_guard<std::mutex> lk(assets_mu_);
+  const auto it = assets_.find(static_cast<loader::ApkFile*>(host));
+  return it == assets_.end() ? nullptr : it->second;
+}
+
+void IosHost::EmitLog(int priority, const std::string& tag, const std::string& text) {
+  if (!log_) return;
+  std::string line = text;
+  while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
+  log_("guest log: " + abi::PrioName(priority) + "/" + tag + ": " + line);
+}
+
+bool IosHost::ReadEglAttributes(std::uint32_t address, std::array<std::int32_t, 129>& out,
+                                std::string* why) const {
+  if (address == 0) return true;
+  const auto& memory = p_.memory();
+  auto at = static_cast<std::uint64_t>(address);
+  for (std::size_t i = 0; i < out.size(); ++i, at += sizeof(out[i])) {
+    if (at >= memory.window_bytes() ||
+        !memory.Read(static_cast<std::uint32_t>(at), &out[i], sizeof(out[i]))) break;
+    if (i % 2 == 0 && out[i] == 0x3038) return true;  // EGL_NONE
+  }
+  *why = "unreadable or unterminated EGL attribute list";
+  return false;
+}
+
+std::optional<std::uint32_t> IosHost::ResolveDynamic(const std::string& name) {
+  if (name.starts_with("gl") && !specials_.contains(name) && !HostSymbol(name)) return std::nullopt;
+  return name.empty() ? std::nullopt : Resolve(name);
+}
+
+std::optional<std::uint32_t> IosHost::Resolve(const std::string& name) {
+  std::lock_guard<std::mutex> lock(slots_mu_);
+  // Data imports answer an address the guest reads, not a slot it calls.
+  if (const auto it = data_symbols_.find(name); it != data_symbols_.end()) return it->second;
+  if (const auto it = slots_.find(name); it != slots_.end()) return p_.abi().SlotFor(it->second);
+
+  const auto special = specials_.find(name);
+  const rb::gfx::ThunkEntry* entry = special == specials_.end() ? rb::gfx::FindThunk(name) : nullptr;
+  if (special == specials_.end() && entry == nullptr) return std::nullopt;
+
+  if (kThunkSlotBase + slots_.size() >= abi::AbiContext::kMaxSlots) {
+    if (log_) log_("thunks: no slot left for " + name);
+    return std::nullopt;
+  }
+  const std::uint32_t index = kThunkSlotBase + static_cast<std::uint32_t>(slots_.size());
+  Special fn;
+  if (special != specials_.end()) {
+    fn = special->second;
+  } else {
+    void* const host = HostSymbol(name);
+    const std::uint32_t binding = GlOffsetBinding(name);
+    fn = [this, entry, name, host, binding](exec::MachineState& s, std::string* why) {
+      if (host == nullptr) {
+        *why = name + " has no iOS implementation (" + entry->lib + " on a device)";
+        return false;
+      }
+      return abi::ThunkCaller::Call(entry->spec, host, s, p_.memory(), handles_, why,
+                                    binding != 0 ? GlBufferBound : nullptr, binding);
+    };
+  }
+  slots_.emplace(name, index);
+  p_.abi().Bind(index,
+                [this, name, index, fn](exec::MachineState& s, std::string* why) {
+                  g_last_host_call.store(name.c_str(), std::memory_order_relaxed);
+                  if (index < slot_calls_.size()) slot_calls_[index].fetch_add(1, std::memory_order_relaxed);
+                  // Recorded before the call runs, so a fault inside the host callee lists the call itself.
+                  const std::uint32_t at = recent_next_.fetch_add(1, std::memory_order_relaxed);
+                  recent_[at % kRecentCalls] = RecentHostCall{name.c_str(), {s.r[0], s.r[1], s.r[2], s.r[3]}};
+                  if (fn(s, why)) return true;
+                  s.r[0] = 0;
+                  if (FirstRefusal(name) && log_) log_("thunks: " + name + " refused: " + *why);
+                  return true;
+                },
+                Waits(name) ? abi::AbiContext::SlotLock::kReleasesGgl : abi::AbiContext::SlotLock::kHoldsGgl);
+  return p_.abi().SlotFor(index);
+}
+
+void IosHost::EnableUnityWindow(int width, int height) {
+  UpdateUnityWindowSize(width, height);
+  AddSpecial("ANativeWindow_fromSurface", [this](exec::MachineState& s, std::string*) {
+    s.r[0] = s.r[1] != 0 ? handles_.Put(&unity_window_size_) : 0;
+    return true;
+  });
+  for (const char* name : {"ANativeWindow_acquire", "ANativeWindow_release"}) {
+    // iOS owns the drawable for the lifetime of this session.
+    AddSpecial(name, [](exec::MachineState&, std::string*) { return true; });
+  }
+  for (std::size_t axis = 0; axis < unity_window_size_.size(); ++axis) {
+    AddSpecial(axis == 0 ? "ANativeWindow_getWidth" : "ANativeWindow_getHeight",
+               [this, axis](exec::MachineState& s, std::string*) {
+      void* window = nullptr;
+      s.r[0] = handles_.Get(s.r[0], &window) && window == &unity_window_size_
+          ? static_cast<std::uint32_t>(unity_window_size_[axis]) : 0;
+      return true;
+    });
+  }
+  AddSpecial("ANativeWindow_setBuffersGeometry", [this](exec::MachineState& s, std::string*) {
+    void* window = nullptr;
+    const bool size_ok = (s.r[1] == 0 || s.r[1] == static_cast<std::uint32_t>(unity_window_size_[0])) &&
+                         (s.r[2] == 0 || s.r[2] == static_cast<std::uint32_t>(unity_window_size_[1]));
+    s.r[0] = handles_.Get(s.r[0], &window) && window == &unity_window_size_ && size_ok
+        ? 0 : static_cast<std::uint32_t>(-22);  // Android EINVAL
+    return true;
+  });
+}
+
+std::vector<std::string> IosHost::CallCountLines() const {
+  std::vector<std::pair<std::string, std::uint64_t>> counts;
+  {
+    std::lock_guard<std::mutex> lock(slots_mu_);
+    counts.reserve(slots_.size());
+    for (const auto& [name, index] : slots_) {
+      const std::uint64_t n = slot_calls_[index].load(std::memory_order_relaxed);
+      if (n != 0) counts.emplace_back(name, n);
+    }
+  }
+  std::sort(counts.begin(), counts.end(),
+            [](const auto& a, const auto& b) { return a.second > b.second; });
+  std::vector<std::string> out;
+  char line[160];
+  const std::size_t shown = std::min<std::size_t>(counts.size(), 10);
+  for (std::size_t i = 0; i < shown; ++i) {
+    std::snprintf(line, sizeof line, "host calls: %s %llu", counts[i].first.c_str(),
+                  static_cast<unsigned long long>(counts[i].second));
+    out.emplace_back(line);
+  }
+  return out;
+}
+
+bool IosHost::FirstRefusal(const std::string& name) {
+  std::lock_guard<std::mutex> lock(slots_mu_);
+  return refused_.insert(name).second;
+}
+
+std::vector<std::string> IosHost::RecentCallLines() const {
+  std::vector<std::string> out;
+  const std::uint32_t written = recent_calls_written();
+  const std::uint32_t count = written < kRecentCalls ? written : kRecentCalls;
+  char line[192];
+  for (std::uint32_t i = 0; i < count; ++i) {
+    const std::uint32_t slot = (written - count + i) % kRecentCalls;
+    const RecentHostCall& call = recent_calls()[slot];
+    std::snprintf(line, sizeof line, "host call: %s 0x%08x 0x%08x 0x%08x 0x%08x",
+                  call.name != nullptr ? call.name : "?", call.arg[0], call.arg[1], call.arg[2], call.arg[3]);
+    out.emplace_back(line);
+  }
+  return out;
+}
+
+std::uint32_t IosHost::GuestString(const std::string& text) {
+  if (const auto it = strings_.find(text); it != strings_.end()) return it->second;
+  const auto bytes = static_cast<std::uint32_t>(text.size() + 1);
+  if (bytes > string_bytes_left_) {
+    const std::uint32_t size = (bytes + mem::kGuestPage - 1) & ~(mem::kGuestPage - 1);
+    std::string why;
+    const auto page = p_.MapFree(size, mem::kRead | mem::kWrite, &why);
+    if (page == 0) return 0;
+    string_next_ = page;
+    string_bytes_left_ = size;
+  }
+  const auto at = string_next_;
+  if (!p_.memory().Write(at, text.c_str(), bytes)) return 0;
+  string_next_ += bytes;
+  string_bytes_left_ -= bytes;
+  strings_.emplace(text, at);
+  return at;
+}
+
+}  // namespace rb::platform::ios

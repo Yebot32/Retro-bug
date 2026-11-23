@@ -618,11 +618,11 @@ void invalidation_reaches_the_compiled_code() {
               "test would be measuring something other than a patched function");
   }
 
-  // Before invalidation: Tier I owns no cache, so it must already answer the new 42 — and Tier J must
-  // still answer the *old* 1008, which is the premise of everything below. Measured on the Tab S9:
-  // `patched, not yet invalidated: I=42 J=1008`. If a future back end re-reads code and comes back 42
-  // here, this test has nothing left to demonstrate and should be deleted rather than left to pass
-  // vacuously, so it fails loudly instead.
+  // Before invalidation: both tiers now cache decoded blocks, so both must still answer the *old* 1008 —
+  // the premise of everything below. This row used to assert that Tier I came back 42 because it owned no
+  // cache; with the decode-once cache (iOS S1) that property is gone, and what remains is the contract
+  // every real JIT relies on: written code is not visible until the guest flushes. ARM never promised
+  // otherwise, and Tier J (the default on Android) has always behaved this way.
   {
     exec::MachineState si{}, sj{};
     const exec::RunResult ri = run(rig.interp.get(), a->addr, 3, 7, si);
@@ -632,15 +632,17 @@ void invalidation_reaches_the_compiled_code() {
                  static_cast<std::int32_t>(si.r[0]), kPatchB_want, static_cast<std::int32_t>(sj.r[0]));
     CHECK_CTX(ri.reason == exec::StopReason::Returned && rj.reason == exec::StopReason::Returned,
               "a patched probe must still run to a return: I " + ri.detail + " / J " + rj.detail);
-    CHECK_CTX(static_cast<std::int32_t>(si.r[0]) == kPatchB_want,
-              "Tier I, which owns no cache, reads " + std::to_string(static_cast<std::int32_t>(si.r[0])) +
-                  " of patched code; want " + std::to_string(kPatchB_want));
+    CHECK_CTX(static_cast<std::int32_t>(si.r[0]) == kPatchA_want,
+              "Tier I ran the cached block of patched code: " +
+                  std::to_string(static_cast<std::int32_t>(si.r[0])) + ", want the stale " +
+                  std::to_string(kPatchA_want));
     CHECK_CTX(static_cast<std::int32_t>(sj.r[0]) == kPatchA_want,
               "Tier J answered " + std::to_string(static_cast<std::int32_t>(sj.r[0])) +
                   " before anything invalidated its cache; it has no cache to invalidate, so this "
                   "test is measuring nothing");
   }
 
+  rig.interp->Invalidate(a->addr, a->addr + kPatchWindow);
   rig.jit->Invalidate(a->addr, a->addr + kPatchWindow);
 
   exec::MachineState si{}, sj{};
@@ -672,6 +674,7 @@ void invalidation_reaches_the_compiled_code() {
   rig.mem->Protect(page, mem::kGuestPage, kRead | kWrite, &rerr);
   rig.mem->Write(a->addr + diff_at, &ba[diff_at], 1);
   rig.mem->Protect(page, mem::kGuestPage, kRead | kExec, &rerr);
+  rig.interp->Invalidate(a->addr, a->addr + kPatchWindow);
   rig.jit->Invalidate(a->addr, a->addr + kPatchWindow);
   exec::MachineState back{};
   run(rig.jit.get(), a->addr, 3, 7, back);
@@ -1116,6 +1119,37 @@ void the_virtual_counter_reads_the_host_count_on_both_tiers() {
     const exec::RunResult rp = engine.Run(p, 1000);
     CHECK_CTX(rp.reason == exec::StopReason::Unimplemented && p.r[0] == 0x11,
               std::string{"Tier "} + tier + ": CNTPCT must stay refused: " + rp.detail);
+  }
+}
+
+/// PMCCNTR (`mrc p15, #0, rT, c9, c13, #0`), the PMU cycle counter, read as a running count on both tiers — what a
+/// kernel with user PMU access enabled gives. Older OpenSSL's `_armv7_tick` reads it under a SIGILL guard (Looney
+/// Tunes Dash's libToonRunner, in a static initialiser); synthesising a trap for a read the engine can answer
+/// would enter the guest's SIGILL handler, so the count is answered from the same host source as CNTVCT. Encoding
+/// (ARM state):
+///   mrc p15,#0,r0,c9,c13,#0 ; mrc p15,#0,r1,c9,c13,#0 ; bx lr  → ee190f1d ee191f1d e12fff1e
+void the_cycle_counter_reads_a_running_count_on_both_tiers() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  constexpr exec::GuestAddr kBlob = 0x0070'9000u;
+  constexpr std::uint32_t kCode[] = {0xEE190F1D, 0xEE191F1D, 0xE12FFF1E};
+  std::string err;
+  if (!rig.mem->Map(kBlob, mem::kGuestPage, kRead | kWrite | kExec, &err)) {
+    fail("could not map the cycle-counter page", __LINE__, err);
+    return;
+  }
+  CHECK_CTX(rig.mem->Write(kBlob, kCode, sizeof(kCode)), "could not plant the cycle-counter blob");
+  for (const bool jit : {false, true}) {
+    const char* tier = jit ? "J" : "I";
+    exec::Executor& engine = jit ? static_cast<exec::Executor&>(*rig.jit) : static_cast<exec::Executor&>(*rig.interp);
+    exec::MachineState s = EntryState(kBlob, 0, 0, false);
+    const std::uint64_t before = exec::HostVirtualCounter();
+    const exec::RunResult r = engine.Run(s, 1000);
+    const std::uint64_t after = exec::HostVirtualCounter();
+    CHECK_CTX(r.reason == exec::StopReason::Returned, std::string{"Tier "} + tier + ": " + r.detail);
+    // A 32-bit count: the two reads are in order (modulo the wrap) and no further apart than the host's span.
+    CHECK_CTX(s.r[0] != 0 && static_cast<std::uint32_t>(s.r[1] - s.r[0]) <= after - before,
+              std::string{"Tier "} + tier + ": counts " + Hex(s.r[0]) + "/" + Hex(s.r[1]));
   }
 }
 
@@ -2886,6 +2920,44 @@ void packed_media_rows_agree_with_the_arm64_recipes() {
 /// libc's constructor once the guest heap existed, SM-X710, 2026-10-10). Two rows, because one alone
 /// cannot fail both ways: an overflowing `smlabb` must set Q on both tiers, and a non-overflowing one
 /// must leave it clear — a writer that always set (or never set) Q passes one row and fails the other.
+/// M4: Tier J reaches mapped pages through a page table kept current by GuestMemory's observer. A block compiled
+/// while its data page was mapped loads it inline; once the page is unmapped the same compiled block takes the
+/// checked path and faults by name — it never reads through a stale pointer.
+void the_page_table_follows_every_mapping_change() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  std::string err;
+  constexpr exec::GuestAddr kData = 0x0200'0000u, kCode = 0x0210'0000u;
+  const std::size_t before = rig.jit->inline_pages();
+  CHECK_CTX(rig.mem->Map(kData, mem::kGuestPage, kRead | kWrite, &err), "");
+  CHECK_CTX(rig.jit->inline_pages() == before + 1, std::to_string(rig.jit->inline_pages()) + " vs " + std::to_string(before));
+  const std::uint32_t value = 0x1234'5678u;
+  rig.mem->Write(kData + 8, &value, 4);
+  // ldr r0, [r1, #8] ; bx lr  (A32)
+  const std::uint32_t code[2] = {0xE5910008u, 0xE12FFF1Eu};
+  CHECK_CTX(rig.mem->Map(kCode, mem::kGuestPage, kRead | kWrite | kExec, &err), "");
+  rig.mem->Write(kCode, code, sizeof code);
+  exec::MachineState s{};
+  s.r[1] = kData;
+  s.r[13] = kStackTop;
+  s.r[14] = kReturnAddress;
+  s.pc = kCode;
+  s.mode = isa::Mode::Arm;
+  exec::RunResult rr = rig.jit->Run(s, 100);
+  CHECK_CTX(rr.reason == exec::StopReason::Returned && s.r[0] == value, rr.detail);
+  CHECK_CTX(rig.mem->Protect(kData, mem::kGuestPage, kNone, &err), err);  // no longer readable: out of the table
+  CHECK_CTX(rig.jit->inline_pages() == before + 1, "");  // the code page is still in
+  CHECK_CTX(rig.mem->Unmap(kData, mem::kGuestPage, &err), "");
+  exec::MachineState t{};
+  t.r[1] = kData;
+  t.r[13] = kStackTop;
+  t.r[14] = kReturnAddress;
+  t.pc = kCode;
+  t.mode = isa::Mode::Arm;
+  rr = rig.jit->Run(t, 100);
+  CHECK_CTX(rr.reason == exec::StopReason::Fault && rr.detail.find("0x2000008") != std::string::npos, rr.detail);
+}
+
 void the_dsp_multiplies_publish_q_on_both_tiers() {
   Rig rig = build();
   if (!rig.ok) return;
@@ -2999,6 +3071,61 @@ void the_wide_vector_adds_widen_like_hardware() {
                Hex(si.d[0]).c_str(), Hex(sj.d[0]).c_str());
 }
 
+/// The ASIMD high-narrowing family (VADDHN/VRADDHN/VSUBHN/VRSUBHN), which Dynarmic's A32 decoder had
+/// commented out: libunity's NEON image path executes `vaddhn.i16` and the front end stopped the process
+/// with "unpredictable instruction" (Cars 3, 2026-10-20). Each row adds/subtracts 16-bit lanes, shifts by
+/// 8, narrows to 8 bits, and writes d2 -- which is the LOW HALF OF SOURCE q1, so a translator that writes
+/// the destination before reading both sources gets lanes 4..7 wrong.
+void the_high_narrowing_vector_ops_narrow_like_hardware() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  constexpr exec::GuestAddr kPage = 0x0071'0000u;
+  constexpr exec::GuestAddr kAdd = kPage + 0x00u;
+  constexpr exec::GuestAddr kRadd = kPage + 0x10u;
+  constexpr exec::GuestAddr kSub = kPage + 0x20u;
+  constexpr exec::GuestAddr kRsub = kPage + 0x30u;
+  std::string err;
+  if (!rig.mem->Map(kPage, mem::kGuestPage, kRead | kWrite | kExec, &err)) {
+    fail("could not map the narrowing page", __LINE__, err);
+    return;
+  }
+  // Thumb-2: vaddhn.i16 d2,q0,q1; vraddhn; vsubhn; vrsubhn; bx lr (assembled with clang).
+  constexpr std::uint16_t kA[] = {0xef80, 0x2402, 0x4770};
+  constexpr std::uint16_t kR[] = {0xff80, 0x2402, 0x4770};
+  constexpr std::uint16_t kS[] = {0xef80, 0x2602, 0x4770};
+  constexpr std::uint16_t kRS[] = {0xff80, 0x2602, 0x4770};
+  CHECK_CTX(rig.mem->Write(kAdd, kA, sizeof(kA)), "could not plant vaddhn");
+  CHECK_CTX(rig.mem->Write(kRadd, kR, sizeof(kR)), "could not plant vraddhn");
+  CHECK_CTX(rig.mem->Write(kSub, kS, sizeof(kS)), "could not plant vsubhn");
+  CHECK_CTX(rig.mem->Write(kRsub, kRS, sizeof(kRS)), "could not plant vrsubhn");
+
+  const auto run_pair = [&](exec::GuestAddr where, std::uint64_t expected, const char* what) {
+    exec::MachineState si = EntryState(where, 0, 0, true);
+    si.d[0] = 0x0004'0003'0002'0000ull;  // q0 lanes 0..3 (16-bit, low first)
+    si.d[1] = 0x8000'0007'0006'0005ull;  // q0 lanes 4..7
+    si.d[2] = 0x0001'FFFF'0101'00FFull;  // q1 lanes 0..3; d2 is also Vd (read before write)
+    si.d[3] = 0x8000'0000'8000'7FFFull;  // q1 lanes 4..7
+    exec::MachineState sj = si;
+    const std::uint64_t d3_before = si.d[3];
+    const exec::RunResult ri = rig.interp->Run(si, 1000);
+    const exec::RunResult rj = rig.jit->Run(sj, 1000);
+    CHECK_CTX(ri.reason == exec::StopReason::Returned,
+              std::string{what} + " Tier I: " + std::to_string(static_cast<int>(ri.reason)) + " " + ri.detail);
+    CHECK_CTX(rj.reason == exec::StopReason::Returned,
+              std::string{what} + " Tier J: " + std::to_string(static_cast<int>(rj.reason)) + " " + rj.detail);
+    CHECK_CTX(si.d[2] == expected, std::string{what} + " Tier I: " + Hex(si.d[2]) + " want " + Hex(expected));
+    CHECK_CTX(sj.d[2] == expected, std::string{what} + " Tier J: " + Hex(sj.d[2]) + " want " + Hex(expected));
+    // d3 is q1's high half and is not the destination: it must be untouched.
+    CHECK_CTX(si.d[3] == d3_before, std::string{what} + " clobbered d3 in Tier I");
+    CHECK_CTX(sj.d[3] == d3_before, std::string{what} + " clobbered d3 in Tier J");
+  };
+
+  run_pair(kAdd, 0x0000'8080'0000'0100ull, "vaddhn.i16");
+  run_pair(kRadd, 0x0000'8080'0000'0101ull, "vraddhn.i16");
+  run_pair(kSub, 0x0000'8080'0000'FFFFull, "vsubhn.i16");
+  run_pair(kRsub, 0x0000'8080'0000'FFFFull, "vrsubhn.i16");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -3018,6 +3145,7 @@ int main(int argc, char** argv) {
   exclusive_access_rows_match_hardware_rule_and_each_other();
   packed_media_rows_agree_with_the_arm64_recipes();
   invalidation_reaches_the_compiled_code();
+  the_page_table_follows_every_mapping_change();
   both_tiers_stop_at_the_same_svc();
   a_guest_cacheflush_reaches_the_tier_that_owns_the_cache();
   unmapped_code_faults_in_both_tiers();
@@ -3025,10 +3153,12 @@ int main(int argc, char** argv) {
   a_kuser_helper_call_is_answered_on_both_tiers();
   an_unmodelled_coprocessor_access_stops_both_tiers();
   the_virtual_counter_reads_the_host_count_on_both_tiers();
+  the_cycle_counter_reads_a_running_count_on_both_tiers();
   an_unmodelled_coprocessor_number_stops_both_tiers();
   the_thumb_acquire_byte_and_half_rows_execute_on_both_tiers();
   the_dsp_multiplies_publish_q_on_both_tiers();
   the_wide_vector_adds_widen_like_hardware();
+  the_high_narrowing_vector_ops_narrow_like_hardware();
 
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;

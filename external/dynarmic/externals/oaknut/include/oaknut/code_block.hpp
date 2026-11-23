@@ -13,6 +13,7 @@
 #    include <windows.h>
 #elif defined(__APPLE__)
 #    include <TargetConditionals.h>
+#    include <dlfcn.h>
 #    include <libkern/OSCacheControl.h>
 #    include <pthread.h>
 #    include <sys/mman.h>
@@ -31,11 +32,13 @@ public:
 #if defined(_WIN32)
         m_memory = (std::uint32_t*)VirtualAlloc(nullptr, size, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
 #elif defined(__APPLE__)
-#    if TARGET_OS_IPHONE
-        m_memory = (std::uint32_t*)mmap(nullptr, size, PROT_READ | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
-#    else
+        // RetroBug (patches/dynarmic/0011): iOS uses the same MAP_JIT mapping as macOS. The old iOS path
+        // mapped R|X and flipped to R|W through mprotect, which the kernel accepts and then refuses to
+        // execute: a writable code page loses its code signature, so the first call into a freshly
+        // emitted Tier J block died with an uncatchable SIGKILL and no crash report (builds 36-38). A
+        // MAP_JIT mapping is what the kernel grants to a launch with JIT permission, and it fails with
+        // EPERM otherwise, which makes the construction itself the honest capability test.
         m_memory = (std::uint32_t*)mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANON | MAP_PRIVATE | MAP_JIT, -1, 0);
-#    endif
 #elif defined(__NetBSD__)
         m_memory = (std::uint32_t*)mmap(nullptr, size, PROT_MPROTECT(PROT_READ | PROT_WRITE | PROT_EXEC), MAP_ANON | MAP_PRIVATE, -1, 0);
 #elif defined(__OpenBSD__)
@@ -44,8 +47,15 @@ public:
         m_memory = (std::uint32_t*)mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
 #endif
 
-        if (m_memory == nullptr)
+#if defined(_WIN32)
+        if (m_memory == nullptr) {
+#else
+        // mmap reports failure as MAP_FAILED, not null; treating that as a buffer is a write to -1.
+        if (m_memory == MAP_FAILED) {
+            m_memory = nullptr;
+#endif
             throw std::bad_alloc{};
+        }
     }
 
     ~CodeBlock()
@@ -72,18 +82,21 @@ public:
 
     void protect()
     {
-#if defined(__APPLE__) && !TARGET_OS_IPHONE
-        pthread_jit_write_protect_np(1);
-#elif defined(__APPLE__) || defined(__NetBSD__) || defined(__OpenBSD__)
+#if defined(__APPLE__)
+        // RetroBug (patches/dynarmic/0011): MAP_JIT pages are switched, not mprotect()ed — on iOS the
+        // mprotect flip leaves a page the kernel will kill on execution. The toggle is per thread, which
+        // is exactly the scope of a code emission.
+        set_write_protected(true);
+#elif defined(__NetBSD__) || defined(__OpenBSD__)
         mprotect(m_memory, m_size, PROT_READ | PROT_EXEC);
 #endif
     }
 
     void unprotect()
     {
-#if defined(__APPLE__) && !TARGET_OS_IPHONE
-        pthread_jit_write_protect_np(0);
-#elif defined(__APPLE__) || defined(__NetBSD__) || defined(__OpenBSD__)
+#if defined(__APPLE__)
+        set_write_protected(false);
+#elif defined(__NetBSD__) || defined(__OpenBSD__)
         mprotect(m_memory, m_size, PROT_READ | PROT_WRITE);
 #endif
     }
@@ -138,6 +151,31 @@ public:
 protected:
     std::uint32_t* m_memory;
     std::size_t m_size = 0;
+
+private:
+    /// RetroBug (patches/dynarmic/0011): the public iOS SDK marks `pthread_jit_write_protect_np`
+    /// unavailable, but libsystem exports it and a MAP_JIT page needs exactly that toggle — without it a
+    /// store to the code page faults. Resolve it at run time (the macOS API is declared, so it is called
+    /// directly there); if the symbol is ever absent, fall back to an mprotect of the mapping.
+    void set_write_protected(bool enabled)
+    {
+#if defined(__APPLE__)
+#    if TARGET_OS_IPHONE
+        using Toggle = void (*)(int);
+        static const Toggle toggle =
+            reinterpret_cast<Toggle>(::dlsym(RTLD_DEFAULT, "pthread_jit_write_protect_np"));
+        if (toggle != nullptr) {
+            toggle(enabled ? 1 : 0);
+            return;
+        }
+        ::mprotect(m_memory, m_size, enabled ? (PROT_READ | PROT_EXEC) : (PROT_READ | PROT_WRITE));
+#    else
+        pthread_jit_write_protect_np(enabled ? 1 : 0);
+#    endif
+#else
+        (void)enabled;
+#endif
+    }
 };
 
 }  // namespace oaknut

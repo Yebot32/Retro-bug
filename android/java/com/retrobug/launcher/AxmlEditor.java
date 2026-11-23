@@ -21,7 +21,11 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 final class AxmlEditor {
     private static final int RES_XML_TYPE = 0x0003;
@@ -37,7 +41,7 @@ final class AxmlEditor {
     private static final int POOL_SORTED_FLAG = 0x1;
     private static final int TYPE_STRING = 0x03;
     private static final int TYPE_INT_DEC = 0x10;
-    private static final int TYPE_INT_BOOLEAN = 0x12;
+    static final int TYPE_INT_BOOLEAN = 0x12;
     private static final int ATTR_SIZE = 20;
     private static final int NODE_HEADER = 16;
 
@@ -246,11 +250,37 @@ final class AxmlEditor {
         return raw >= 0 ? str(raw) : ((c[a + 15] & 0xff) == TYPE_STRING ? str(s32(c, a + 16)) : null);
     }
 
-    Integer minSdk() { return intAttr("uses-sdk", "minSdkVersion"); }
+    Integer minSdk() { return usesSdk("minSdkVersion"); }
 
-    Integer targetSdk() { return intAttr("uses-sdk", "targetSdkVersion"); }
+    Integer targetSdk() { return usesSdk("targetSdkVersion"); }
+
+    /**
+     * Reads the last explicit value in the source manifest. Some legacy games split the SDK attributes across
+     * multiple elements. Normalize those elements before writing a copy for Android.
+     */
+    private Integer usesSdk(String attr) {
+        Integer v = null;
+        for (byte[] c : nodes) {
+            if (u16(c, 0) != XML_START_ELEMENT || !"uses-sdk".equals(str(s32(c, NODE_HEADER + 4)))) continue;
+            int a = findAttr(c, attr);
+            if (a >= 0) v = s32(c, a + 16);
+        }
+        return v;
+    }
 
     /** Attribute names of the first {@code element}, in file order (tests check the resource-id ordering). */
+    /** Attribute names, in order, of the first {@code element} whose android:name is {@code name}. */
+    List<String> attrNamesOf(String element, String name) {
+        List<String> out = new ArrayList<>();
+        for (byte[] c : nodes) {
+            if (u16(c, 0) != XML_START_ELEMENT || !element.equals(str(s32(c, NODE_HEADER + 4)))) continue;
+            if (!name.equals(stringValue(c, findAttr(c, "name")))) continue;
+            for (int i = 0; i < attrCount(c); i++) out.add(str(s32(c, attrOff(c, i) + 4)));
+            return out;
+        }
+        return out;
+    }
+
     List<String> attrNames(String element) {
         List<String> out = new ArrayList<>();
         int n = findElement(element);
@@ -265,11 +295,88 @@ final class AxmlEditor {
         return v == null ? null : v != 0;
     }
 
+    Boolean hasCode() {
+        Integer v = intAttr("application", "hasCode");
+        return v == null ? null : v != 0;
+    }
+
+    /** String value of attribute {@code attr} of the first {@code element} whose android:name is {@code name}. */
+    String stringAttrOf(String element, String name, String attr) {
+        for (byte[] c : nodes) {
+            if (u16(c, 0) != XML_START_ELEMENT || !element.equals(str(s32(c, NODE_HEADER + 4)))) continue;
+            if (!name.equals(stringValue(c, findAttr(c, "name")))) continue;
+            return stringValue(c, findAttr(c, attr));
+        }
+        return null;
+    }
+
+    private String stringValue(byte[] c, int a) {
+        if (a < 0) return null;
+        int raw = s32(c, a + 8);
+        return raw >= 0 ? str(raw) : ((c[a + 15] & 0xff) == TYPE_STRING ? str(s32(c, a + 16)) : null);
+    }
+
     // ---------------------------------------------------------------- editing
 
     void setTargetSdk(int value) throws IOException { setUsesSdk("targetSdkVersion", ATTR_TARGET_SDK_VERSION, value); }
 
     void setMinSdk(int value) throws IOException { setUsesSdk("minSdkVersion", ATTR_MIN_SDK_VERSION, value); }
+
+    /** Consolidates split SDK declarations so a later element cannot reset values to Android's defaults. */
+    boolean mergeUsesSdk() throws IOException {
+        int first = findElement("uses-sdk");
+        if (first < 0) return false;
+        List<Integer> duplicates = new ArrayList<>();
+        for (int i = first + 1; i < nodes.size(); i++) {
+            byte[] node = nodes.get(i);
+            if (u16(node, 0) == XML_START_ELEMENT && "uses-sdk".equals(str(s32(node, NODE_HEADER + 4)))) {
+                duplicates.add(i);
+            }
+        }
+        if (duplicates.isEmpty()) return false;
+        Map<String, byte[]> attributes = new LinkedHashMap<>();
+        List<Integer> declarations = new ArrayList<>(duplicates.size() + 1);
+        declarations.add(first);
+        declarations.addAll(duplicates);
+        for (int index : declarations) {
+            byte[] node = nodes.get(index);
+            if (index + 1 >= nodes.size() || u16(nodes.get(index + 1), 0) != XML_END_ELEMENT
+                    || !"uses-sdk".equals(str(s32(nodes.get(index + 1), NODE_HEADER + 4)))
+                    || u16(node, NODE_HEADER + 10) != ATTR_SIZE) {
+                throw new IOException("unsupported <uses-sdk> structure");
+            }
+            for (int i = 0; i < attrCount(node); i++) {
+                int offset = attrOff(node, i);
+                String key = str(s32(node, offset)) + "\n" + str(s32(node, offset + 4));
+                attributes.put(key, Arrays.copyOfRange(node, offset, offset + ATTR_SIZE));
+            }
+        }
+        List<byte[]> sorted = new ArrayList<>(attributes.values());
+        sorted.sort(new Comparator<byte[]>() {
+            @Override public int compare(byte[] left, byte[] right) {
+                return Integer.compare(resourceId(left), resourceId(right));
+            }
+
+            private int resourceId(byte[] attribute) {
+                int name = s32(attribute, 4);
+                if (resIds == null || name < 0 || name >= resIds.length || resIds[name] == 0) {
+                    return Integer.MAX_VALUE;
+                }
+                return resIds[name];
+            }
+        });
+        byte[] original = nodes.get(first);
+        byte[] merged = element(XML_START_ELEMENT, s32(original, 8), s32(original, NODE_HEADER + 4), sorted.size());
+        for (int i = 0; i < sorted.size(); i++) {
+            System.arraycopy(sorted.get(i), 0, merged, attrOff(merged, i), ATTR_SIZE);
+        }
+        for (int i = duplicates.size() - 1; i >= 0; i--) {
+            int offset = duplicates.get(i);
+            nodes.subList(offset, offset + 2).clear();
+        }
+        nodes.set(first, merged);
+        return true;
+    }
 
     /** Sets an int attribute of {@code <uses-sdk>}: rewritten in place, inserted, or with a new element. */
     private void setUsesSdk(String attr, int resId, int value) throws IOException {
@@ -306,6 +413,492 @@ final class AxmlEditor {
         put32(end, NODE_HEADER, -1); put32(end, NODE_HEADER + 4, tag);
         nodes.add(manifest + 1, end);
         nodes.add(manifest + 1, withAttribute(start, androidNs, nameIdx, resId, value));
+    }
+
+    /**
+     * Targeting API 31+ requires an explicit {@code android:exported} on every activity, activity-alias, service and
+     * receiver that has an intent filter; before 31 such a component was exported by default. This writes that old
+     * default, {@code exported="true"}, onto each one that lacks the attribute, so raising the target does not change
+     * which components other apps can reach (and the platform does not refuse the install). Returns how many.
+     */
+    int setExportedDefaults() throws IOException {
+        final java.util.Set<String> kinds = new java.util.HashSet<>(
+                java.util.Arrays.asList("activity", "activity-alias", "service", "receiver"));
+        int changed = 0;
+        java.util.ArrayDeque<Integer> open = new java.util.ArrayDeque<>();
+        java.util.Set<Integer> needs = new java.util.LinkedHashSet<>();
+        for (int i = 0; i < nodes.size(); i++) {
+            byte[] c = nodes.get(i);
+            int type = u16(c, 0);
+            if (type == XML_START_ELEMENT) {
+                String name = str(s32(c, NODE_HEADER + 4));
+                if (name.equals("intent-filter") && !open.isEmpty()) {
+                    int parent = open.peek();
+                    byte[] p = nodes.get(parent);
+                    if (kinds.contains(str(s32(p, NODE_HEADER + 4))) && findAttr(p, "exported") < 0) needs.add(parent);
+                }
+                open.push(i);
+            } else if (type == XML_END_ELEMENT && !open.isEmpty()) {
+                open.pop();
+            }
+        }
+        if (needs.isEmpty()) return 0;
+        int nameIdx = ensureAttrName("exported", ATTR_EXPORTED);  // first: it may insert into the pool
+        int androidNs = indexOf(ANDROID_NS);
+        if (androidNs < 0) throw new IOException("manifest declares no android namespace");
+        for (int idx : needs) {
+            byte[] c = withAttribute(nodes.get(idx), androidNs, nameIdx, ATTR_EXPORTED, -1);
+            int off = findAttr(c, "exported");
+            c[off + 15] = TYPE_INT_BOOLEAN;
+            put32(c, off + 16, -1);
+            put32(c, off + 8, -1);
+            nodes.set(idx, c);
+            changed++;
+        }
+        return changed;
+    }
+
+    private static final int ATTR_DEBUGGABLE = 0x0101000f;
+
+    /**
+     * Sets {@code <application android:debuggable="true">} — a diagnostics option (profiling with simpleperf,
+     * {@code run-as} for the app's files), never a default: a debuggable app is slower and exposes its data.
+     */
+    void setDebuggable() throws IOException {
+        int app = findElement("application");
+        if (app < 0) throw new IOException("manifest has no <application> element");
+        byte[] c = nodes.get(app);
+        int off = findAttr(c, "debuggable");
+        if (off < 0) {
+            int nameIdx = ensureAttrName("debuggable", ATTR_DEBUGGABLE);  // first: it may insert into the pool
+            int androidNs = indexOf(ANDROID_NS);
+            if (androidNs < 0) throw new IOException("manifest declares no android namespace");
+            c = withAttribute(nodes.get(findElement("application")), androidNs, nameIdx, ATTR_DEBUGGABLE, -1);
+            nodes.set(app, c);
+            off = findAttr(c, "debuggable");
+        }
+        c[off + 15] = TYPE_INT_BOOLEAN;
+        put32(c, off + 16, -1);
+        put32(c, off + 8, -1);  // no raw string value
+    }
+
+    /**
+     * Adds {@code <queries><provider android:authorities=authority/></queries>} as a child of {@code <manifest>},
+     * before {@code <application>}: from API 30 an app sees another app's provider only when it declares it. False
+     * when that provider is already declared under a {@code <queries>}.
+     */
+    boolean addQueriesProvider(String authority) throws IOException {
+        boolean inQueries = false;
+        for (byte[] c : nodes) {
+            int type = u16(c, 0);
+            if (type != XML_START_ELEMENT && type != XML_END_ELEMENT) continue;
+            String el = str(s32(c, NODE_HEADER + 4));
+            if ("queries".equals(el)) inQueries = type == XML_START_ELEMENT;
+            if (inQueries && type == XML_START_ELEMENT && "provider".equals(el)
+                    && authority.equals(stringValue(c, findAttr(c, "authorities")))) {
+                return false;
+            }
+        }
+        int app = findElement("application");
+        if (app < 0) throw new IOException("manifest has no <application> element");
+        int nAuth = ensureAttrName("authorities", ATTR_AUTHORITIES);  // first: it may insert into the pool
+        int ns = indexOf(ANDROID_NS);
+        if (ns < 0) throw new IOException("manifest declares no android namespace");
+        int tQueries = poolString("queries"), tProvider = poolString("provider"), vAuth = poolString(authority);
+        app = findElement("application");
+        int line = s32(nodes.get(app), 8);
+        byte[] qStart = element(XML_START_ELEMENT, line, tQueries, 0);
+        byte[] pStart = element(XML_START_ELEMENT, line, tProvider, 1);
+        putStringAttr(pStart, NODE_HEADER + 20, ns, nAuth, vAuth);
+        byte[] pEnd = element(XML_END_ELEMENT, line, tProvider, 0);
+        byte[] qEnd = element(XML_END_ELEMENT, line, tQueries, 0);
+        nodes.add(app, qEnd);
+        nodes.add(app, pEnd);
+        nodes.add(app, pStart);
+        nodes.add(app, qStart);
+        return true;
+    }
+
+    /** A start (with room for `attrs` attributes) or end element node for tag pool index `tag`. */
+    private static byte[] element(int type, int line, int tag, int attrs) {
+        boolean start = type == XML_START_ELEMENT;
+        byte[] n = new byte[NODE_HEADER + (start ? 20 + attrs * ATTR_SIZE : 8)];
+        put16(n, 0, type); put16(n, 2, NODE_HEADER); put32(n, 4, n.length);
+        put32(n, 8, line); put32(n, 12, -1);
+        put32(n, NODE_HEADER, -1); put32(n, NODE_HEADER + 4, tag);
+        if (start) {
+            put16(n, NODE_HEADER + 8, 20); put16(n, NODE_HEADER + 10, ATTR_SIZE);
+            put16(n, NODE_HEADER + 12, attrs);
+        }
+        return n;
+    }
+
+    private static final int ATTR_VERSION_NAME = 0x0101021c;
+
+    /** {@code <manifest android:versionName>}, or null when absent or not a string. */
+    String versionName() {
+        int m = findElement("manifest");
+        if (m < 0) return null;
+        byte[] c = nodes.get(m);
+        return stringValue(c, findAttr(c, "versionName"));
+    }
+
+    /** Sets {@code <manifest android:versionName>} (added when absent). */
+    void setVersionName(String value) throws IOException {
+        int m = findElement("manifest");
+        if (m < 0) throw new IOException("manifest has no <manifest> element");
+        byte[] c = nodes.get(m);
+        int off = findAttr(c, "versionName");
+        if (off < 0) {
+            int nameIdx = ensureAttrName("versionName", ATTR_VERSION_NAME);  // first: it may insert into the pool
+            int androidNs = indexOf(ANDROID_NS);
+            if (androidNs < 0) throw new IOException("manifest declares no android namespace");
+            c = withAttribute(nodes.get(findElement("manifest")), androidNs, nameIdx, ATTR_VERSION_NAME, 0);
+            nodes.set(m, c);
+            off = findAttr(c, "versionName");
+        }
+        int idx = poolString(value);  // appended at the end: no index shifts
+        put32(c, off + 8, idx);
+        put16(c, off + 12, 8);
+        c[off + 14] = 0;
+        c[off + 15] = TYPE_STRING;
+        put32(c, off + 16, idx);
+    }
+
+    private static final int ATTR_NAME = 0x01010003;
+    private static final int ATTR_EXPORTED = 0x01010010;
+    private static final int ATTR_AUTHORITIES = 0x01010018;
+    private static final int ATTR_INIT_ORDER = 0x0101001a;
+    private static final int ATTR_REQUIRED = 0x0101028e;
+
+    /**
+     * Adds {@code <provider android:name=cls android:exported="false" android:authorities=auth
+     * android:initOrder=initOrder/>} as the last child of {@code <application>}. The targetSdk shims run from
+     * that provider: the platform creates providers before Application.onCreate and before any activity or
+     * service, and a high initOrder puts it ahead of the game's own providers.
+     */
+    void addProvider(String cls, String authorities, int initOrder) throws IOException {
+        addProvider(cls, authorities, initOrder, false);
+    }
+
+    /** As {@link #addProvider(String, String, int)}, with android:exported set to `exported`. */
+    void addProvider(String cls, String authorities, int initOrder, boolean exported) throws IOException {
+        int app = findElement("application");
+        if (app < 0) throw new IOException("manifest has no <application> element");
+        // Names first: each insert shifts later pool indexes, so no index is taken until they are all in.
+        int nName = ensureAttrName("name", ATTR_NAME);
+        int nExported = ensureAttrName("exported", ATTR_EXPORTED);
+        int nAuth = ensureAttrName("authorities", ATTR_AUTHORITIES);
+        int nInit = ensureAttrName("initOrder", ATTR_INIT_ORDER);
+        int ns = indexOf(ANDROID_NS);
+        if (ns < 0) throw new IOException("manifest declares no android namespace to attach the provider to");
+        int tag = poolString("provider"), vName = poolString(cls), vAuth = poolString(authorities);
+        int end = -1;
+        for (int i = nodes.size() - 1; i > app && end < 0; i--) {
+            byte[] c = nodes.get(i);
+            if (u16(c, 0) == XML_END_ELEMENT && "application".equals(str(s32(c, NODE_HEADER + 4)))) end = i;
+        }
+        if (end < 0) throw new IOException("<application> has no end element");
+        int line = s32(nodes.get(end), 8);
+        // Attributes in resource-id order, as aapt2 writes them: name < exported < authorities < initOrder.
+        byte[] start = new byte[NODE_HEADER + 20 + 4 * ATTR_SIZE];
+        put16(start, 0, XML_START_ELEMENT); put16(start, 2, NODE_HEADER); put32(start, 4, start.length);
+        put32(start, 8, line); put32(start, 12, -1);
+        put32(start, NODE_HEADER, -1); put32(start, NODE_HEADER + 4, tag);
+        put16(start, NODE_HEADER + 8, 20); put16(start, NODE_HEADER + 10, ATTR_SIZE);
+        put16(start, NODE_HEADER + 12, 4);
+        int a = NODE_HEADER + 20;
+        putStringAttr(start, a, ns, nName, vName);
+        put32(start, a + ATTR_SIZE, ns); put32(start, a + ATTR_SIZE + 4, nExported);
+        put32(start, a + ATTR_SIZE + 8, -1); put16(start, a + ATTR_SIZE + 12, 8);
+        start[a + ATTR_SIZE + 15] = TYPE_INT_BOOLEAN; put32(start, a + ATTR_SIZE + 16, exported ? -1 : 0);
+        putStringAttr(start, a + 2 * ATTR_SIZE, ns, nAuth, vAuth);
+        put32(start, a + 3 * ATTR_SIZE, ns); put32(start, a + 3 * ATTR_SIZE + 4, nInit);
+        putTyped(start, a + 3 * ATTR_SIZE, initOrder);
+        byte[] close = new byte[NODE_HEADER + 8];
+        put16(close, 0, XML_END_ELEMENT); put16(close, 2, NODE_HEADER); put32(close, 4, close.length);
+        put32(close, 8, line); put32(close, 12, -1);
+        put32(close, NODE_HEADER, -1); put32(close, NODE_HEADER + 4, tag);
+        nodes.add(end, close);
+        nodes.add(end, start);
+    }
+
+    /**
+     * Adds {@code <uses-library android:name=library android:required=required/>} as the last child of
+     * {@code <application>}, unless the manifest already declares that library. False when nothing was added.
+     * API 28 took org.apache.http.legacy off the default classpath; an app built before it that uses the Apache client
+     * declares the library to get it back (developer.android.com, "Apache HTTP client deprecation").
+     */
+    boolean addUsesLibrary(String library, boolean required) throws IOException {
+        if (stringAttrOf("uses-library", library, "name") != null) return false;
+        int app = findElement("application");
+        if (app < 0) throw new IOException("manifest has no <application> element");
+        int nName = ensureAttrName("name", ATTR_NAME);
+        int nRequired = ensureAttrName("required", ATTR_REQUIRED);
+        int ns = indexOf(ANDROID_NS);
+        if (ns < 0) throw new IOException("manifest declares no android namespace to attach the library to");
+        int tag = poolString("uses-library"), vName = poolString(library);
+        int end = -1;
+        for (int i = nodes.size() - 1; i > app && end < 0; i--) {
+            byte[] c = nodes.get(i);
+            if (u16(c, 0) == XML_END_ELEMENT && "application".equals(str(s32(c, NODE_HEADER + 4)))) end = i;
+        }
+        if (end < 0) throw new IOException("<application> has no end element");
+        int line = s32(nodes.get(end), 8);
+        // Attributes in resource-id order: name (0x01010003) < required (0x0101028e).
+        byte[] start = new byte[NODE_HEADER + 20 + 2 * ATTR_SIZE];
+        put16(start, 0, XML_START_ELEMENT); put16(start, 2, NODE_HEADER); put32(start, 4, start.length);
+        put32(start, 8, line); put32(start, 12, -1);
+        put32(start, NODE_HEADER, -1); put32(start, NODE_HEADER + 4, tag);
+        put16(start, NODE_HEADER + 8, 20); put16(start, NODE_HEADER + 10, ATTR_SIZE);
+        put16(start, NODE_HEADER + 12, 2);
+        int a = NODE_HEADER + 20;
+        putStringAttr(start, a, ns, nName, vName);
+        put32(start, a + ATTR_SIZE, ns); put32(start, a + ATTR_SIZE + 4, nRequired);
+        put32(start, a + ATTR_SIZE + 8, -1); put16(start, a + ATTR_SIZE + 12, 8);
+        start[a + ATTR_SIZE + 15] = TYPE_INT_BOOLEAN; put32(start, a + ATTR_SIZE + 16, required ? -1 : 0);
+        byte[] close = new byte[NODE_HEADER + 8];
+        put16(close, 0, XML_END_ELEMENT); put16(close, 2, NODE_HEADER); put32(close, 4, close.length);
+        put32(close, 8, line); put32(close, 12, -1);
+        put32(close, NODE_HEADER, -1); put32(close, NODE_HEADER + 4, tag);
+        nodes.add(end, close);
+        nodes.add(end, start);
+        return true;
+    }
+
+    private static final int ATTR_VALUE = 0x01010024;
+
+    /** The integer android:value of {@code <meta-data android:name=name>} under {@code <application>}, or null. */
+    Integer metaDataInt(String name) {
+        for (byte[] c : nodes) {
+            if (u16(c, 0) != XML_START_ELEMENT || !"meta-data".equals(str(s32(c, NODE_HEADER + 4)))) continue;
+            if (!name.equals(stringValue(c, findAttr(c, "name")))) continue;
+            int a = findAttr(c, "value");
+            return a < 0 || (c[a + 15] & 0xff) != TYPE_INT_DEC ? null : s32(c, a + 16);
+        }
+        return null;
+    }
+
+    /**
+     * Adds {@code <meta-data android:name=name android:value=value/>} (an integer) as the last child of
+     * {@code <application>}; PackageManager hands it back in ApplicationInfo.metaData (GET_META_DATA).
+     */
+    void addMetaDataInt(String name, int value) throws IOException { addMetaData(name, value, null); }
+
+    /** As {@link #addMetaDataInt}, with a string android:value. */
+    void addMetaDataString(String name, String value) throws IOException { addMetaData(name, 0, value); }
+
+    /** The string android:value of {@code <meta-data android:name=name>}, or null. */
+    String metaDataString(String name) {
+        for (byte[] c : nodes) {
+            if (u16(c, 0) != XML_START_ELEMENT || !"meta-data".equals(str(s32(c, NODE_HEADER + 4)))) continue;
+            if (!name.equals(stringValue(c, findAttr(c, "name")))) continue;
+            return stringValue(c, findAttr(c, "value"));
+        }
+        return null;
+    }
+
+    private void addMetaData(String name, int intValue, String strValue) throws IOException {
+        int app = findElement("application");
+        if (app < 0) throw new IOException("manifest has no <application> element");
+        int nName = ensureAttrName("name", ATTR_NAME);
+        int nValue = ensureAttrName("value", ATTR_VALUE);
+        int ns = indexOf(ANDROID_NS);
+        if (ns < 0) throw new IOException("manifest declares no android namespace to attach the meta-data to");
+        int tag = poolString("meta-data"), vName = poolString(name), vStr = strValue == null ? -1 : poolString(strValue);
+        int end = -1;
+        for (int i = nodes.size() - 1; i > app && end < 0; i--) {
+            byte[] c = nodes.get(i);
+            if (u16(c, 0) == XML_END_ELEMENT && "application".equals(str(s32(c, NODE_HEADER + 4)))) end = i;
+        }
+        if (end < 0) throw new IOException("<application> has no end element");
+        int line = s32(nodes.get(end), 8);
+        // Attributes in resource-id order: name (0x01010003) < value (0x01010024).
+        byte[] start = new byte[NODE_HEADER + 20 + 2 * ATTR_SIZE];
+        put16(start, 0, XML_START_ELEMENT); put16(start, 2, NODE_HEADER); put32(start, 4, start.length);
+        put32(start, 8, line); put32(start, 12, -1);
+        put32(start, NODE_HEADER, -1); put32(start, NODE_HEADER + 4, tag);
+        put16(start, NODE_HEADER + 8, 20); put16(start, NODE_HEADER + 10, ATTR_SIZE);
+        put16(start, NODE_HEADER + 12, 2);
+        int a = NODE_HEADER + 20;
+        putStringAttr(start, a, ns, nName, vName);
+        if (strValue != null) {
+            putStringAttr(start, a + ATTR_SIZE, ns, nValue, vStr);
+        } else {
+            put32(start, a + ATTR_SIZE, ns); put32(start, a + ATTR_SIZE + 4, nValue);
+            putTyped(start, a + ATTR_SIZE, intValue);
+        }
+        byte[] close = new byte[NODE_HEADER + 8];
+        put16(close, 0, XML_END_ELEMENT); put16(close, 2, NODE_HEADER); put32(close, 4, close.length);
+        put32(close, 8, line); put32(close, 12, -1);
+        put32(close, NODE_HEADER, -1); put32(close, NODE_HEADER + 4, tag);
+        nodes.add(end, close);
+        nodes.add(end, start);
+    }
+
+    // ---------------------------------------------------------------- package rename
+
+    /** Attributes holding a class name, by element; a relative one resolves against the manifest package. */
+    private static final String[][] CLASS_ATTRS = {
+            {"application", "name", "backupAgent", "manageSpaceActivity"},
+            {"activity", "name", "parentActivityName"},
+            {"activity-alias", "name", "targetActivity"},
+            {"service", "name"}, {"receiver", "name"}, {"provider", "name"}, {"instrumentation", "name"},
+    };
+    private static final String[] PERMISSION_DECLS = {"permission", "permission-tree", "permission-group"};
+    private static final String[] PERMISSION_REFS = {"name", "permission", "readPermission", "writePermission", "permissionGroup"};
+
+    private static boolean in(String s, String... set) {
+        for (String x : set) if (x.equals(s)) return true;
+        return false;
+    }
+
+    private static boolean isClassAttr(String element, String attr) {
+        for (String[] row : CLASS_ATTRS) {
+            if (!row[0].equals(element)) continue;
+            for (int i = 1; i < row.length; i++) if (row[i].equals(attr)) return true;
+        }
+        return false;
+    }
+
+    /** {@code name} as the platform resolves it against package {@code pkg} (PackageParser.buildClassName). */
+    static String fullClassName(String pkg, String name) {
+        if (name.startsWith(".")) return pkg + name;
+        return name.indexOf('.') < 0 ? pkg + "." + name : name;
+    }
+
+    /**
+     * {@code v} (an authority or a declared permission) moved from {@code old} to {@code neu}: a name under the old
+     * package keeps its tail; any other gets the new package's tail (or the whole new package) appended, because
+     * the platform refuses a second app declaring the same authority or permission whatever its prefix.
+     */
+    static String renamedName(String old, String neu, String v) {
+        if (v.equals(old) || v.startsWith(old + ".")) return neu + v.substring(old.length());
+        return v + (neu.startsWith(old + ".") ? neu.substring(old.length()) : "." + neu);
+    }
+
+    /**
+     * The provider authorities the manifest declares. A DEX that names one of them as a string (a game opening its
+     * own provider, e.g. Rolling Sky's ServicePreferencesHelper) can only follow a rename that fits the bytes the
+     * string table already holds, so the repack must know them before it renames.
+     */
+    List<String> providerAuthorities() {
+        List<String> out = new ArrayList<>();
+        for (byte[] c : nodes) {
+            if (u16(c, 0) != XML_START_ELEMENT || !"provider".equals(str(s32(c, NODE_HEADER + 4)))) continue;
+            String v = stringValue(c, findAttr(c, "authorities"));
+            if (v == null) continue;
+            for (String a : v.split(";", -1)) if (!a.isEmpty()) out.add(a);
+        }
+        return out;
+    }
+
+    /** Authority renames to use instead of the generic rule (a name that fits a DEX string, see providerAuthorities). */
+    void setAuthorityOverrides(java.util.Map<String, String> overrides) {
+        authorityOverrides.clear();
+        if (overrides != null) authorityOverrides.putAll(overrides);
+    }
+
+    /** Every authority the last {@link #renamePackage} renamed, as old -> new. */
+    java.util.Map<String, String> authorityRenames() {
+        return new java.util.LinkedHashMap<>(authorityRenames);
+    }
+
+    private final java.util.Map<String, String> authorityOverrides = new java.util.LinkedHashMap<>();
+    private final java.util.Map<String, String> authorityRenames = new java.util.LinkedHashMap<>();
+
+    private static final java.util.regex.Pattern PACKAGE_NAME =
+            java.util.regex.Pattern.compile("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+");
+
+    /**
+     * Renames the manifest package to {@code neu} so the app installs beside the original. The DEX keeps its
+     * classes, so every class name the manifest gives relative to the old package (".Main", "Main") is written
+     * out in full against the old package first; provider authorities and declared permissions are renamed
+     * (they must be unique on the device), with every reference to a renamed permission; an intent-filter
+     * category equal to the old package (GCM/C2DM) and taskAffinity/process names under it follow the package.
+     * Returns one report line per change.
+     */
+    List<String> renamePackage(String neu) throws IOException {
+        return renamePackage(neu, null);
+    }
+
+    /** A provider can use both a DEX literal and an authority built from the current package name. */
+    List<String> renamePackage(String neu, String packageDerivedAuthority) throws IOException {
+        String old = packageName();
+        if (old == null) throw new IOException("manifest has no package to rename");
+        if (!PACKAGE_NAME.matcher(neu).matches()) throw new IOException("not a valid package name: " + neu);
+        if (neu.equals(old)) throw new IOException("new package is the same as the old one: " + neu);
+        List<String> out = new ArrayList<>();
+        java.util.Map<String, String> perms = new java.util.LinkedHashMap<>();
+        for (byte[] c : nodes) {
+            if (u16(c, 0) != XML_START_ELEMENT || !in(str(s32(c, NODE_HEADER + 4)), PERMISSION_DECLS)) continue;
+            String v = stringValue(c, findAttr(c, "name"));
+            if (v != null) perms.put(v, renamedName(old, neu, v));
+        }
+        boolean renamed = false;
+        for (byte[] c : nodes) {
+            if (u16(c, 0) != XML_START_ELEMENT) continue;
+            String el = str(s32(c, NODE_HEADER + 4));
+            for (int i = 0; i < attrCount(c); i++) {
+                int a = attrOff(c, i);
+                String attr = str(s32(c, a + 4)), v = stringValue(c, a);
+                if (attr == null || v == null) continue;
+                String nv = null;
+                if ("manifest".equals(el) && "package".equals(attr)) {
+                    nv = neu;
+                    renamed = true;
+                } else if (isClassAttr(el, attr) && !v.isEmpty()) {
+                    nv = fullClassName(old, v);
+                } else if ("meta-data".equals(el) && "value".equals(attr) && v.startsWith(".")
+                        && "android.support.PARENT_ACTIVITY".equals(stringValue(c, findAttr(c, "name")))) {
+                    nv = old + v;                      // NavUtils resolves it against getPackageName()
+                } else if ("provider".equals(el) && "authorities".equals(attr)) {
+                    StringBuilder sb = new StringBuilder();
+                    for (String auth : v.split(";", -1)) {
+                        if (sb.length() > 0) sb.append(';');
+                        if (auth.isEmpty()) {
+                            sb.append(auth);
+                            continue;
+                        }
+                        String generic = renamedName(old, neu, auth);
+                        String authNeu = authorityOverrides.getOrDefault(auth, generic);
+                        authorityRenames.put(auth, authNeu);
+                        sb.append(authNeu);
+                        if (auth.equals(packageDerivedAuthority) && !generic.equals(authNeu)) {
+                            sb.append(';').append(generic);
+                        }
+                    }
+                    nv = sb.toString();
+                } else if (perms.containsKey(v) && in(attr, PERMISSION_REFS)) {
+                    nv = perms.get(v);
+                } else if ("category".equals(el) && "name".equals(attr) && v.equals(old)) {
+                    nv = neu;
+                } else if (in(attr, "taskAffinity", "process") && (v.equals(old) || v.startsWith(old + "."))) {
+                    nv = neu + v.substring(old.length());
+                }
+                if (nv == null || nv.equals(v)) continue;
+                int idx = poolString(nv);
+                put32(c, a + 8, idx);
+                put16(c, a + 12, 8); c[a + 14] = 0; c[a + 15] = TYPE_STRING; put32(c, a + 16, idx);
+                out.add(el + " " + attr + ": " + v + " -> " + nv);
+            }
+        }
+        if (!renamed) throw new IOException("manifest package attribute not found on <manifest>");
+        return out;
+    }
+
+    private static void putStringAttr(byte[] c, int a, int ns, int name, int value) {
+        put32(c, a, ns); put32(c, a + 4, name); put32(c, a + 8, value);
+        put16(c, a + 12, 8); c[a + 14] = 0; c[a + 15] = TYPE_STRING; put32(c, a + 16, value);
+    }
+
+    /** Pool index of {@code s}, appended when missing (values need no resource-map slot). */
+    private int poolString(String s) {
+        int i = indexOf(s);
+        if (i >= 0) return i;
+        strings.add(s);
+        poolDirty = true;
+        return strings.size() - 1;
     }
 
     private static void putTyped(byte[] c, int a, int value) {
@@ -356,6 +949,72 @@ final class AxmlEditor {
         put32(out, ins + 4, name);
         putTyped(out, ins, value);
         return out;
+    }
+
+    /**
+     * Removes attribute {@code attr} from every {@code <element>}; true when one was removed. The attribute's name
+     * stays in the string pool (harmless); the node shrinks and its id/class/style indexes follow.
+     */
+    boolean removeAttribute(String element, String attr) {
+        boolean any = false;
+        for (int i = 0; i < nodes.size(); i++) {
+            byte[] c = nodes.get(i);
+            if (u16(c, 0) != XML_START_ELEMENT || !element.equals(str(s32(c, NODE_HEADER + 4)))) continue;
+            any |= removeAttrAt(i, attr);
+        }
+        return any;
+    }
+
+    static final int TYPE_FLOAT = 0x04;
+
+    /**
+     * Sets android:{@code attr} (resource id {@code resId}) to a typed value on every {@code <element>}: rewritten in
+     * place, or inserted in resource-id order. Returns how many elements were set.
+     */
+    int setTypedAttr(String element, String attr, int resId, int type, int data) throws IOException {
+        int nName = ensureAttrName(attr, resId);  // first: it may insert into the pool
+        int ns = indexOf(ANDROID_NS);
+        if (ns < 0) throw new IOException("manifest declares no android namespace");
+        int count = 0;
+        for (int i = 0; i < nodes.size(); i++) {
+            byte[] c = nodes.get(i);
+            if (u16(c, 0) != XML_START_ELEMENT || !element.equals(str(s32(c, NODE_HEADER + 4)))) continue;
+            int a = findAttr(c, attr);
+            if (a < 0) {
+                c = withAttribute(c, ns, nName, resId, data);
+                nodes.set(i, c);
+                a = findAttr(c, attr);
+            }
+            put32(c, a + 8, -1);
+            put16(c, a + 12, 8);
+            c[a + 14] = 0;
+            c[a + 15] = (byte) type;
+            put32(c, a + 16, data);
+            count++;
+        }
+        return count;
+    }
+
+    /** Removes attribute {@code attr} from the start element at node index {@code i}; true when it was there. */
+    private boolean removeAttrAt(int i, String attr) {
+        byte[] c = nodes.get(i);
+        int size = u16(c, NODE_HEADER + 10), n = attrCount(c), at = -1;
+        for (int k = 0; k < n && at < 0; k++) if (attr.equals(str(s32(c, attrOff(c, k) + 4)))) at = k;
+        if (at < 0) return false;
+        int del = attrOff(c, at);
+        byte[] out = new byte[c.length - size];
+        System.arraycopy(c, 0, out, 0, del);
+        System.arraycopy(c, del + size, out, del, c.length - del - size);
+        put32(out, 4, out.length);
+        put16(out, NODE_HEADER + 12, n - 1);
+        // idIndex/classIndex/styleIndex are 1-based positions: the removed one becomes 0, later ones move down.
+        for (int f = NODE_HEADER + 14; f <= NODE_HEADER + 18; f += 2) {
+            int v = u16(out, f);
+            if (v == at + 1) put16(out, f, 0);
+            else if (v > at + 1) put16(out, f, v - 1);
+        }
+        nodes.set(i, out);
+        return true;
     }
 
     /** Add one to every string-pool reference in node {@code c} that is >= {@code at}. */

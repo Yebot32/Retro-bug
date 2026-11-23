@@ -12,6 +12,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "rb/abi/jni_env.h"
+#include "rb/abi/jni_args.h"
 
 #include <cstdio>
 #include <cstring>
@@ -20,6 +21,14 @@
 namespace rb::abi {
 
 namespace {
+
+/// The guest registers at the `Call<T>Method` slot a host method is running for, per host thread (M2: two
+/// guest threads can be inside host methods at once). `env` scopes it to one environment.
+struct CallingFrame {
+  const JniEnv* env = nullptr;
+  const exec::MachineState* state = nullptr;
+};
+thread_local CallingFrame tls_calling;
 
 /// Hex digits for a guest word — what every "0x" in a refusal is followed by. The file used to print
 /// `"0x" + Hex32(addr)`, a decimal number wearing a hex prefix, in every handle it named.
@@ -75,6 +84,10 @@ std::uint32_t Arg(const exec::MachineState& state, unsigned index) {
 }
 
 }  // namespace
+
+const exec::MachineState* JniEnv::calling_state() const {
+  return tls_calling.env == this ? tls_calling.state : nullptr;
+}
 
 JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsigned arena_bytes,
                std::string* err)
@@ -346,7 +359,7 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
       if (serr != nullptr) *serr = "GetArrayLength(0x" + Hex32(Arg(s, 1)) + "): not a live byte[] of this environment";
       return false;
     }
-    s.r[0] = static_cast<std::uint32_t>(it->second.size());
+    s.r[0] = static_cast<std::uint32_t>(it->second->size());
     return true;
   });
   abi_.Bind(jni::kGetByteArrayRegion, [this](exec::MachineState& s, std::string* serr) {
@@ -363,7 +376,7 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
       if (serr != nullptr) *serr = "GetByteArrayRegion: the stacked buf argument is not readable";
       return false;
     }
-    const auto size = static_cast<std::int64_t>(it->second.size());
+    const auto size = static_cast<std::int64_t>(it->second->size());
     if (start < 0 || len < 0 || static_cast<std::int64_t>(start) + len > size) {
       // JNI throws ArrayIndexOutOfBoundsException here; with no exceptions to raise, refuse by name.
       if (serr != nullptr) {
@@ -372,7 +385,7 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
       }
       return false;
     }
-    if (len != 0 && !memory_.Write(buf, it->second.data() + start, static_cast<std::size_t>(len))) {
+    if (len != 0 && !memory_.Write(buf, it->second->data() + start, static_cast<std::size_t>(len))) {
       if (serr != nullptr) {
         *serr = "GetByteArrayRegion: could not write " + std::to_string(len) + " bytes to guest 0x" + Hex32(buf);
       }
@@ -410,7 +423,7 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
       if (serr != nullptr) *serr = "SetByteArrayRegion: the stacked buf argument is not readable";
       return false;
     }
-    const auto size = static_cast<std::int64_t>(it->second.size());
+    const auto size = static_cast<std::int64_t>(it->second->size());
     if (start < 0 || len < 0 || static_cast<std::int64_t>(start) + len > size) {
       if (serr != nullptr) {
         *serr = "SetByteArrayRegion: [" + std::to_string(start) + ", +" + std::to_string(len) +
@@ -418,7 +431,7 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
       }
       return false;
     }
-    if (len != 0 && !memory_.Read(buf, it->second.data() + start, static_cast<std::size_t>(len))) {
+    if (len != 0 && !memory_.Read(buf, it->second->data() + start, static_cast<std::size_t>(len))) {
       if (serr != nullptr) {
         *serr = "SetByteArrayRegion: could not read " + std::to_string(len) + " bytes from guest 0x" + Hex32(buf);
       }
@@ -437,7 +450,7 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
       if (serr != nullptr) *serr = "GetByteArrayElements(0x" + Hex32(arr) + "): not a live byte[] of this environment";
       return false;
     }
-    const auto n = static_cast<std::uint32_t>(it->second.size());
+    const auto n = static_cast<std::uint32_t>(it->second->size());
     const unsigned total = (jni::kStringHeaderBytes + n + 3u) & ~3u;
     const GuestAddr block = AllocBlock(total);
     std::string werr;
@@ -451,7 +464,7 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
       return false;
     }
     live_.emplace(block, LiveBlock{total, n, jni::kElementsMagic});
-    if (n != 0 && !memory_.Write(block + jni::kStringHeaderBytes, it->second.data(), n)) {
+    if (n != 0 && !memory_.Write(block + jni::kStringHeaderBytes, it->second->data(), n)) {
       ReleaseInternal(block);
       if (serr != nullptr) *serr = "GetByteArrayElements: could not write the copy at 0x" + Hex32(block);
       return false;
@@ -491,8 +504,8 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
         if (serr != nullptr) *serr = "ReleaseByteArrayElements: the array 0x" + Hex32(arr) + " was deleted before its elements";
         return false;
       }
-      if (!it->second.empty() &&
-          !memory_.Read(block + jni::kStringHeaderBytes, it->second.data(), it->second.size())) {
+      if (!it->second->empty() &&
+          !memory_.Read(block + jni::kStringHeaderBytes, it->second->data(), it->second->size())) {
         if (serr != nullptr) *serr = "ReleaseByteArrayElements: the copy at 0x" + Hex32(elems) + " is unreadable";
         return false;
       }
@@ -519,6 +532,17 @@ JniEnv::JniEnv(mem::GuestMemory& memory, AbiContext& abi, GuestAddr where, unsig
     return true;
   });
   abi_.Bind(jni::kExceptionDescribe, noop);
+
+  // The JNIEnv table is an engine service, not foreign host code: its functions mutate this environment's
+  // arena, records and host class model, which the GGL protects, and none of them waits on another guest
+  // thread. So they run with the GGL held — including the host methods `CallHost` dispatches to, which
+  // reach the same records through `NewHostByteArray`/`StringText`/`HostArray`. A nested guest call one
+  // of them makes (a host method calling back into the guest) may still release the lock at a slice
+  // boundary or a blocking syscall; nothing here keeps an invariant across that call except the
+  // `methods_` record, which only setup (`DefineHostMethod`) grows.
+  for (std::uint32_t slot = 0; slot < jni::kTableEntries; ++slot) {
+    abi_.SetSlotLock(slot, AbiContext::SlotLock::kHoldsGgl);
+  }
 
   ok_ = true;
   if (err != nullptr) err->clear();
@@ -787,52 +811,7 @@ bool JniEnv::DefineHostMethod(GuestAddr cls, const std::string& name, const std:
   // `(params)ret`, with every reference — `Lpkg/Name;` or any `[...` array — reduced to L, because the
   // calling convention only cares that it is one word.
   HostMethodRec rec{cls, name, sig, {}, 'V', std::move(fn), 0, 0};
-  std::size_t i = 0;
-  if (sig.empty() || sig[i++] != '(') return fail("a signature starts with '('");
-  const auto one = [&](char& kind) -> bool {
-    if (i >= sig.size()) return false;
-    char c = sig[i];
-    if (c == '[') {
-      while (i < sig.size() && sig[i] == '[') ++i;
-      if (i >= sig.size()) return false;
-      c = sig[i];
-      if (c == 'L') {
-        const std::size_t semi = sig.find(';', i);
-        if (semi == std::string::npos) return false;
-        i = semi + 1;
-      } else {
-        if (std::strchr("ZBCSIJFD", c) == nullptr) return false;
-        ++i;
-      }
-      kind = 'L';
-      return true;
-    }
-    if (c == 'L') {
-      const std::size_t semi = sig.find(';', i);
-      if (semi == std::string::npos) return false;
-      i = semi + 1;
-      kind = 'L';
-      return true;
-    }
-    if (std::strchr("ZBCSIJFD", c) == nullptr) return false;
-    ++i;
-    kind = c;
-    return true;
-  };
-  while (i < sig.size() && sig[i] != ')') {
-    char k = 0;
-    if (!one(k)) return fail("unreadable parameter list");
-    rec.params.push_back(k);
-  }
-  if (i >= sig.size()) return fail("no ')'");
-  ++i;
-  if (i < sig.size() && sig[i] == 'V') {
-    rec.ret = 'V';
-    ++i;
-  } else if (!one(rec.ret)) {
-    return fail("unreadable return type");
-  }
-  if (i != sig.size()) return fail("trailing characters after the return type");
+  if (!jni::ParseSignature(sig, &rec.params, &rec.ret)) return fail("unreadable JNI method signature '" + sig + "'");
   methods_.push_back(std::move(rec));
   return true;
 }
@@ -859,7 +838,7 @@ GuestAddr JniEnv::ClassOf(GuestAddr obj) const {
 GuestAddr JniEnv::NewHostByteArray(std::vector<std::uint8_t> bytes) {
   if (next_array_ >= jni::kHandleSpan / 4u) return 0;
   const GuestAddr h = jni::kArrayRefBase + next_array_++ * 4u;
-  arrays_.emplace(h, std::move(bytes));
+  arrays_.emplace(h, std::make_shared<std::vector<std::uint8_t>>(std::move(bytes)));
   ++arrays_made_;
   return h;
 }
@@ -913,57 +892,21 @@ bool JniEnv::CallHost(exec::MachineState& s, char family, ArgForm form, std::str
   // the last two, `...` promoted F to double and Z/B/C/S to int, and 8-byte values sit 8-aligned —
   // in the variadic form that alignment also skips r3, since a pair cannot start on an odd register.
   std::vector<std::uint64_t> args;
-  GuestAddr cursor = form == ArgForm::kVariadic ? s.r[13] : Arg(s, 3);
-  bool r3_free = form == ArgForm::kVariadic;
-  const auto read = [&](GuestAddr at, void* out, std::size_t n) {
-    return memory_.Read(at, out, n);
-  };
-  for (const char k : m.params) {
-    std::uint64_t v = 0;
-    if (form == ArgForm::kJvalues) {
-      const std::size_t n = (k == 'Z' || k == 'B') ? 1 : (k == 'C' || k == 'S') ? 2 : (k == 'J' || k == 'D') ? 8 : 4;
-      if (!read(cursor, &v, n)) return fail("Call*Method " + who + ": jvalue array at 0x" + Hex32(cursor) + " unreadable");
-      cursor += 8;
-    } else {
-      const bool wide = k == 'J' || k == 'D' || k == 'F';  // F arrives as a double
-      if (wide) {
-        r3_free = false;
-        cursor = (cursor + 7u) & ~7u;
-        if (!read(cursor, &v, 8)) return fail("Call*Method " + who + ": argument at 0x" + Hex32(cursor) + " unreadable");
-        cursor += 8;
-        if (k == 'F') {
-          double d = 0;
-          std::memcpy(&d, &v, 8);
-          const float f = static_cast<float>(d);
-          std::uint32_t bits = 0;
-          std::memcpy(&bits, &f, 4);
-          v = bits;
-        }
-      } else if (r3_free) {
-        v = s.r[3];
-        r3_free = false;
-      } else {
-        std::uint32_t w = 0;
-        if (!read(cursor, &w, 4)) return fail("Call*Method " + who + ": argument at 0x" + Hex32(cursor) + " unreadable");
-        v = w;
-        cursor += 4;
-      }
-    }
-    // Narrow kinds keep only their own bits, so a caller's stale upper bytes never reach the host.
-    if (k == 'Z') v &= 0xffu;
-    if (k == 'B') v = static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int8_t>(v)));
-    if (k == 'C') v &= 0xffffu;
-    if (k == 'S') v = static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int16_t>(v)));
-    if (k == 'I' || k == 'F' || k == 'L') v &= 0xffff'ffffu;
-    args.push_back(v);
-  }
+  std::string derr;
+  const jni::ArgForm jform = form == ArgForm::kVariadic ? jni::ArgForm::kVariadic
+                             : form == ArgForm::kVaList ? jni::ArgForm::kVaList
+                                                        : jni::ArgForm::kJvalues;
+  if (!jni::DecodeArgs(s, memory_, jform, m.params, 3, &args, &derr)) return fail("Call*Method " + who + ": " + derr);
 
   std::uint64_t ret = 0;
   std::string why;
   ++m.calls;
-  calling_state_ = &s;
+  // Per host thread, and saved/restored, so a host method on one thread never sees another thread's caller,
+  // and a host method that calls back into the guest (which calls another host method) gets its own back.
+  const CallingFrame saved = tls_calling;
+  tls_calling = CallingFrame{this, &s};
   const bool answered = m.fn(*this, args, ret, &why);
-  calling_state_ = nullptr;
+  tls_calling = saved;
   if (!answered) {
     ++m.refused;
     return fail(who + ": " + why);
@@ -1013,7 +956,7 @@ void JniEnv::Audit(diag::Auditor& audit) const {
   audit.Info("jni/arena", std::to_string(arena_total) + " bytes, " + std::to_string(strings_made_) +
                              " string(s) made, " + std::to_string(chars_made_) + " copy/copies");
   std::size_t array_bytes = 0;
-  for (const auto& [handle, bytes] : arrays_) array_bytes += bytes.size();
+  for (const auto& [handle, bytes] : arrays_) array_bytes += bytes->size();
   audit.Check("jni/array-accounting", arrays_made_ - arrays_freed_ == arrays_.size(),
               std::to_string(arrays_made_) + " made - " + std::to_string(arrays_freed_) + " freed vs " +
                   std::to_string(arrays_.size()) + " live (" + std::to_string(array_bytes) + " B on the host)");

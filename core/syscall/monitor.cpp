@@ -2,13 +2,26 @@
  * RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
  */
 #include "rb/syscall/monitor.h"
+#include "rb/syscall/host_io.h"
+
+#include <fcntl.h>
+#include <sys/resource.h>
+#include <sys/utsname.h>
+#include <unistd.h>
+#include <sched.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
+#include <limits>
 #include <random>
+#include <thread>
+#include <vector>
 
 #include "rb/mem/guest_memory.h"
+#include "rb/platform/host.h"
 
 namespace rb::syscall {
 namespace {
@@ -30,20 +43,19 @@ std::string ProtText(std::uint32_t prot) {
   return out;
 }
 
-/// The host's own clocks, and the only place in this file that asks the host anything. `CLOCK_REALTIME`
-/// and `CLOCK_MONOTONIC` are facts a process can have; the process-CPU clocks are not answered here
-/// because a guest's "CPU time" measured by the emulator's host would be a different quantity wearing the
-/// right name, and a named refusal is better than a plausible wrong number.
+/// The host's own clocks, and the only place in this file that asks the host anything. The wall and monotonic
+/// clocks are facts a process can have. The CPU-time clocks are answered from the host too: the calling host thread
+/// is the one running this guest thread, so its CPU time is that thread's work (plus the emulator's, which makes it
+/// larger, never smaller or stuck). They were refused until M4: games budget work by clock() (CLOCK_PROCESS_CPUTIME_ID)
+/// and a refusal stalled Fruit Ninja's loader for good.
 bool HostClock(std::int32_t clock_id, std::int64_t* nanos) {
-  const clockid_t id = clock_id == static_cast<std::int32_t>(CLOCK_REALTIME)
-                           ? CLOCK_REALTIME
-                           : (clock_id == static_cast<std::int32_t>(CLOCK_MONOTONIC) ? CLOCK_MONOTONIC
-                                                                                    : -1);
-  if (id < 0) return false;
-  timespec ts{};
-  if (::clock_gettime(id, &ts) != 0) return false;
-  *nanos = static_cast<std::int64_t>(ts.tv_sec) * 1'000'000'000 + static_cast<std::int64_t>(ts.tv_nsec);
-  return true;
+  // The wall and monotonic clocks and their raw/coarse/boot variants (0, 1, 4..7) — the guest kernel's answer — and
+  // the process and thread CPU clocks (2, 3). A clock id encoding a pid or tid (negative) is not answered.
+  //
+  // The mapping to the host's clock names is the platform's: Darwin's MONOTONIC counts through sleep and
+  // Linux's does not, so the two are not the same clock under the same number (see rb/platform/host.h).
+  if (clock_id < 0 || clock_id > 7) return false;
+  return platform::ClockNs(clock_id, nanos);
 }
 
 /// The host's entropy pool, through `<random>` because `getentropy`/`getrandom` are API 28 and this
@@ -149,13 +161,17 @@ const char* Name(Verdict v) {
     case Verdict::kUnsupported: return "unsupported";
     case Verdict::kExit: return "exit";
     case Verdict::kForward: return "forward";
+    case Verdict::kBlocking: return "blocking";
+    case Verdict::kThreadExit: return "thread-exit";
   }
   return "unknown";
 }
 
 const char* Name(std::uint32_t number) {
   switch (number) {
+    case nr::kExit: return "exit";
     case nr::kRead: return "read";
+    case nr::kLseek: return "lseek";
     case nr::kWrite: return "write";
     case nr::kClose: return "close";
     case nr::kGetpid: return "getpid";
@@ -164,12 +180,16 @@ const char* Name(std::uint32_t number) {
     case nr::kGettimeofday: return "gettimeofday";
     case nr::kMunmap: return "munmap";
     case nr::kFstat: return "fstat";
+    case nr::kSigreturn: return "sigreturn";
+    case nr::kClone: return "clone";
     case nr::kMprotect: return "mprotect";
     case nr::kMremap: return "mremap";
     case nr::kWritev: return "writev";
     case nr::kPrctl: return "prctl";
     case nr::kRtSigaction: return "rt_sigaction";
+    case nr::kRtSigreturn: return "rt_sigreturn";
     case nr::kRtSigprocmask: return "rt_sigprocmask";
+    case nr::kRtSigsuspend: return "rt_sigsuspend";
     case nr::kMmap2: return "mmap2";
     case nr::kFstat64: return "fstat64";
     case nr::kGetdents64: return "getdents64";
@@ -177,11 +197,29 @@ const char* Name(std::uint32_t number) {
     case nr::kFcntl64: return "fcntl64";
     case nr::kGettid: return "gettid";
     case nr::kFutex: return "futex";
+    case nr::kSchedYield: return "sched_yield";
+    case nr::kNanosleep: return "nanosleep";
     case nr::kExitGroup: return "exit_group";
     case nr::kSetTidAddress: return "set_tid_address";
     case nr::kClockGettime: return "clock_gettime";
     case nr::kClockNanosleep: return "clock_nanosleep";
     case nr::kTgkill: return "tgkill";
+    case nr::kTkill: return "tkill";
+    case nr::kRtTgsigqueueinfo: return "rt_tgsigqueueinfo";
+    case 376: return "process_vm_readv";
+    case nr::kClockGetres: return "clock_getres";
+    case nr::kUname: return "uname";
+    case nr::kSysinfo: return "sysinfo";
+    case nr::kSchedSetaffinity: return "sched_setaffinity";
+    case nr::kSchedGetaffinity: return "sched_getaffinity";
+    case nr::kPrlimit64: return "prlimit64";
+    case nr::kSchedGetparam: return "sched_getparam";
+    case nr::kSchedSetscheduler: return "sched_setscheduler";
+    case nr::kSchedGetscheduler: return "sched_getscheduler";
+    case nr::kSchedGetPriorityMax: return "sched_get_priority_max";
+    case nr::kSchedGetPriorityMin: return "sched_get_priority_min";
+    case nr::kSetpriority: return "setpriority";
+    case nr::kGetpriority: return "getpriority";
     case nr::kOpenat: return "openat";
     case nr::kFstatat64: return "fstatat64";
     case nr::kReadlinkat: return "readlinkat";
@@ -321,33 +359,80 @@ std::string Monitor::TallyText() const {
   return out.empty() ? std::string{"(nothing yet)"} : out;
 }
 
+std::uint64_t Monitor::AllocLimit() const {
+  const std::uint64_t window = memory_->window_bytes();
+  return alloc_ceiling_ != 0 ? std::min<std::uint64_t>(window, alloc_ceiling_) : window;
+}
+
 std::uint32_t Monitor::FindFreeRun(std::uint32_t hint, std::uint32_t size) const {
-  // The scan starts where the last anonymous mapping landed, so consecutive arenas stay consecutive,
-  // then wraps to the base; a hint is honoured only when page-aligned and entirely free, which is the
-  // kernel's own rule for a hint it is allowed to ignore. The base is one guest page in —
+  // A hint is honoured only when page-aligned and entirely free, which is the kernel's own rule for a hint it
+  // is allowed to ignore; otherwise the highest free run (top-down, below). The floor is one guest page in —
   // window-agnostic on purpose, because the model's window is 64 MiB on the launcher and a few pages
   // wide in tests, and a base tuned to one of them is a base the other cannot allocate above.
-  constexpr std::uint32_t kHeapBase = 0x0000'1000u;
-  const auto free_run = [&](std::uint32_t cand) {
-    if (cand < kHeapBase || static_cast<std::uint64_t>(cand) + size > memory_->window_bytes()) return false;
-    for (std::uint32_t pg = cand; pg < cand + size; pg += mem::kGuestPage) {
-      if (memory_->IsMapped(pg)) return false;
+  //
+  // All bounds are 64-bit and end at `AllocLimit()`: a 4 GiB window's size is 0 as a uint32, which made a
+  // 32-bit limit refuse every allocation, and `cand + size` wraps at the top of the space.
+  constexpr std::uint64_t kHeapBase = 0x0000'1000u;
+  const std::uint64_t limit = AllocLimit();
+  const auto free_run = [&](std::uint64_t cand) {
+    if (cand < kHeapBase || cand + size > limit) return false;
+    for (std::uint64_t pg = cand; pg < cand + size; pg += mem::kGuestPage) {
+      if (memory_->IsMapped(static_cast<std::uint32_t>(pg))) return false;
     }
     return true;
   };
   if (hint != 0 && (hint & (mem::kGuestPage - 1u)) == 0 && free_run(hint)) return hint;
-  const std::uint32_t start = mmap_next_ >= kHeapBase ? mmap_next_ : kHeapBase;
-  const std::uint32_t limit = static_cast<std::uint32_t>(memory_->window_bytes());
-  for (std::uint32_t cand = start; cand + size <= limit; cand += mem::kGuestPage) {
-    if (free_run(cand)) return cand;
-  }
-  for (std::uint32_t cand = kHeapBase; cand + size <= start && cand + size <= limit; cand += mem::kGuestPage) {
-    if (free_run(cand)) return cand;
+  // Top-down, as Linux's default mmap layout places them: the highest free run below the limit. A mapping then
+  // sits just below the one made before it, so memory past the end of the newest region is an older region, as
+  // on a device — Gumball's cLanguage::read scans past its last string for a non-zero byte and relies on that.
+  // A mapped page inside a candidate moves the search to just below that page.
+  if (size == 0 || size > limit - kHeapBase) return 0;
+  std::uint64_t cand = (limit - size) & ~static_cast<std::uint64_t>(mem::kGuestPage - 1u);
+  while (cand >= kHeapBase) {
+    std::uint64_t blocked = 0;
+    for (std::uint64_t pg = cand + size; pg > cand;) {
+      pg -= mem::kGuestPage;
+      if (memory_->IsMapped(static_cast<std::uint32_t>(pg))) {
+        blocked = pg + 1;  // +1 so a block at page 0 is still "found"
+        break;
+      }
+    }
+    if (blocked == 0) return static_cast<std::uint32_t>(cand);
+    const std::uint64_t page = blocked - 1;
+    if (page < kHeapBase + size) return 0;
+    cand = page - size;
   }
   return 0;
 }
 
-Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
+bool Monitor::ServesItself(const Frame& f) {
+  if (HostIo::TakesFd(f.number)) {
+    const std::int32_t fd = static_cast<std::int32_t>(f.arg[0]);
+    if ((f.number == nr::kWrite || f.number == nr::kWritev) && (fd == 1 || fd == 2)) return true;  // the console
+    for (const ServedFile& s : served_) {
+      if (s.fd == fd) return true;
+    }
+    return false;
+  }
+  unsigned index = 0;
+  // Only the path calls this monitor has handlers for consult the provider (its virtual files).
+  if (files_ && memory_ != nullptr && HostIo::TakesPath(f.number, &index) &&
+      (f.number == nr::kOpenat || f.number == nr::kFstatat64 || f.number == nr::kFaccessat ||
+       f.number == nr::kReadlinkat)) {
+    std::string path;
+    if (ReadGuestPath(*memory_, f.arg[index], &path) != PathStatus::kOk) return false;
+    return files_(path).has_value();
+  }
+  return false;
+}
+
+Outcome Monitor::Classify(const Frame& f, exec::MachineState& state, runtime::GuestThread* thread) {
+  runtime::GuestThread& th = thread != nullptr ? *thread : *main_;
+  // Diagnostics for a stall dump: the last call this thread asked for, even if it is now blocked in it.
+  th.last_syscall.store(f.number);
+  if (host_io_ && memory_ != nullptr && HostIo::Handles(f.number) && !ServesItself(f)) {
+    return HostIo::Serve(f, *memory_);
+  }
   switch (f.number) {
     case nr::kGetpid:
     case nr::kGettid: {
@@ -358,13 +443,210 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
         return Outcome::Refused(err::kEnosys,
                                 "getpid/gettid before the launcher set this instance's ids");
       }
-      const std::int32_t id = f.number == nr::kGetpid ? pid_ : tid_;
+      if (f.number == nr::kGettid && th.tid == 0) {
+        return Outcome::Refused(err::kEnosys, "gettid on a guest thread that was given no tid");
+      }
+      const std::int32_t id = f.number == nr::kGetpid ? pid_ : th.tid;
       return Outcome::Emulated(id, "per-instance id supplied by the launcher");
     }
 
-    case nr::kExitGroup:
-      return Outcome{Verdict::kExit, static_cast<std::int32_t>(f.arg[0]),
-                     "exit_group(" + Hex(f.arg[0]) + ")"};
+    case nr::kSchedYield: {
+      // Blocking in the GGL's sense: the point of the call is to let another thread run, so the yield
+      // happens with the lock released (`Verdict::kBlocking`; the bridge runs `block` unlocked).
+      Outcome o{Verdict::kBlocking, 0, "sched_yield() -> 0, yielded with the GGL released", {}};
+      o.block = [] {
+        std::this_thread::yield();
+        return Outcome::Emulated(0, "sched_yield() -> 0, yielded with the GGL released");
+      };
+      return o;
+    }
+
+    case nr::kNanosleep: {
+      // nanosleep(req, rem) with the arm32 kernel's 32-bit `struct timespec` {tv_sec, tv_nsec}. The request
+      // is read and validated here, under the GGL; only the sleep itself runs unlocked. A signal for this
+      // thread cuts the sleep short with EINTR; `rem` is not written, which is a named gap (the answer
+      // says so) rather than a fabricated remaining time.
+      if (memory_ == nullptr) {
+        return Outcome::Refused(err::kEnosys, "nanosleep: no guest memory is attached to this monitor");
+      }
+      std::int32_t req[2] = {};
+      if (!memory_->Read(f.arg[0], req, sizeof req)) {
+        return Outcome::Answered(err::kEfault, "nanosleep: the request at 0x" + Hex(f.arg[0]) +
+                                                   " is not readable guest memory");
+      }
+      if (req[0] < 0 || req[1] < 0 || req[1] >= 1'000'000'000) {
+        return Outcome::Answered(err::kEinval, "nanosleep({" + std::to_string(req[0]) + ", " +
+                                                   std::to_string(req[1]) +
+                                                   "}) = -EINVAL (-22): tv_sec < 0 or tv_nsec outside [0, 1e9)");
+      }
+      const std::int64_t nanos = static_cast<std::int64_t>(req[0]) * 1'000'000'000 + req[1];
+      return Sleep("nanosleep({" + std::to_string(req[0]) + ", " + std::to_string(req[1]) + "})", nanos, th);
+    }
+
+    case nr::kClockNanosleep: {
+      // clock_nanosleep(clockid, flags, req, rem): the raw syscall answers -errno (bionic's wrapper turns it
+      // into the positive return). TIMER_ABSTIME (1) makes `req` an absolute time on `clockid`.
+      if (memory_ == nullptr) {
+        return Outcome::Refused(err::kEnosys, "clock_nanosleep: no guest memory is attached to this monitor");
+      }
+      const auto clock_id = static_cast<std::int32_t>(f.arg[0]);
+      const std::uint32_t flags = f.arg[1];
+      std::int32_t req[2] = {};
+      if (!memory_->Read(f.arg[2], req, sizeof req)) {
+        return Outcome::Answered(err::kEfault, "clock_nanosleep: the request at 0x" + Hex(f.arg[2]) +
+                                                   " is not readable guest memory");
+      }
+      const std::string call = "clock_nanosleep(clock " + std::to_string(clock_id) + ", flags " +
+                               std::to_string(flags) + ", {" + std::to_string(req[0]) + ", " +
+                               std::to_string(req[1]) + "})";
+      if (req[0] < 0 || req[1] < 0 || req[1] >= 1'000'000'000 || (flags & ~1u) != 0) {
+        return Outcome::Answered(err::kEinval, call + " = -EINVAL (-22)");
+      }
+      std::int64_t now = 0;
+      if (!Now(clock_id, &now)) {
+        return Outcome::Answered(err::kEinval, call + " = -EINVAL (-22): no fact for that clock id here");
+      }
+      const std::int64_t t = static_cast<std::int64_t>(req[0]) * 1'000'000'000 + req[1];
+      const std::int64_t nanos = (flags & 1u) != 0 ? std::max<std::int64_t>(0, t - now) : t;
+      return Sleep(call, nanos, th);
+    }
+
+    case nr::kExitGroup: {
+      // The process is finished: every other guest thread stops at its next slice boundary or syscall, and
+      // every one parked in a futex wait or a sleep is woken to do so (the bridge's run loop checks this).
+      const std::string why = "exit_group(" + Hex(f.arg[0]) + ")";
+      RequestGroupExit(why + " on tid " + std::to_string(th.tid));
+      return Outcome{Verdict::kExit, static_cast<std::int32_t>(f.arg[0]), why};
+    }
+
+    case nr::kExit:
+      return ThreadExit(f, th);
+
+    case nr::kClone:
+      return Clone(f, state, th);
+
+    case nr::kTkill:
+    case nr::kRtTgsigqueueinfo:
+    case nr::kTgkill: {
+      // The fatal-signal family, under all three numbers a Unity boot uses: `tgkill(tgid, tid, sig)`,
+      // `tkill(tid, sig)` and `rt_tgsigqueueinfo(tgid, tid, sig, info)`. They are the same operation with the
+      // arguments shifted, and only `tgkill` was handled, which is how a scan for 268 read a process that never
+      // touched a signal — while Cars 3 asked 238 and 363 in the same microsecond as 268.
+      //
+      // C26: a real signal is now QUEUED for its target thread instead of refused. The target takes it at the
+      // ABI's next slice boundary and enters the handler the guest installed (see `DeliverPendingSignal` in
+      // the runtime). Measured, and this is what the whole change is for (SM-X710 2026-10-19): Cars 3 installs
+      // a handler for signal 30 at libmono.so+0x2bdb59, then `tkill(tid, 30)` — SIGPWR, Mono's GC
+      // thread-suspend — was refused, so the runtime aborted (SIGABRT) and called `exit(127)`. MadTruck died on
+      // the identical pair. The return value stays the kernel's 0, which is now also the truth: the signal is
+      // pending.
+      const bool queued = f.number == nr::kRtTgsigqueueinfo;
+      const bool tkill_form = f.number == nr::kTkill;  // tkill(tid, sig); the other two are (tgid, tid, sig[, info])
+      const auto tgid = static_cast<std::int32_t>(f.arg[0]);
+      const auto tid = static_cast<std::int32_t>(tkill_form ? f.arg[0] : f.arg[1]);
+      const auto sig = static_cast<std::int32_t>(tkill_form ? f.arg[1] : f.arg[2]);
+      const char* what = queued ? "rt_tgsigqueueinfo" : (tkill_form ? "tkill" : "tgkill");
+      const std::string call = std::string{what} + "(" +
+                               (tkill_form ? "" : std::to_string(tgid) + ", ") +
+                               std::to_string(tid) + ", " + std::to_string(sig) +
+                               (queued ? ", &info" : "") + ")";
+      if (sig < 0 || sig > 64) {
+        if (signal_trace_) {
+          signal_trace_("sig: " + call + " -> -EINVAL (-22): " + std::to_string(sig) +
+                        " is not a signal number on this ABI (0..64)");
+        }
+        return Outcome::Answered(err::kEinval, call + " = -EINVAL (-22): " + std::to_string(sig) +
+                                                   " is not a signal number on this ABI (0..64)");
+      }
+      // tkill carries no tgid, so the tid alone decides; the other two also require the group id to match.
+      const bool group_ok = f.number == nr::kTkill || (ids_set_ && tgid == pid_);
+      const bool alive = group_ok && (tid == main_->tid || live_tids_.count(tid) != 0);
+      if (!alive) return Outcome::Answered(err::kEsrch, call + " = -ESRCH (-3): no such live thread in this process");
+      if (sig == 0) return Outcome::Emulated(0, call + " -> 0: the thread is alive");
+      // A signal is checked against the guest's own dispositions, so a report says which of the three things
+      // happened: entered a handler, ran a default action, or ignored. SIGKILL/SIGSTOP cannot be caught, and
+      // saying so is better than a generic delivery.
+      const Disposition d = disposition(sig);
+      if (d.handler == 1) {
+        return Outcome::Emulated(0, call + " -> 0: signal " + std::to_string(sig) +
+                                        " is SIG_IGN for this guest, so it is dropped");
+      }
+      if (sig == 9 || sig == 19) {
+        return Outcome::Refused(err::kEnosys, call + ": signal " + std::to_string(sig) +
+                                                  " cannot be caught and this build does not run default "
+                                                  "actions; refusing rather than pretending it took");
+      }
+      QueueSignal(tid, sig);
+      if (signal_trace_) {
+        signal_trace_("sig: " + call + " -> 0: queued for delivery" +
+                      (d.catches() ? ", handler 0x" + Hex(d.handler) + " (restorer 0x" + Hex(d.restorer) + ")"
+                                   : ", no handler installed — the default action will be reported, not run"));
+      }
+      return Outcome::Emulated(0, call + " -> 0: signal " + std::to_string(sig) + " queued for tid " +
+                                      std::to_string(tid) +
+                                      (d.catches() ? " (a handler is installed)" : " (no handler installed)"));
+    }
+
+    case nr::kMadvise: {
+      // madvise(addr, len, advice). MADV_DONTNEED (4) drops the pages: a later read sees zeros, which is what an
+      // allocator returning memory relies on — for read-only private pages too (kernel semantics), so a page
+      // without write access is opened for the zero-fill and put back. Executable pages are the exception: no
+      // guest page here records whether it came from a file, and a device would re-read a file-backed code page
+      // rather than zero it, so they are left as they are (and the note counts them). The hints a kernel may
+      // ignore answer 0; MADV_REMOVE (9) needs a shared mapping this build never makes (the kernel's EINVAL for
+      // a private one); any advice the kernel does not know is EINVAL, by number.
+      const std::uint32_t at = f.arg[0];
+      const std::uint32_t len = f.arg[1];
+      const std::uint32_t advice = f.arg[2];
+      const std::string call = "madvise(0x" + Hex(at) + ", " + std::to_string(len) + ", " + std::to_string(advice) + ")";
+      if ((at & (mem::kGuestPage - 1u)) != 0) {
+        return Outcome::Answered(err::kEinval, call + " = -EINVAL (-22): the address is not page-aligned");
+      }
+      const bool hint = advice <= 3u /* NORMAL RANDOM SEQUENTIAL WILLNEED */ || advice == 8u /* FREE */ ||
+                        (advice >= 10u && advice <= 21u) /* DONTFORK..PAGEOUT */;
+      if (advice == 9u) {
+        return Outcome::Answered(err::kEinval, call + " = -EINVAL (-22): MADV_REMOVE needs a shared mapping, and "
+                                                      "this build makes none (the kernel's answer for a private one)");
+      }
+      if (advice != 4u && !hint) {
+        return Outcome::Answered(err::kEinval, call + " = -EINVAL (-22): advice " + std::to_string(advice) +
+                                                   " is not one the kernel knows");
+      }
+      if (hint || len == 0) return Outcome::Emulated(0, call + " -> 0 (a hint: accepted, no effect)");
+      if (memory_ == nullptr) {
+        return Outcome::Refused(err::kEnosys, "madvise: no guest memory is attached to this monitor");
+      }
+      const std::uint64_t end = static_cast<std::uint64_t>(at) + len;
+      if (end > memory_->window_bytes()) return Outcome::Answered(err::kEnomem, call + " = -ENOMEM (-12)");
+      static const std::uint8_t kZero[mem::kGuestPage] = {};
+      unsigned zeroed = 0, kept = 0;
+      for (std::uint64_t pg = at; pg < end; pg += mem::kGuestPage) {  // checked first: a refusal changes nothing
+        const auto p = static_cast<std::uint32_t>(pg);
+        if (!memory_->IsMapped(p)) return Outcome::Answered(err::kEnomem, call + " = -ENOMEM (-12): 0x" + Hex(p) + " is not mapped");
+      }
+      for (std::uint64_t pg = at; pg < end; pg += mem::kGuestPage) {
+        const auto p = static_cast<std::uint32_t>(pg);
+        const unsigned prot = memory_->ProtAt(p);
+        if ((prot & mem::kExec) != 0) {
+          ++kept;
+          continue;
+        }
+        // DONTNEED drops whole pages (len is rounded up).
+        if ((prot & mem::kWrite) != 0) {
+          if (memory_->Write(p, kZero, mem::kGuestPage)) ++zeroed; else ++kept;
+          continue;
+        }
+        std::string perr;
+        const bool ok = memory_->Protect(p, mem::kGuestPage, prot | mem::kWrite, &perr) &&
+                        memory_->Write(p, kZero, mem::kGuestPage);
+        memory_->Protect(p, mem::kGuestPage, prot, &perr);
+        if (ok) ++zeroed; else ++kept;
+      }
+      return Outcome::Emulated(0, call + " -> 0: MADV_DONTNEED zero-filled " + std::to_string(zeroed) +
+                                      " page(s)" + (kept != 0 ? "; " + std::to_string(kept) +
+                                                                     " executable page(s) left as they were"
+                                                              : std::string{}));
+    }
 
     case nr::kMprotect: {
       // The call a real libc's own startup cannot get past: bionic's
@@ -401,6 +683,30 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
                                    "mprotect(" + range + ", " + asked + ") = -ENOMEM (-12): 0x" +
                                        Hex(page) + " in the range has no mapping");
         }
+      }
+      // One direction *is* applied: opening a PROT_NONE reservation. bionic's pthread_create maps a whole
+      // thread (guard + stack + static TLS + pthread_internal_t) PROT_NONE and then mprotects the usable part
+      // read/write; leaving those pages inaccessible would fault the new thread's first store. A page with
+      // no access gets exactly the requested protection (and zeroed backing, which is what such a page held).
+      const unsigned want = ((prot & 1u) ? mem::kRead : 0u) | ((prot & 2u) ? mem::kWrite : 0u) |
+                            ((prot & 4u) ? mem::kExec : 0u);
+      unsigned opened = 0;
+      if (want != mem::kNone) {
+        for (std::uint64_t page = at & ~static_cast<std::uint64_t>(mem::kGuestPage - 1); page < end;
+             page += mem::kGuestPage) {
+          const auto p = static_cast<std::uint32_t>(page);
+          if (memory_->ProtAt(p) != mem::kNone) continue;
+          std::string perr;
+          if (!memory_->Protect(p, mem::kGuestPage, want, &perr)) {
+            return Outcome::Answered(err::kEnomem, "mprotect(" + range + ", " + asked + "): opening 0x" + Hex(p) +
+                                                       " failed: " + perr);
+          }
+          ++opened;
+        }
+      }
+      if (opened != 0) {
+        return Outcome::Emulated(0, "mprotect(" + range + ", " + asked + ") = 0: " + std::to_string(opened) +
+                                        " PROT_NONE page(s) opened with the requested protection");
       }
       // The deliberate deviation, and it is worded as one: granting the value a device grants is what
       // lets a guest proceed, but nothing here applied the request to anything, so a report that read
@@ -447,13 +753,13 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
                                 "svc #256 (set_tid_address) before the launcher set this instance's ids; "
                                 "refusing rather than returning a tid nobody produced");
       }
-      clear_child_tid_ = f.arg[0];
-      const std::string why = "set_tid_address(0x" + Hex(clear_child_tid_) + ") -> tid " +
-                              std::to_string(tid_) +
+      th.clear_child_tid = f.arg[0];
+      const std::string why = "set_tid_address(0x" + Hex(th.clear_child_tid) + ") -> tid " +
+                              std::to_string(th.tid) +
                               "; the clear-child-tid slot is recorded, and no thread exit walks it "
                               "because this build models one thread";
       Observe(why);
-      return Outcome::Emulated(tid_, why);
+      return Outcome::Emulated(th.tid, why);
     }
 
     case nr::kSetRobustList: {
@@ -464,10 +770,10 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
                                                    ") = -EINVAL (-22): the kernel requires exactly "
                                                    "sizeof(struct robust_list_head) = 24");
       }
-      robust_head_ = f.arg[0];
-      robust_len_ = f.arg[1];
-      const std::string why = "set_robust_list(head=0x" + Hex(robust_head_) + ", len=" +
-                              std::to_string(robust_len_) +
+      th.robust_head = f.arg[0];
+      th.robust_len = f.arg[1];
+      const std::string why = "set_robust_list(head=0x" + Hex(th.robust_head) + ", len=" +
+                              std::to_string(th.robust_len) +
                               ") recorded -> 0; this build models one thread and no thread exit, so "
                               "nothing ever walks the list";
       Observe(why);
@@ -489,9 +795,9 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
       if (!have) {
         return Outcome::Refused(err::kEnosys,
                                 call + "(" + std::to_string(id) +
-                                    ") has no fact to answer from: this build answers CLOCK_REALTIME "
-                                    "(0) and CLOCK_MONOTONIC (1) only, and a CPU-time clock measured on "
-                                    "the host would be the emulator's time under the guest's name");
+                                    ") has no fact to answer from: this build answers clock ids 0..7 "
+                                    "(wall, monotonic and CPU time); per-process or per-thread clock ids "
+                                    "of another pid/tid are not mapped");
       }
       std::int64_t sec = nanos / 1'000'000'000;
       std::int64_t nsec = nanos % 1'000'000'000;
@@ -526,6 +832,262 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
       }
       return Outcome::Emulated(0, call + "(" + std::to_string(id) + ") = " + std::to_string(sec) + "s " +
                                       std::to_string(nsec) + "ns");
+    }
+
+    case nr::kClockGetres: {
+      // clock_getres(clockid, &res). The resolution of a clock is a fact about the host that is running this
+      // guest, not a number to invent, so it is asked for and written back — and the guest's `timespec` is the
+      // legacy arm32 shape (two 4-byte fields), exactly as in the case above.
+      //
+      // This call is in the Cars 3 death path: measured (SM-X710 2026-10-19) it is the first of three refusals
+      // — 264, then 238 (`tkill`), then 363 (`rt_tgsigqueueinfo`) — after which the game calls exit_group(127).
+      const std::int32_t id = static_cast<std::int32_t>(f.arg[0]);
+      const std::string call = "clock_getres(" + std::to_string(id) + ")";
+      if (memory_ == nullptr) {
+        return Outcome::Refused(err::kEnosys, call + ": no guest memory is attached to this monitor, so there "
+                                                   "is nowhere to write the timespec");
+      }
+      timespec host{};
+      if (::clock_getres(static_cast<clockid_t>(id), &host) != 0) {
+        // EINVAL is the kernel's own answer for a clock id it does not know, and this is the one clock call whose
+        // refusal is not about this build: the host has the same table a device would.
+        return Outcome::Answered(err::kEinval, call + " = -EINVAL (-22): no clock with that id");
+      }
+      const std::uint32_t at = f.arg[1];
+      // A resolution of zero is what a kernel reports for a clock it cannot measure; hosts do this for
+      // CLOCK_THREAD_CPUTIME_ID under some hypervisors. Written through rather than replaced, because a caller
+      // that reads 0 and divides defensively is better served than one handed a plausible non-zero lie.
+      const std::uint32_t words[2] = {static_cast<std::uint32_t>(host.tv_sec),
+                                      static_cast<std::uint32_t>(host.tv_nsec)};
+      if (at != 0 && !memory_->Write(at, words, sizeof words)) {
+        return Outcome::Answered(err::kEfault, call + ": the timespec at 0x" + Hex(at) +
+                                                   " is not writable guest memory");
+      }
+      return Outcome::Emulated(0, call + " = " + std::to_string(host.tv_sec) + "s " +
+                                      std::to_string(host.tv_nsec) + "ns");
+    }
+
+    case nr::kUname: {
+      // uname(&buf). The machine field is the one that has to differ from the host's: this guest is ARM32 and
+      // asks what it is running on, so "armv7l" is the true answer to the question it asked, and the host's
+      // "aarch64" would be the answer to a question nobody put. Every other field is the host's own.
+      // `struct utsname` is six 65-byte fields on both the arm32 and the arm64 kernel ABI, so the copy is the
+      // same shape; only `machine` (and, on a Darwin host, every field) is corrected.
+      struct utsname u {};
+      const platform::Uts uts = platform::LinuxUts();
+      std::snprintf(u.sysname, sizeof u.sysname, "%s", uts.sysname);
+      std::snprintf(u.nodename, sizeof u.nodename, "%s", uts.nodename);
+      std::snprintf(u.release, sizeof u.release, "%s", uts.release);
+      std::snprintf(u.version, sizeof u.version, "%s", uts.version);
+      std::snprintf(u.machine, sizeof u.machine, "%s", uts.machine);
+      const std::uint32_t at = f.arg[0];
+      if (at != 0 && !memory_->Write(at, &u, sizeof u)) {
+        return Outcome::Answered(err::kEfault, "uname: the utsname at 0x" + Hex(at) +
+                                                   " is not writable guest memory");
+      }
+      return Outcome::Emulated(0, "uname -> {sysname " + std::string{u.sysname} + ", release " +
+                                      std::string{u.release} + ", machine armv7l}");
+    }
+
+    case nr::kSchedGetaffinity: {
+      // sched_getaffinity(pid, cpusetsize, &mask). A guest asking which CPUs it may run on deserves the host's
+      // real answer, truncated to the first 32 bits the arm32 `cpu_set_t` holds — not a fabricated "all of
+      // them", which is what makes a thread pool size itself wrong on a phone that is thermally capped.
+      const auto pid = static_cast<std::int32_t>(f.arg[0]);
+      const std::uint32_t size = f.arg[1];
+      const std::string call = "sched_getaffinity(" + std::to_string(pid) + ", " + std::to_string(size) + ")";
+      if (memory_ == nullptr) {
+        return Outcome::Refused(err::kEnosys, call + ": no guest memory is attached to this monitor");
+      }
+      // Guest pids name guest threads, not host ones, so the only mask that means anything is this
+      // process's. Darwin has no sched_getaffinity at all; the platform answers with the online CPUs.
+      const std::uint32_t mask = platform::CpuMask();
+      if (mask == 0 && platform::CpuCount() == 0) {
+        return Outcome::Answered(err::kEsrch, call + " = -ESRCH (-3): the host has no such thread");
+      }
+      // The arm32 cpu_set_t is 1024 bits (128 bytes) with the same bit-per-CPU layout, so the leading word maps
+      // straight across; anything the guest asked for beyond that is zero-filled, as a kernel does.
+      std::vector<std::uint8_t> guest(size, 0);
+      const std::size_t from_host = std::min<std::size_t>(size, sizeof mask);
+      std::memcpy(guest.data(), &mask, from_host);
+      if (size != 0 && !memory_->Write(f.arg[2], guest.data(), size)) {
+        return Outcome::Answered(err::kEfault, call + ": the cpu_set at 0x" + Hex(f.arg[2]) +
+                                                   " is not writable guest memory");
+      }
+      unsigned cpus = 0;
+      for (unsigned i = 0; i < 32; ++i) cpus += (mask >> i) & 1u;
+      return Outcome::Emulated(0, call + " -> " + std::to_string(cpus) + " CPU(s)");
+    }
+
+    case nr::kSchedSetaffinity: {
+      // sched_setaffinity(pid, cpusetsize, &mask). Applying a guest's request to the *host* thread would move
+      // the emulator itself, which is not what the guest asked for and is not this build's to decide; the
+      // request is read back and reported, and the guest is told it took, because the set it named is one the
+      // host can already schedule on. The deviation is stated rather than hidden.
+      const auto pid = static_cast<std::int32_t>(f.arg[0]);
+      const std::uint32_t size = f.arg[1];
+      const std::string call = "sched_setaffinity(" + std::to_string(pid) + ", " + std::to_string(size) + ")";
+      if (memory_ == nullptr) {
+        return Outcome::Refused(err::kEnosys, call + ": no guest memory is attached to this monitor");
+      }
+      std::vector<std::uint8_t> bits(size, 0);
+      if (size != 0 && !memory_->Read(f.arg[2], bits.data(), size)) {
+        return Outcome::Answered(err::kEfault, call + ": the cpu_set at 0x" + Hex(f.arg[2]) +
+                                                   " is not readable guest memory");
+      }
+      return Outcome::Emulated(0, call + " = 0: recorded, not applied — the guest's threads already run on a "
+                                         "superset of the CPUs a phone would give them, and moving the host "
+                                         "threads that run them is not this build's decision");
+    }
+
+    case nr::kPrlimit64: {
+      // prlimit64(pid, resource, &new, &old). The arm32 kernel's `struct rlimit64` is two 8-byte fields, so the
+      // guest's shape is fixed by the ABI. RLIMIT_NOFILE and RLIMIT_STACK are the two a game's loader actually
+      // reads, and both have a true host answer.
+      const auto pid = static_cast<std::int32_t>(f.arg[0]);
+      const auto resource = static_cast<std::int32_t>(f.arg[1]);
+      const std::string call = "prlimit64(" + std::to_string(pid) + ", " + std::to_string(resource) + ")";
+      if (memory_ == nullptr) {
+        return Outcome::Refused(err::kEnosys, call + ": no guest memory is attached to this monitor");
+      }
+      platform::Limit host{};
+      if (!platform::ResourceLimit(resource, &host)) {
+        return Outcome::Answered(err::kEinval, call + " = -EINVAL (-22): no such resource, or no such process");
+      }
+      // A limit of RLIM_INFINITY does not survive the trip into a 32-bit field, so it is clamped to the widest
+      // value the guest's own type can hold rather than wrapped to zero.
+      constexpr std::uint64_t kInf = platform::kInfinite;
+      const auto clamp = [](std::uint64_t v) -> std::uint64_t {
+        return v == platform::kInfinite ? kInf : v;
+      };
+      const std::uint64_t old_pair[2] = {clamp(host.cur), clamp(host.max)};
+      if (f.arg[3] != 0 && !memory_->Write(f.arg[3], old_pair, sizeof old_pair)) {
+        return Outcome::Answered(err::kEfault, call + ": the old rlimit at 0x" + Hex(f.arg[3]) +
+                                                   " is not writable guest memory");
+      }
+      if (f.arg[2] != 0) {
+        const std::uint64_t asked[2] = {clamp(host.cur), clamp(host.max)};
+        return Outcome::Emulated(0, call + " = 0: cur " + std::to_string(asked[0]) + ", max " +
+                                        std::to_string(asked[1]) + " (the request was read, not applied: this "
+                                        "build does not lower the host's own limits)");
+      }
+      return Outcome::Emulated(0, call + " -> cur " + std::to_string(old_pair[0]) + ", max " +
+                                      std::to_string(old_pair[1]));
+    }
+
+    case nr::kSysinfo: {
+      // sysinfo(&info). A game reads totalram/freeram to size its own caches, and the host has those numbers.
+      // The arm32 and arm64 kernels agree on the field layout of the leading `uptime`, `loads` and `totalram`
+      // group, so only the leading prefix is copied: the struct grew over kernel versions and writing the
+      // host's full 112 bytes over the guest's smaller one would overrun the caller's buffer.
+      const std::uint32_t at = f.arg[0];
+      const std::string call = "sysinfo";
+      if (memory_ == nullptr) {
+        return Outcome::Refused(err::kEnosys, call + ": no guest memory is attached to this monitor");
+      }
+      platform::MemInfo host{};
+      if (!platform::MemoryInfo(&host)) {
+        return Outcome::Answered(err::kEfault, call + " = -EFAULT (-14): the host refused to describe itself");
+      }
+      // The arm32 `struct sysinfo` prefix, field for field: uptime, loads[3], totalram, freeram, sharedram,
+      // bufferram, totalswap, freeswap. Written field by field so the widths are the guest's, not the
+      // host's — `long` is 4 bytes on one side of this ABI pair and 8 on the other.
+      const std::uint32_t words[10] = {
+          static_cast<std::uint32_t>(host.uptime),
+          host.loads[0], host.loads[1], host.loads[2],
+          static_cast<std::uint32_t>(host.totalram), static_cast<std::uint32_t>(host.freeram),
+          static_cast<std::uint32_t>(host.sharedram), static_cast<std::uint32_t>(host.bufferram),
+          static_cast<std::uint32_t>(host.totalswap), static_cast<std::uint32_t>(host.freeswap)};
+      if (at != 0 && !memory_->Write(at, words, sizeof words)) {
+        return Outcome::Answered(err::kEfault, call + ": the sysinfo at 0x" + Hex(at) +
+                                                   " is not writable guest memory");
+      }
+      return Outcome::Emulated(0, call + " -> totalram " + std::to_string(host.totalram) + "B, freeram " +
+                                      std::to_string(host.freeram) + "B, procs " +
+                                      std::to_string(host.procs));
+    }
+
+    case nr::kSchedGetparam:
+    case nr::kSchedGetscheduler:
+    case nr::kSchedGetPriorityMin:
+    case nr::kSchedGetPriorityMax: {
+      // The scheduler queries a Mono/Boehm GC thread makes before it parks itself: sched_getparam(pid, &param),
+      // sched_getscheduler(pid), sched_get_priority_min/max(policy). All four are facts about the *host* thread
+      // that is running this guest thread, and each has a real answer.
+      //
+      // Measured (SM-X710 2026-10-19): Cars 3 asked 155, 156, 159 and 160 in a tight loop once the signal
+      // refusals stopped ending it, so these are the next wall rather than a hypothetical gap.
+      const auto pid = static_cast<std::int32_t>(f.arg[0]);
+      const std::string call = std::string{Name(f.number)} + "(" + std::to_string(pid) +
+                               (f.number == nr::kSchedGetPriorityMin || f.number == nr::kSchedGetPriorityMax
+                                    ? ", " + std::to_string(f.arg[1]) + ")"
+                                    : ")");
+      if (f.number == nr::kSchedGetparam) {
+        if (memory_ == nullptr) {
+          return Outcome::Refused(err::kEnosys, call + ": no guest memory is attached to this monitor");
+        }
+        std::int32_t prio = 0;
+        if (!platform::SchedPriority(pid, &prio)) {
+          return Outcome::Answered(err::kEsrch, call + " = -ESRCH (-3): the host has no such thread");
+        }
+        // The arm32 `struct sched_param` is a single `int sched_priority`, so the copy is four bytes.
+        if (f.arg[1] != 0 && !memory_->Write(f.arg[1], &prio, 4)) {
+          return Outcome::Answered(err::kEfault, call + ": the sched_param at 0x" + Hex(f.arg[1]) +
+                                                     " is not writable guest memory");
+        }
+        return Outcome::Emulated(0, call + " -> priority " + std::to_string(prio));
+      }
+      if (f.number == nr::kSchedGetscheduler) {
+        std::int32_t policy = 0;
+        if (!platform::SchedPolicy(pid, &policy)) {
+          return Outcome::Answered(err::kEsrch, call + " = -ESRCH (-3): the host has no such thread");
+        }
+        return Outcome::Emulated(policy, call + " -> policy " + std::to_string(policy));
+      }
+      // The priority bounds are per policy, and the host's table is the same one a device uses.
+      const std::int32_t policy = static_cast<std::int32_t>(f.arg[1]);
+      std::int32_t lo = 0, hi = 0;
+      if (!platform::SchedPriorityBounds(policy, &lo, &hi)) {
+        return Outcome::Answered(err::kEinval, call + " = -EINVAL (-22): no such scheduling policy");
+      }
+      const std::int32_t bound = f.number == nr::kSchedGetPriorityMin ? lo : hi;
+      return Outcome::Emulated(bound, call + " -> " + std::to_string(bound));
+    }
+
+    case nr::kSchedSetscheduler: {
+      // sched_setscheduler(pid, policy, &param). Accepted and reported, not applied: this would change the
+      // *host* thread that runs the guest, and a guest asking for SCHED_FIFO on a phone that would refuse it
+      // is better told the truth than given a real-time priority the emulator then holds. The deviation is
+      // named in the detail rather than hidden behind a bare 0.
+      const std::string call = "sched_setscheduler(" + std::to_string(f.arg[0]) + ", " +
+                               std::to_string(f.arg[1]) + ")";
+      return Outcome::Emulated(0, call + " = 0: recorded, not applied — the scheduling policy of the host "
+                                         "threads that run this guest is not a guest's to set, and a phone "
+                                         "would refuse a real-time policy to an untrusted app anyway");
+    }
+
+    case nr::kGetpriority:
+    case nr::kSetpriority: {
+      // getpriority/setpriority(which, who). These are the nice-value pair a Mono GC thread reads; the host's
+      // answer is the true one for the thread running the guest. The set is recorded, not applied, for the
+      // same reason as sched_setscheduler.
+      const auto which = static_cast<std::int32_t>(f.arg[0]);
+      const auto who = static_cast<std::int32_t>(f.arg[1]);
+      const std::string call = std::string{Name(f.number)} + "(" + std::to_string(which) + ", " +
+                               std::to_string(who) + ")";
+      if (f.number == nr::kGetpriority) {
+        errno = 0;
+        // A kernel returns the nice value biased by 20 so it is never negative; that bias is part of the ABI
+        // and is reproduced here rather than replaced with the raw value.
+        const int prio = ::getpriority(which, static_cast<id_t>(who));
+        if (prio == -1 && errno != 0) {
+          return Outcome::Answered(err::kEsrch, call + " = -ESRCH (-3): no such process, group or user");
+        }
+        return Outcome::Emulated(prio, call + " -> " + std::to_string(prio) + " (nice " +
+                                          std::to_string(prio - 20) + ")");
+      }
+      return Outcome::Emulated(0, call + " = 0: recorded, not applied — this build does not re-nice the "
+                                         "host threads that run the guest");
     }
 
     case nr::kGetrandom: {
@@ -571,6 +1133,47 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
                                "getrandom(" + std::to_string(len) + ") from the host's entropy pool");
     }
 
+    case nr::kRtSigsuspend: {
+      // rt_sigsuspend(mask, sigsetsize). The arm32 compat sigset is 8 bytes (the same rule as
+      // rt_sigprocmask). It swaps the blocked mask, sleeps until a deliverable signal is queued, and
+      // returns -EINTR; the handler runs at the next ABI boundary. The temporary mask must stay in place
+      // while the handler runs. Signal delivery saves the previous mask in that handler's frame.
+      if (f.arg[1] != 8) {
+        return Outcome::Answered(err::kEinval, "rt_sigsuspend(sigsetsize=" + std::to_string(f.arg[1]) +
+                                                   ") = -EINVAL (-22): the arm32 compat sigset is 8 bytes");
+      }
+      if (memory_ == nullptr) {
+        return Outcome::Refused(err::kEnosys, "rt_sigsuspend: no guest memory is attached to this monitor");
+      }
+      std::uint64_t incoming = 0;
+      if (!memory_->Read(f.arg[0], &incoming, sizeof incoming)) {
+        return Outcome::Answered(err::kEfault, "rt_sigsuspend: the mask at 0x" + Hex(f.arg[0]) +
+                                                   " is not readable guest memory");
+      }
+      // A resumed signal handler can suspend independently. Preserve the old mask if this wait is retried
+      // before a frame has been delivered.
+      if (!th.sigsuspend_restore) th.sigsuspend_old_mask = th.signal_mask;
+      th.sigsuspend_restore = true;
+      th.signal_mask = incoming;
+      const std::string call = "rt_sigsuspend(mask 0x" + Hex(static_cast<std::uint32_t>(incoming)) + ")";
+      if (HasDeliverablePending(th.tid, incoming)) {
+        return Outcome::Answered(err::kEintr, call + " = -EINTR (-4): a signal is already pending");
+      }
+      runtime::FutexTable* table = futex_;
+      const std::int32_t tid = th.tid;
+      // Register under the GGL the caller holds, so a tkill after the pending check above cannot miss
+      // the waiter (a tkill is serialized by the same GGL).
+      if (table != nullptr) table->BeginSignalWait(tid);
+      Outcome o{Verdict::kBlocking, 0, call + " — sleeping until a signal", {}};
+      o.block = [table, tid, call] {
+        if (table != nullptr && table->WaitForSignal(tid)) {
+          return Outcome::Answered(err::kEintr, call + " = -EINTR (-4): a signal is pending");
+        }
+        return Outcome::Answered(err::kEintr, call + " = -EINTR (-4): the process is exiting");
+      };
+      return o;
+    }
+
     case nr::kRtSigprocmask: {
       const std::uint32_t how = f.arg[0];
       const std::uint32_t set = f.arg[1];
@@ -600,26 +1203,29 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
         return Outcome::Answered(err::kEfault, "rt_sigprocmask: the set at 0x" + Hex(set) +
                                                    " is not readable guest memory");
       }
-      if (old != 0 && !memory_->Write(old, &signal_mask_, sizeof signal_mask_)) {
+      if (old != 0 && !memory_->Write(old, &th.signal_mask, sizeof th.signal_mask)) {
         return Outcome::Answered(err::kEfault, "rt_sigprocmask: the old-set out-parameter at 0x" +
                                                    Hex(old) + " is not writable guest memory");
       }
       if (set != 0) {
         if (how == 0) {
-          signal_mask_ |= incoming;
+          th.signal_mask |= incoming;
         } else if (how == 1) {
-          signal_mask_ &= ~incoming;
+          th.signal_mask &= ~incoming;
         } else {
-          signal_mask_ = incoming;
+          th.signal_mask = incoming;
         }
       }
       return Outcome::Emulated(0, "rt_sigprocmask(how=" + std::to_string(how) + ") -> mask 0x" +
-                                      Hex(signal_mask_) +
-                                      " (modelled in the monitor; this build delivers no signals)");
+                                      Hex(th.signal_mask) +
+                                      " (modelled on the calling thread; delivery reads it)");
     }
 
     case nr::kPrctl: {
       const std::uint32_t option = f.arg[0];
+      if (option == 0x53564d41u) {  // PR_SET_VMA: names an anonymous mapping for /proc/maps; nothing to name here
+        return Outcome::Emulated(0, "prctl(PR_SET_VMA) -> 0: the mapping name is not recorded");
+      }
       // PR_SET_NAME (15) / PR_GET_NAME (16): the thread name is guest-visible state that RetroBug can
       // hold without touching the host thread, so these two are answered and everything else is refused
       // by name rather than answered with a 0 the way a kernel would answer an option it *does* know.
@@ -642,15 +1248,15 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
             }
             if (name[i] == '\0') break;
           }
-          thread_name_ = name;
+          th.name = name;
           return Outcome::Emulated(0, std::string{"prctl(PR_SET_NAME, \""} + name.data() +
                                       "\") recorded in the monitor; the host thread is not renamed");
         }
-        if (!memory_->Write(f.arg[1], thread_name_.data(), thread_name_.size())) {
+        if (!memory_->Write(f.arg[1], th.name.data(), th.name.size())) {
           return Outcome::Answered(err::kEfault, "prctl(PR_GET_NAME): the buffer at 0x" + Hex(f.arg[1]) +
                                                      " is not writable guest memory");
         }
-        return Outcome::Emulated(0, std::string{"prctl(PR_GET_NAME) -> \""} + thread_name_.data() + "\"");
+        return Outcome::Emulated(0, std::string{"prctl(PR_GET_NAME) -> \""} + th.name.data() + "\"");
       }
       return Outcome::Refused(err::kEnosys, "svc #172 (prctl) is not implemented for option 0x" +
                                                 Hex(option) +
@@ -718,7 +1324,10 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
                                                           "descriptor table is full (" +
                                                    std::to_string(kMaxServedFds) + ")");
       }
-      const std::int32_t fd = NextFd();
+      // With host I/O on, a served descriptor holds a real host descriptor number (an open /dev/null), so a host fd
+      // the guest opens later can never be given the same number.
+      const std::int32_t fd = host_io_ ? ::open("/dev/null", O_RDONLY | O_CLOEXEC) : NextFd();
+      if (fd < 0) return Outcome::Answered(err::kEmfile, "openat('" + path + "'): no host descriptor left to reserve");
       served_.push_back(ServedFile{path, std::move(*bytes), 0, fd});
       const std::string why = "openat('" + path + "') -> fd " + std::to_string(fd) + " (" +
                               std::to_string(served_.back().bytes.size()) +
@@ -731,6 +1340,7 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
       const std::int32_t fd = static_cast<std::int32_t>(f.arg[0]);
       for (auto it = served_.begin(); it != served_.end(); ++it) {
         if (it->fd == fd) {
+          if (host_io_) ::close(fd);  // the reserved host number goes back
           served_.erase(it);
           return Outcome::Emulated(0, "close(" + std::to_string(fd) + ") -> 0");
         }
@@ -738,6 +1348,28 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
       return Outcome::Answered(err::kEbadf, "close(" + std::to_string(fd) +
                                                 ") = -EBADF (-9): no descriptor with that number is open "
                                                 "in this instance");
+    }
+
+    case nr::kLseek: {
+      const auto fd = static_cast<std::int32_t>(f.arg[0]);
+      ServedFile* file = FileFor(fd);
+      if (file == nullptr) return Outcome::Answered(err::kEbadf, "lseek: invalid file descriptor");
+
+      std::int64_t base = 0;
+      switch (f.arg[2]) {
+        case 0: break;  // SEEK_SET
+        case 1: base = file->offset; break;  // SEEK_CUR
+        case 2: base = file->bytes.size(); break;  // SEEK_END
+        default: return Outcome::Answered(err::kEinval, "lseek: invalid whence");
+      }
+      const std::int64_t offset = base + static_cast<std::int32_t>(f.arg[1]);
+      if (offset < 0) return Outcome::Answered(err::kEinval, "lseek: negative file offset");
+      if (offset > std::numeric_limits<std::int32_t>::max()) {
+        return Outcome::Answered(err::kEoverflow, "lseek: offset exceeds the ARM 32-bit return range");
+      }
+      file->offset = static_cast<std::size_t>(offset);
+      return Outcome::Emulated(static_cast<std::int32_t>(offset),
+                               "lseek(fd=" + std::to_string(fd) + ") -> " + std::to_string(offset));
     }
 
     case nr::kRead: {
@@ -753,7 +1385,7 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
       }
       const std::uint32_t count = f.arg[2];
       if (count == 0) return Outcome::Emulated(0, "read(fd=" + std::to_string(fd) + ", 0) -> 0");
-      const std::size_t left = file->bytes.size() - file->offset;
+      const std::size_t left = file->bytes.size() - std::min(file->offset, file->bytes.size());
       const std::size_t n = std::min<std::size_t>(count, left);
       if (n != 0 && !memory_->Write(f.arg[1], file->bytes.data() + file->offset, n)) {
         return Outcome::Answered(err::kEfault, "read(fd=" + std::to_string(fd) + "): the buffer at 0x" +
@@ -869,13 +1501,51 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
       const std::int32_t fd = static_cast<std::int32_t>(f.arg[4]);
       if (len == 0) return Outcome::Answered(err::kEinval, "mmap2(len=0) = -EINVAL (-22)");
       constexpr std::uint32_t kMapAnonymous = 0x20u;
-      if ((flags & kMapAnonymous) == 0 && fd != -1) {
+      constexpr std::uint32_t kMapFixed = 0x10u, kMapFixedNoReplace = 0x100000u;
+      const bool fixed = (flags & (kMapFixed | kMapFixedNoReplace)) != 0;
+      const std::uint64_t rounded = (static_cast<std::uint64_t>(len) + mem::kGuestPage - 1u) &
+                                    ~static_cast<std::uint64_t>(mem::kGuestPage - 1u);
+      if (rounded > UINT32_MAX) return Outcome::Answered(err::kEnomem, "mmap2: length exceeds the A32 window");
+      const auto size = static_cast<std::uint32_t>(rounded);
+      if (fixed) {
+        const std::string call = "mmap2(MAP_FIXED, addr=0x" + Hex(hint) + ", len=" + std::to_string(len) +
+                                 ", prot=0x" + Hex(prot) + ", flags=0x" + Hex(flags) + ")";
+        if (hint < mem::kGuestPage || (hint & (mem::kGuestPage - 1u))) {
+          return Outcome::Answered(err::kEinval, call + ": invalid fixed address");
+        }
+        if (static_cast<std::uint64_t>(hint) + size > AllocLimit()) {
+          return Outcome::Answered(err::kEnomem, call + ": range exceeds the guest allocation window");
+        }
+        if ((flags & kMapAnonymous) == 0) {
+          return Outcome::Refused(err::kEnosys, call + ": fixed file-backed mappings are not implemented");
+        }
+        if ((flags & kMapFixedNoReplace) != 0) {
+          for (std::uint64_t page = hint; page < static_cast<std::uint64_t>(hint) + size; page += mem::kGuestPage) {
+            if (memory_->IsMapped(static_cast<std::uint32_t>(page))) {
+              return Outcome::Answered(err::kEexist, call + ": range is already mapped");
+            }
+          }
+        }
+        const unsigned permissions = ((prot & 1u) ? mem::kRead : 0u) | ((prot & 2u) ? mem::kWrite : 0u) |
+                                     ((prot & 4u) ? mem::kExec : 0u);
+        std::string error;
+        if (!memory_->Map(hint, size, permissions, &error)) {
+          return Outcome::Answered(err::kEnomem, call + ": " + error);
+        }
+        return Outcome::Emulated(static_cast<std::int32_t>(hint), call + " -> 0x" + Hex(hint));
+      }
+      bool from_file = false;
+      if ((flags & kMapAnonymous) == 0 && fd != -1 && host_io_) {
+        bool served = false;
+        for (const ServedFile& s : served_) served = served || s.fd == fd;
+        from_file = !served;
+      }
+      if ((flags & kMapAnonymous) == 0 && fd != -1 && !from_file) {
         return Outcome::Refused(err::kEnosys,
                                 "mmap2 with a file descriptor (fd=" + std::to_string(fd) +
                                     ") is not implemented: this monitor serves no file mappings, and a "
                                     "zero answer would be a mapping nobody owns");
       }
-      const std::uint32_t size = (len + mem::kGuestPage - 1u) & ~(mem::kGuestPage - 1u);
       const std::uint32_t at = FindFreeRun(hint, size);
       if (at == 0) {
         return Outcome::Answered(err::kEnomem,
@@ -883,14 +1553,31 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
                                      ") = -ENOMEM (-12): the guest window has no free run of " +
                                      std::to_string(size) + " bytes left");
       }
-      const unsigned prot_bits = ((prot & 1u) ? mem::kRead : 0u) | ((prot & 2u) ? mem::kWrite : 0u) |
-                                 ((prot & 4u) ? mem::kExec : 0u);
+      const unsigned prot_bits = ((prot & 1u) ? mem::kRead : 0u) | ((prot & 2u) || from_file ? mem::kWrite : 0u) |
+                                 ((prot & 4u) ? mem::kExec : 0u);  // a file copy is written once here
       std::string merr;
       if (!memory_->Map(at, size, prot_bits, &merr)) {
         return Outcome::Answered(err::kEnomem, "mmap2: could not map " + std::to_string(size) +
                                                    " bytes at 0x" + Hex(at) + ": " + merr);
       }
       mmap_next_ = at + size;
+      if (from_file) {
+        // A private copy of the file's bytes from offset pgoff * 4096 (mmap2's unit): what MAP_PRIVATE reads; a
+        // MAP_SHARED writer's stores are not written back (named in the detail).
+        void* host = memory_->HostForAccess(at);
+        const off_t off = static_cast<off_t>(f.arg[5]) * 4096;
+        const ssize_t got = host == nullptr ? -1 : ::pread(fd, host, len, off);
+        if (got < 0) {
+          std::string e;
+          memory_->Unmap(at, size, &e);
+          return Outcome::Answered(err::kEbadf, "mmap2(fd=" + std::to_string(fd) + "): reading the file failed");
+        }
+        return Outcome::Emulated(static_cast<std::int32_t>(at),
+                                 "mmap2(fd=" + std::to_string(fd) + ", len=" + std::to_string(len) + ", off=" +
+                                     std::to_string(off) + ") -> 0x" + Hex(at) + ": a private copy of " +
+                                     std::to_string(got) + " file bytes" +
+                                     ((flags & 0x01u) != 0 ? " (MAP_SHARED: stores are not written back)" : ""));
+      }
       return Outcome::Emulated(static_cast<std::int32_t>(at),
                                "mmap2(anon, len=" + std::to_string(len) + ", prot=0x" + Hex(prot) +
                                    ") -> 0x" + Hex(at) + ": " + std::to_string(size) +
@@ -941,9 +1628,10 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
         return Outcome::Emulated(static_cast<std::int32_t>(old_at), call + " -> 0x" + Hex(old_at) + " (in place)");
       }
       // Grow in place when every page after the old end is free and inside the window.
-      bool tail_free = static_cast<std::uint64_t>(old_at) + new_size <= memory_->window_bytes();
-      for (std::uint32_t pg = old_at + old_size; tail_free && pg < old_at + new_size; pg += mem::kGuestPage) {
-        if (memory_->IsMapped(pg)) tail_free = false;
+      bool tail_free = static_cast<std::uint64_t>(old_at) + new_size <= AllocLimit();
+      for (std::uint64_t pg = std::uint64_t{old_at} + old_size; tail_free && pg < std::uint64_t{old_at} + new_size;
+           pg += mem::kGuestPage) {
+        if (memory_->IsMapped(static_cast<std::uint32_t>(pg))) tail_free = false;
       }
       if (tail_free) {
         if (!memory_->Map(old_at + old_size, new_size - old_size, prot, &merr)) {
@@ -972,10 +1660,11 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
     }
 
     case nr::kFutex: {
-      // One thread is modelled, so the two ops bionic's pthread layer actually drives are answered and
-      // the rest stay refusals. WAIT's immediate path is the kernel's own (value already changed ->
-      // EAGAIN); a matching value would park a device's caller, and answering 0 says out loud that no
-      // scheduler here will ever wake it.
+      if (futex_ != nullptr) return Futex(f, th);
+      // No futex table: a bare single-threaded monitor. The two ops bionic's pthread layer actually drives
+      // are answered and the rest stay refusals. WAIT's immediate path is the kernel's own (value already
+      // changed -> EAGAIN); a matching value would park a device's caller, and answering 0 says out loud
+      // that no scheduler here will ever wake it.
       const std::uint32_t uaddr = f.arg[0];
       const std::uint32_t raw = f.arg[1] & 0x7fu;  ///< FUTEX_CMD_MASK: PRIVATE (128) and CLOCK_RT (256) off
       // bionic drives BOTH forms: plain `__futex_wait`/`wake` (0x0/0x1, device libc at 0x43180/0x43144)
@@ -1018,18 +1707,91 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
     }
 
     case nr::kRtSigaction: {
-      // Accepted, recorded, never delivered: the host raises no signals into this build, and the call's
-      // job in startup code is to install a handler — a fact about the guest's own state. `oldact` is
-      // zeroed so a caller reading back the previous handler sees NULL, not whatever the buffer held.
-      if (f.arg[2] != 0 && memory_ != nullptr) {
-        const std::uint32_t zero[5] = {};  // arm32 struct sigaction: handler, flags, restorer, mask[2]
-        memory_->Write(f.arg[2], zero, sizeof(zero));
+      // Accepted and recorded: the call's job in startup code is to install a handler, and the record is
+      // what a guest-sent signal (tkill/tgkill/rt_tgsigqueueinfo) is delivered through.
+      //
+      // The signal number is read out of the guest's `struct sigaction` and named in the answer, because the
+      // *set* of signals a guest installs handlers for is the thing signal delivery has to be built against,
+      // and the deduplicated boot-report note could not answer it: it recorded only the first three handlers
+      // (39/36/38) before the run had finished starting threads that install more. Measured on native 32-bit
+      // Cars 3 (SM-X710, /proc/<pid>/status SigCgt): it catches 17 signals, 30 (SIGPWR) among them — so a
+      // build that can only see three of them is not seeing the guest, it is seeing its own log cap.
+      //
+      // `handler` is captured too. Zero means SIG_DFL and one means SIG_IGN, which are not handler addresses;
+      // anything else is guest code a delivery would have to enter.
+      const std::int32_t sig = static_cast<std::int32_t>(f.arg[0]);
+      if (sig < 1 || sig > 64) {
+        return Outcome::Answered(err::kEinval, "rt_sigaction(sig=" + std::to_string(sig) +
+                                                   ") = -EINVAL (-22): a signal number is 1..64");
       }
-      const std::string why = "rt_sigaction(sig=" + std::to_string(f.arg[0]) +
-                              ") accepted and recorded; no signal is ever delivered by this build, and "
-                              "the previous handler reads back as NULL";
+      Disposition incoming;
+      bool install = false;
+      if (f.arg[1] != 0) {
+        if (memory_ == nullptr) {
+          return Outcome::Refused(err::kEnosys, "rt_sigaction: no guest memory is attached to this monitor");
+        }
+        // The layout read off the guest (see Disposition in monitor.h): {handler, flags, restorer, mask}.
+        std::uint32_t handler = 0, flags = 0, mask[2] = {0, 0}, restorer = 0;
+        if (!memory_->Read(f.arg[1], &handler, 4) || !memory_->Read(f.arg[1] + 4, &flags, 4) ||
+            !memory_->Read(f.arg[1] + 8, &restorer, 4) || !memory_->Read(f.arg[1] + 12, mask, sizeof mask)) {
+          return Outcome::Answered(err::kEfault, "rt_sigaction(sig=" + std::to_string(sig) + "): the act at 0x" +
+                                                     Hex(f.arg[1]) + " is not readable guest memory");
+        }
+        incoming = Disposition{handler, flags, restorer,
+                               (static_cast<std::uint64_t>(mask[1]) << 32) | mask[0]};
+        install = true;
+      }
+      // oldact is the disposition from *before* this call, and a query (act == NULL) must not erase the
+      // handler delivery depends on. The kernel copies the new act in first, then the old act out.
+      if (f.arg[2] != 0) {
+        const Disposition old = disposition(sig);
+        const std::uint32_t out[5] = {old.handler, old.flags, old.restorer,
+                                      static_cast<std::uint32_t>(old.mask),
+                                      static_cast<std::uint32_t>(old.mask >> 32)};
+        if (memory_ == nullptr || !memory_->Write(f.arg[2], out, sizeof out)) {
+          return Outcome::Answered(err::kEfault, "rt_sigaction(sig=" + std::to_string(sig) +
+                                                     "): the oldact at 0x" + Hex(f.arg[2]) +
+                                                     " is not writable guest memory");
+        }
+      }
+      if (install) sig_dispositions_[sig] = incoming;
+      const Disposition now = disposition(sig);
+      const char* kind = now.handler == 0 ? "SIG_DFL" : (now.handler == 1 ? "SIG_IGN" : "a handler");
+      const std::string why = "rt_sigaction(sig=" + std::to_string(sig) + ")" +
+                              (install ? " = 0: recorded " : " query = 0: ") + kind + " at 0x" +
+                              Hex(now.handler) + ", flags 0x" + Hex(now.flags) + ", restorer 0x" +
+                              Hex(now.restorer) + " (" + std::to_string(installed_handler_count()) +
+                              " handler(s) installed so far)";
+      // Straight to the live trace as well as the report: this is the line that has to survive the notes'
+      // dedup and cap, because it is the record signal delivery will be built from.
+      if (signal_trace_) signal_trace_(why);
       Observe(why);
       return Outcome::Emulated(0, why);
+    }
+
+    // The end of a handler. The restorer the guest registered issues it, and the
+    // answer is "put back the state the handler interrupted" — which is the delivery's own record, not a
+    // value the kernel hands back. A call with no delivery in progress is refused by name: answering 0
+    // would resume the handler's own `svc` instruction in place, an infinite loop where the guest should
+    // have had an error. Both are the same posture as everywhere else in this file — a fact, or a refusal
+    // that names itself.
+    case nr::kSigreturn:
+    case nr::kRtSigreturn: {
+      const std::string call = Name(f.number);
+      if (!SignalReturnHooked() || th.deliveries.empty()) {
+        return Outcome::Refused(err::kEnosys,
+                                call + ": no active signal frame to restore");
+      }
+      if (th.deliveries.back().realtime != (f.number == nr::kRtSigreturn)) {
+        return Outcome::Refused(err::kEinval, call + ": syscall does not match the active signal frame");
+      }
+      // The runtime performs the restore: it owns the frame layout, and the monitor sits below it. A
+      // sigreturn does not return, so `r0` carries nothing back from the call — but `Complete` writes the
+      // outcome's r0 unconditionally, and the interrupted r0 the frame just restored is the value the
+      // resumed code must see. Carry it through rather than replacing it with 0.
+      Outcome restored = SignalReturn(th);
+      if (restored.verdict == Verdict::kEmulated) restored.r0 = static_cast<std::int32_t>(state.r[0]);
+      return restored;
     }
 
     case nr::kFaccessat: {
@@ -1137,34 +1899,325 @@ Outcome Monitor::Classify(const Frame& f, exec::MachineState& state) {
                              "app_data_file execute_no_trans; see 30 §Step 12");
 
     default: {
-      // The reason names the call, so a reader on a phone can tell this from "no monitor attached" and
-      // from "answered with ENOENT". The number is decimal because that is what `svc #<n>` means; the
-      // name is the same table `Describe` prints.
       const char* named = Name(f.number);
-      std::string why = "svc #" + std::to_string(f.number);
-      if (named != nullptr) {
-        why += std::string{" ("} + named +
-               ") is not implemented in this build; refused with ENOSYS (-38) rather than inventing a"
-               " result a real kernel would produce";
-      } else {
-        why += " is not implemented; refusing with ENOSYS (-38), the value this kernel answers for a"
-               " number outside its table, rather than a 0 nobody produced";
-      }
-      return Outcome::Refused(err::kEnosys, why);
+      std::string why = "ARM syscall #" + std::to_string(f.number);
+      if (named != nullptr) why += std::string{" ("} + named + ")";
+      return Outcome::Refused(err::kEnosys, why + " is not implemented; returned ENOSYS (-38)");
     }
   }
 }
 
-Outcome Monitor::Handle(exec::MachineState& state, std::uint32_t svc_imm) {
+// ------------------------------------------------------------------------------------ threads (M2 Task 4)
+
+bool Monitor::Now(std::int32_t clock_id, std::int64_t* nanos) const {
+  return clock_ ? clock_(clock_id, nanos) : HostClock(clock_id, nanos);
+}
+
+std::optional<runtime::FutexTable::Clock::time_point> Monitor::DeadlineFor(std::int32_t clock_id,
+                                                                          std::int64_t abs_nanos) const {
+  std::int64_t now = 0;
+  if (!Now(clock_id, &now)) return std::nullopt;
+  const std::int64_t left = std::max<std::int64_t>(0, abs_nanos - now);
+  return runtime::FutexTable::Clock::now() + std::chrono::nanoseconds(left);
+}
+
+void Monitor::RequestGroupExit(const std::string& why) {
+  {
+    std::lock_guard<std::mutex> lk(exit_mu_);
+    if (group_exit_reason_.empty()) group_exit_reason_ = why;
+  }
+  group_exited_.store(true, std::memory_order_release);
+  if (futex_ != nullptr) futex_->Shutdown();
+}
+
+std::string Monitor::group_exit_reason() const {
+  std::lock_guard<std::mutex> lk(exit_mu_);
+  return group_exit_reason_;
+}
+
+Outcome Monitor::Sleep(const std::string& what, std::int64_t nanos, runtime::GuestThread& th) {
+  // Blocking in the GGL's sense: the sleep runs with the lock released, so other guest threads run
+  // meanwhile. With a futex table it is the table's sleep, which `exit_group` or a signal for this thread
+  // cuts short. `rem` is not written: a named gap in the EINTR answer rather than a made-up value.
+  const std::string why = what + " (host sleep, GGL released)";
+  Outcome o{Verdict::kBlocking, 0, why, {}};
+  runtime::FutexTable* table = futex_;
+  runtime::GuestThread* wait_thread = &th;
+  const std::int32_t tid = th.tid;
+  // Register before the GGL is released for the block: a tkill in that window must find the sleeper.
+  if (table != nullptr) table->BeginSleep(tid);
+  o.block = [nanos, why, table, tid, wait_thread] {
+    const int prior_kind = wait_thread != nullptr ? wait_thread->wait_kind.load() : 0;
+    const std::uint32_t prior_arg = wait_thread != nullptr ? wait_thread->wait_arg.load() : 0u;
+    struct Restore {
+      runtime::GuestThread* t;
+      int kind;
+      std::uint32_t arg;
+      ~Restore() {
+        if (t != nullptr) {
+          t->wait_kind.store(kind);
+          t->wait_arg.store(arg);
+        }
+      }
+    } restore{wait_thread, prior_kind, prior_arg};
+    if (wait_thread != nullptr) {
+      wait_thread->wait_kind.store(static_cast<int>(runtime::GuestThread::WaitKind::kSleep));
+      wait_thread->wait_arg.store(static_cast<std::uint32_t>(nanos));
+    }
+    if (table != nullptr) {
+      switch (table->SleepUntil(runtime::FutexTable::Clock::now() + std::chrono::nanoseconds(nanos), tid)) {
+        case runtime::FutexTable::SleepResult::kSlept: break;
+        case runtime::FutexTable::SleepResult::kInterrupted:
+          return Outcome::Answered(err::kEintr, why + " — cut short by a signal (EINTR; `rem` is not written)");
+        case runtime::FutexTable::SleepResult::kShutdown:
+          return Outcome::Answered(err::kEintr, why + " — cut short: the process is exiting");
+      }
+    } else {
+      std::this_thread::sleep_for(std::chrono::nanoseconds(nanos));
+    }
+    return Outcome::Emulated(0, why + " -> 0, slept");
+  };
+  return o;
+}
+
+std::int32_t Monitor::NextTid() {
+  if (next_tid_ == 0) next_tid_ = main_->tid + 1;
+  return next_tid_++;
+}
+
+std::int32_t Monitor::AllocateThreadId() {
+  const std::int32_t tid = NextTid();
+  live_tids_.insert(tid);
+  return tid;
+}
+
+Outcome Monitor::Clone(const Frame& f, exec::MachineState& state, runtime::GuestThread& th) {
+  const std::uint32_t flags = f.arg[0];
+  const std::string call = "clone(flags=0x" + Hex(flags) + ", stack=0x" + Hex(f.arg[1]) + ", ptid=0x" +
+                           Hex(f.arg[2]) + ", tls=0x" + Hex(f.arg[3]) + ", ctid=0x" + Hex(f.arg[4]) + ")";
+  if (flags != kBionicCloneFlags) {
+    return Outcome::Refused(err::kEnosys,
+                            "svc #120 (clone) with flags 0x" + Hex(flags) +
+                                " is not implemented: only bionic pthread_create's 0x3d0f00 (CLONE_VM|FS|FILES|"
+                                "SIGHAND|THREAD|SYSVSEM|SETTLS|PARENT_SETTID|CHILD_CLEARTID) is served — no "
+                                "fork, vfork or other thread shape");
+  }
+  if (!spawner_) {
+    return Outcome::Refused(err::kEnosys, call + ": no thread spawner is installed on this monitor, so it "
+                                                 "cannot run a second guest thread");
+  }
+  if (group_exited()) {
+    // The process is exiting (exit_group, a fatal thread fault, or teardown): no new thread may start, or it
+    // would outlive the process it belongs to.
+    return Outcome::Answered(err::kEagain, call + " = -EAGAIN (-11): the process is exiting (" + group_exit_reason() +
+                                               "); no new thread starts");
+  }
+  if (memory_ == nullptr) return Outcome::Refused(err::kEnosys, call + ": no guest memory is attached");
+  if (f.arg[1] == 0) {
+    return Outcome::Answered(err::kEinval, call + " = -EINVAL (-22): a CLONE_VM thread needs its own stack");
+  }
+  const std::int32_t tid = NextTid();
+  // CLONE_PARENT_SETTID: the parent's word holds the tid before either thread runs again.
+  if (!memory_->Write(f.arg[2], &tid, 4)) {
+    return Outcome::Answered(err::kEfault, call + " = -EFAULT (-14): the parent-tid word is not writable");
+  }
+  auto child = std::make_unique<runtime::GuestThread>();
+  // The parent's registers, as the kernel copies them: PC already past the svc, then r0 = 0 (the child's
+  // view of clone's return), SP = the new stack, TP = the TLS argument (CLONE_SETTLS).
+  child->state = state;
+  child->state.r[0] = 0;
+  child->state.r[13] = f.arg[1];
+  child->state.tp = f.arg[3];
+  child->stack_hi = f.arg[1];
+  child->tid = tid;
+  child->clear_child_tid = f.arg[4];  // CLONE_CHILD_CLEARTID
+  child->signal_mask = th.signal_mask;
+  child->name = th.name;
+  child->executor = th.executor;
+  child->owner = th.owner;
+  std::uint32_t self = 0;
+  if (memory_->Read(f.arg[3] + 4u, &self, 4)) child->pthread_struct = self;  // TP+4: the thread struct
+  live_tids_.insert(tid);
+  // Diagnostics (C46): one line per thread creation — the parent's name and link register name the call
+  // site, so a thread that never starts (Unity's choreographer) shows as the missing line, not a mystery.
+  if (host_io_trace_) {
+    host_io_trace_("clone by tid " + std::to_string(th.tid) + " '" + th.name.data() + "' lr 0x" + Hex(state.r[14]) +
+                   " new-stack 0x" + Hex(f.arg[1]));
+  }
+  const std::string why = spawner_(std::move(child));
+  if (!why.empty()) {
+    live_tids_.erase(tid);
+    return Outcome::Answered(err::kEagain, call + " = -EAGAIN (-11): " + why);
+  }
+  return Outcome::Emulated(tid, call + " -> tid " + std::to_string(tid) + " on a new host thread");
+}
+
+Outcome Monitor::ThreadExit(const Frame& f, runtime::GuestThread& th) {
+  // CLONE_CHILD_CLEARTID: zero the word and wake every waiter on it — what pthread_join is parked on. A
+  // missed wake here hangs every join forever, so it is unconditional when the slot is set.
+  std::string cleared = "no clear-child-tid word";
+  if (th.clear_child_tid != 0 && memory_ != nullptr) {
+    const std::uint32_t zero = 0;
+    const bool wrote = memory_->Write(th.clear_child_tid, &zero, 4);
+    const int woke = futex_ != nullptr ? futex_->Wake(th.clear_child_tid, 0x7fff'ffff) : 0;
+    cleared = "clear-child-tid 0x" + Hex(th.clear_child_tid) + (wrote ? " zeroed" : " NOT writable") + ", " +
+              std::to_string(woke) + " waiter(s) woken";
+  }
+  live_tids_.erase(th.tid);
+  return Outcome{Verdict::kThreadExit, static_cast<std::int32_t>(f.arg[0]),
+                 "exit(" + std::to_string(static_cast<std::int32_t>(f.arg[0])) + ") on tid " + std::to_string(th.tid) +
+                     ": " + cleared};
+}
+
+Outcome Monitor::Futex(const Frame& f, runtime::GuestThread& th) {
+  // futex(uaddr, op, val, timeout|val2, uaddr2, val3). FUTEX_PRIVATE_FLAG (128) is the same table here (one
+  // process); FUTEX_CLOCK_REALTIME (256) picks the clock of WAIT_BITSET's absolute timeout.
+  const std::uint32_t uaddr = f.arg[0];
+  const std::uint32_t op = f.arg[1] & 0x7fu;
+  const bool realtime = (f.arg[1] & 0x100u) != 0;
+  const std::string call = "futex(0x" + Hex(uaddr) + ", op 0x" + Hex(f.arg[1]) + ", " + std::to_string(f.arg[2]) + ")";
+  if ((f.arg[1] & ~(0x7fu | 0x80u | 0x100u)) != 0) {
+    return Outcome::Refused(err::kEnosys, "svc #240 (futex) op 0x" + Hex(f.arg[1]) + ": unknown flag bits");
+  }
+  if (op == 1u || op == 10u) {  // WAKE, WAKE_BITSET
+    const std::uint32_t bitset = op == 10u ? f.arg[5] : runtime::FutexTable::kMatchAny;
+    if (bitset == 0) return Outcome::Answered(err::kEinval, call + " = -EINVAL (-22): a zero bitset");
+    const auto n = static_cast<std::int32_t>(f.arg[2]);
+    const int woke = futex_->Wake(uaddr, n, bitset);
+    return Outcome::Emulated(woke, call + " WAKE -> " + std::to_string(woke) + " woken");
+  }
+  if (op == 0u || op == 9u) {  // WAIT (relative timeout), WAIT_BITSET (absolute timeout)
+    const std::uint32_t bitset = op == 9u ? f.arg[5] : runtime::FutexTable::kMatchAny;
+    if (bitset == 0) return Outcome::Answered(err::kEinval, call + " = -EINVAL (-22): a zero bitset");
+    if (realtime && op == 0u) {
+      return Outcome::Refused(err::kEnosys, call + ": FUTEX_CLOCK_REALTIME with a plain WAIT (the kernel's ENOSYS)");
+    }
+    if (memory_ == nullptr) return Outcome::Refused(err::kEnosys, call + ": no guest memory is attached");
+    std::optional<runtime::FutexTable::Clock::time_point> deadline;
+    if (f.arg[3] != 0) {
+      std::int32_t ts[2] = {};
+      if (!memory_->Read(f.arg[3], ts, sizeof ts)) {
+        return Outcome::Answered(err::kEfault, call + " = -EFAULT (-14): the timeout is not readable");
+      }
+      if (ts[0] < 0 || ts[1] < 0 || ts[1] >= 1'000'000'000) {
+        return Outcome::Answered(err::kEinval, call + " = -EINVAL (-22): a malformed timeout");
+      }
+      const std::int64_t t = static_cast<std::int64_t>(ts[0]) * 1'000'000'000 + ts[1];
+      if (op == 0u) {
+        deadline = runtime::FutexTable::Clock::now() + std::chrono::nanoseconds(t);
+      } else {
+        deadline = DeadlineFor(realtime ? 0 : 1, t);
+        if (!deadline) return Outcome::Refused(err::kEnosys, call + ": no clock to measure the timeout against");
+      }
+    }
+    // Steps 1 and 2 of the wait (futex_table.h): read the word and queue the waiter, both under the GGL, so
+    // a wake that follows this check cannot be missed. Step 3 — the block — runs with the GGL released.
+    std::uint32_t cur = 0;
+    if (!memory_->Read(uaddr, &cur, 4)) {
+      return Outcome::Answered(err::kEfault, call + " = -EFAULT (-14): the word is not readable guest memory");
+    }
+    if (cur != f.arg[2]) {
+      return Outcome::Answered(err::kEagain, call + " = -EAGAIN (-11): the word holds " + Hex(cur) +
+                                                 ", not the expected value");
+    }
+    auto waiter = futex_->Enqueue(uaddr, bitset, th.tid);
+    runtime::FutexTable* table = futex_;
+    Outcome o{Verdict::kBlocking, 0, call + " WAIT", {}};
+    runtime::GuestThread* wait_thread = &th;
+    o.block = [table, waiter, deadline, call, wait_thread, uaddr] {
+      // Diagnostics: name this wait while it blocks, and put back what the thread was doing before (a
+      // host call that itself waits re-enters here).
+      const int prior_kind = wait_thread->wait_kind.load();
+      const std::uint32_t prior_arg = wait_thread->wait_arg.load();
+      wait_thread->wait_kind.store(static_cast<int>(runtime::GuestThread::WaitKind::kFutex));
+      wait_thread->wait_arg.store(uaddr);
+      struct Restore {
+        runtime::GuestThread* t;
+        int kind;
+        std::uint32_t arg;
+        ~Restore() {
+          t->wait_kind.store(kind);
+          t->wait_arg.store(arg);
+        }
+      } restore{wait_thread, prior_kind, prior_arg};
+      switch (table->Block(waiter, deadline)) {
+        case runtime::FutexTable::WaitResult::kWoken: return Outcome::Emulated(0, call + " WAIT -> 0, woken");
+        case runtime::FutexTable::WaitResult::kTimedOut:
+          return Outcome::Answered(err::kEtimedout, call + " WAIT = -ETIMEDOUT (-110)");
+        case runtime::FutexTable::WaitResult::kInterrupted:
+          return Outcome::Answered(err::kEintr, call + " WAIT = -EINTR (-4): a signal is pending for this thread");
+        case runtime::FutexTable::WaitResult::kShutdown: break;
+      }
+      return Outcome::Answered(err::kEintr, call + " WAIT = -EINTR (-4): the process is exiting");
+    };
+    return o;
+  }
+  return Outcome::Refused(err::kEnosys, "svc #240 (futex) op " + std::to_string(f.arg[1]) +
+                                            " is not implemented; WAIT, WAKE, WAIT_BITSET and WAKE_BITSET are");
+}
+
+void Monitor::set_main_thread(runtime::GuestThread* t) {
+  runtime::GuestThread* next = t != nullptr ? t : &own_main_;
+  if (next == main_) return;
+  // The values set so far belong to the main thread whichever object holds them.
+  next->tid = main_->tid;
+  next->clear_child_tid = main_->clear_child_tid;
+  next->robust_head = main_->robust_head;
+  next->robust_len = main_->robust_len;
+  next->signal_mask = main_->signal_mask;
+  next->name = main_->name;
+  main_ = next;
+}
+
+Outcome Monitor::Handle(exec::MachineState& state, std::uint32_t svc_imm, runtime::GuestThread* thread) {
+  Outcome o = Begin(state, svc_imm, thread);
+  if (o.verdict != Verdict::kBlocking) return o;
+  // Single-threaded caller: there is no lock to release, so the wait runs here.
+  return Finish(state, o.block ? o.block() : Outcome::Refused(err::kEnosys, "a blocking answer with no wait"));
+}
+
+Outcome Monitor::Begin(exec::MachineState& state, std::uint32_t svc_imm, runtime::GuestThread* thread) {
   const Frame f = Frame::Capture(state, svc_imm);
   Note(f.number);
-  Outcome o = Classify(f, state);
+  Outcome o = Classify(f, state, thread);
+  if (o.verdict == Verdict::kBlocking) return o;  // no write-back yet: the wait has not happened
+  return Complete(state, std::move(o), thread);
+}
+
+Outcome Monitor::Finish(exec::MachineState& state, Outcome done) {
+  if (done.verdict == Verdict::kBlocking) {
+    // A wait that answered "still waiting" is a bug in the wait, not an answer: refuse by name.
+    done = Outcome::Refused(err::kEnosys, "a blocking call's wait returned another blocking verdict: " + done.detail);
+  }
+  return Complete(state, std::move(done));
+}
+
+Outcome Monitor::Complete(exec::MachineState& state, Outcome o, const runtime::GuestThread* thread) {
+  const Frame f = Frame::Capture(state, 0);
+  if (host_io_trace_) {
+    if (o.verdict == Verdict::kUnsupported) {
+      // Identical refusals can happen on every frame. Keep the first caller and count all calls in the report.
+      constexpr std::size_t kMaxTracedRefusals = 128;
+      if (traced_refusals_.size() < kMaxTracedRefusals && traced_refusals_.emplace(f.number, o.detail).second) {
+        std::string caller = " [guest resume pc 0x" + Hex(f.pc) + ", lr 0x" + Hex(state.r[14]);
+        if (thread != nullptr) caller += ", guest tid " + std::to_string(thread->tid);
+        host_io_trace_(o.detail + caller + "]");
+      }
+    } else if (o.detail.rfind("host ", 0) == 0 || o.detail.rfind("mmap2(MAP_FIXED", 0) == 0) {
+      host_io_trace_(o.detail);
+    }
+  }
   // Refusals and errno answers are recorded alongside the successes: the report's answer lines exist
   // so a run that died on an `openat` can say which path and why, not merely that openat happened.
   // Only four success sites called `Observe` before, so every refusal reached the report as a tally
   // entry with no reason attached — the exact silent-ignore shape the note machinery was built to
   // prevent.
-  if (o.r0 < 0) {
+  // An mmap address above 0x80000000 is negative as an int32 and a success. rt_sigreturn's r0 is the
+  // *interrupted* thread's register, restored from the frame, so a negative value there is not an error the
+  // monitor answered. A refused rt_sigreturn (verdict kUnsupported) still counts.
+  const bool restored_signal = o.verdict == Verdict::kEmulated &&
+      (o.detail.rfind("rt_sigreturn:", 0) == 0 || o.detail.rfind("sigreturn:", 0) == 0);
+  if (LooksLikeError(o.r0) && !restored_signal) {
     ++refusals_;
     Observe(o.detail);
   }

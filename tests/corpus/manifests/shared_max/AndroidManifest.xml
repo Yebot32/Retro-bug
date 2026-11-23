@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A game that shares a user id with its publisher's other apps and caps the platform version: a renamed copy
+     cannot keep either (the shared user belongs to the original's signer; maxSdkVersion blocks current Android). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.retrobug.fixture" android:sharedUserId="com.retrobug.shared">
+    <uses-sdk android:minSdkVersion="9" android:targetSdkVersion="19" android:maxSdkVersion="19"/>
+    <application android:label="fixture">
+        <activity android:name=".Main" android:exported="true"/>
+    </application>
+</manifest>

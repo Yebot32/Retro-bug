@@ -32,8 +32,10 @@
 #pragma once
 
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 
 #include "rb/abi/abi.h"
@@ -216,14 +218,15 @@ class JniEnv {
   };
   [[nodiscard]] std::vector<HostMethodUse> host_method_uses() const;
   /// The guest's registers at the `Call<T>Method` slot, valid only while a host method runs (null
-  /// otherwise) — what a host method needs to say *who* called it, e.g. a stack scan for return
+  /// otherwise) on the calling host thread — what a host method needs to say *who* called it, e.g. a stack scan for return
   /// addresses when the arguments alone do not explain the request.
-  [[nodiscard]] const exec::MachineState* calling_state() const { return calling_state_; }
+  [[nodiscard]] const exec::MachineState* calling_state() const;
   /// The bytes of a live `byte[]` this environment made, or null — what a host method reads a `[B`
-  /// argument through.
-  [[nodiscard]] const std::vector<std::uint8_t>* HostArray(GuestAddr handle) const {
+  /// argument through. Shared ownership: the bytes outlive a `DeleteLocalRef` made meanwhile by another guest
+  /// thread (a host method may hold this across a nested guest call). GGL holder only.
+  [[nodiscard]] std::shared_ptr<const std::vector<std::uint8_t>> HostArray(GuestAddr handle) const {
     const auto it = arrays_.find(handle);
-    return it == arrays_.end() ? nullptr : &it->second;
+    return it == arrays_.end() ? nullptr : it->second;
   }
   [[nodiscard]] unsigned elements_made() const { return elements_made_; }
   [[nodiscard]] unsigned elements_released() const { return elements_released_; }
@@ -259,11 +262,15 @@ class JniEnv {
     return h >= jni::kArrayRefBase && h < jni::kArrayRefBase + jni::kHandleSpan;
   }
 
-  std::vector<HostClassRec> classes_;    ///< handle = kClassRefBase + 4 * index
-  std::vector<HostMethodRec> methods_;   ///< id = kMethodIdBase + 4 * index
+  // Deques, not vectors: `CallHost` holds a `HostMethodRec&` (and its class name) across the host method, which
+  // may make a nested guest call during which another guest thread runs JNI — and a `push_back` there
+  // (`DefineHostClass`/`DefineHostMethod`) must not move the record out from under it (M2 Task 4).
+  std::deque<HostClassRec> classes_;    ///< handle = kClassRefBase + 4 * index
+  std::deque<HostMethodRec> methods_;   ///< id = kMethodIdBase + 4 * index
   std::map<GuestAddr, GuestAddr> bound_;  ///< guest value -> class handle
-  std::map<GuestAddr, std::vector<std::uint8_t>> arrays_;  ///< live arrays by handle
-  const exec::MachineState* calling_state_ = nullptr;
+  /// Live arrays by handle. Shared, so a `HostArray` result a host method holds across a nested guest call stays
+  /// valid even if another guest thread `DeleteLocalRef`s the array meanwhile (M2 Task 4).
+  std::map<GuestAddr, std::shared_ptr<std::vector<std::uint8_t>>> arrays_;
   /// Live `GetByteArrayElements` blocks: block handle -> the array it copies. The release checks both
   /// halves, so elements handed back against the wrong array are refused by name.
   std::map<GuestAddr, GuestAddr> elements_;

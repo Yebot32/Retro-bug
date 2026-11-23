@@ -209,7 +209,7 @@ bool GlForward::Call(const std::string& name, exec::MachineState& s, const mem::
       // A null stays null; a small value with a buffer bound is an offset, not an address (GLES1.1 VBOs);
       // anything else must be guest memory, or the driver would read a host address nobody owns.
       void* host = nullptr;
-      if (w != 0) host = mem.Host(w);
+      if (w != 0) host = mem.HostForAccess(w);
       if (host == nullptr && w >= 0x10000u) {
         if (err != nullptr) {
           char buf[96];

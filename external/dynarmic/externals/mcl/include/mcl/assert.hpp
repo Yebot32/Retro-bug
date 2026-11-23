@@ -15,6 +15,12 @@ namespace mcl::detail {
 
 [[noreturn]] void assert_terminate_impl(const char* expr_str, fmt::string_view msg, fmt::format_args args);
 
+/// RetroBug (patches/dynarmic/0012): optional sink for an assertion message. Called before the message
+/// is printed; a hook that throws replaces termination with unwinding, which lets an offline translation
+/// tool refuse one block decoded out of data instead of losing the whole image. No hook is installed by
+/// default, so engine assertions keep their process-ending behaviour.
+void set_assert_hook(void (*hook)(const char*));
+
 template<typename... Ts>
 [[noreturn]] void assert_terminate(const char* expr_str, fmt::string_view msg, Ts... args)
 {

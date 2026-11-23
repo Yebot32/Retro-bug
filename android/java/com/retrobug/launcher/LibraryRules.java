@@ -1,0 +1,109 @@
+// RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
+//
+// The library's decisions, kept free of Android so the host tests pin them: which tiles stay "Getting ready" across a
+// rescan, which targetSdk a converted copy is really made for (the repackager's own rule), where an APK's 32-bit code
+// sits, and how far a backdrop is sampled down before it is decoded.
+package com.retrobug.launcher;
+
+import java.util.List;
+import java.util.Set;
+
+final class LibraryRules {
+    private LibraryRules() {}
+
+    enum Kind { GAME, SPLIT, NOT_32_BIT }
+
+    /** A backdrop is only shown blurred at ~320 px: decode it to at most this on its longer side. */
+    static final int BACKDROP_MAX = 640;
+
+    /** A rescan's games keep CONVERTING while their conversion runs; every other game takes the rescan's state. */
+    static void keepConverting(List<Game> fresh, Set<String> converting) {
+        for (Game g : fresh) if (converting.contains(g.key)) g.state = Game.State.CONVERTING;
+    }
+
+    static boolean needsRuntimeUpdate(int installedStamp) {
+        return installedStamp < ApkRepackager.RUNTIME_STAMP;
+    }
+
+    /**
+     * These games' bundled push SDKs create PendingIntents without specifying mutability. Android S rejects such an
+     * Intent from an app whose targetSdk is 31 or newer, so their converted copies stay at 30 or below. This is an
+     * explicit exception to the usual rule that a copy never lowers the original's target: an APK that was already
+     * repackaged once can carry target 33 even though the game itself predates the S restriction. Rolling Sky's CM
+     * push service crashes the same way in its separate :service process.
+     */
+    static int legacyPushTarget(String packageName, int requestedTarget) {
+        if (packageName == null) return requestedTarget;
+        String source = packageName;
+        boolean suffixRemoved;
+        do {
+            suffixRemoved = false;
+            if (source.endsWith(ApkRepackager.ALTERNATE_SUFFIX)) {
+                source = source.substring(0, source.length() - ApkRepackager.ALTERNATE_SUFFIX.length());
+                suffixRemoved = true;
+            } else if (source.endsWith(ApkRepackager.RENAME_SUFFIX)) {
+                source = source.substring(0, source.length() - ApkRepackager.RENAME_SUFFIX.length());
+                suffixRemoved = true;
+            }
+        } while (suffixRemoved);
+        if ("com.pikpok.oreo".equals(source) || "com.rovio.angrybirdsgo".equals(source)
+                || "com.turbochilli.rollingsky".equals(source) || "com.sega.ssasr".equals(source)) {
+            return Math.min(requestedTarget, 30);
+        }
+        return requestedTarget;
+    }
+
+    /**
+     * The targetSdk a copy is made for: at least the install floor, the copy's minSdk and the player's setting, and never
+     * below the original's (an absent targetSdk means minSdk). {@code setting} 0 means none.
+     */
+    static int outputTarget(Integer oldTarget, Integer oldMin, int setting) {
+        int newMin = oldMin != null && oldMin >= ApkRepackager.MIN_SDK_FLOOR ? oldMin : ApkRepackager.MIN_SDK_FLOOR;
+        int floor = Math.max(Math.max(ApkRepackager.INSTALL_FLOOR_SDK, newMin), setting);
+        if (oldTarget == null && oldMin != null && oldMin >= floor) return oldMin;
+        if (oldTarget != null && oldTarget >= floor) return oldTarget;
+        return floor;
+    }
+
+    /**
+     * The target to use when a compatibility rule deliberately overrides the original target. The normal rule keeps an
+     * original target that is higher than the requested one; this one does not, but still never drops below the
+     * install floor or the copy's minSdk.
+     */
+    static int forcedOutputTarget(Integer oldMin, int setting) {
+        int newMin = oldMin != null && oldMin >= ApkRepackager.MIN_SDK_FLOOR ? oldMin : ApkRepackager.MIN_SDK_FLOOR;
+        return Math.max(Math.max(ApkRepackager.INSTALL_FLOOR_SDK, newMin), setting);
+    }
+
+    /**
+     * As {@link #outputTarget(Integer, Integer, int)}, for a game whose code calls registerReceiver: from target 34 that
+     * call throws unless it passes RECEIVER_EXPORTED/NOT_EXPORTED, which a game written for an older Android never does.
+     * Such a copy is kept at 33 — unless the original already targeted 34+ (it was written for the rule) or the
+     * player's setting is below 34 anyway.
+     */
+    static int outputTarget(Integer oldTarget, Integer oldMin, int setting, boolean registersReceivers) {
+        int t = outputTarget(oldTarget, oldMin, setting);
+        int original = oldTarget != null ? oldTarget : (oldMin != null ? oldMin : 1);
+        if (registersReceivers && t >= 34 && original < 34) return Math.max(33, ApkRepackager.MIN_SDK_FLOOR);
+        return t;
+    }
+
+    /**
+     * Where the 32-bit ARM code is: in a single base APK, or spread over a split install — and a split install is not
+     * playable either way, because a copy is made from one APK and the split's resources would be left behind (C7).
+     * A base that carries v7a *and* has splits used to be classified GAME for that reason.
+     */
+    static Kind classify(Set<String> baseAbis, Set<String> splitAbis, boolean hasSplits) {
+        if (baseAbis.contains("arm64-v8a") || splitAbis.contains("arm64-v8a")) return Kind.NOT_32_BIT;
+        if (ApkScan.is32BitOnly(baseAbis)) return hasSplits ? Kind.SPLIT : Kind.GAME;
+        if (ApkScan.is32BitOnly(splitAbis)) return Kind.SPLIT;
+        return Kind.NOT_32_BIT;
+    }
+
+    /** The power-of-two inSampleSize that brings the longer side to at most BACKDROP_MAX; 1 for an unknown size. */
+    static int backdropSample(int w, int h) {
+        int longer = Math.max(w, h), s = 1;
+        while (longer / s > BACKDROP_MAX) s *= 2;
+        return s;
+    }
+}
