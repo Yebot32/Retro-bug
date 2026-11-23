@@ -3411,6 +3411,55 @@ bool BlockRunner::Step(const Inst* inst) {
       Put(inst, V{compare(a.lo, b.lo), compare(a.hi, b.hi)});
       return true;
     }
+    case Opcode::VectorDeinterleaveEven8: case Opcode::VectorDeinterleaveEven16:
+    case Opcode::VectorDeinterleaveEven32: case Opcode::VectorDeinterleaveEven64:
+    case Opcode::VectorDeinterleaveEvenLower8: case Opcode::VectorDeinterleaveEvenLower16:
+    case Opcode::VectorDeinterleaveEvenLower32:
+    case Opcode::VectorDeinterleaveOdd8: case Opcode::VectorDeinterleaveOdd16:
+    case Opcode::VectorDeinterleaveOdd32: case Opcode::VectorDeinterleaveOdd64:
+    case Opcode::VectorDeinterleaveOddLower8: case Opcode::VectorDeinterleaveOddLower16:
+    case Opcode::VectorDeinterleaveOddLower32:
+    case Opcode::VectorInterleaveLower8: case Opcode::VectorInterleaveLower16:
+    case Opcode::VectorInterleaveLower32: case Opcode::VectorInterleaveLower64:
+    case Opcode::VectorInterleaveUpper8: case Opcode::VectorInterleaveUpper16:
+    case Opcode::VectorInterleaveUpper32: case Opcode::VectorInterleaveUpper64: {
+      V a{}, b{}, out{};
+      if (!W128(inst, 0, a) || !W128(inst, 1, b)) return false;
+      const auto op = inst->GetOpcode();
+      unsigned bytes = 1;
+      switch (op) {
+        case Opcode::VectorDeinterleaveEven16: case Opcode::VectorDeinterleaveEvenLower16:
+        case Opcode::VectorDeinterleaveOdd16: case Opcode::VectorDeinterleaveOddLower16:
+        case Opcode::VectorInterleaveLower16: case Opcode::VectorInterleaveUpper16: bytes = 2; break;
+        case Opcode::VectorDeinterleaveEven32: case Opcode::VectorDeinterleaveEvenLower32:
+        case Opcode::VectorDeinterleaveOdd32: case Opcode::VectorDeinterleaveOddLower32:
+        case Opcode::VectorInterleaveLower32: case Opcode::VectorInterleaveUpper32: bytes = 4; break;
+        case Opcode::VectorDeinterleaveEven64: case Opcode::VectorDeinterleaveOdd64:
+        case Opcode::VectorInterleaveLower64: case Opcode::VectorInterleaveUpper64: bytes = 8; break;
+        default: break;
+      }
+      const auto* first = reinterpret_cast<const std::uint8_t*>(&a);
+      const auto* second = reinterpret_cast<const std::uint8_t*>(&b);
+      auto* result = reinterpret_cast<std::uint8_t*>(&out);
+      if (op >= Opcode::VectorInterleaveLower8 && op <= Opcode::VectorInterleaveUpper64) {
+        const unsigned start = op >= Opcode::VectorInterleaveUpper8 ? 8 : 0;
+        for (unsigned offset = 0; offset < 8; offset += bytes) {
+          std::memcpy(result + 2 * offset, first + start + offset, bytes);
+          std::memcpy(result + 2 * offset + bytes, second + start + offset, bytes);
+        }
+      } else {
+        const bool lower = (op >= Opcode::VectorDeinterleaveEvenLower8 && op <= Opcode::VectorDeinterleaveEvenLower32) ||
+                           (op >= Opcode::VectorDeinterleaveOddLower8 && op <= Opcode::VectorDeinterleaveOddLower32);
+        const unsigned half = lower ? 4 : 8;
+        const unsigned start = op >= Opcode::VectorDeinterleaveOdd8 ? bytes : 0;
+        for (unsigned offset = 0; offset < half; offset += bytes) {
+          std::memcpy(result + offset, first + start + 2 * offset, bytes);
+          std::memcpy(result + half + offset, second + start + 2 * offset, bytes);
+        }
+      }
+      Put(inst, out);
+      return true;
+    }
     case Opcode::VectorExtractLower:
     case Opcode::VectorExtract: {
       V first{}, second{}, out{};

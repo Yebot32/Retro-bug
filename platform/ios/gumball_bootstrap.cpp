@@ -160,7 +160,7 @@ bool GumballBootstrap::Call(const char* method, const char* shorty, const abi::A
   runtime::Ggl::Held held(guest.ggl());
   auto* jni = boot_.jni();
   jni->PushFrame();
-  const auto receiver = jni->ToGuestLocal(java_.NewLocalRef(surface_), error);
+  const auto receiver = surface_;
   abi::Args32 placed{Word::Ptr(jni->env()), Word::Ptr(receiver)};
   placed.insert(placed.end(), args.begin(), args.end());
   exec::RunResult result{};
@@ -227,8 +227,10 @@ bool GumballBootstrap::Start(const std::string& apk, int width, int height, std:
     if (!apk_) return false;
     InstallJava();
     const auto local = java_.NewInstance(kSurface);
-    surface_ = java_.NewGlobalRef(local);
+    // This engine caches the surface passed to jniSurfaceChanged and reuses it on later JNI calls.
+    surface_ = boot_.jni()->ToGuestGlobal(local, error);
     java_.DeleteLocalRef(local);
+    if (surface_ == 0) return false;
   }
   width_ = width;
   if (!Call("jniClearTextures", "VII", {}, error) ||

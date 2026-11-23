@@ -21,6 +21,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <limits.h>
 #if defined(__APPLE__) && __has_include(<execinfo.h>)
 #include <execinfo.h>
@@ -28,6 +29,7 @@
 #if defined(__APPLE__)
 #include <CoreFoundation/CoreFoundation.h>
 #endif
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -649,6 +651,55 @@ bool RbIosSession::Boot(std::string* err) {
     java->DefineMethod("com/halfbrick/mortar/HBSupport", "GetUUID", "()Ljava/lang/String;", true,
                        [directory = self->session_dir](auto& java, int, const auto&) {
       return java.NewString(HalfbrickInstallationId(directory));
+    });
+    constexpr char support[] = "com/halfbrick/mortar/HBSupport";
+    for (const auto& [name, value] : {std::pair{"GetCountry", u"US"}, {"GetDeviceLanguage", u"en"},
+                                    {"GetAccountEmails", u""}}) {
+      java->DefineMethod(support, name, "()Ljava/lang/String;", true,
+                         [value](auto& j, int, const auto&) { return j.NewString(value); });
+    }
+    java->DefineMethod(support, "GetDesintyTypeMask", "()I", true,
+                       [self](auto&, int, const auto&) { return self->display_density; });
+    const auto tablet = [self] {
+      return std::min(self->width, self->height) * 160 >= 600 * std::max(1, self->display_density);
+    };
+    java->DefineMethod(support, "IsDeviceTablet", "()I", true,
+                       [tablet](auto&, int, const auto&) { return tablet() ? 1 : 0; });
+    java->DefineMethod(support, "GetPhysicalScreenSizeTypeMask", "()I", true,
+                       [tablet](auto&, int, const auto&) { return tablet() ? 3 : 2; });
+    java->DefineMethod(support, "GetTouchscreenCapabilities", "()I", true,
+                       [](auto&, int, const auto&) { return 2; });
+    java->DefineMethod(support, "GetWifi", "()I", true, [](auto&, int, const auto&) { return 0; });
+    const auto prefs_path = self->session_dir + "/halfbrick-preferences";
+    const auto preferences = std::make_shared<std::map<std::string, bool>>();
+    const auto read_pref = [preferences, prefs_path] {
+      if (!preferences->empty()) return;
+      std::ifstream file(prefs_path);
+      std::string name;
+      bool value;
+      while (file >> std::quoted(name) >> value) (*preferences)[name] = value;
+    };
+    for (const char* name : {"PreferenceKeyExists", "GetBoolPreference"}) {
+      java->DefineMethod(support, name, "(Ljava/lang/String;)Z", true,
+                         [preferences, read_pref, exists = std::string_view(name) == "PreferenceKeyExists"]
+                         (auto& j, int, const auto& args) {
+        read_pref();
+        const auto name = std::filesystem::path(j.GetStringChars(args.at(0))).string();
+        const auto it = preferences->find(name);
+        return it != preferences->end() && (exists || it->second);
+      });
+    }
+    java->DefineMethod(support, "SetBoolPreference", "(Ljava/lang/String;Z)V", true,
+                       [preferences, read_pref, prefs_path](auto& j, int, const auto& args) {
+      read_pref();
+      const auto name = std::filesystem::path(j.GetStringChars(args.at(0))).string();
+      (*preferences)[name] = args.at(1) != 0;
+      const auto temporary = prefs_path + ".tmp";
+      std::ofstream file(temporary);
+      for (const auto& [key, value] : *preferences) file << std::quoted(key) << ' ' << value << '\n';
+      file.close();
+      if (file) ::rename(temporary.c_str(), prefs_path.c_str());
+      return 0u;
     });
     if (self->unity_apk) {
       rb::platform::ios::UnityBootstrap::JavaServices services;

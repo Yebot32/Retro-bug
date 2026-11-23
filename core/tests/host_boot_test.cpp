@@ -482,6 +482,44 @@ void unity_can_cache_its_player_callbacks_and_power_methods() {
   CHECK(!java.ExceptionCheck());
 }
 
+void unity_reads_apk_asset_streams_and_finds_its_obb_directory() {
+  test::ZipWriter zip;
+  zip.AddStored("assets/bin/Data/boot.config", test::Bytes("xyz"));
+  const auto path = WriteTempApk(zip.Finish());
+  CHECK(!path.empty());
+  if (path.empty()) return;
+  java::TableJava java;
+  java::AndroidEnv env;
+  env.obb_dir = "/games/test/obb";
+  java::InstallAndroidBase(java, env);
+  platform::ios::UnityBootstrap::InstallJava(java, path, {env.package_name, u"1", 1});
+  const auto manager = java.NewInstance("android/content/res/AssetManager");
+  const auto cls = java.GetObjectClass(manager);
+  const auto open = java.GetMethodID(cls, "open", "(Ljava/lang/String;)Ljava/io/InputStream;", false);
+  const auto name = java.NewString(u"bin/Data/boot.config");
+  const auto stream = java.Call('L', false, manager, 0, open, {name});
+  const auto stream_class = java.GetObjectClass(stream);
+  const auto read = java.GetMethodID(stream_class, "read", "()I", false);
+  CHECK(java.Call('I', false, stream, 0, read, {}) == 'x');
+  const auto read_bytes = java.GetMethodID(stream_class, "read", "([BII)I", false);
+  const auto bytes = java.NewArray('B', 4, 0, 0);
+  CHECK(java.Call('I', false, stream, 0, read_bytes, {bytes, 1, 3}) == 2);
+  char data[4]{};
+  CHECK(java.GetArrayRegion('B', bytes, 0, 4, data));
+  CHECK(data[0] == 0 && data[1] == 'y' && data[2] == 'z' && data[3] == 0);
+  CHECK(static_cast<std::int32_t>(java.Call('I', false, stream, 0, read, {})) == -1);
+  const auto player = java.NewInstance("com/unity3d/player/UnityPlayerActivity");
+  const auto activity = java.GetObjectClass(player);
+  const auto get_dirs = java.GetMethodID(activity, "getObbDirs", "()[Ljava/io/File;", false);
+  const auto dirs = java.Call('L', false, player, 0, get_dirs, {});
+  CHECK(java.GetArrayLength(dirs) == 1);
+  const auto file = java.GetObjectArrayElement(dirs, 0);
+  const auto get_path = java.GetMethodID(java.GetObjectClass(file), "getAbsolutePath", "()Ljava/lang/String;", false);
+  CHECK(java.GetStringChars(java.Call('L', false, file, 0, get_path, {})) == u"/games/test/obb");
+  CHECK(!java.ExceptionCheck());
+  unlink(path.c_str());
+}
+
 void unity_can_read_committed_preferences_and_probe_android_services() {
   java::TableJava java;
   java::AndroidEnv env;
@@ -793,6 +831,7 @@ int main() {
   unity_uses_the_imports_package_and_launch_intent();
   unity_can_cache_its_player_callbacks_and_power_methods();
   unity_can_read_committed_preferences_and_probe_android_services();
+  unity_reads_apk_asset_streams_and_finds_its_obb_directory();
   proc_maps_describes_guest_addresses_and_permissions();
   older_game_bridges_answer_the_startup_lookups();
   unity_android_contract_covers_display_library_loading_and_main_looper();

@@ -254,6 +254,41 @@ void vector_comparisons_produce_lane_masks() {
   CHECK(in.d[7] == 0);
 }
 
+void zip_and_unzip_use_the_correct_vector_width() {
+  Rig rig = build();
+  if (!rig.ok) return;
+  // vuzp.8 d0,d1; vzip.8 d2,d3; vuzp.16 q2,q3; vzip.32 q4,q5; bx lr
+  const std::uint8_t program[] = {0xb2, 0xff, 0x01, 0x01, 0xb2, 0xff, 0x83, 0x21,
+                                  0xb6, 0xff, 0x46, 0x41, 0xba, 0xff, 0xca, 0x81, 0x70, 0x47};
+  exec::MachineState in{};
+  in.d[0] = 0x0706050403020100ull;
+  in.d[1] = 0x0f0e0d0c0b0a0908ull;
+  in.d[2] = in.d[0];
+  in.d[3] = 0x1716151413121110ull;
+  in.d[4] = 0x0003000200010000ull;
+  in.d[5] = 0x0007000600050004ull;
+  in.d[6] = 0x0013001200110010ull;
+  in.d[7] = 0x0017001600150014ull;
+  in.d[8] = 0x0000000100000000ull;
+  in.d[9] = 0x0000000300000002ull;
+  in.d[10] = 0x0000001100000010ull;
+  in.d[11] = 0x0000001300000012ull;
+  const auto rr = Run(rig, program, sizeof program, in);
+  CHECK_CTX(rr.reason == exec::StopReason::Returned, rr.detail);
+  CHECK(in.d[0] == 0x0e0c0a0806040200ull);
+  CHECK(in.d[1] == 0x0f0d0b0907050301ull);
+  CHECK(in.d[2] == 0x1303120211011000ull);
+  CHECK(in.d[3] == 0x1707160615051404ull);
+  CHECK(in.d[4] == 0x0006000400020000ull);
+  CHECK(in.d[5] == 0x0016001400120010ull);
+  CHECK(in.d[6] == 0x0007000500030001ull);
+  CHECK(in.d[7] == 0x0017001500130011ull);
+  CHECK(in.d[8] == 0x0000001000000000ull);
+  CHECK(in.d[9] == 0x0000001100000001ull);
+  CHECK(in.d[10] == 0x0000001200000002ull);
+  CHECK(in.d[11] == 0x0000001300000003ull);
+}
+
 }  // namespace
 
 int main() {
@@ -264,6 +299,7 @@ int main() {
   reciprocal_estimate_uses_only_the_two_d_lanes();
   vector_extract_crosses_the_width_of_each_register();
   vector_comparisons_produce_lane_masks();
+  zip_and_unzip_use_the_correct_vector_width();
   conditions_and_memory_round_trip();
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;

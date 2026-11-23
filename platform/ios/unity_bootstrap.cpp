@@ -18,6 +18,7 @@
 #include <utility>
 
 #include "rb/host/boot.h"
+#include "rb/loader/apk_assets.h"
 
 namespace rb::platform::ios {
 struct UnityJavaTasks {
@@ -57,9 +58,92 @@ constexpr char kDisplayManager[] = "android/hardware/display/DisplayManager";
 constexpr char kDisplay[] = "android/view/Display";
 constexpr char kRunnable[] = "java/lang/Runnable";
 constexpr char kBridge[] = "bitter/jnibridge/JNIBridge";
+constexpr char kAssetStream[] = "android/content/res/AssetManager$AssetInputStream";
 constexpr char kBridgeInvoke[] = "invoke(JLjava/lang/Class;Ljava/lang/reflect/Method;[Ljava/lang/Object;)Ljava/lang/Object;";
 
 using Java = java::TableJava;
+
+void InstallLegacyFmod(Java& vm, const UnityBootstrap::JavaServices& services) {
+  constexpr char device[] = "org/fmod/FMODAudioDevice";
+  vm.DefineClass(device, "java/lang/Object");
+  const auto inactive = [](Java&, int, const auto&) { return 0u; };
+  for (const char* name : {"<init>", "close", "stop", "stopAudioRecord"}) {
+    vm.DefineMethod(device, name, "()V", false, inactive);
+  }
+  const auto logged = std::make_shared<bool>(false);
+  vm.DefineMethod(device, "start", "()V", false, [log = services.log, logged](Java&, int, const auto&) {
+    if (!std::exchange(*logged, true) && log) log("audio: legacy FMOD Java device has no iOS PCM bridge");
+    return 0u;
+  });
+  vm.DefineMethod(device, "isRunning", "()Z", false, inactive);
+  vm.DefineMethod(device, "startAudioRecord", "(III)I", false,
+                  [](Java&, int, const auto&) { return static_cast<std::uint32_t>(-1); });
+}
+
+void InstallApkAssetStreams(Java& vm, const std::string& apk) {
+  struct Stream {
+    std::vector<std::uint8_t> bytes;
+    std::size_t position = 0;
+  };
+  struct AssetState {
+    std::unique_ptr<loader::ApkArchive> archive;
+    std::map<int, Stream> streams;
+  };
+  const auto state = std::make_shared<AssetState>();
+  vm.DefineClass("java/io/InputStream", "java/lang/Object");
+  vm.DefineClass(kAssetStream, "java/io/InputStream");
+  const auto open = [state, apk](Java& j, int, const auto& args) -> Java::Ref {
+    const auto name = std::filesystem::path(j.GetStringChars(args.at(0))).generic_string();
+    const auto entry = "assets/" + name;
+    std::string error;
+    if (!state->archive) state->archive = loader::ApkArchive::Open(apk, &error);
+    const auto size = state->archive ? state->archive->EntrySize(entry) : std::nullopt;
+    if (size && *size <= 64u * 1024 * 1024) {
+      if (auto bytes = state->archive->Read(entry, &error)) {
+        const auto ref = j.NewInstance(kAssetStream);
+        state->streams.emplace(j.ObjectOf(ref), Stream{std::move(*bytes)});
+        return ref;
+      }
+    }
+    j.SetPending("java/io/FileNotFoundException", name);
+    return 0;
+  };
+  vm.DefineClass("java/io/FileNotFoundException", "java/io/IOException");
+  vm.DefineMethod("android/content/res/AssetManager", "open", "(Ljava/lang/String;)Ljava/io/InputStream;", false, open);
+  vm.DefineMethod("android/content/res/AssetManager", "open", "(Ljava/lang/String;I)Ljava/io/InputStream;", false, open);
+  vm.DefineMethod(kAssetStream, "read", "()I", false, [state](Java&, int self, const auto&) -> std::int32_t {
+    const auto it = state->streams.find(self);
+    if (it == state->streams.end() || it->second.position == it->second.bytes.size()) return -1;
+    return it->second.bytes[it->second.position++];
+  });
+  const auto read_array = [state](Java& j, int self, const auto& args) -> std::int32_t {
+    const auto length = j.GetArrayLength(args.at(0));
+    const auto offset = args.size() == 1 ? 0 : static_cast<std::int32_t>(args.at(1));
+    const auto count = args.size() == 1 ? length : static_cast<std::int32_t>(args.at(2));
+    if (offset < 0 || count < 0 || offset > length || count > length - offset) {
+      j.SetPending("java/lang/IndexOutOfBoundsException", "invalid asset read range");
+      return -1;
+    }
+    if (count == 0) return 0;
+    const auto it = state->streams.find(self);
+    if (it == state->streams.end()) return -1;
+    auto& source = it->second;
+    const auto size = std::min<std::size_t>(count, source.bytes.size() - source.position);
+    if (size == 0 || !j.SetArrayRegion('B', args.at(0), offset, size, source.bytes.data() + source.position)) return -1;
+    source.position += size;
+    return static_cast<std::int32_t>(size);
+  };
+  vm.DefineMethod(kAssetStream, "read", "([B)I", false, read_array);
+  vm.DefineMethod(kAssetStream, "read", "([BII)I", false, read_array);
+  vm.DefineMethod(kAssetStream, "available", "()I", false, [state](Java&, int self, const auto&) {
+    const auto it = state->streams.find(self);
+    return it == state->streams.end() ? 0 : it->second.bytes.size() - it->second.position;
+  });
+  vm.DefineMethod(kAssetStream, "close", "()V", false, [state](Java&, int self, const auto&) {
+    state->streams.erase(self);
+    return 0u;
+  });
+}
 
 void PutObject(Java& vm, int object, const char* field, Java::Ref value) {
   vm.PutField(object, field, vm.ObjectOf(value));
@@ -73,6 +157,13 @@ void PutString(Java& vm, int object, const char* field, const std::u16string& te
 
 void InstallIntent(Java& vm) {
   vm.DefineClass(kIntent, "java/lang/Object");
+  vm.DefineField(kIntent, "ACTION_MAIN", "Ljava/lang/String;", true);
+  const auto intent_class = vm.FindClass(kIntent);
+  const auto action_main = vm.NewString(u"android.intent.action.MAIN");
+  vm.SetField('L', true, intent_class, vm.GetFieldID(intent_class, "ACTION_MAIN", "Ljava/lang/String;", true),
+              action_main);
+  vm.DeleteLocalRef(action_main);
+  vm.DeleteLocalRef(intent_class);
   vm.DefineField(kIntent, "action", "Ljava/lang/String;", false);
   vm.DefineField(kIntent, "package", "Ljava/lang/String;", false);
   vm.DefineMethod(kIntent, "<init>", "()V", false, [](Java&, int, const auto&) { return 0u; });
@@ -129,6 +220,11 @@ void InstallPackageManager(Java& vm, const ApkIdentity& identity, const std::u16
     vm.DefineField(kManager, name, "I", true);
     vm.SetField('I', true, manager, vm.GetFieldID(manager, name, "I", true), value);
   }
+  vm.DefineField(kManager, "FEATURE_AUDIO_LOW_LATENCY", "Ljava/lang/String;", true);
+  const auto low_latency = vm.NewString(u"android.hardware.audio.low_latency");
+  vm.SetField('L', true, manager, vm.GetFieldID(manager, "FEATURE_AUDIO_LOW_LATENCY", "Ljava/lang/String;", true),
+              low_latency);
+  vm.DeleteLocalRef(low_latency);
   vm.DeleteLocalRef(manager);
   vm.DefineClass(kPackageInfo, "java/lang/Object");
   vm.DefineClass("android/app/ApplicationErrorReport", "java/lang/Object");
@@ -141,6 +237,7 @@ void InstallPackageManager(Java& vm, const ApkIdentity& identity, const std::u16
     vm.DefineField("android/content/pm/ApplicationInfo", name, "Ljava/lang/String;", false);
   }
   vm.DefineField("android/content/pm/ApplicationInfo", "targetSdkVersion", "I", false);
+  vm.DefineField("android/content/pm/ApplicationInfo", "splitPublicSourceDirs", "[Ljava/lang/String;", false);
   vm.DefineMethod("android/content/Context", "getPackageManager", "()Landroid/content/pm/PackageManager;",
                   false, [](Java& j, int, const auto&) { return j.NewInstance(kManager); });
   // A sideloaded APK on iOS has neither a Play installer nor an Android error-report receiver.
@@ -299,6 +396,7 @@ void InstallSystemServices(Java& vm, const UnityBootstrap::JavaServices& service
   vm.DeleteLocalRef(cls);
   vm.DefineField(context, "DISPLAY_SERVICE", "Ljava/lang/String;", true);
   vm.DefineField(context, "TELEPHONY_SERVICE", "Ljava/lang/String;", true);
+  vm.DefineField(context, "LOCATION_SERVICE", "Ljava/lang/String;", true);
   const auto display_context = vm.FindClass(context);
   const auto display_key = vm.NewString(u"display");
   vm.SetField('L', true, display_context,
@@ -308,7 +406,19 @@ void InstallSystemServices(Java& vm, const UnityBootstrap::JavaServices& service
   vm.SetField('L', true, display_context,
               vm.GetFieldID(display_context, "TELEPHONY_SERVICE", "Ljava/lang/String;", true), phone_key);
   vm.DeleteLocalRef(phone_key);
+  const auto location_key = vm.NewString(u"location");
+  vm.SetField('L', true, display_context,
+              vm.GetFieldID(display_context, "LOCATION_SERVICE", "Ljava/lang/String;", true), location_key);
+  vm.DeleteLocalRef(location_key);
   vm.DeleteLocalRef(display_context);
+  constexpr char activity_info[] = "android/content/pm/ActivityInfo";
+  const auto orientation = vm.FindClass(activity_info);
+  for (const auto& [name, value] : {std::pair{"SCREEN_ORIENTATION_REVERSE_LANDSCAPE", 8},
+                                   {"SCREEN_ORIENTATION_REVERSE_PORTRAIT", 9}}) {
+    vm.DefineField(activity_info, name, "I", true);
+    vm.SetField('I', true, orientation, vm.GetFieldID(orientation, name, "I", true), value);
+  }
+  vm.DeleteLocalRef(orientation);
   vm.DefineClass(kDisplayManager, "java/lang/Object");
   vm.DefineClass("android/telephony/TelephonyManager", "java/lang/Object");
   for (const auto* method : {"getNetworkOperatorName", "getNetworkOperator", "getNetworkCountryIso",
@@ -742,6 +852,30 @@ std::shared_ptr<UnityJavaTasks> UnityBootstrap::InstallJava(java::TableJava& jav
   java.DefineClass(kSurface, "java/lang/Object");
   java.DefineClass("com/unity3d/player/ReflectionHelper", "java/lang/Object");
   InstallIntent(java);
+  InstallLegacyFmod(java, services);
+  InstallApkAssetStreams(java, apk);
+  const auto class_name = [](Java& j, int, const auto& args) {
+    auto name = std::filesystem::path(j.GetStringChars(args.at(0))).generic_string();
+    std::replace(name.begin(), name.end(), '.', '/');
+    return j.FindClass(name);
+  };
+  java.DefineMethod("java/lang/Class", "forName", "(Ljava/lang/String;)Ljava/lang/Class;", true, class_name);
+  java.DefineMethod("java/lang/Class", "forName", "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;",
+                    true, class_name);
+  java.DefineMethod("android/content/Context", "getObbDirs", "()[Ljava/io/File;", false,
+                    [](Java& j, int self, const auto&) {
+    const auto context = j.FindClass("android/content/Context");
+    const auto file_class = j.FindClass("java/io/File");
+    const auto method = j.GetMethodID(context, "getObbDir", "()Ljava/io/File;", false);
+    const auto receiver = j.MakeRef(self);
+    const auto path = method ? j.Call('L', false, receiver, 0, method, {}) : 0;
+    const auto dirs = j.NewArray('L', path ? 1 : 0, file_class, path);
+    j.DeleteLocalRef(receiver);
+    j.DeleteLocalRef(path);
+    j.DeleteLocalRef(context);
+    j.DeleteLocalRef(file_class);
+    return dirs;
+  });
   InstallPlayerCallbacks(java, services);
   InstallSystemServices(java, services);
   InstallPreferences(java);
