@@ -458,6 +458,12 @@ void InstallAndroidBase(TableJava& j, AndroidEnv env) {
                  [env](TableJava& f, int, const std::vector<std::uint64_t>&) {
                    return static_cast<std::uint64_t>(NewFile(f, env.cache_dir));
                  });
+  if (!env.obb_dir.empty()) {
+    j.DefineMethod("android/content/Context", "getObbDir", "()Ljava/io/File;", false,
+                   [path = env.obb_dir](TableJava& f, int, const std::vector<std::uint64_t>&) {
+                     return static_cast<std::uint64_t>(NewFile(f, path));
+                   });
+  }
   j.DefineMethod("android/content/Context", "getAssets", "()Landroid/content/res/AssetManager;", false,
                  [](TableJava& f, int, const std::vector<std::uint64_t>&) {
                    return static_cast<std::uint64_t>(f.NewInstance("android/content/res/AssetManager"));

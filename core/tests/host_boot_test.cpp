@@ -482,11 +482,20 @@ void unity_can_cache_its_player_callbacks_and_power_methods() {
 void unity_can_read_committed_preferences_and_probe_android_services() {
   java::TableJava java;
   java::AndroidEnv env;
+  env.obb_dir = "/games/test/obb";
   java::InstallAndroidBase(java, env);
   java::InstallDlgl(java, env);
   platform::ios::UnityBootstrap::InstallJava(java, "/games/test.apk", {env.package_name, u"1", 1});
   const auto activity = java.NewInstance("com/unity3d/player/UnityPlayerActivity");
   const auto activity_class = java.GetObjectClass(activity);
+  const auto get_obb = java.GetMethodID(activity_class, "getObbDir", "()Ljava/io/File;", false);
+  const auto obb = java.Call('L', false, activity, 0, get_obb, {});
+  const auto file_class = java.GetObjectClass(obb);
+  const auto get_path = java.GetMethodID(file_class, "getAbsolutePath", "()Ljava/lang/String;", false);
+  CHECK(java.GetStringChars(java.Call('L', false, obb, 0, get_path, {})) == u"/games/test/obb");
+  const auto manager_class = java.FindClass("android/content/pm/PackageManager");
+  const auto meta_data_flag = java.GetFieldID(manager_class, "GET_META_DATA", "I", true);
+  CHECK(java.GetField('I', true, manager_class, meta_data_flag) == 0x80);
   const auto get_prefs = java.GetMethodID(activity_class, "getSharedPreferences",
                                          "(Ljava/lang/String;I)Landroid/content/SharedPreferences;", false);
   const auto group = java.NewString(u"user");

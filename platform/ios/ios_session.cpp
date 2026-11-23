@@ -549,6 +549,7 @@ bool RbIosSession::Boot(std::string* err) {
   env.apk_path = apk;
   env.files_dir = data_dir + "/files";
   env.cache_dir = data_dir + "/cache";
+  if (!data_dir.empty()) env.obb_dir = data_dir + "/obb";
   env.model = "iPad";
   env.manufacturer = "Apple";
   env.brand = "Apple";
@@ -996,6 +997,7 @@ extern "C" RbIosSession* rb_ios_create(const char* apk_path, const char* lib_nam
   if (!s->data_dir.empty()) {
     ::mkdir((s->data_dir + "/files").c_str(), 0755);
     ::mkdir((s->data_dir + "/cache").c_str(), 0755);
+    ::mkdir((s->data_dir + "/obb").c_str(), 0755);
   }
   s->window_bytes = PickWindowBytes(s.get());
   s->Log("create: apk=" + s->apk + " lib=" + s->lib + " (boot deferred to the render thread)");

@@ -24,6 +24,7 @@ struct AndroidEnv {
   std::string apk_path;  ///< the APK the game was imported from (ApplicationInfo.sourceDir)
   std::string files_dir;
   std::string cache_dir;
+  std::string obb_dir;  ///< optional app-specific Android expansion-file directory
   std::string model = "iPad";
   std::string manufacturer = "Apple";
   std::string brand = "Apple";

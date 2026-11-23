@@ -94,6 +94,10 @@ void InstallPackageManager(Java& vm, const ApkIdentity& identity, const std::u16
   const auto empty = [](Java&, int, const auto&) { return 0u; };
   vm.DefineClass(kBundle, "java/lang/Object");
   vm.DefineClass(kManager, "java/lang/Object");
+  vm.DefineField(kManager, "GET_META_DATA", "I", true);
+  const auto manager = vm.FindClass(kManager);
+  vm.SetField('I', true, manager, vm.GetFieldID(manager, "GET_META_DATA", "I", true), 0x80);
+  vm.DeleteLocalRef(manager);
   vm.DefineClass(kPackageInfo, "java/lang/Object");
   vm.DefineClass("android/app/ApplicationErrorReport", "java/lang/Object");
   vm.DefineField(kPackageInfo, "packageName", "Ljava/lang/String;", false);
@@ -439,6 +443,8 @@ void UnityBootstrap::InstallJava(java::TableJava& java, const std::string& apk, 
   InstallServiceConnection(java);
   InstallMotionEvent(java);
   java.DefineField(kPlayer, "currentActivity", kActivitySig, true);
+  java.DefineMethod(kPlayer, "initializeGoogleAr", "()Z", false,
+                    [](Java&, int, const auto&) { return 0u; });
   const auto apk_path = std::filesystem::path(apk).u16string();
   InstallPackageManager(java, identity, apk_path);
   for (const char* method : {"getPackageCodePath", "getPackageResourcePath"}) {
