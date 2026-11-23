@@ -539,9 +539,13 @@ void proc_maps_describes_guest_addresses_and_permissions() {
   if (!process) return;
   CHECK_CTX(process->memory().Map(0x40000, 0x1000, mem::kRead, &error), error);
   CHECK_CTX(process->memory().Map(0x41000, 0x1000, mem::kRead | mem::kWrite, &error), error);
+  CHECK_CTX(process->memory().Map(0x42000, 0x1000, mem::kNone, &error), error);
+  CHECK(process->memory().ProtAt(0x40000) == mem::kRead);
+  CHECK(process->memory().ProtAt(0x41000) == (mem::kRead | mem::kWrite));
   const auto maps = process->ProcMaps();
-  CHECK(maps.find("00040000-00041000 r--p 00000000 00:00 0\n") != std::string::npos);
-  CHECK(maps.find("00041000-00042000 rw-p 00000000 00:00 0\n") != std::string::npos);
+  CHECK_CTX(maps.find("00040000-00041000 r--p 00000000 00:00 0\n") != std::string::npos, maps);
+  CHECK_CTX(maps.find("00041000-00042000 rw-p 00000000 00:00 0\n") != std::string::npos, maps);
+  CHECK_CTX(maps.find("00042000-00043000 ---p 00000000 00:00 0\n") != std::string::npos, maps);
 }
 
 }  // namespace
