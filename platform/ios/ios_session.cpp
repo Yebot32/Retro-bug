@@ -474,6 +474,7 @@ struct RbIosSession {
   /// this line a slow load and a dead process look the same in the log.
   std::thread monitor;
   std::atomic<bool> running{false};
+  std::atomic<bool> closing{false};
   std::atomic<bool> want_run{true};  ///< false while the app is in the background
   std::atomic<int> frames{0};
 
@@ -634,7 +635,7 @@ bool RbIosSession::Boot(std::string* err) {
   cfg.log = [self](const std::string& line) { self->Log(line); };
   if (self->unity_apk) {
     cfg.on_guest_exit = [self](int status) {
-      self->Fail("Unity guest exited with status " + std::to_string(status));
+      if (!self->closing.load()) self->Fail("Unity guest exited with status " + std::to_string(status));
       self->running.store(false);
     };
   }
@@ -653,6 +654,17 @@ bool RbIosSession::Boot(std::string* err) {
       return java.NewString(HalfbrickInstallationId(directory));
     });
     constexpr char support[] = "com/halfbrick/mortar/HBSupport";
+    constexpr char mortar_native[] = "com/halfbrick/mortar/NativeGameLib";
+    constexpr char mortar_activity[] = "com/halfbrick/mortar/MortarGameActivity";
+    java->DefineClass(mortar_native, "java/lang/Object");
+    java->DefineClass(mortar_activity, "android/app/Activity");
+    java->DefineMethod(mortar_native, "SupportsOpenSL", "()Z", true,
+                       [](auto&, int, const auto&) { return 1u; });
+    java->DefineMethod(mortar_activity, "SetScreenResolution", "(II)V", true,
+                       [self](auto&, int, const auto& args) {
+      self->Log("halfbrick: requested drawable " + std::to_string(args.at(0)) + "x" + std::to_string(args.at(1)));
+      return 0u;
+    });
     for (const auto& [name, value] : {std::pair{"GetCountry", u"US"}, {"GetDeviceLanguage", u"en"},
                                     {"GetAccountEmails", u""}}) {
       java->DefineMethod(support, name, "()Ljava/lang/String;", true,
@@ -990,6 +1002,10 @@ bool RbIosSession::Boot(std::string* err) {
   // Sampling adds a lock and a map update per slice. Keep it available for profiling launches.
   if (profile_pc) boot->process()->StartPcProfile();
   process.store(boot->process(), std::memory_order_release);
+  if (closing.load()) {
+    boot->process()->RequestStop();
+    return false;
+  }
   // Which engine the loaded library presents. The natives are the evidence, not the library's name: a
   // stock APK's engine image is whatever the Java layer would have loaded, and only its exports say what
   // the shell must call. A surface none of these matches is named, with the exports it does offer, rather
@@ -1036,6 +1052,17 @@ bool RbIosSession::Boot(std::string* err) {
     return false;
   }
   return true;
+}
+
+extern "C" int rb_ios_apk_prefers_portrait(const char* apk_path) {
+  if (!apk_path) return 0;
+  std::string error;
+  const auto archive = rb::loader::ApkArchive::Open(apk_path, &error);
+  if (!archive) return 0;
+  for (const auto* path : {"lib/armeabi/libgumball.so", "lib/armeabi-v7a/libgumball.so", "assets/rb32/libgumball.so"}) {
+    if (archive->EntrySize(path)) return 1;
+  }
+  return 0;
 }
 
 extern "C" RbIosSession* rb_ios_create(const char* apk_path, const char* lib_name, const char* data_dir,
@@ -1231,7 +1258,9 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
     }
   });
 
-  s->render = std::thread([s, layer] {
+  CFRetain(layer);
+  auto retained_layer = std::shared_ptr<void>(layer, [](void* value) { CFRelease(value); });
+  s->render = std::thread([s, layer = std::move(retained_layer)] {
     while (s->running.load()) {
       RbIosSession* owner = nullptr;
       if (g_drawable_owner.compare_exchange_strong(owner, s) || owner == s) break;
@@ -1248,7 +1277,7 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
       if (!s->booted) {
         s->Log("game: booting " + s->apk + " lib=" + s->lib);
         if (!s->Boot(&why)) {
-          s->Fail("boot: " + why);
+          if (!s->closing.load()) s->Fail("boot: " + why);
           s->running.store(false);
           return;
         }
@@ -1257,7 +1286,7 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
       }
       const bool unity_gles2 = s->unity && s->apk_identity.gl_es_version <= 0x20000;
       if (unity_gles2) s->Log("egl: Unity GLES2 compatibility for this APK's graphics requirements");
-      egl.SetLayer(layer, s->client_version, unity_gles2 ? 2 : 3);
+      egl.SetLayer(layer.get(), s->client_version, unity_gles2 ? 2 : 3);
       if (!egl.Begin(&why)) {
         s->Fail("EGL context: " + why);
         egl.ReleaseThread();
@@ -1327,7 +1356,6 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
             continue;
           }
           if (s->gumball) {
-            s->gumball->Touch(t.kind, t.id, t.x, t.y);
             continue;
           }
           if (s->dlgl || s->pikpok || s->halfbrick) {
@@ -1356,8 +1384,13 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
         const auto render_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                    std::chrono::steady_clock::now() - render_start).count();
         if (!rendered) {
-          s->Fail(std::string{s->dlgl ? "dlxDraw" : s->gumball ? "jniRun" : "nativeRender"} + ": " + why);
+          if (!s->closing.load()) {
+            s->Fail(std::string{s->dlgl ? "dlxDraw" : s->gumball ? "jniRun" : "nativeRender"} + ": " + why);
+          }
           break;
+        }
+        if (s->gumball) {
+          for (const auto& touch : queued) s->gumball->Touch(touch.kind, touch.id, touch.x, touch.y);
         }
         if (s->unity && egl.presents() == presents_before) {
           std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -1423,6 +1456,7 @@ extern "C" void rb_ios_stop(RbIosSession* s) {
 extern "C" void rb_ios_stop_async(RbIosSession* s) {
   if (s == nullptr) return;
   // The launcher can return immediately while the render thread and guest workers shut down.
+  s->closing.store(true);
   s->running.store(false);
   std::thread([s] { rb_ios_destroy(s); }).detach();
 }
@@ -1437,6 +1471,7 @@ extern "C" void rb_ios_resume(RbIosSession* s) {
 
 extern "C" void rb_ios_destroy(RbIosSession* s) {
   if (s == nullptr) return;
+  s->closing.store(true);
   if (auto* guest = s->process.load(std::memory_order_acquire)) guest->RequestStop();
   rb_ios_stop(s);
   // Stop callbacks before releasing any engine adapter or its Java references.

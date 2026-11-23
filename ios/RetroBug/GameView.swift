@@ -10,31 +10,36 @@ import QuartzCore
 struct GameView: View {
     let apk: URL
     let lib: String
-    let accent: Color
+    let portrait: Bool
     @Environment(\.dismiss) private var dismiss
     @AppStorage("performanceOverlay") private var performanceOverlay = false
     @AppStorage("renderScale") private var renderScale = 1.0
     @AppStorage("runtimeJit") private var runtimeJit = true
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
+        GeometryReader { geometry in
+            let width = geometry.size.width
+            let height = geometry.size.height
+            let gameWidth = portrait && width > height ? height * height / width : width
             GameSurface(apk: apk, lib: lib, performanceOverlay: performanceOverlay,
                         renderScale: renderScale, runtimeJit: runtimeJit)
-                .ignoresSafeArea()
-            Button {
-                dismiss()
-            } label: {
-                Text("EXIT")
-                    .font(Holo.medium(13))
-                    .kerning(0.5)
-                    .foregroundColor(Holo.text)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 9)
-                    .background(Holo.panel.opacity(0.92))
-                    .overlay(alignment: .bottom) { Rectangle().fill(accent).frame(height: 2) }
-            }
-            .padding(16)
+                .frame(width: gameWidth, height: height)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(.black)
+                .overlay(alignment: .leading) {
+                    Color.clear.frame(width: 20)
+                        .contentShape(Rectangle())
+                        .gesture(DragGesture(minimumDistance: 20).onEnded { drag in
+                            if drag.translation.width > 70 &&
+                                drag.translation.width > abs(drag.translation.height) * 1.5 {
+                                dismiss()
+                            }
+                        })
+                        .accessibilityHidden(true)
+                }
         }
+        .ignoresSafeArea()
+        .accessibilityAction(.escape) { dismiss() }
         .statusBarHidden(true)
     }
 }
@@ -52,6 +57,10 @@ private struct GameSurface: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: GameUIView, context: Context) {}
+
+    static func dismantleUIView(_ uiView: GameUIView, coordinator: ()) {
+        uiView.endSession()
+    }
 }
 
 final class GameUIView: UIView {
@@ -255,16 +264,17 @@ final class GameUIView: UIView {
 
     override func willMove(toWindow newWindow: UIWindow?) {
         super.willMove(toWindow: newWindow)
-        if newWindow == nil, let s = session {
-            // EXIT dismisses the game; the guest may be inside a long load, so the stop and teardown run
-            // off the main thread. Touching the session after this is a use-after-free by design.
-            session = nil
-            AppLog.write("game: exit requested (background shutdown)")
-            rb_ios_stop_async(s)
-            started = false
-            lastSize = .zero
-            timer?.invalidate()
-        }
+        if newWindow == nil { endSession() }
+    }
+
+    func endSession() {
+        guard let s = session else { return }
+        session = nil
+        timer?.invalidate()
+        timer = nil
+        touchIds.removeAll()
+        AppLog.write("game: leaving for the library (background shutdown)")
+        rb_ios_stop_async(s)
     }
 
     // ---- touches: Cocos2d-x's Java layer scales MotionEvent coordinates by contentScaleFactor and forwards

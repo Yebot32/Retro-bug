@@ -846,12 +846,13 @@ class BlockRunner {
     // One dense slot per instruction, sized once per block execution (a block is tens of instructions,
     // and the alternative — a hash insertion and a hash lookup for every operand — was the dominant cost
     // of this interpreter).
-    const std::size_t slots = block.ir.size() + 1;
-    temps_.resize(slots);
-    produced_.resize(slots);
-    carry_.resize(slots);
-    ge_.resize(slots);
-    valid_.assign(slots, std::uint8_t{0});
+    slot_count_ = block.ir.size() + 1;
+    slots_ = inline_slots_.data();
+    if (slot_count_ > inline_slots_.size()) {
+      if (overflow_slots_.size() < slot_count_) overflow_slots_.resize(slot_count_);
+      slots_ = overflow_slots_.data();
+    }
+    for (std::size_t i = 0; i < slot_count_; ++i) slots_[i].valid = 0;
     for (const auto& inst : block.ir) {
       if (!Step(&inst)) return false;
       ++steps;
@@ -933,7 +934,7 @@ class BlockRunner {
                               : "IR temporary read before it was written";
       return false;
     }
-    out = temps_[slot];
+    out = slots_[slot].temp;
     return true;
   }
 
@@ -1013,15 +1014,15 @@ class BlockRunner {
   /// map this file used to hash for every `GetNZCVFromOp`.
   [[nodiscard]] const Flags* Produced(const Inst* inst) const {
     const unsigned slot = SlotOf(inst);
-    return HasValue(slot, kFlags) ? &produced_[slot] : nullptr;
+    return HasValue(slot, kFlags) ? &slots_[slot].flags : nullptr;
   }
   [[nodiscard]] const bool* Carried(const Inst* inst) const {
     const unsigned slot = SlotOf(inst);
-    return HasValue(slot, kCarry) ? &carry_[slot].value : nullptr;
+    return HasValue(slot, kCarry) ? &slots_[slot].carry : nullptr;
   }
   [[nodiscard]] const std::uint32_t* GeOf(const Inst* inst) const {
     const unsigned slot = SlotOf(inst);
-    return HasValue(slot, kGe) ? &ge_[slot] : nullptr;
+    return HasValue(slot, kGe) ? &slots_[slot].ge : nullptr;
   }
 
   void Put(const Inst* inst, V value) {
@@ -1029,9 +1030,9 @@ class BlockRunner {
     // Every Put follows the block's own instruction, which TranslateOne numbered; a zero here would mean
     // the numbering pass was skipped, and silently dropping the value would surface as a wrong answer
     // somewhere else. Sizing guarantees the upper bound.
-    if (slot != 0 && slot < temps_.size()) {
-      temps_[slot] = value;
-      valid_[slot] |= kTemp;
+    if (slot != 0 && slot < slot_count_) {
+      slots_[slot].temp = value;
+      slots_[slot].valid |= kTemp;
     }
   }
 
@@ -1099,9 +1100,9 @@ class BlockRunner {
   /// consumer — not the producer — decides which bits it reads.
   void NoteFlags(const Inst* inst, const Flags& f) {
     const unsigned slot = SlotOf(inst);
-    if (slot != 0 && slot < valid_.size()) {
-      produced_[slot] = f;
-      valid_[slot] |= kFlags;
+    if (slot != 0 && slot < slot_count_) {
+      slots_[slot].flags = f;
+      slots_[slot].valid |= kFlags;
     }
   }
 
@@ -1113,25 +1114,23 @@ class BlockRunner {
   /// Value slots, indexed by the instruction's dense ordinal (`Inst::GetName`, assigned one per block in
   /// `isa::TranslateOne`). These were `std::unordered_map<const Inst*, …>` — a hash per operand read and
   /// per result write — which made operand access, not the operation itself, the interpreter's cost.
-  std::vector<V> temps_;
+  struct ScratchSlot {
+    V temp;
+    Flags flags;
+    std::uint32_t ge;
+    bool carry;
+    std::uint8_t valid;
+  };
+  // Keep short blocks on the stack. Larger blocks reuse one typed scratch allocation for this run.
+  // Payloads only become readable after their producer marks them valid.
+  std::array<ScratchSlot, 64> inline_slots_;
+  std::vector<ScratchSlot> overflow_slots_;
+  ScratchSlot* slots_ = nullptr;
+  std::size_t slot_count_ = 0;
   enum : std::uint8_t { kTemp = 1, kFlags = 2, kCarry = 4, kGe = 8 };
   bool HasValue(unsigned slot, std::uint8_t kind) const {
-    return slot != 0 && slot < valid_.size() && (valid_[slot] & kind) != 0;
+    return slot != 0 && slot < slot_count_ && (slots_[slot].valid & kind) != 0;
   }
-  // Clear one byte per IR slot between blocks. Payloads are reused until the producer writes them.
-  std::vector<std::uint8_t> valid_;
-  std::vector<Flags> produced_;
-  /// Shifter carries, kept apart from `produced_` because their N/Z reach CPSR by a different route
-  /// (`TST`) than their C does (`GetCarryFromOp`), and merging them would make Tier I disagree with
-  /// the back end about what a `GetNZCVFromOp` on a shift means.
-  struct ShiftCarry { bool value; };
-  std::vector<ShiftCarry> carry_;
-  /// The GE word a packed add/subtract produced, in dynarmic's expanded one-lane-per-bit form, keyed by
-  /// the instruction that produced it — the same shape as `carry_` and for the same reason: the IR names
-  /// the *producer* in `GetGEFromOp`, so the value has to be recorded where a producer can leave it and
-  /// read where a consumer asks. Held apart from `produced_` because it is not a flag: it survives an
-  /// unrelated `ADDS` in between, and `MRS rD, CPSR` reads it out of CPSR's own bits.
-  std::vector<std::uint32_t> ge_;
   bool check_bit = false;
   /// An SVC noted by `A32CallSupervisor`, waiting to be surfaced at the block's `CheckHalt` terminal —
   /// see the two places that read it. Pending rather than immediate so the PC is already past the
@@ -1623,9 +1622,9 @@ bool BlockRunner::Step(const Inst* inst) {
       const unsigned width = PackedLaneWidth(op);
       Put(inst, V{LaneAddSub(a, b, width, IsPackedSub(op)), 0});
       const unsigned slot = SlotOf(inst);
-      if (slot != 0 && slot < valid_.size()) {
-        ge_[slot] = GeOfPackedAddSub(op, a, b, width);
-        valid_[slot] |= kGe;
+      if (slot != 0 && slot < slot_count_) {
+        slots_[slot].ge = GeOfPackedAddSub(op, a, b, width);
+        slots_[slot].valid |= kGe;
       }
       return true;
     }
@@ -2272,9 +2271,9 @@ bool BlockRunner::Step(const Inst* inst) {
       Put(inst, V{result, 0});
       {
         const unsigned slot = SlotOf(inst);
-        if (slot != 0 && slot < valid_.size()) {
-          carry_[slot].value = carry;
-          valid_[slot] |= kCarry;
+        if (slot != 0 && slot < slot_count_) {
+          slots_[slot].carry = carry;
+          slots_[slot].valid |= kCarry;
         }
       }
       NoteFlags(inst, Tst(result, 32));  // N and Z from the result; C is published separately, V clear

@@ -20,7 +20,7 @@ struct ImportedGame: Identifiable {
 struct LauncherView: View {
     private static let fileQueue = DispatchQueue(label: "com.retrobug.library", qos: .userInitiated)
     private enum ActiveSheet: String, Identifiable {
-        case importer, importerFolder, share
+        case importer, importerFolder, share, update
         var id: String { rawValue }
     }
 
@@ -38,6 +38,7 @@ struct LauncherView: View {
     @State private var booting = true
     @State private var importsInFlight = 0
     @State private var handledQALaunch = false
+    @State private var update: ReleaseUpdate?
 
     private var gamesDir: URL {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -124,13 +125,25 @@ struct LauncherView: View {
                 DocumentPicker(mode: .folder, onPick: importFolder, onDone: { sheet = nil })
             case .share:
                 ShareSheet(items: [AppLog.url])
+            case .update:
+                if let update { ReleaseUpdateSheet(release: update) }
             }
         }
         .fullScreenCover(item: $playing) { game in
-            GameView(apk: game.url, lib: libName, accent: holo.accent)
+            GameView(apk: game.url, lib: libName,
+                     portrait: game.url.path.withCString { rb_ios_apk_prefers_portrait($0) != 0 })
         }
         .onAppear {
             prepare()
+        }
+        .task(id: booting) {
+            guard !booting, update == nil,
+                  ProcessInfo.processInfo.environment["RETROBUG_QA_GAME"] == nil,
+                  let release = await ReleaseUpdate.check(), !Task.isCancelled else { return }
+            guard sheet == nil, playing == nil, !showSettings, !addSource, menuGame == nil,
+                  pendingDelete == nil else { return }
+            update = release
+            sheet = .update
         }
         .onOpenURL { url in
             AppLog.write("openURL: \(url.path)")

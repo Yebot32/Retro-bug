@@ -35,6 +35,7 @@ void rb_ios_set_display_info(RbIosSession* s, int rotation, int density_dpi, flo
 /// declared application icon (PNG/JPEG/WebP), preferring high-density variants. Returns bytes that
 /// the caller releases with rb_ios_free_bytes, or NULL when no raster launcher icon can be found.
 unsigned char* rb_ios_apk_icon(const char* apk_path, unsigned int* len);
+int rb_ios_apk_prefers_portrait(const char* apk_path);
 void rb_ios_free_bytes(void* bytes);
 
 /// Creates a session for `lib_name` in `apk_path`. The boot happens on the render thread when rb_ios_start

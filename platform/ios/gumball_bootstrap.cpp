@@ -239,7 +239,7 @@ bool GumballBootstrap::Start(const std::string& apk, int width, int height, std:
             started_ ? abi::Args32{} : abi::Args32{Word::S32(0)}, error)) return false;
   started_ = true;
   Resume();
-  boot_.Live("gumball: JNI surface and GLES1 initialized");
+  boot_.Live("gumball: JNI surface and GLES1 initialized at " + std::to_string(width) + "x" + std::to_string(height));
   return true;
 }
 

@@ -388,7 +388,9 @@ void InstallSystemServices(Java& vm, const UnityBootstrap::JavaServices& service
   vm.DeleteLocalRef(power_class);
   vm.DefineField(context, "POWER_SERVICE", "Ljava/lang/String;", true);
   vm.DefineField(context, "MODE_PRIVATE", "I", true);  // Android's value is zero.
+  vm.DefineField(context, "BIND_AUTO_CREATE", "I", true);
   const auto cls = vm.FindClass(context);
+  vm.SetField('I', true, cls, vm.GetFieldID(cls, "BIND_AUTO_CREATE", "I", true), 1);
   const auto power_field = vm.GetFieldID(cls, "POWER_SERVICE", "Ljava/lang/String;", true);
   const auto power = vm.NewString(u"power");
   vm.SetField('L', true, cls, power_field, power);
@@ -413,7 +415,8 @@ void InstallSystemServices(Java& vm, const UnityBootstrap::JavaServices& service
   vm.DeleteLocalRef(display_context);
   constexpr char activity_info[] = "android/content/pm/ActivityInfo";
   const auto orientation = vm.FindClass(activity_info);
-  for (const auto& [name, value] : {std::pair{"SCREEN_ORIENTATION_REVERSE_LANDSCAPE", 8},
+  for (const auto& [name, value] : {std::pair{"SCREEN_ORIENTATION_SENSOR_PORTRAIT", 7},
+                                   {"SCREEN_ORIENTATION_REVERSE_LANDSCAPE", 8},
                                    {"SCREEN_ORIENTATION_REVERSE_PORTRAIT", 9}}) {
     vm.DefineField(activity_info, name, "I", true);
     vm.SetField('I', true, orientation, vm.GetFieldID(orientation, name, "I", true), value);
@@ -421,11 +424,20 @@ void InstallSystemServices(Java& vm, const UnityBootstrap::JavaServices& service
   vm.DeleteLocalRef(orientation);
   vm.DefineClass(kDisplayManager, "java/lang/Object");
   vm.DefineClass("android/telephony/TelephonyManager", "java/lang/Object");
-  for (const auto* method : {"getNetworkOperatorName", "getNetworkOperator", "getNetworkCountryIso",
+  for (const auto* method : {"getDeviceId", "getSubscriberId", "getSimSerialNumber", "getLine1Number",
+                            "getNetworkOperatorName", "getNetworkOperator", "getNetworkCountryIso",
                             "getSimCountryIso", "getSimOperatorName"}) {
     vm.DefineMethod("android/telephony/TelephonyManager", method, "()Ljava/lang/String;", false,
                     [](Java& j, int, const auto&) { return j.NewString(u""); });
   }
+  vm.DefineClass("android/Manifest$permission", "java/lang/Object");
+  vm.DefineField("android/Manifest$permission", "READ_PHONE_STATE", "Ljava/lang/String;", true);
+  const auto permissions = vm.FindClass("android/Manifest$permission");
+  const auto read_phone = vm.NewString(u"android.permission.READ_PHONE_STATE");
+  vm.SetField('L', true, permissions,
+              vm.GetFieldID(permissions, "READ_PHONE_STATE", "Ljava/lang/String;", true), read_phone);
+  vm.DeleteLocalRef(read_phone);
+  vm.DeleteLocalRef(permissions);
   vm.DefineMethod("android/telephony/TelephonyManager", "getPhoneType", "()I", false,
                   [](Java&, int, const auto&) { return 0u; });
   vm.DefineClass(kDisplay, "java/lang/Object");
