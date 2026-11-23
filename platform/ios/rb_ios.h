@@ -31,9 +31,8 @@ int rb_ios_session_engine(RbIosSession* s);
 void rb_ios_set_runtime_jit(RbIosSession* s, int enabled);
 
 /// The game's icon, read out of the APK the way the Android launcher asks PackageManager for it: the
-/// largest entry that looks like a launcher image (PNG/JPEG/WebP), adaptive-icon layers and nine-patch
-/// sheets skipped. Returns a malloc'd copy in *len (0 when there is none) that the caller releases with
-/// rb_ios_free_bytes; NULL when the APK cannot be read or carries no such entry.
+/// declared application icon (PNG/JPEG/WebP), preferring high-density variants. Returns bytes that
+/// the caller releases with rb_ios_free_bytes, or NULL when no raster launcher icon can be found.
 unsigned char* rb_ios_apk_icon(const char* apk_path, unsigned int* len);
 void rb_ios_free_bytes(void* bytes);
 

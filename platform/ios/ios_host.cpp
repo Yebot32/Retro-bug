@@ -649,13 +649,14 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
     void* host = nullptr;
     auto file = asset(s.r[0], &host, why, "AAsset_read");
     if (!file) return false;
-    const std::uint32_t count = s.r[2];
-    void* buffer = count == 0 ? nullptr : p_.memory().HostForAccess(s.r[1]);
-    if (count != 0 && buffer == nullptr) {
-      *why = "AAsset_read: the buffer " + Hex(s.r[1]) + " is not guest memory";
-      return false;
+    const std::uint32_t dst = s.r[1];
+    const auto got = file->ReadTo(s.r[2], [this, dst](auto bytes) {
+      return p_.memory().Write(dst, bytes.data(), bytes.size());
+    });
+    if (got < 0 && FirstRefusal("AAsset_read destination") && log_) {
+      log_("assets: AAsset_read could not write to guest address " + Hex(dst) +
+           " (requested " + std::to_string(s.r[2]) + " bytes)");
     }
-    const auto got = file->Read(buffer, static_cast<std::int64_t>(count));
     s.r[0] = static_cast<std::uint32_t>(got);
     return true;
   });

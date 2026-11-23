@@ -216,6 +216,10 @@ target_link_libraries(rb_sles_tests PRIVATE rb_abi rb_mem OpenSLES dl)
 add_executable(rb_gl_thunk_tests gl_thunk_test.cpp "${CMAKE_SOURCE_DIR}/android/jni/thunks.cpp")
 target_include_directories(rb_gl_thunk_tests PRIVATE "${CMAKE_SOURCE_DIR}/android/jni")
 target_link_libraries(rb_gl_thunk_tests PRIVATE rb_abi rb_mem rb_gfx EGL GLESv2 dl)
+if(ANDROID_ABI STREQUAL "arm64-v8a")
+  target_sources(rb_gl_thunk_tests PRIVATE "${CMAKE_SOURCE_DIR}/android/jni/host_slots.cpp")
+  target_link_libraries(rb_gl_thunk_tests PRIVATE rb_runtime)
+endif()
 
 # The platform seam (S0 of the iOS port): pure host tests, no guest, no device, no fixtures — the
 # only suite that can run on the build machine itself. Its contract is what makes the same core
@@ -235,7 +239,8 @@ if(TARGET rb_inbound)
   # build; the iOS app is its one user. (halfbrick_bootstrap.cpp is not: it calls the framework's GL entry
   # points, which live in an Objective-C++ file, so the iOS build is where it is compiled.)
   add_executable(rb_host_boot_tests host_boot_test.cpp "${CMAKE_SOURCE_DIR}/platform/ios/pikpok_bootstrap.cpp"
-    "${CMAKE_SOURCE_DIR}/platform/ios/unity_bootstrap.cpp" "${CMAKE_SOURCE_DIR}/platform/ios/apk_identity.cpp")
+    "${CMAKE_SOURCE_DIR}/platform/ios/unity_bootstrap.cpp" "${CMAKE_SOURCE_DIR}/platform/ios/apk_identity.cpp"
+    "${CMAKE_SOURCE_DIR}/platform/ios/apk_icon.cpp")
   target_link_libraries(rb_host_boot_tests PRIVATE rb_host rb_java)
   target_compile_definitions(rb_host_boot_tests PRIVATE
     RB_DEVICE_LIBC_PATH="/data/local/tmp/rb_device_libc.so"

@@ -6,9 +6,11 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -25,6 +27,8 @@ class ApkFile {
   }
   /// Up to `n` bytes from the cursor; 0 at the end. The cursor advances by what was copied.
   std::int64_t Read(void* dst, std::int64_t n);
+  /// Copies at most `n` bytes through a checked destination. On refusal returns -1 and preserves the cursor.
+  std::int64_t ReadTo(std::int64_t n, const std::function<bool(std::span<const std::uint8_t>)>& copy);
   /// SEEK_SET (0), SEEK_CUR (1), SEEK_END (2); returns the new position, or -1 for a bad `whence` or a
   /// negative resulting offset. Seeking past the end is legal; the next read is 0.
   std::int64_t Seek(std::int64_t off, int whence);

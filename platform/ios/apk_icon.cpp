@@ -1,17 +1,16 @@
 // RetroBug iOS adapter — the game icon for the launcher grid. SPDX-License-Identifier: Apache-2.0
 //
-// The Android launcher asks PackageManager for a game's icon; iOS has no package manager, so the same
-// answer is read out of the APK with the engine's zip reader: the entry whose name says launcher image,
-// preferring the largest (density buckets scale up), skipping adaptive-icon layers that are not a picture
-// on their own and nine-patch sheets. The stored bytes go out unchanged; UIImage decodes PNG, JPEG and
-// the WebP newer games ship.
+// Resolve AndroidManifest.xml's application icon through resources.arsc and return the raster variant
+// to UIKit without altering its alpha channel. Older APKs without a resource table use a name fallback.
 
+#include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 
+#include "apk_identity.h"
 #include "rb/loader/zip.h"
 #include "rb_ios.h"
 
@@ -38,21 +37,68 @@ std::string LowerBase(const std::string& path) {
 }
 
 int IconScore(const std::string& base) {
-  int score = 0;
-  if (base.find("ic_launcher") != std::string::npos) {
-    score = 3;
-  } else if (base.find("launcher") != std::string::npos) {
-    score = 2;
-  } else if (base.find("icon") != std::string::npos || base.find("logo") != std::string::npos) {
-    score = 1;
+  const auto stem = base.substr(0, base.find_last_of('.'));
+  if (stem == "ic_launcher" || stem == "app_icon" || stem == "appicon") return 3;
+  if (stem == "icon" || stem == "launcher_icon") return 2;
+  if (stem == "ic_launcher_round") return 1;
+  return 0;
+}
+
+bool IsRaster(const std::string& path) {
+  return !EndsWithNoCase(path, ".9.png") &&
+      (EndsWithNoCase(path, ".png") || EndsWithNoCase(path, ".webp") ||
+       EndsWithNoCase(path, ".jpg") || EndsWithNoCase(path, ".jpeg"));
+}
+
+std::optional<std::vector<std::uint8_t>> ReadBounded(rb::loader::ZipReader& zip,
+                                                     const std::string& name, std::uint32_t limit) {
+  const auto size = zip.UncompressedSize(name);
+  if (!size || *size == 0 || *size > limit) return std::nullopt;
+  std::string why;
+  return zip.Read(name, &why);
+}
+
+std::optional<std::vector<std::uint8_t>> FindIcon(rb::loader::ZipReader& zip) {
+  constexpr auto kIconLimit = 12u << 20;
+  const auto manifest = ReadBounded(zip, "AndroidManifest.xml", 2u << 20);
+  const auto identity = manifest ? rb::platform::ios::ReadApkIdentity(*manifest) : rb::platform::ios::ApkIdentity{};
+  if (identity.icon || identity.round_icon) {
+    if (const auto table = ReadBounded(zip, "resources.arsc", 32u << 20)) {
+      bool resolved = false;
+      for (const auto id : {identity.icon, identity.round_icon}) {
+        if (id == 0) continue;
+        auto variants = rb::platform::ios::ReadApkDrawables(*table, id);
+        resolved |= !variants.empty();
+        const auto density = [](unsigned dpi) { return dpi == 0 || dpi >= 0xfffe ? 160u : dpi; };
+        std::stable_sort(variants.begin(), variants.end(), [&](const auto& a, const auto& b) {
+          return density(a.density) > density(b.density);
+        });
+        for (const auto& variant : variants) {
+          if (IsRaster(variant.path)) {
+            if (auto bytes = ReadBounded(zip, variant.path, kIconLimit)) return bytes;
+          }
+        }
+      }
+      // XML-only adaptive or vector drawables cannot be decoded directly by UIKit.
+      if (resolved) return std::nullopt;
+    }
   }
-  if (score == 0) return 0;
-  // An adaptive icon's foreground and background are layers, not a picture; a splash is not the icon.
-  if (base.find("foreground") != std::string::npos || base.find("background") != std::string::npos ||
-      base.find("splash") != std::string::npos) {
-    return 0;
+  std::string best;
+  int best_score = 0;
+  std::uint32_t best_size = 0;
+  for (const std::string& name : zip.Names()) {
+    if (!(name.starts_with("res/drawable") || name.starts_with("res/mipmap")) || !IsRaster(name)) continue;
+    const int score = IconScore(LowerBase(name));
+    if (score == 0) continue;
+    const auto size = zip.UncompressedSize(name);
+    if (!size || *size == 0 || *size > kIconLimit) continue;
+    if (score > best_score || (score == best_score && *size > best_size)) {
+      best = name;
+      best_score = score;
+      best_size = *size;
+    }
   }
-  return score;
+  return best.empty() ? std::nullopt : ReadBounded(zip, best, kIconLimit);
 }
 
 }  // namespace
@@ -64,28 +110,7 @@ extern "C" unsigned char* rb_ios_apk_icon(const char* apk_path, unsigned int* le
   const std::unique_ptr<rb::loader::ZipReader> zip = rb::loader::ZipReader::OpenFile(apk_path, &why);
   if (zip == nullptr) return nullptr;
 
-  std::string best;
-  int best_score = 0;
-  std::uint32_t best_size = 0;
-  for (const std::string& name : zip->Names()) {
-    const std::string base = LowerBase(name);
-    if (!EndsWithNoCase(base, ".png") && !EndsWithNoCase(base, ".webp") && !EndsWithNoCase(base, ".jpg") &&
-        !EndsWithNoCase(base, ".jpeg")) {
-      continue;
-    }
-    if (EndsWithNoCase(base, ".9.png")) continue;
-    const int score = IconScore(base);
-    if (score == 0) continue;
-    const std::optional<std::uint32_t> size = zip->UncompressedSize(name);
-    if (!size || *size == 0) continue;
-    if (score > best_score || (score == best_score && *size > best_size)) {
-      best = name;
-      best_score = score;
-      best_size = *size;
-    }
-  }
-  if (best.empty() || best_size > (12u << 20)) return nullptr;
-  const std::optional<std::vector<std::uint8_t>> bytes = zip->Read(best, &why);
+  const auto bytes = FindIcon(*zip);
   if (!bytes || bytes->empty()) return nullptr;
   auto* out = static_cast<unsigned char*>(std::malloc(bytes->size()));
   if (out == nullptr) return nullptr;

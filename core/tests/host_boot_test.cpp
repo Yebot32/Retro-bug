@@ -36,10 +36,12 @@
 #include "rb/java/halfbrick.h"
 #include "rb/java/pikpok.h"
 #include "rb/loader/guest_elf.h"
+#include "rb/loader/apk_assets.h"
 #include "rb/mem/guest_memory.h"
 #include "rb/runtime/guest_process.h"
 #include "zip_builder.h"
 #include "../../platform/ios/unity_bootstrap.h"
+#include "../../platform/ios/rb_ios.h"
 
 #ifndef RB_DEVICE_LIBC_PATH
 #define RB_DEVICE_LIBC_PATH "/data/local/tmp/rb_device_libc.so"
@@ -576,6 +578,137 @@ void older_game_bridges_answer_the_startup_lookups() {
   CHECK(!java.ExceptionCheck());
 }
 
+void asset_reads_cross_guest_page_boundaries() {
+  test::ZipWriter zip;
+  const auto contents = test::Bytes("eightbytes");
+  zip.AddStored("assets/data", contents);
+  std::string error;
+  auto archive = loader::ApkArchive::OpenMemory(zip.Finish(), &error);
+  CHECK_CTX(archive != nullptr, error);
+  if (!archive) return;
+  auto file = archive->OpenFile("assets/data", &error);
+  CHECK_CTX(file != nullptr, error);
+  if (!file) return;
+  mem::AddressModel model;
+  model.host_page_shift = 14;
+  auto memory = mem::GuestMemory::Create(4 * mem::kGuestPage, model, &error);
+  CHECK_CTX(memory != nullptr, error);
+  if (!memory) return;
+  constexpr auto page = mem::kGuestPage;
+  constexpr auto destination = 2 * page - 3;
+  CHECK_CTX(memory->Map(page, page, mem::kRead | mem::kWrite, &error), error);
+  CHECK_CTX(memory->Map(2 * page, page, mem::kRead, &error), error);
+  CHECK_CTX(memory->Map(3 * page, page, mem::kNone, &error), error);
+  const auto read = [&] {
+    return file->ReadTo(30, [&](auto bytes) { return memory->Write(destination, bytes.data(), bytes.size()); });
+  };
+  CHECK(read() == -1 && file->Position() == 0);
+  CHECK_CTX(memory->Protect(2 * page, page, mem::kRead | mem::kWrite, &error), error);
+  CHECK(read() == static_cast<std::int64_t>(contents.size()));
+  std::vector<std::uint8_t> copied(contents.size());
+  CHECK(memory->Read(destination, copied.data(), copied.size()) && copied == contents);
+  CHECK(read() == 0);
+}
+
+void apk_icon_uses_the_manifest_and_density() {
+  using Bytes = std::vector<std::uint8_t>;
+  using test::Put16;
+  using test::Put32;
+  const auto append = [](Bytes& out, const Bytes& data) { out.insert(out.end(), data.begin(), data.end()); };
+  const auto wrap = [&](unsigned kind, const Bytes& header, const Bytes& body) {
+    Bytes chunk;
+    Put16(chunk, kind);
+    Put16(chunk, 8 + header.size());
+    Put32(chunk, 8 + header.size() + body.size());
+    append(chunk, header);
+    append(chunk, body);
+    return chunk;
+  };
+  const auto pool = [&](std::initializer_list<std::string_view> values) {
+    Bytes header, offsets, text;
+    Put32(header, values.size());
+    Put32(header, 0);
+    Put32(header, 0x100);  // UTF-8 pool.
+    Put32(header, 28 + values.size() * 4);
+    Put32(header, 0);
+    for (const auto value : values) {
+      Put32(offsets, text.size());
+      text.push_back(value.size());
+      text.push_back(value.size());
+      text.insert(text.end(), value.begin(), value.end());
+      text.push_back(0);
+    }
+    append(offsets, text);
+    return wrap(1, header, offsets);
+  };
+  const auto element = [&](unsigned name, const Bytes& attributes) {
+    Bytes node;
+    Put32(node, 0xffffffffu);  // No element namespace.
+    Put32(node, name);
+    Put16(node, 20);
+    Put16(node, 20);
+    Put16(node, attributes.size() / 20);
+    node.resize(20);
+    append(node, attributes);
+    return wrap(0x0102, Bytes(8), node);
+  };
+  const auto low = "res/low.png", high = "res/high.png";
+  auto xml_nodes = pool({"manifest", "application", "http://schemas.android.com/apk/res/android", "icon"});
+  append(xml_nodes, element(0, {}));
+  Bytes icon_attr;
+  Put32(icon_attr, 2);
+  Put32(icon_attr, 3);
+  Put32(icon_attr, 0xffffffffu);
+  Put32(icon_attr, 0x01000008); // TYPE_REFERENCE
+  Put32(icon_attr, 0x7f010002);
+  append(xml_nodes, element(1, icon_attr));
+
+  const auto type = [&](unsigned density, unsigned string_id, bool sparse) {
+    Bytes header{1, static_cast<std::uint8_t>(sparse ? 1 : 0), 0, 0};
+    Put32(header, sparse ? 1 : 3);
+    Put32(header, sparse ? 40 : 48);
+    Put32(header, 16);
+    header.resize(26);
+    Put16(header, density);
+    Bytes entries;
+    if (sparse) {
+      Put16(entries, 2);
+      Put16(entries, 0);
+    } else {
+      Put32(entries, 0xffffffffu);
+      Put32(entries, 0xffffffffu);
+      Put32(entries, 0);
+    }
+    Put16(entries, 0); // Compact value, key index zero.
+    Put16(entries, 0x0308);
+    Put32(entries, string_id);
+    return wrap(0x0201, header, entries);
+  };
+  auto package = type(160, 0, false);
+  append(package, type(480, 1, true));
+  Bytes package_header, table_header;
+  Put32(package_header, 0x7f);
+  package_header.resize(280);
+  Put32(table_header, 1);
+  auto table = pool({low, high});
+  append(table, wrap(0x0200, package_header, package));
+
+  test::ZipWriter zip;
+  zip.AddStored("AndroidManifest.xml", wrap(3, {}, xml_nodes));
+  zip.AddStored("resources.arsc", wrap(2, table_header, table));
+  zip.AddStored("res/drawable/ic_launcher.png", test::Bytes("unrelated SDK icon"));
+  zip.AddStored(low, test::Bytes("low"));
+  zip.AddStored(high, test::Bytes("high"));
+  const auto path = WriteTempApk(zip.Finish());
+  CHECK(!path.empty());
+  if (path.empty()) return;
+  unsigned length = 0;
+  auto* icon = rb_ios_apk_icon(path.c_str(), &length);
+  CHECK(icon != nullptr && length == 4 && std::memcmp(icon, "high", 4) == 0);
+  rb_ios_free_bytes(icon);
+  unlink(path.c_str());
+}
+
 }  // namespace
 
 int main() {
@@ -584,6 +717,8 @@ int main() {
   unity_can_read_committed_preferences_and_probe_android_services();
   proc_maps_describes_guest_addresses_and_permissions();
   older_game_bridges_answer_the_startup_lookups();
+  asset_reads_cross_guest_page_boundaries();
+  apk_icon_uses_the_manifest_and_density();
   const Images im = LoadImages();
   if (!im.ok) {
     std::fprintf(stderr, "# host boot lane skipped: %s is missing (run tools/run_engine_tests.sh)\n", im.missing.c_str());

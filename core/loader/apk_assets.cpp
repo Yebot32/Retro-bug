@@ -32,11 +32,19 @@ std::unique_ptr<ApkFile> ApkArchive::OpenFile(const std::string& name, std::stri
 }
 
 std::int64_t ApkFile::Read(void* dst, std::int64_t n) {
+  if (dst == nullptr) return 0;
+  return ReadTo(n, [dst](auto bytes) {
+    std::memcpy(dst, bytes.data(), bytes.size());
+    return true;
+  });
+}
+
+std::int64_t ApkFile::ReadTo(std::int64_t n, const std::function<bool(std::span<const std::uint8_t>)>& copy) {
   std::lock_guard<std::mutex> lk(mu_);
-  if (n <= 0 || dst == nullptr || pos_ >= static_cast<std::int64_t>(bytes_.size())) return 0;
+  if (n <= 0 || pos_ >= static_cast<std::int64_t>(bytes_.size())) return 0;
   const std::int64_t left = static_cast<std::int64_t>(bytes_.size()) - pos_;
   const std::int64_t take = std::min(n, left);
-  std::memcpy(dst, bytes_.data() + pos_, static_cast<std::size_t>(take));
+  if (!copy(std::span(bytes_).subspan(static_cast<std::size_t>(pos_), static_cast<std::size_t>(take)))) return -1;
   pos_ += take;
   return take;
 }
