@@ -590,6 +590,7 @@ void asset_reads_cross_guest_page_boundaries() {
   CHECK_CTX(file != nullptr, error);
   if (!file) return;
   mem::AddressModel model;
+  model.kind = mem::AddressModel::kBiased;
   model.host_page_shift = 14;
   auto memory = mem::GuestMemory::Create(4 * mem::kGuestPage, model, &error);
   CHECK_CTX(memory != nullptr, error);
