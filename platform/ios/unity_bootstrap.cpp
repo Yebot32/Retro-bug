@@ -6,6 +6,7 @@
 #include <bit>
 #include <chrono>
 #include <cstdio>
+#include <deque>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -19,6 +20,27 @@
 #include "rb/host/boot.h"
 
 namespace rb::platform::ios {
+struct UnityJavaTasks {
+  using Clock = std::chrono::steady_clock;
+  struct Task { int handler, runnable; Clock::time_point due; };
+  std::mutex mutex;
+  std::deque<Task> pending;
+
+  bool Post(int handler, int runnable, std::int64_t delay) {
+    if (runnable == 0) return false;
+    std::lock_guard<std::mutex> lock(mutex);
+    if (pending.size() >= 1024) return false;
+    // Android delays are signed milliseconds. Clamp to what the host clock can represent.
+    const auto now = Clock::now();
+    const auto max = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::time_point::max() - now).count();
+    const auto due = now + std::chrono::milliseconds(std::clamp<std::int64_t>(delay, 0, max));
+    const auto position = std::upper_bound(pending.begin(), pending.end(), due,
+                                           [](auto time, const Task& task) { return time < task.due; });
+    pending.insert(position, {handler, runnable, due});
+    return true;
+  }
+};
+
 namespace {
 constexpr char kPlayer[] = "com/unity3d/player/UnityPlayer";
 constexpr char kActivity[] = "com/unity3d/player/UnityPlayerActivity";
@@ -33,6 +55,9 @@ constexpr char kEditor[] = "android/content/SharedPreferences$Editor";
 constexpr char kMotion[] = "android/view/MotionEvent";
 constexpr char kDisplayManager[] = "android/hardware/display/DisplayManager";
 constexpr char kDisplay[] = "android/view/Display";
+constexpr char kRunnable[] = "java/lang/Runnable";
+constexpr char kBridge[] = "bitter/jnibridge/JNIBridge";
+constexpr char kBridgeInvoke[] = "invoke(JLjava/lang/Class;Ljava/lang/reflect/Method;[Ljava/lang/Object;)Ljava/lang/Object;";
 
 using Java = java::TableJava;
 
@@ -92,7 +117,8 @@ void InstallIntent(Java& vm) {
   });
 }
 
-void InstallPackageManager(Java& vm, const ApkIdentity& identity, const std::u16string& apk_path) {
+void InstallPackageManager(Java& vm, const ApkIdentity& identity, const std::u16string& apk_path,
+                           const UnityBootstrap::JavaServices& services) {
   const auto empty = [](Java&, int, const auto&) { return 0u; };
   vm.DefineClass(kBundle, "java/lang/Object");
   vm.DefineClass(kManager, "java/lang/Object");
@@ -107,6 +133,10 @@ void InstallPackageManager(Java& vm, const ApkIdentity& identity, const std::u16
   vm.DefineField(kPackageInfo, "versionCode", "I", false);
   vm.DefineField(kPackageInfo, "applicationInfo", "Landroid/content/pm/ApplicationInfo;", false);
   vm.DefineField("android/content/pm/PackageItemInfo", "metaData", "Landroid/os/Bundle;", false);
+  for (const auto* name : {"publicSourceDir", "dataDir", "nativeLibraryDir"}) {
+    vm.DefineField("android/content/pm/ApplicationInfo", name, "Ljava/lang/String;", false);
+  }
+  vm.DefineField("android/content/pm/ApplicationInfo", "targetSdkVersion", "I", false);
   vm.DefineMethod("android/content/Context", "getPackageManager", "()Landroid/content/pm/PackageManager;",
                   false, [](Java& j, int, const auto&) { return j.NewInstance(kManager); });
   // A sideloaded APK on iOS has neither a Play installer nor an Android error-report receiver.
@@ -116,25 +146,70 @@ void InstallPackageManager(Java& vm, const ApkIdentity& identity, const std::u16
   vm.DefineMethod(kManager, "hasSystemFeature", "(Ljava/lang/String;)Z", false, empty);
   vm.DefineMethod("android/app/ApplicationErrorReport", "getErrorReportReceiver",
                   "(Landroid/content/Context;Ljava/lang/String;I)Landroid/content/ComponentName;", true, empty);
-  vm.DefineMethod(kBundle, "getBoolean", "(Ljava/lang/String;Z)Z", false,
-                  [](Java&, int, const auto& args) { return args.at(1); });
-  vm.DefineMethod(kBundle, "getBoolean", "(Ljava/lang/String;)Z", false, empty);
+  const auto metadata = std::make_shared<decltype(identity.metadata)>(identity.metadata);
+  const auto lookup = [metadata](Java& j, int self, const auto& args) -> const decltype(metadata)::element_type::mapped_type* {
+    if (!j.FieldOf(self, "manifest")) return nullptr;
+    const auto key = j.GetStringChars(args.at(0));
+    const auto value = metadata->find(key);
+    return value == metadata->end() ? nullptr : &value->second;
+  };
+  vm.DefineMethod(kBundle, "containsKey", "(Ljava/lang/String;)Z", false,
+                  [lookup](Java& j, int self, const auto& args) { return lookup(j, self, args) != nullptr; });
+  for (const auto* sig : {"(Ljava/lang/String;)Z", "(Ljava/lang/String;Z)Z"}) {
+    vm.DefineMethod(kBundle, "getBoolean", sig, false,
+                    [lookup](Java& j, int self, const auto& args) -> std::uint64_t {
+      const auto* value = lookup(j, self, args);
+      if (value != nullptr) {
+        if (const auto* boolean = std::get_if<bool>(value)) return *boolean;
+      }
+      return args.size() > 1 ? args.at(1) : 0;
+    });
+  }
+  for (const auto* sig : {"(Ljava/lang/String;)I", "(Ljava/lang/String;I)I"}) {
+    vm.DefineMethod(kBundle, "getInt", sig, false,
+                    [lookup](Java& j, int self, const auto& args) -> std::uint64_t {
+      const auto* value = lookup(j, self, args);
+      if (value != nullptr) {
+        if (const auto* integer = std::get_if<std::int32_t>(value)) return static_cast<std::uint32_t>(*integer);
+      }
+      return args.size() > 1 ? args.at(1) : 0;
+    });
+  }
+  vm.DefineMethod(kBundle, "getString", "(Ljava/lang/String;)Ljava/lang/String;", false,
+                  [lookup](Java& j, int self, const auto& args) -> Java::Ref {
+    const auto* value = lookup(j, self, args);
+    const auto* string = value != nullptr ? std::get_if<std::u16string>(value) : nullptr;
+    return string != nullptr ? j.NewString(*string) : 0;
+  });
   const std::u16string package(identity.package.begin(), identity.package.end());
-  const auto application_info = [package, apk_path](Java& j) {
+  const auto data_dir = std::filesystem::path(services.data_dir).u16string();
+  const auto lib_dir = std::filesystem::path(services.native_library_dir).u16string();
+  const auto application_info = [package, apk_path, data_dir, lib_dir, metadata,
+                                 target_sdk = identity.target_sdk](Java& j, bool include_metadata) {
     const auto info = j.NewInstance("android/content/pm/ApplicationInfo");
     int object = j.ObjectOf(info);
     PutString(j, object, "packageName", package);
     PutString(j, object, "sourceDir", apk_path);
+    PutString(j, object, "publicSourceDir", apk_path);
+    PutString(j, object, "dataDir", data_dir);
+    PutString(j, object, "nativeLibraryDir", lib_dir);
+    j.PutField(object, "targetSdkVersion", target_sdk);
+    if (include_metadata && !metadata->empty()) {
+      const auto bundle = j.NewInstance(kBundle);
+      j.PutField(j.ObjectOf(bundle), "manifest", 1);
+      PutObject(j, object, "metaData", bundle);
+      j.DeleteLocalRef(bundle);
+    }
     return info;
   };
   vm.DefineMethod("android/content/Context", "getApplicationInfo", "()Landroid/content/pm/ApplicationInfo;",
-                  false, [application_info](Java& j, int, const auto&) { return application_info(j); });
+                  false, [application_info](Java& j, int, const auto&) { return application_info(j, true); });
   const auto get_application = [package, application_info](Java& j, int, const auto& args) -> Java::Ref {
     if (j.StringOf(j.ObjectOf(args.at(0))) != package) {
       j.SetPending("android/content/pm/PackageManager$NameNotFoundException", "package is not imported");
       return 0;
     }
-    return application_info(j);
+    return application_info(j, (args.at(1) & 0x80) != 0);
   };
   vm.DefineMethod(kManager, "getApplicationInfo", "(Ljava/lang/String;I)Landroid/content/pm/ApplicationInfo;",
                   false, get_application);
@@ -162,7 +237,9 @@ void InstallPlayerCallbacks(Java& vm, const UnityBootstrap::JavaServices& servic
            {"initCamera", "(IIII)[I"}, {"isCameraFrontFacing", "(I)Z"}, {"getCameraOrientation", "(I)I"},
            {"installPresentationDisplay", "(I)Z"}, {"getSplashMode", "()I"},
            {"executeGLThreadJobs", "()V"}, {"disableLogger", "()V"},
-           {"startActivityIndicator", "()V"}, {"stopActivityIndicator", "()V"}, {"setFullscreen", "(Z)V"}}) {
+           {"startActivityIndicator", "()V"}, {"stopActivityIndicator", "()V"}, {"setFullscreen", "(Z)V"},
+           {"showVideoPlayer", "(Ljava/lang/String;IIIZII)Z"}, {"loadGoogleVR", "(ZZZ)J"},
+           {"setGoogleVREnabled", "(Z)V"}, {"unloadGoogleVR", "()V"}, {"addPhoneCallListener", "()V"}}) {
     vm.DefineMethod(kPlayer, name, sig, false, empty);
   }
   for (const auto& [name, sig] : {
@@ -185,17 +262,20 @@ void InstallPlayerCallbacks(Java& vm, const UnityBootstrap::JavaServices& servic
     return 0u;
   });
   vm.DefineMethod(kPlayer, "loadLibrary", "(Ljava/lang/String;)Z", false,
-                  [load = services.load_library](Java& j, int, const auto& args) {
+                  [load = services.load_library, log = services.log](Java& j, int, const auto& args) {
     const auto name = j.StringOf(j.ObjectOf(args.at(0)));
     if (name.empty() || !std::all_of(name.begin(), name.end(), [](char16_t c) {
           return (c >= u'a' && c <= u'z') || (c >= u'A' && c <= u'Z') || (c >= u'0' && c <= u'9') ||
                  c == u'_' || c == u'-' || c == u'.';
-        })) return false;
+        })) {
+      if (log) log("unity: loadLibrary received an empty or invalid library name");
+      return false;
+    }
     return load && load(std::string(name.begin(), name.end()));
   });
 }
 
-void InstallPowerManager(Java& vm) {
+void InstallSystemServices(Java& vm, const UnityBootstrap::JavaServices& services) {
   constexpr char context[] = "android/content/Context";
   constexpr char manager[] = "android/os/PowerManager";
   constexpr char lock[] = "android/os/PowerManager$WakeLock";
@@ -222,6 +302,61 @@ void InstallPowerManager(Java& vm) {
   vm.DeleteLocalRef(display_context);
   vm.DefineClass(kDisplayManager, "java/lang/Object");
   vm.DefineClass(kDisplay, "java/lang/Object");
+  vm.DefineClass("android/view/WindowManager", "java/lang/Object");
+  vm.DefineClass("android/graphics/Point", "java/lang/Object");
+  vm.DefineClass("android/util/DisplayMetrics", "java/lang/Object");
+  for (const char* field : {"x", "y"}) vm.DefineField("android/graphics/Point", field, "I", false);
+  for (const char* field : {"widthPixels", "heightPixels", "densityDpi"}) {
+    vm.DefineField("android/util/DisplayMetrics", field, "I", false);
+  }
+  for (const char* field : {"density", "scaledDensity", "xdpi", "ydpi"}) {
+    vm.DefineField("android/util/DisplayMetrics", field, "F", false);
+  }
+  const auto info = [display = services.display] {
+    return display ? display() : UnityBootstrap::DisplayInfo{};
+  };
+  for (const char* owner : {"android/graphics/Point", "android/util/DisplayMetrics"}) {
+    vm.DefineMethod(owner, "<init>", "()V", false, [](Java&, int, const auto&) { return 0u; });
+  }
+  for (const auto& [method, member] : {
+           std::pair{"getRotation", &UnityBootstrap::DisplayInfo::rotation},
+           {"getOrientation", &UnityBootstrap::DisplayInfo::rotation},
+           {"getWidth", &UnityBootstrap::DisplayInfo::width},
+           {"getHeight", &UnityBootstrap::DisplayInfo::height}}) {
+    vm.DefineMethod(kDisplay, method, "()I", false,
+                    [info, member](Java&, int, const auto&) { return info().*member; });
+  }
+  vm.DefineMethod(kDisplay, "getRefreshRate", "()F", false, [info](Java&, int, const auto&) {
+    return std::bit_cast<std::uint32_t>(info().refresh_rate);
+  });
+  for (const auto* method : {"getSize", "getRealSize"}) {
+    vm.DefineMethod(kDisplay, method, "(Landroid/graphics/Point;)V", false, [info](Java& j, int, const auto& args) {
+      const auto size = info();
+      const auto point = j.ObjectOf(args.at(0));
+      j.PutField(point, "x", size.width);
+      j.PutField(point, "y", size.height);
+      return 0u;
+    });
+  }
+  for (const auto* method : {"getMetrics", "getRealMetrics"}) {
+    vm.DefineMethod(kDisplay, method, "(Landroid/util/DisplayMetrics;)V", false, [info](Java& j, int, const auto& args) {
+      const auto data = info();
+      const auto metrics = j.ObjectOf(args.at(0));
+      j.PutField(metrics, "widthPixels", data.width);
+      j.PutField(metrics, "heightPixels", data.height);
+      j.PutField(metrics, "densityDpi", data.density_dpi);
+      const auto dpi = static_cast<float>(data.density_dpi);
+      for (const auto* name : {"density", "scaledDensity"}) {
+        j.PutField(metrics, name, std::bit_cast<std::uint32_t>(dpi / 160.f));
+      }
+      for (const auto* name : {"xdpi", "ydpi"}) j.PutField(metrics, name, std::bit_cast<std::uint32_t>(dpi));
+      return 0u;
+    });
+  }
+  vm.DefineMethod("android/view/WindowManager", "getDefaultDisplay", "()Landroid/view/Display;", false,
+                  [](Java& j, int, const auto&) { return j.NewInstance(kDisplay); });
+  vm.DefineMethod("android/app/Activity", "getWindowManager", "()Landroid/view/WindowManager;", false,
+                  [](Java& j, int, const auto&) { return j.NewInstance("android/view/WindowManager"); });
   vm.DefineMethod(kDisplayManager, "getDisplay", "(I)Landroid/view/Display;", false,
                   [](Java& j, int, const auto& args) { return args.at(0) == 0 ? j.NewInstance(kDisplay) : 0; });
   vm.DefineMethod(kDisplayManager, "getDisplays", "()[Landroid/view/Display;", false,
@@ -246,8 +381,13 @@ void InstallPowerManager(Java& vm) {
     const auto service = j.StringOf(j.ObjectOf(args.at(0)));
     if (service == u"power") return j.NewInstance("android/os/PowerManager");
     if (service == u"display") return j.NewInstance(kDisplayManager);
+    if (service == u"window") return j.NewInstance("android/view/WindowManager");
     return Java::Ref{0};
   });
+  for (const auto* method : {"checkCallingOrSelfPermission", "checkSelfPermission"}) {
+    vm.DefineMethod(context, method, "(Ljava/lang/String;)I", false,
+                    [](Java&, int, const auto&) { return static_cast<std::uint32_t>(-1); });
+  }
   vm.DefineMethod(manager, "newWakeLock", "(ILjava/lang/String;)Landroid/os/PowerManager$WakeLock;", false,
                   [](Java& j, int, const auto&) { return j.NewInstance("android/os/PowerManager$WakeLock"); });
   vm.DefineMethod(lock, "isHeld", "()Z", false,
@@ -262,19 +402,72 @@ void InstallPowerManager(Java& vm) {
 
 void InstallPreferences(Java& vm) {
   // The Unity Java profile keeps its preference groups separate within each running title.
-  using Value = std::variant<std::uint64_t, std::u16string>;
+  struct Scalar { char type; std::uint64_t bits; };
+  using Value = std::variant<Scalar, std::u16string>;
+  using Group = std::map<std::u16string, Value>;
   struct State {
     struct Edit {
       bool clear = false;
       std::map<std::u16string, std::optional<Value>> changes;
     };
     std::mutex mutex;
-    std::map<std::u16string, std::map<std::u16string, Value>> groups;
+    std::map<std::u16string, Group> groups;
     std::map<int, Edit> editors;
+    std::map<int, Group> snapshots;
   };
   const auto state = std::make_shared<State>();
   const auto text = [](Java& j, Java::Ref ref) { return j.StringOf(j.ObjectOf(ref)); };
   const auto group = [](Java& j, int self) { return j.StringOf(static_cast<int>(j.FieldOf(self, "group"))); };
+  constexpr char map[] = "java/util/Map";
+  constexpr char hash_map[] = "java/util/HashMap";
+  vm.DefineClass(map, "java/lang/Object");
+  vm.DefineClass(hash_map, map);
+  for (const auto& [name, method, sig] : {std::tuple{"Boolean", "booleanValue", "Z"},
+       {"Long", "longValue", "J"}, {"Float", "floatValue", "F"}}) {
+    const std::string boxed = std::string("java/lang/") + name;
+    vm.DefineClass(boxed, "java/lang/Object");
+    vm.DefineMethod(boxed, method, std::string("()") + sig, false,
+                    [](Java& j, int self, const auto&) { return j.FieldOf(self, "value"); });
+  }
+  vm.DefineMethod(kPrefs, "getAll", "()Ljava/util/Map;", false, [state, group](Java& j, int self, const auto&) {
+    const auto pref_name = group(j, self);
+    const auto snapshot = j.NewInstance("java/util/HashMap");
+    const auto key = j.ObjectOf(snapshot);
+    std::lock_guard<std::mutex> lock(state->mutex);
+    if (const auto values = state->groups.find(pref_name); values != state->groups.end()) {
+      state->snapshots[key] = values->second;
+    }
+    return snapshot;
+  });
+  const auto map_size = [state](int self) {
+    std::lock_guard<std::mutex> lock(state->mutex);
+    const auto snapshot = state->snapshots.find(self);
+    return snapshot == state->snapshots.end() ? std::size_t{0} : snapshot->second.size();
+  };
+  vm.DefineMethod(map, "size", "()I", false, [map_size](Java&, int self, const auto&) { return map_size(self); });
+  vm.DefineMethod(map, "isEmpty", "()Z", false, [map_size](Java&, int self, const auto&) { return map_size(self) == 0; });
+  const auto lookup = [state, text](Java& j, int self, const auto& args) -> std::optional<Value> {
+    const auto key = text(j, args.at(0));
+    std::lock_guard<std::mutex> lock(state->mutex);
+    if (const auto snap = state->snapshots.find(self); snap != state->snapshots.end()) {
+      if (const auto entry = snap->second.find(key); entry != snap->second.end()) return entry->second;
+    }
+    return std::nullopt;
+  };
+  vm.DefineMethod(map, "containsKey", "(Ljava/lang/Object;)Z", false,
+                  [lookup](Java& j, int self, const auto& args) { return lookup(j, self, args).has_value(); });
+  vm.DefineMethod(map, "get", "(Ljava/lang/Object;)Ljava/lang/Object;", false,
+                  [lookup](Java& j, int self, const auto& args) -> Java::Ref {
+    const auto value = lookup(j, self, args);
+    if (!value) return 0;
+    if (const auto* string = std::get_if<std::u16string>(&*value)) return j.NewString(*string);
+    const auto scalar = std::get<Scalar>(*value);
+    const auto type = scalar.type == 'Z' ? "Boolean" : scalar.type == 'J' ? "Long" :
+                      scalar.type == 'F' ? "Float" : "Integer";
+    const auto boxed = j.NewInstance(std::string("java/lang/") + type);
+    j.PutField(j.ObjectOf(boxed), "value", scalar.bits);
+    return boxed;
+  });
   vm.DefineMethod("android/content/Context", "getSharedPreferences",
                   "(Ljava/lang/String;I)Landroid/content/SharedPreferences;", false,
                   [](Java& j, int, const auto& args) {
@@ -298,7 +491,7 @@ void InstallPreferences(Java& vm) {
   constexpr const char* primitives[][2] = {{"Int", "I"}, {"Boolean", "Z"}, {"Float", "F"}, {"Long", "J"}};
   const auto install_value = [&](const std::string& name, const std::string& sig, bool string) {
     vm.DefineMethod(kPrefs, "get" + name, "(Ljava/lang/String;" + sig + ")" + sig, false,
-                    [state, text, group, string](Java& j, int self, const auto& args) -> std::uint64_t {
+                    [state, text, group, string, type = sig[0]](Java& j, int self, const auto& args) -> std::uint64_t {
       const auto name = group(j, self), key = text(j, args.at(0));
       std::optional<Value> value;
       {
@@ -310,15 +503,18 @@ void InstallPreferences(Java& vm) {
       }
       if (!value) return args.at(1);
       if (string && std::holds_alternative<std::u16string>(*value)) return j.NewString(std::get<std::u16string>(*value));
-      if (!string && std::holds_alternative<std::uint64_t>(*value)) return std::get<std::uint64_t>(*value);
-      return args.at(1);
+      if (!string) {
+        if (const auto* scalar = std::get_if<Scalar>(&*value); scalar && scalar->type == type) return scalar->bits;
+      }
+      j.SetPending("java/lang/ClassCastException", "SharedPreferences value has the wrong type");
+      return 0;
     });
     vm.DefineMethod(kEditor, "put" + name, "(Ljava/lang/String;" + sig + ")Landroid/content/SharedPreferences$Editor;",
-                    false, [state, text, string](Java& j, int self, const auto& args) {
+                    false, [state, text, string, type = sig[0]](Java& j, int self, const auto& args) {
       const auto key = text(j, args.at(0));
       const auto raw = args.at(1);
       std::optional<Value> value;
-      if (!string) value = raw;
+      if (!string) value = Scalar{type, raw};
       else if (raw != 0) value = text(j, raw);
       {
         std::lock_guard<std::mutex> lock(state->mutex);
@@ -365,31 +561,89 @@ void InstallPreferences(Java& vm) {
 }
 
 void InstallServiceConnection(Java& vm) {
-  constexpr char bridge[] = "bitter/jnibridge/JNIBridge";
-  vm.DefineClass(bridge, "java/lang/Object");
+  vm.DefineClass(kBridge, "java/lang/Object");
+  vm.DefineClass(kRunnable, "java/lang/Object");
   vm.DefineClass("android/content/ServiceConnection", "java/lang/Object");
-  const auto proxy = [](Java& j, Java::Ref requested) -> Java::Ref {
-    const auto connection = j.FindClass("android/content/ServiceConnection");
-    const bool matches = requested != 0 && j.IsSameObject(requested, connection);
-    j.DeleteLocalRef(connection);
-    return matches ? j.NewInstance("android/content/ServiceConnection") : 0;
+  const auto proxy = [](Java& j, Java::Ref requested, std::uint64_t handle) -> Java::Ref {
+    const auto name = j.ClassName(j.ObjectOf(requested));
+    if (name != "android/content/ServiceConnection" && name != kRunnable) return 0;
+    const auto result = j.NewInstance(name);
+    j.PutField(j.ObjectOf(result), "nativeHandle", handle);
+    return result;
   };
   // Android services are unavailable. Unity can still create its ServiceConnection before bindService returns false.
-  vm.DefineMethod(bridge, "newInterfaceProxy", "(JLjava/lang/Class;)Ljava/lang/Object;", true,
-                  [proxy](Java& j, int, const auto& args) { return proxy(j, args.at(1)); });
-  vm.DefineMethod(bridge, "newInterfaceProxy", "(J[Ljava/lang/Class;)Ljava/lang/Object;", true,
+  vm.DefineMethod(kBridge, "newInterfaceProxy", "(JLjava/lang/Class;)Ljava/lang/Object;", true,
+                  [proxy](Java& j, int, const auto& args) { return proxy(j, args.at(1), args.at(0)); });
+  vm.DefineMethod(kBridge, "newInterfaceProxy", "(J[Ljava/lang/Class;)Ljava/lang/Object;", true,
                   [proxy](Java& j, int, const auto& args) -> Java::Ref {
     if (j.GetArrayLength(args.at(1)) != 1) return 0;
     const auto requested = j.GetObjectArrayElement(args.at(1), 0);
-    const auto result = proxy(j, requested);
+    const auto result = proxy(j, requested, args.at(0));
     j.DeleteLocalRef(requested);
     return result;
   });
   const auto empty = [](Java&, int, const auto&) { return 0u; };
-  vm.DefineMethod(bridge, "disableInterfaceProxy", "(Ljava/lang/Object;)V", true, empty);
+  vm.DefineMethod(kBridge, "disableInterfaceProxy", "(Ljava/lang/Object;)V", true,
+                  [](Java& j, int, const auto& args) {
+    j.PutField(j.ObjectOf(args.at(0)), "nativeHandle", 0);
+    return 0u;
+  });
+  vm.DefineMethod(kRunnable, "run", "()V", false, [](Java& j, int self, const auto&) {
+    const auto handle = j.FieldOf(self, "nativeHandle");
+    if (handle == 0) return 0u;
+    const auto cls = j.FindClass(kRunnable);
+    const auto method = j.GetMethodID(cls, "run", "()V", false);
+    const auto reflected = j.ToReflected(cls, method, false, false);
+    const auto result = j.CallNative(kBridge, kBridgeInvoke, {handle, cls, reflected, 0});
+    j.DeleteLocalRef(result);
+    j.DeleteLocalRef(reflected);
+    j.DeleteLocalRef(cls);
+    return 0u;
+  });
   vm.DefineMethod("android/content/Context", "bindService",
                   "(Landroid/content/Intent;Landroid/content/ServiceConnection;I)Z", false, empty);
   vm.DefineMethod("android/content/Context", "unbindService", "(Landroid/content/ServiceConnection;)V", false, empty);
+}
+
+void InstallMainLooper(Java& vm, const std::shared_ptr<UnityJavaTasks>& tasks) {
+  constexpr char looper[] = "android/os/Looper";
+  constexpr char handler[] = "android/os/Handler";
+  vm.DefineClass(looper, "java/lang/Object");
+  vm.DefineClass(handler, "java/lang/Object");
+  const auto main_ref = vm.NewInstance(looper);
+  const auto main = vm.ObjectOf(main_ref);
+  vm.DeleteLocalRef(main_ref);
+  for (const char* method : {"getMainLooper", "myLooper"}) {
+    vm.DefineMethod(looper, method, "()Landroid/os/Looper;", true,
+                    [main](Java& j, int, const auto&) { return j.MakeRef(main); });
+  }
+  vm.DefineMethod(handler, "<init>", "()V", false, [main](Java& j, int self, const auto&) {
+    j.PutField(self, "looper", main);
+    return 0u;
+  });
+  vm.DefineMethod(handler, "<init>", "(Landroid/os/Looper;)V", false,
+                  [](Java& j, int self, const auto& args) { PutObject(j, self, "looper", args.at(0)); return 0u; });
+  vm.DefineMethod(handler, "getLooper", "()Landroid/os/Looper;", false,
+                  [](Java& j, int self, const auto&) { return j.MakeRef(j.FieldOf(self, "looper")); });
+  vm.DefineMethod(handler, "post", "(Ljava/lang/Runnable;)Z", false, [tasks](Java& j, int self, const auto& args) {
+    return tasks->Post(self, j.ObjectOf(args.at(0)), 0);
+  });
+  vm.DefineMethod(handler, "postDelayed", "(Ljava/lang/Runnable;J)Z", false,
+                  [tasks](Java& j, int self, const auto& args) {
+    return tasks->Post(self, j.ObjectOf(args.at(0)), static_cast<std::int64_t>(args.at(1)));
+  });
+  vm.DefineMethod(handler, "removeCallbacks", "(Ljava/lang/Runnable;)V", false,
+                  [tasks](Java& j, int self, const auto& args) {
+    const auto runnable = j.ObjectOf(args.at(0));
+    std::lock_guard<std::mutex> lock(tasks->mutex);
+    std::erase_if(tasks->pending, [&](const auto& task) { return task.handler == self && task.runnable == runnable; });
+    return 0u;
+  });
+  vm.DefineMethod("android/app/Activity", "runOnUiThread", "(Ljava/lang/Runnable;)V", false,
+                  [tasks](Java& j, int, const auto& args) {
+    tasks->Post(0, j.ObjectOf(args.at(0)), 0);
+    return 0u;
+  });
 }
 
 void InstallMotionEvent(Java& vm) {
@@ -460,7 +714,7 @@ void InstallMotionEvent(Java& vm) {
 }
 }
 
-void UnityBootstrap::InstallJava(java::TableJava& java, const std::string& apk, const ApkIdentity& identity,
+std::shared_ptr<UnityJavaTasks> UnityBootstrap::InstallJava(java::TableJava& java, const std::string& apk, const ApkIdentity& identity,
                                  const JavaServices& services) {
   java.DefineClass("android/view/View", "java/lang/Object");
   java.DefineClass("android/view/ViewGroup", "android/view/View");
@@ -471,22 +725,51 @@ void UnityBootstrap::InstallJava(java::TableJava& java, const std::string& apk, 
   java.DefineClass("com/unity3d/player/ReflectionHelper", "java/lang/Object");
   InstallIntent(java);
   InstallPlayerCallbacks(java, services);
-  InstallPowerManager(java);
+  InstallSystemServices(java, services);
   InstallPreferences(java);
   InstallServiceConnection(java);
+  auto tasks = std::make_shared<UnityJavaTasks>();
+  InstallMainLooper(java, tasks);
   InstallMotionEvent(java);
   java.DefineField(kPlayer, "currentActivity", kActivitySig, true);
   java.DefineMethod(kPlayer, "initializeGoogleAr", "()Z", false,
                     [](Java&, int, const auto&) { return 0u; });
   const auto apk_path = std::filesystem::path(apk).u16string();
-  InstallPackageManager(java, identity, apk_path);
+  InstallPackageManager(java, identity, apk_path, services);
   for (const char* method : {"getPackageCodePath", "getPackageResourcePath"}) {
     java.DefineMethod("android/content/Context", method, "()Ljava/lang/String;", false,
                       [apk_path](java::TableJava& vm, int, const auto&) { return vm.NewString(apk_path); });
   }
+  return tasks;
 }
 
-UnityBootstrap::UnityBootstrap(host::Boot& boot, java::TableJava& java) : boot_(boot), java_(java) {}
+UnityBootstrap::UnityBootstrap(host::Boot& boot, java::TableJava& java, std::shared_ptr<UnityJavaTasks> tasks)
+    : boot_(boot), java_(java), tasks_(std::move(tasks)) {}
+
+bool UnityBootstrap::RunJavaTasks(java::TableJava& java, const std::shared_ptr<UnityJavaTasks>& tasks,
+                                  std::string* why) {
+  if (!tasks) return true;
+  for (unsigned i = 0; i < 32; ++i) {
+    int runnable;
+    {
+      std::lock_guard<std::mutex> lock(tasks->mutex);
+      if (tasks->pending.empty() || tasks->pending.front().due > UnityJavaTasks::Clock::now()) break;
+      runnable = tasks->pending.front().runnable;
+      tasks->pending.pop_front();
+    }
+    java.PushLocalFrame(8);
+    const auto object = java.MakeRef(runnable);
+    const auto type = java.GetObjectClass(object);
+    const auto run = java.GetMethodID(type, "run", "()V", false);
+    if (run) java.Call('V', false, object, 0, run, {});
+    java.PopLocalFrame(0);
+    if (java.ExceptionCheck()) {
+      *why = "Unity Android callback: " + java.PendingClass() + ": " + java.PendingMessage();
+      return false;
+    }
+  }
+  return true;
+}
 
 UnityBootstrap::~UnityBootstrap() {
   if (receiver_ != 0) java_.DeleteGlobalRef(receiver_);
@@ -507,7 +790,11 @@ bool UnityBootstrap::Call(const char* name, const char* signature, const std::ve
   const auto method = std::string(name) + signature;
   std::string error;
   const auto value = boot_.CallNative(method, receiver_, args, &error);
-  if (error.empty() && java_.ExceptionCheck()) error = "pending Java exception " + java_.PendingClass();
+  if (error.empty() && java_.ExceptionCheck()) {
+    error = "pending Java exception " + java_.PendingClass();
+    const auto message = java_.PendingMessage();
+    if (!message.empty()) error += ": " + message;
+  }
   // Inbound reports a guest fault separately from the method lookup error.
   if (error.empty() && boot_.process()->monitor().group_exited()) error = "guest process exited";
   if (!error.empty()) {
@@ -569,6 +856,7 @@ bool UnityBootstrap::Attach(std::string* why) {
 }
 
 bool UnityBootstrap::Render(std::string* why) {
+  if (!RunJavaTasks(java_, tasks_, why)) return false;
   std::uint64_t keep_running = 0;
   if (!Call("nativeRender", "()Z", {}, why, &keep_running)) return false;
   if (keep_running != 0) return true;

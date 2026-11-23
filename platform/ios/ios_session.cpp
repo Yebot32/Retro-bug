@@ -410,6 +410,8 @@ struct RbIosSession {
   bool stock_apk = false;
   int client_version = 2;
   int width = 0, height = 0;
+  int display_rotation = 0, display_density = 160;
+  float display_refresh = 60;
   /// The guest window this iOS build can actually reserve (4 GiB is refused; measured), tried largest
   /// first at session creation. 0 means none was found and the boot will fail by name.
   std::size_t window_bytes = 0;
@@ -427,6 +429,7 @@ struct RbIosSession {
   std::unique_ptr<rb::platform::ios::UnityBootstrap> unity;
   bool unity_apk = false;
   rb::platform::ios::ApkIdentity apk_identity;
+  std::shared_ptr<rb::platform::ios::UnityJavaTasks> unity_tasks;
   bool dlgl_apk = false;  ///< the APK ships assets/rb32/libdlgl.so: boot the whole DLGE Java load order
   bool booted = false;  ///< render thread only
   bool runtime_jit = true;  ///< configured before the render thread starts
@@ -608,19 +611,25 @@ bool RbIosSession::Boot(std::string* err) {
     if (self->unity_apk) {
       rb::platform::ios::UnityBootstrap::JavaServices services;
       services.log = [self](const std::string& line) { self->Log(line); };
+      services.display = [self] {
+        return rb::platform::ios::UnityBootstrap::DisplayInfo{
+            self->width, self->height, self->display_rotation, self->display_density, self->display_refresh};
+      };
+      services.data_dir = self->data_dir;
+      services.native_library_dir = self->apk + "/" + self->lib_dir;
       services.load_library = [self](const std::string& name) {
         if (!self->boot) return false;
         const std::string library = name.starts_with("lib") && name.ends_with(".so") ? name : "lib" + name + ".so";
         std::string why;
         const bool loaded = self->boot->DlOpen(library, &why) != 0;
-        if (!loaded) self->Log("unity: loadLibrary " + library + ": " + why);
+        self->Log("unity: loadLibrary " + library + (loaded ? " loaded" : ": " + why));
         return loaded;
       };
       services.request_shutdown = [self] {
         self->Log("unity: player requested shutdown");
         self->running.store(false);
       };
-      rb::platform::ios::UnityBootstrap::InstallJava(*java, self->apk, self->apk_identity, services);
+      self->unity_tasks = rb::platform::ios::UnityBootstrap::InstallJava(*java, self->apk, self->apk_identity, services);
     }
     self->java = java.get();
     java->set_trace([self](const std::string& line) { self->Log(line); });
@@ -662,11 +671,18 @@ bool RbIosSession::Boot(std::string* err) {
     // guest reaches the app's container and nothing else.
     const auto cpu_count = std::max(1u, std::thread::hardware_concurrency());
     const auto cpuinfo = rb::runtime::GuestProcess::CpuInfo(cpu_count);
+    const auto cpu_set = cpu_count == 1 ? std::string("0\n") : "0-" + std::to_string(cpu_count - 1) + "\n";
+    std::uint64_t physical_bytes = 0;
+    std::size_t memory_size = sizeof physical_bytes;
+    if (::sysctlbyname("hw.memsize", &physical_bytes, &memory_size, nullptr, 0) != 0) physical_bytes = 0;
+    const auto guest_limit = self->window_bytes == 0 ? physical_bytes :
+                             std::min<std::uint64_t>(self->window_bytes, physical_bytes);
+    const auto meminfo = "MemTotal:       " + std::to_string(guest_limit >> 10) + " kB\n";
     std::string proc_stat = "cpu  0 0 0 0 0 0 0 0 0 0\n";
     for (unsigned cpu = 0; cpu < cpu_count; ++cpu) {
       proc_stat += "cpu" + std::to_string(cpu) + " 0 0 0 0 0 0 0 0 0 0\n";
     }
-    process.monitor().set_file_provider([&process, cpuinfo, proc_stat](const std::string& path)
+    process.monitor().set_file_provider([&process, cpuinfo, proc_stat, cpu_set, meminfo](const std::string& path)
                                            -> std::optional<std::vector<std::uint8_t>> {
       if (path == "/proc/self/maps") {
         const auto maps = process.ProcMaps();
@@ -674,6 +690,9 @@ bool RbIosSession::Boot(std::string* err) {
       }
       if (path == "/proc/cpuinfo") return std::vector<std::uint8_t>(cpuinfo.begin(), cpuinfo.end());
       if (path == "/proc/stat") return std::vector<std::uint8_t>(proc_stat.begin(), proc_stat.end());
+      if (path == "/proc/meminfo") return std::vector<std::uint8_t>(meminfo.begin(), meminfo.end());
+      if (path == "/sys/devices/system/cpu/online" || path == "/sys/devices/system/cpu/present" ||
+          path == "/sys/devices/system/cpu/possible") return std::vector<std::uint8_t>(cpu_set.begin(), cpu_set.end());
       return std::nullopt;
     });
     process.monitor().set_host_io(true);
@@ -891,7 +910,7 @@ bool RbIosSession::Boot(std::string* err) {
     return module != nullptr && module->FindExport(name).has_value();
   };
   if (unity_apk) {
-    unity = std::make_unique<rb::platform::ios::UnityBootstrap>(*boot, *java);
+    unity = std::make_unique<rb::platform::ios::UnityBootstrap>(*boot, *java, unity_tasks);
     self->Log("engine: experimental UnityPlayer lifecycle");
   } else if (dlgl_apk || lib == "libdlgl.so") {
     dlgl = std::make_unique<rb::platform::ios::DlglBootstrap>(
@@ -1011,6 +1030,13 @@ extern "C" RbIosSession* rb_ios_create(const char* apk_path, const char* lib_nam
   s->window_bytes = PickWindowBytes(s.get());
   s->Log("create: apk=" + s->apk + " lib=" + s->lib + " (boot deferred to the render thread)");
   return s.release();
+}
+
+extern "C" void rb_ios_set_display_info(RbIosSession* s, int rotation, int density_dpi, float refresh_rate) {
+  if (!s) return;
+  s->display_rotation = rotation;
+  s->display_density = density_dpi;
+  s->display_refresh = refresh_rate;
 }
 
 extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height, char* err, int err_len) {
@@ -1219,6 +1245,9 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
           continue;
         }
         const int next_frame = s->frames.load() + 1;
+        if (s->unity && next_frame == 1) {
+          s->Log("unity: first frame presented (GLES " + std::to_string(egl.context_version()) + ")");
+        }
         if (render_ms >= 2000) {
           // A synchronous load inside the guest render call: the line names how long it took, so a long
           // first frame is distinguishable from a stall the monitor reports while it is still running.

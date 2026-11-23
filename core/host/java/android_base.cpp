@@ -5,9 +5,12 @@
 #include "rb/java/android_base.h"
 
 #include <chrono>
+#include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -20,6 +23,38 @@ using Ref = TableJava::Ref;
 std::u16string U(const std::string& s) { return std::u16string(s.begin(), s.end()); }
 
 std::string Narrow(const std::u16string& s) { return std::string(s.begin(), s.end()); }
+
+std::u16string DecodeUtf8(const std::vector<std::uint8_t>& bytes) {
+  std::u16string result;
+  result.reserve(bytes.size());
+  for (std::size_t i = 0; i < bytes.size();) {
+    const auto first = bytes[i++];
+    if (first < 0x80) {
+      result.push_back(first);
+      continue;
+    }
+    const unsigned extra = first >= 0xc2 && first < 0xe0 ? 1 : first >= 0xe0 && first < 0xf0 ? 2 :
+                           first >= 0xf0 && first <= 0xf4 ? 3 : 0;
+    std::uint32_t cp = first & (0x7fu >> (extra + 1));
+    unsigned read = 0;
+    while (read < extra && i < bytes.size() && (bytes[i] & 0xc0) == 0x80) {
+      cp = (cp << 6) | (bytes[i++] & 0x3f);
+      ++read;
+    }
+    constexpr std::uint32_t minimum[] = {0, 0x80, 0x800, 0x10000};
+    if (extra == 0 || read != extra || cp < minimum[extra] || cp > 0x10ffff ||
+        (cp >= 0xd800 && cp <= 0xdfff)) {
+      result.push_back(u'\ufffd');
+    } else if (cp < 0x10000) {
+      result.push_back(static_cast<char16_t>(cp));
+    } else {
+      cp -= 0x10000;
+      result.push_back(static_cast<char16_t>(0xd800 + (cp >> 10)));
+      result.push_back(static_cast<char16_t>(0xdc00 + (cp & 0x3ff)));
+    }
+  }
+  return result;
+}
 
 std::string StrArg(TableJava& j, const std::vector<std::uint64_t>& a, std::size_t i) {
   if (i >= a.size() || a[i] == 0) return {};
@@ -79,10 +114,79 @@ void InstallAndroidBase(TableJava& j, AndroidEnv env) {
 
   // ---- java/lang/Object: the root every other class extends.
   j.DefineClass("java/lang/Object");
+  j.DefineMethod("java/lang/Object", "<init>", "()V", false, [](TableJava&, int, const auto&) { return 0u; });
+  j.DefineMethod("java/lang/Object", "getClass", "()Ljava/lang/Class;", false,
+                 [](TableJava& f, int self, const auto&) {
+    const auto object = f.MakeRef(self);
+    const auto cls = f.GetObjectClass(object);
+    f.DeleteLocalRef(object);
+    return cls;
+  });
+  j.DefineClass("java/lang/Class", "java/lang/Object");
+  j.DefineMethod("java/lang/Class", "getName", "()Ljava/lang/String;", false,
+                 [](TableJava& f, int self, const auto&) {
+    auto name = f.ClassName(self);
+    std::replace(name.begin(), name.end(), '/', '.');
+    return f.NewString(U(name));
+  });
 
   // ---- java/lang/String. TableJava creates instances of this class for every string the guest makes or is
   // handed, so the methods here are what a guest's string calls reach.
   j.DefineClass("java/lang/String", "java/lang/Object");
+  const auto bytes_constructor = [](TableJava& f, int self, const auto& args) {
+    const auto array = static_cast<Ref>(args.at(0));
+    if (array == 0 || (args.size() == 2 && args[1] == 0)) {
+      f.SetPending("java/lang/NullPointerException", "String requires bytes and a charset");
+      return 0u;
+    }
+    auto encoding = args.size() == 2 ? Narrow(f.GetStringChars(args[1])) : "UTF-8";
+    std::transform(encoding.begin(), encoding.end(), encoding.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    const auto size = f.GetArrayLength(array);
+    if (size < 0) return 0u;
+    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
+    if (size != 0 && !f.GetArrayRegion('B', array, 0, size, bytes.data())) return 0u;
+    if (encoding == "UTF-8" || encoding == "UTF8") {
+      f.PutString(self, DecodeUtf8(bytes));
+    } else if (encoding == "ISO-8859-1" || encoding == "ISO8859_1") {
+      f.PutString(self, std::u16string(bytes.begin(), bytes.end()));
+    } else if (encoding == "US-ASCII" || encoding == "ASCII") {
+      std::u16string ascii;
+      for (auto byte : bytes) ascii.push_back(byte < 128 ? byte : u'\ufffd');
+      f.PutString(self, std::move(ascii));
+    } else {
+      f.SetPending("java/io/UnsupportedEncodingException", encoding);
+    }
+    return 0u;
+  };
+  j.DefineMethod("java/lang/String", "<init>", "([B)V", false, bytes_constructor);
+  j.DefineMethod("java/lang/String", "<init>", "([BLjava/lang/String;)V", false, bytes_constructor);
+  j.DefineClass("java/lang/StringBuilder", "java/lang/Object");
+  j.DefineMethod("java/lang/StringBuilder", "<init>", "()V", false,
+                 [](TableJava&, int, const auto&) { return 0u; });
+  j.DefineMethod("java/lang/StringBuilder", "<init>", "(Ljava/lang/String;)V", false,
+                 [](TableJava& f, int self, const auto& args) {
+    f.PutString(self, f.GetStringChars(args.at(0)));
+    return 0u;
+  });
+  for (const auto* kind : {"Ljava/lang/String;", "I", "J", "C", "Z"}) {
+    j.DefineMethod("java/lang/StringBuilder", "append", std::string("(") + kind + ")Ljava/lang/StringBuilder;",
+                   false, [kind](TableJava& f, int self, const auto& args) {
+      auto text = f.StringOf(self);
+      const auto v = args.at(0);
+      switch (kind[0]) {
+        case 'L': text += v ? f.GetStringChars(v) : u"null"; break;
+        case 'I': text += U(std::to_string(static_cast<std::int32_t>(v))); break;
+        case 'J': text += U(std::to_string(static_cast<std::int64_t>(v))); break;
+        case 'C': text.push_back(static_cast<char16_t>(v)); break;
+        case 'Z': text += v ? u"true" : u"false"; break;
+      }
+      f.PutString(self, std::move(text));
+      return f.MakeRef(self);
+    });
+  }
+  j.DefineMethod("java/lang/StringBuilder", "toString", "()Ljava/lang/String;", false,
+                 [](TableJava& f, int self, const auto&) { return f.NewString(f.StringOf(self)); });
   j.DefineMethod("java/lang/String", "length", "()I", false, [](TableJava& f, int self, const std::vector<std::uint64_t>&) {
     return static_cast<std::uint64_t>(static_cast<std::uint32_t>(f.StringOf(self).size()));
   });
@@ -461,6 +565,22 @@ void InstallAndroidBase(TableJava& j, AndroidEnv env) {
                  [env](TableJava& f, int, const std::vector<std::uint64_t>&) {
                    return static_cast<std::uint64_t>(NewFile(f, env.cache_dir));
                  });
+  j.DefineMethod("android/content/Context", "getExternalFilesDir", "(Ljava/lang/String;)Ljava/io/File;", false,
+                 [path = env.files_dir](TableJava& f, int, const auto& args) -> Ref {
+    if (path.empty()) return 0;
+    const auto type = StrArg(f, args, 0);
+    if (type == "." || type == ".." || type.find_first_of("/\\:") != std::string::npos ||
+        type.find('\0') != std::string::npos) return 0;
+    auto folder = std::filesystem::path(path);
+    if (!type.empty()) folder /= type;
+    std::error_code error;
+    std::filesystem::create_directories(folder, error);
+    return error ? 0 : NewFile(f, folder.string());
+  });
+  j.DefineMethod("android/content/Context", "getExternalCacheDir", "()Ljava/io/File;", false,
+                 [path = env.cache_dir](TableJava& f, int, const auto&) -> Ref {
+    return path.empty() ? 0 : NewFile(f, path);
+  });
   if (!env.obb_dir.empty()) {
     j.DefineMethod("android/content/Context", "getObbDir", "()Ljava/io/File;", false,
                    [path = env.obb_dir](TableJava& f, int, const std::vector<std::uint64_t>&) {

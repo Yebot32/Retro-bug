@@ -229,6 +229,16 @@ final class GameUIView: UIView {
         let scale = contentScaleFactor
         let w = Int32(bounds.width * scale)
         let h = Int32(bounds.height * scale)
+        let screen = window?.windowScene?.screen ?? UIScreen.main
+        let rotation: Int32
+        switch window?.windowScene?.interfaceOrientation {
+        case .landscapeLeft: rotation = 1
+        case .portraitUpsideDown: rotation = 2
+        case .landscapeRight: rotation = 3
+        default: rotation = 0
+        }
+        rb_ios_set_display_info(s, rotation, Int32((160 * screen.scale).rounded()),
+                               Float(screen.maximumFramesPerSecond))
         var err = [CChar](repeating: 0, count: 4096)
         let pointer = UnsafeMutableRawPointer(Unmanaged.passUnretained(layer).toOpaque())
         AppLog.write("game: start \(bounds.width)x\(bounds.height) @\(scale) -> \(w)x\(h) px")

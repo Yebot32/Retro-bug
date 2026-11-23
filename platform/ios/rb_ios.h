@@ -29,6 +29,7 @@ int rb_ios_session_jit(RbIosSession* s);
 int rb_ios_session_engine(RbIosSession* s);
 /// Enables runtime JIT for this session (default), or selects AOT/interpreter only. Set before starting.
 void rb_ios_set_runtime_jit(RbIosSession* s, int enabled);
+void rb_ios_set_display_info(RbIosSession* s, int rotation, int density_dpi, float refresh_rate);
 
 /// The game's icon, read out of the APK the way the Android launcher asks PackageManager for it: the
 /// declared application icon (PNG/JPEG/WebP), preferring high-density variants. Returns bytes that

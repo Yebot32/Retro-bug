@@ -68,6 +68,8 @@ ApkIdentity ReadApkIdentity(Bytes manifest) {
   Bytes strings;
   ApkIdentity identity;
   bool root = true;
+  unsigned depth = 0;
+  bool in_application = false;
   for (std::size_t pos = 8; end - pos >= 8;) {
     const auto type = U16(manifest, pos);
     const auto header = U16(manifest, pos + 2);
@@ -76,13 +78,24 @@ ApkIdentity ReadApkIdentity(Bytes manifest) {
     const Bytes chunk = manifest.subspan(pos, size);
     pos += size;
     if (type == 0x0001) strings = chunk;
+    if (type == 0x0103 && depth != 0) {
+      if (depth == 2) in_application = false;
+      --depth;
+    }
     if (type != 0x0102) continue;
     if (header != 16 || chunk.size() < 36) return {};
     const auto element = PoolString(strings, U32(chunk, 20));
+    ++depth;
     if (root && element != u"manifest") return {};
-    if (!root && element != u"application") continue;
+    const bool application = depth == 2 && element == u"application";
+    if (application) in_application = true;
+    const bool meta = depth == 3 && in_application && element == u"meta-data";
+    const bool sdk = depth == 2 && element == u"uses-sdk";
+    if (!root && !application && !meta && !sdk) continue;
     const std::size_t stride = U16(chunk, 26), count = U16(chunk, 28), first = 16 + U16(chunk, 24);
     if (stride < 20 || first < 36 || first > chunk.size() || count > (chunk.size() - first) / stride) return {};
+    std::u16string metadata_name;
+    std::optional<std::variant<bool, std::int32_t, std::u16string>> metadata_value;
     for (std::size_t i = 0; i < count; ++i) {
       const auto attr = chunk.subspan(first + i * stride, 20);
       const auto ns = U32(attr, 0);
@@ -100,11 +113,18 @@ ApkIdentity ReadApkIdentity(Bytes manifest) {
       } else if (PoolString(strings, ns) == u"http://schemas.android.com/apk/res/android") {
         if (root && name == u"versionName") identity.version_name = PoolString(strings, string);
         if (root && name == u"versionCode" && (kind == 0x10 || kind == 0x11)) identity.version_code = data;
-        if (!root && kind == 1 && name == u"icon") identity.icon = data;
-        if (!root && kind == 1 && name == u"roundIcon") identity.round_icon = data;
+        if (application && kind == 1 && name == u"icon") identity.icon = data;
+        if (application && kind == 1 && name == u"roundIcon") identity.round_icon = data;
+        if (sdk && name == u"targetSdkVersion" && (kind == 0x10 || kind == 0x11)) identity.target_sdk = data;
+        if (meta && name == u"name") metadata_name = PoolString(strings, string);
+        if (meta && name == u"value") {
+          if (kind == 0x12) metadata_value = data != 0;
+          if (kind == 0x10 || kind == 0x11) metadata_value = static_cast<std::int32_t>(data);
+          if (kind == 3) metadata_value = PoolString(strings, data);
+        }
       }
     }
-    if (!root) break;
+    if (!metadata_name.empty() && metadata_value) identity.metadata[metadata_name] = std::move(*metadata_value);
     root = false;
   }
   return identity;

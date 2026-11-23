@@ -57,6 +57,8 @@ class TableJava : public abi::HostJava {
   int ObjectOf(Ref r) const;  ///< the object a live reference names, 0 if none
   std::string ObjectClassName(int obj) const;
   std::u16string StringOf(int obj) const;
+  void PutString(int obj, std::u16string value);
+  std::string ClassName(int obj) const;
   std::uint64_t FieldOf(int obj, const std::string& name) const;
   std::uint64_t StaticOf(const std::string& cls, const std::string& name) const;
   Ref MakeRef(int obj);  ///< a new local reference (for method bodies returning objects)
@@ -64,6 +66,7 @@ class TableJava : public abi::HostJava {
   /// Throws a new instance of `cls` (defined on demand) with `message`.
   void SetPending(const std::string& cls, const std::string& message);
   std::string PendingClass() const;  ///< the pending throwable's class name, empty if none
+  std::string PendingMessage() const;
   std::size_t live_refs() const;
   std::size_t calls(const std::string& name) const;  ///< how often a method or FindClass(name) was reached
   std::vector<NativeBinding> natives(const std::string& cls) const;
@@ -163,6 +166,8 @@ class TableJava : public abi::HostJava {
   int NewObjectLocked(int cls);
   int FindMethodLocked(int cls_obj, const std::string& name, const std::string& sig, bool is_static) const;
   void ThrowLocked(const std::string& cls, const std::string& message);
+  int PendingLocked() const;
+  void SetPendingLocked(int obj);
 
   mutable std::mutex mu_;
   std::vector<Object> objects_{Object{}};  ///< id 0 is "no object"
@@ -183,7 +188,7 @@ class TableJava : public abi::HostJava {
   /// Which class registered each native, by name + signature: the jclass a callback receives must be
   /// the class it was registered on, and the registering class is the only honest source for it.
   std::map<std::string, std::string> native_owner_;
-  int pending_ = 0;  ///< the pending throwable's object id
+  std::map<std::uint64_t, int> pending_;  ///< pending throwable by host thread lifetime
   std::map<std::thread::id, std::vector<std::vector<Ref>>> frames_;  ///< per thread: refs made in each frame
   std::map<std::thread::id, bool> detached_;
 };

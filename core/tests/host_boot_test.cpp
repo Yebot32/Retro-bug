@@ -26,6 +26,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "fake_java.h"
@@ -578,6 +579,82 @@ void older_game_bridges_answer_the_startup_lookups() {
   CHECK(!java.ExceptionCheck());
 }
 
+void unity_android_contract_covers_display_library_loading_and_main_looper() {
+  java::TableJava j;
+  java::InstallAndroidBase(j, {});
+  platform::ios::ApkIdentity identity{"fixture.unity", u"3.51", 203513};
+  identity.target_sdk = 27;
+  identity.metadata[u"unityplayer.SkipPermissionsDialog"] = true;
+  platform::ios::UnityBootstrap::JavaServices services;
+  services.display = [] { return platform::ios::UnityBootstrap::DisplayInfo{2360, 1640, 3, 320, 60.f}; };
+  std::string library;
+  services.load_library = [&](const auto& name) { library = name; return name == "il2cpp"; };
+  const auto tasks = platform::ios::UnityBootstrap::InstallJava(j, "/games/fixture.apk", identity, services);
+  const auto activity = j.NewInstance("com/unity3d/player/UnityPlayerActivity");
+  const auto invoke = [&](char kind, auto object, const char* method, const char* signature,
+                          std::vector<std::uint64_t> args = {}) {
+    const auto cls = j.GetObjectClass(object);
+    const auto id = j.GetMethodID(cls, method, signature, false);
+    CHECK_CTX(id != 0, method);
+    return id ? j.Call(kind, false, object, 0, id, args) : 0;
+  };
+  const auto manager = invoke('L', activity, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;",
+                              {j.NewString(u"display")});
+  const auto display = invoke('L', manager, "getDisplay", "(I)Landroid/view/Display;", {0});
+  CHECK(invoke('I', display, "getRotation", "()I") == 3);
+  const auto metrics = j.NewInstance("android/util/DisplayMetrics");
+  invoke('V', display, "getRealMetrics", "(Landroid/util/DisplayMetrics;)V", {metrics});
+  CHECK(j.FieldOf(j.ObjectOf(metrics), "widthPixels") == 2360);
+  CHECK(j.FieldOf(j.ObjectOf(metrics), "densityDpi") == 320);
+
+  const auto pm = invoke('L', activity, "getPackageManager", "()Landroid/content/pm/PackageManager;");
+  const auto application = invoke('L', pm, "getApplicationInfo",
+      "(Ljava/lang/String;I)Landroid/content/pm/ApplicationInfo;", {j.NewString(u"fixture.unity"), 0x80});
+  CHECK(j.FieldOf(j.ObjectOf(application), "targetSdkVersion") == 27);
+  const auto metadata = j.MakeRef(j.FieldOf(j.ObjectOf(application), "metaData"));
+  CHECK(invoke('Z', metadata, "getBoolean", "(Ljava/lang/String;Z)Z",
+                {j.NewString(u"unityplayer.SkipPermissionsDialog"), 0}) == 1);
+
+  const auto bytes = j.NewArray('B', 6, 0, 0);
+  CHECK(j.SetArrayRegion('B', bytes, 0, 6, "il2cpp"));
+  const auto string = j.FindClass("java/lang/String");
+  const auto ctor = j.GetMethodID(string, "<init>", "([BLjava/lang/String;)V", false);
+  const auto decoded = j.NewObject(string, ctor, {bytes, j.NewString(u"UTF-8")});
+  const auto player = j.NewInstance("com/unity3d/player/UnityPlayer");
+  CHECK(invoke('Z', player, "loadLibrary", "(Ljava/lang/String;)Z", {decoded}) == 1 && library == "il2cpp");
+
+  unsigned runs = 0;
+  j.DefineClass("fixture/Callback", "java/lang/Runnable");
+  j.DefineMethod("fixture/Callback", "run", "()V", false, [&](auto&, int, const auto&) { ++runs; return 0u; });
+  const auto runnable = j.NewInstance("fixture/Callback");
+  const auto handler_class = j.FindClass("android/os/Handler");
+  const auto handler = j.NewObject(handler_class, j.GetMethodID(handler_class, "<init>", "()V", false), {});
+  CHECK(invoke('Z', handler, "post", "(Ljava/lang/Runnable;)Z", {runnable}) == 1 && runs == 0);
+  std::string why;
+  CHECK_CTX(platform::ios::UnityBootstrap::RunJavaTasks(j, tasks, &why), why);
+  CHECK(runs == 1 && !j.ExceptionCheck());
+  CHECK(invoke('Z', handler, "postDelayed", "(Ljava/lang/Runnable;J)Z", {runnable, 60000}) == 1);
+  invoke('V', handler, "removeCallbacks", "(Ljava/lang/Runnable;)V", {runnable});
+  CHECK_CTX(platform::ios::UnityBootstrap::RunJavaTasks(j, tasks, &why), why);
+  CHECK(runs == 1);
+}
+
+void java_exceptions_are_isolated_by_thread() {
+  java::TableJava j;
+  j.DefineClass("java/lang/Object");
+  j.SetPending("java/lang/IllegalStateException", "render thread");
+  bool thread_was_clean = false;
+  std::thread worker([&] {
+    thread_was_clean = !j.ExceptionCheck();
+    j.SetPending("java/lang/IllegalArgumentException", "worker thread");
+  });
+  worker.join();
+  CHECK(thread_was_clean);
+  CHECK(j.PendingClass() == "java/lang/IllegalStateException" && j.PendingMessage() == "render thread");
+  j.ExceptionClear();
+  CHECK(!j.ExceptionCheck());
+}
+
 void asset_reads_cross_guest_page_boundaries() {
   test::ZipWriter zip;
   const auto contents = test::Bytes("eightbytes");
@@ -718,6 +795,8 @@ int main() {
   unity_can_read_committed_preferences_and_probe_android_services();
   proc_maps_describes_guest_addresses_and_permissions();
   older_game_bridges_answer_the_startup_lookups();
+  unity_android_contract_covers_display_library_loading_and_main_looper();
+  java_exceptions_are_isolated_by_thread();
   asset_reads_cross_guest_page_boundaries();
   apk_icon_uses_the_manifest_and_density();
   const Images im = LoadImages();

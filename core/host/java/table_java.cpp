@@ -1,12 +1,19 @@
 // RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
 #include "rb/java/table_java.h"
 
+#include <atomic>
+
 #include <cstdio>
 #include <cstring>
 
 namespace rb::java {
 
 namespace {
+std::uint64_t ThreadToken() {
+  static std::atomic<std::uint64_t> next{1};
+  thread_local const auto token = next.fetch_add(1, std::memory_order_relaxed);
+  return token;
+}
 constexpr abi::HostId kFieldIdBase = 0x10000;
 
 std::size_t ElemSize(char k) {
@@ -87,6 +94,17 @@ std::u16string TableJava::StringOf(int obj) const {
   return obj > 0 && obj < static_cast<int>(objects_.size()) ? objects_[obj].str : std::u16string{};
 }
 
+void TableJava::PutString(int obj, std::u16string value) {
+  std::lock_guard<std::mutex> lk(mu_);
+  if (obj > 0 && obj < static_cast<int>(objects_.size())) objects_[obj].str = std::move(value);
+}
+
+std::string TableJava::ClassName(int obj) const {
+  std::lock_guard<std::mutex> lk(mu_);
+  const Class* cls = ClassOfObj(obj);
+  return cls == nullptr ? std::string{} : cls->name;
+}
+
 std::uint64_t TableJava::FieldOf(int obj, const std::string& name) const {
   std::lock_guard<std::mutex> lk(mu_);
   if (obj <= 0 || obj >= static_cast<int>(objects_.size())) return 0;
@@ -121,9 +139,18 @@ void TableJava::SetPending(const std::string& cls, const std::string& message) {
 
 std::string TableJava::PendingClass() const {
   std::lock_guard<std::mutex> lk(mu_);
-  if (pending_ == 0) return {};
-  const Class* k = ClassOfObj(objects_[pending_].cls);
+  const auto pending = PendingLocked();
+  if (pending == 0) return {};
+  const Class* k = ClassOfObj(objects_[pending].cls);
   return k ? k->name : std::string{};
+}
+
+std::string TableJava::PendingMessage() const {
+  std::lock_guard<std::mutex> lk(mu_);
+  const auto pending = PendingLocked();
+  if (pending == 0) return {};
+  const auto& text = objects_[pending].str;
+  return std::string(text.begin(), text.end());
 }
 
 std::size_t TableJava::live_refs() const {
@@ -203,6 +230,7 @@ int TableJava::FindMethodLocked(int cls_obj, const std::string& name, const std:
       const Method& m = methods_[i];
       if (m.cls == c && m.name == name && m.sig == sig && m.is_static == is_static) return static_cast<int>(i);
     }
+    if (name == "<init>") return 0;
     const Class* k = ClassOfObj(c);
     c = k ? k->super : 0;
   }
@@ -212,7 +240,18 @@ int TableJava::FindMethodLocked(int cls_obj, const std::string& name, const std:
 void TableJava::ThrowLocked(const std::string& cls, const std::string& message) {
   const int t = NewObjectLocked(ClassNamed(cls));
   objects_[t].str = std::u16string(message.begin(), message.end());
-  pending_ = t;
+  SetPendingLocked(t);
+}
+
+int TableJava::PendingLocked() const {
+  const auto found = pending_.find(ThreadToken());
+  return found == pending_.end() ? 0 : found->second;
+}
+
+void TableJava::SetPendingLocked(int obj) {
+  const auto token = ThreadToken();
+  if (obj == 0) pending_.erase(token);
+  else pending_[token] = obj;
 }
 
 // ------------------------------------------------------------------------------------------------- HostJava
@@ -263,6 +302,7 @@ bool TableJava::IsAssignableFrom(Ref from, Ref to) {
 TableJava::Ref TableJava::GetObjectClass(Ref obj) {
   std::lock_guard<std::mutex> lk(mu_);
   const int o = Obj(obj);
+  if (ClassOfObj(o)) return MakeRefLocked(ClassNamed("java/lang/Class"));
   return o ? MakeRefLocked(objects_[o].cls) : 0;
 }
 
@@ -513,13 +553,15 @@ void TableJava::SetObjectArrayElement(Ref a, std::int32_t index, Ref value) {
 
 bool TableJava::ExceptionCheck() {
   std::lock_guard<std::mutex> lk(mu_);
-  return pending_ != 0;
+  return PendingLocked() != 0;
 }
 
 std::int32_t TableJava::Throw(Ref throwable) {
   std::lock_guard<std::mutex> lk(mu_);
-  pending_ = Obj(throwable);
-  return pending_ != 0 ? 0 : -1;
+  const auto obj = Obj(throwable);
+  if (obj == 0) return -1;
+  SetPendingLocked(obj);
+  return 0;
 }
 
 std::int32_t TableJava::ThrowNew(Ref cls, const std::string& message) {
@@ -528,13 +570,13 @@ std::int32_t TableJava::ThrowNew(Ref cls, const std::string& message) {
   if (ClassOfObj(c) == nullptr) return -1;
   const int t = NewObjectLocked(c);
   objects_[t].str = std::u16string(message.begin(), message.end());
-  pending_ = t;
+  SetPendingLocked(t);
   return 0;
 }
 
 TableJava::Ref TableJava::ExceptionOccurred() {
   std::lock_guard<std::mutex> lk(mu_);
-  return pending_ != 0 ? MakeRefLocked(pending_) : 0;
+  return MakeRefLocked(PendingLocked());
 }
 
 void TableJava::ExceptionDescribe() {
@@ -544,7 +586,7 @@ void TableJava::ExceptionDescribe() {
 
 void TableJava::ExceptionClear() {
   std::lock_guard<std::mutex> lk(mu_);
-  pending_ = 0;
+  SetPendingLocked(0);
 }
 
 std::int32_t TableJava::PushLocalFrame(std::int32_t /*capacity*/) {
@@ -657,6 +699,7 @@ bool TableJava::AttachCurrentThread(bool /*daemon*/) {
 
 void TableJava::DetachCurrentThread() {
   std::lock_guard<std::mutex> lk(mu_);
+  SetPendingLocked(0);
   detached_[std::this_thread::get_id()] = true;
 }
 
@@ -691,6 +734,7 @@ std::uint64_t TableJava::CallNative(const std::string& cls, const std::string& n
   }
   std::string err;
   const std::uint64_t result = invoker(name_sig, class_ref, args, &err);
+  DeleteLocalRef(class_ref);
   if (!err.empty() && trace_) trace_("java: native callback " + name_sig + " failed: " + err);
   return result;
 }
