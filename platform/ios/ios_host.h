@@ -84,6 +84,8 @@ class IosHost {
   /// The APK whose assets the guest's AAsset* calls read. Call before the guest's libraries load.
   bool OpenApk(const std::string& path, std::string* err);
   void EnableUnityWindow(int width, int height);
+  void PumpAudio();
+  void SetAudioPaused(bool paused);
   void UpdateUnityWindowSize(int width, int height) { unity_window_size_ = {width, height}; }
 
   /// The ring `DumpRecentHostCalls` reads. `written` is monotonic; slot = n % kRecentCalls.
@@ -98,12 +100,13 @@ class IosHost {
 
  private:
   static void* HostSymbol(const std::string& name);
+  void InstallLegacyClientArrays();
 
   rb::runtime::GuestProcess& p_;
   rb::host::Boot* boot_ = nullptr;
   abi::HandleTable handles_;
   std::function<void(const std::string&)> log_;
-  std::unique_ptr<rb::audio::SilentSles> sles_;  ///< no audio device: a real object model over a muted sink
+  std::unique_ptr<rb::audio::SilentSles> sles_;
   std::map<std::string, Special> specials_;
   mutable std::mutex slots_mu_;  ///< resolution and diagnostic snapshots; forwarded calls do not take it
   std::map<std::string, std::uint32_t> slots_;

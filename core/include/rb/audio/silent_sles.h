@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <span>
 #include <string>
 
 #include "rb/exec/machine_state.h"
@@ -26,8 +27,23 @@ class GuestMemory;
 
 namespace rb::audio {
 
-/// What the silent engine needs from its host. Deliberately as small as the real OpenSL layer's
-/// seam, so the object graph can be exercised without a guest process or an Apple framework.
+struct PcmFormat {
+  unsigned sample_rate;
+  unsigned channels;
+  unsigned bits;
+  unsigned buffers;
+};
+
+class PcmOutput {
+ public:
+  virtual ~PcmOutput() = default;
+  virtual bool Enqueue(std::span<const std::uint8_t> bytes) = 0;
+  virtual void SetPlaying(bool playing) = 0;
+  virtual void Clear() = 0;
+  virtual unsigned TakeCompleted() = 0;
+};
+
+/// The object graph supports either a host PCM device or a muted sink.
 struct SilentSlesHost {
   using Method = std::function<bool(exec::MachineState& s, std::string* why)>;
   mem::GuestMemory* mem = nullptr;
@@ -35,6 +51,7 @@ struct SilentSlesHost {
   std::function<std::uint32_t(const std::string& name, Method fn)> bind;
   std::function<void(const std::string& name, std::uint32_t at)> data_symbol;
   std::function<void(const std::string&)> log;
+  std::function<std::unique_ptr<PcmOutput>(PcmFormat)> open_pcm;
 };
 
 class SilentSles {
@@ -45,6 +62,9 @@ class SilentSles {
   ~SilentSles();
   SilentSles(const SilentSles&) = delete;
   SilentSles& operator=(const SilentSles&) = delete;
+  /// Runs on a guest-capable host thread with the guest lock held.
+  void Pump(const std::function<void(std::uint32_t, std::uint32_t, std::uint32_t)>& callback);
+  void SetPaused(bool paused);
 
  private:
   struct Impl;

@@ -10,6 +10,7 @@
 #include "rb/audio/silent_sles.h"
 
 #include <array>
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -86,6 +87,9 @@ struct SilentSles::Impl {
     std::uint32_t object_cell = 0;
     std::uint32_t play_state = kPlayStateStopped;
     std::uint32_t queued = 0;
+    std::uint32_t played = 0;
+    std::uint32_t queue_cell = 0, callback = 0, context = 0;
+    std::unique_ptr<PcmOutput> output;
     std::map<Facet, std::uint32_t> cells;
   };
   struct Itf {
@@ -101,6 +105,7 @@ struct SilentSles::Impl {
   std::map<std::uint32_t, std::unique_ptr<Itf>> itfs;
   std::map<std::uint32_t, std::unique_ptr<Obj>> objects;
   std::set<std::string> said;
+  bool paused = false;
 
   std::uint32_t bump = 0;
   std::uint32_t bump_end = 0;
@@ -111,7 +116,7 @@ struct SilentSles::Impl {
     // Build every vtable before the guest runs: resolving a name while dispatching a host slot
     // would re-enter the bridge's slot table.
     for (unsigned i = 0; i < static_cast<unsigned>(Facet::Count); ++i) Vtable(static_cast<Facet>(i));
-    Say("backend", "sles: silent backend installed (OpenSL object model; audio output is muted)");
+    Say("backend", host.open_pcm ? "sles: native PCM output available" : "sles: silent backend installed");
   }
 
   void Say(const std::string& key, const std::string& text) {
@@ -138,6 +143,20 @@ struct SilentSles::Impl {
 
   bool WriteU32(std::uint32_t at, std::uint32_t value) {
     return at != 0 && host.mem != nullptr && host.mem->Write(at, &value, 4);
+  }
+
+  std::unique_ptr<PcmOutput> OpenPcm(std::uint32_t source) {
+    if (!host.open_pcm || !host.mem || source == 0) return nullptr;
+    std::array<std::uint32_t, 2> pointers{}, locator{};
+    std::array<std::uint32_t, 7> format{};
+    if (!host.mem->Read(source, pointers.data(), sizeof pointers) ||
+        !host.mem->Read(pointers[0], locator.data(), sizeof locator) ||
+        (locator[0] != 6 && locator[0] != 0x800007bd) ||
+        !host.mem->Read(pointers[1], format.data(), sizeof format)) return nullptr;
+    if (format[0] != 2 || format[1] < 1 || format[1] > 2 || format[2] < 8000000 ||
+        format[2] > 192000000 || (format[3] != 8 && format[3] != 16) ||
+        format[3] != format[4] || format[6] != 2 || locator[1] == 0 || locator[1] > 32) return nullptr;
+    return host.open_pcm({format[2] / 1000, format[1], format[3], locator[1]});
   }
 
   std::uint32_t Bind(const std::string& name, Method fn) {
@@ -187,7 +206,7 @@ struct SilentSles::Impl {
         s.r[0] = kParameterInvalid;
         return true;
       }
-      Say("engine", "sles: slCreateEngine -> 0 (silent engine created)");
+      Say("engine", "sles: slCreateEngine -> 0");
       s.r[0] = kSuccess;
       return true;
     });
@@ -349,7 +368,10 @@ struct SilentSles::Impl {
               s.r[0] = kParameterInvalid;
               return true;
             }
-            Say("player", "sles: CreateAudioPlayer -> object (silent; buffer callbacks are not delivered)");
+            auto& object = *objects.at(player);
+            object.output = OpenPcm(s.r[2]);
+            Say(object.output ? "pcm" : "player", object.output ? "sles: PCM output opened"
+                                                                 : "sles: audio format or device unavailable; player muted");
             return true;
           }
           case 7: {  // CreateOutputMix
@@ -380,7 +402,7 @@ struct SilentSles::Impl {
         switch (index) {
           case 0:  // SetPlayState
             itf->obj->play_state = s.r[1];
-            if (s.r[1] == 3) Say("playing", "sles: player state PLAYING (silent)");
+            if (itf->obj->output) itf->obj->output->SetPlaying(!paused && s.r[1] == 3);
             return true;
           case 1:  // GetPlayState
             if (!WriteOut(s.r[1], itf->obj->play_state)) s.r[0] = kParameterInvalid;
@@ -407,36 +429,88 @@ struct SilentSles::Impl {
         }
         break;
       case Facet::BufferQueue:
-      case Facet::SimpleBufferQueue:
+      case Facet::SimpleBufferQueue: {
+        auto& player = *itf->obj;
         switch (index) {
-          case 0:  // Enqueue
-            ++itf->obj->queued;
-            Say(itf->facet == Facet::BufferQueue ? "enqueue-bq" : "enqueue-simple",
-                "sles: buffer enqueued (silent; no audio callback)");
+          case 0: {  // Enqueue
+            if (player.output) {
+              if (s.r[2] == 0 || s.r[2] > (1u << 20)) {
+                s.r[0] = kParameterInvalid;
+                return true;
+              }
+              pcm.resize(s.r[2]);
+              if (!host.mem->Read(s.r[1], pcm.data(), pcm.size())) {
+                s.r[0] = kParameterInvalid;
+                return true;
+              }
+              if (!player.output->Enqueue(pcm)) {
+                s.r[0] = 7;  // SL_RESULT_BUFFER_INSUFFICIENT
+                return true;
+              }
+              Say("enqueue", "sles: PCM buffer submitted");
+            }
+            ++player.queued;
             return true;
+          }
           case 1:  // Clear
-            itf->obj->queued = 0;
+            if (player.output) player.output->Clear();
+            player.queued = player.played = 0;
             return true;
           case 2:  // GetState
-            if (!WriteOut(s.r[1], itf->obj->queued)) s.r[0] = kParameterInvalid;
+            if (!WriteOut(s.r[1], player.queued) || !WriteOut(s.r[1] + 4, player.played)) s.r[0] = kParameterInvalid;
             return true;
           case 3:  // RegisterCallback
-            Say("bq-callback", "sles: buffer-queue callback registered (silent; not invoked)");
+            player.queue_cell = itf->obj->cells.at(itf->facet);
+            player.callback = s.r[1];
+            player.context = s.r[2];
             return true;
           default:
             break;
         }
         break;
+      }
       case Facet::Count:
         break;
     }
     s.r[0] = kFeatureUnsupported;
     return true;
   }
+
+  std::vector<std::uint8_t> pcm;
 };
 
 SilentSles::SilentSles(SilentSlesHost host) : impl_(std::make_unique<Impl>(std::move(host))) {}
 
 SilentSles::~SilentSles() = default;
+
+void SilentSles::Pump(const std::function<void(std::uint32_t, std::uint32_t, std::uint32_t)>& callback) {
+  struct Completion { std::uint32_t player, function, queue, context; };
+  std::vector<Completion> ready;
+  if (impl_->paused) return;
+  for (const auto& [cell, player] : impl_->objects) {
+    if (!player->output) continue;
+    const auto count = std::min(player->queued, player->output->TakeCompleted());
+    if (count != 0) impl_->Say("completed", "sles: iOS audio buffer completion reached the guest bridge");
+    player->queued -= count;
+    player->played += count;
+    if (player->callback) {
+      for (unsigned i = 0; i < count; ++i) ready.push_back({cell, player->callback, player->queue_cell, player->context});
+    }
+  }
+  for (const auto& item : ready) {
+    const auto active = impl_->objects.find(item.player);
+    if (active != impl_->objects.end() && active->second->callback == item.function &&
+        active->second->context == item.context && active->second->queue_cell == item.queue) {
+      callback(item.function, item.queue, item.context);
+    }
+  }
+}
+
+void SilentSles::SetPaused(bool paused) {
+  impl_->paused = paused;
+  for (const auto& [cell, player] : impl_->objects) {
+    if (player->output) player->output->SetPlaying(!paused && player->play_state == 3);
+  }
+}
 
 }  // namespace rb::audio

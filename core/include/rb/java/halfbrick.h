@@ -10,6 +10,8 @@
 
 namespace rb::java {
 
-void InstallHalfbrick(TableJava& java);
+void InstallHalfbrick(TableJava& java, const std::string& model = "iPad",
+                      const std::string& manufacturer = "Apple", const std::string& package = "retrobug.game",
+                      const std::u16string& version = {}, int sdk = 34);
 
 }  // namespace rb::java

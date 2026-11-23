@@ -5,7 +5,7 @@
 enable_language(OBJCXX)
 
 add_library(rb_ios STATIC egl_shim.mm gl_symbols.mm ios_host.cpp cocos2dx_bootstrap.cpp dlgl_bootstrap.cpp
-    pikpok_bootstrap.cpp halfbrick_bootstrap.cpp unity_bootstrap.cpp ios_session.cpp apk_identity.cpp apk_icon.cpp text_render.mm)
+    pikpok_bootstrap.cpp halfbrick_bootstrap.cpp unity_bootstrap.cpp ios_session.cpp apk_identity.cpp apk_icon.cpp text_render.mm pcm_output.mm)
 target_compile_features(rb_ios PUBLIC cxx_std_20)
 target_compile_options(rb_ios PRIVATE -fobjc-arc)
 target_include_directories(rb_ios PUBLIC
@@ -14,7 +14,8 @@ target_include_directories(rb_ios PUBLIC
 # `rb_gfx` is defined by core/, which the top-level CMakeLists adds after this directory; CMake resolves the
 # name at generate time, so the later definition is the one linked.
 target_link_libraries(rb_ios PUBLIC rb_runtime rb_java rb_gfx rb_audio rb_abi
-  "-framework OpenGLES" "-framework QuartzCore" "-framework CoreText" "-framework CoreGraphics" "-framework Foundation")
+  "-framework OpenGLES" "-framework QuartzCore" "-framework CoreText" "-framework CoreGraphics" "-framework Foundation"
+  "-framework AudioToolbox" "-framework AVFoundation")
 
 # A per-game AOT profile (AOT task 5): the emitted assembly, its per-library tables and the profile table.
 # The sources live under build/aot/<game>/ and are never in git — they are translation derived from the

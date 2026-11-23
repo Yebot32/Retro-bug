@@ -326,7 +326,7 @@ void InstallAndroidBase(TableJava& j, AndroidEnv env) {
 
   // ---- android/os/Build and Build$VERSION: what a game reads to pick a quality tier.
   j.DefineClass("android/os/Build", "java/lang/Object");
-  for (const char* field : {"MODEL", "MANUFACTURER", "BRAND", "DEVICE", "PRODUCT", "HARDWARE", "FINGERPRINT", "ID", "DISPLAY"}) {
+  for (const char* field : {"MODEL", "MANUFACTURER", "BRAND", "DEVICE", "PRODUCT", "HARDWARE", "FINGERPRINT", "ID", "DISPLAY", "TAGS"}) {
     j.DefineField("android/os/Build", field, "Ljava/lang/String;", true);
   }
   SetStaticString(j, "android/os/Build", "MODEL", env.model);
@@ -338,11 +338,14 @@ void InstallAndroidBase(TableJava& j, AndroidEnv env) {
   SetStaticString(j, "android/os/Build", "FINGERPRINT", env.fingerprint);
   SetStaticString(j, "android/os/Build", "ID", "retrobug");
   SetStaticString(j, "android/os/Build", "DISPLAY", "retrobug");
+  SetStaticString(j, "android/os/Build", "TAGS", "release-keys");
   j.DefineClass("android/os/Build$VERSION", "java/lang/Object");
   j.DefineField("android/os/Build$VERSION", "SDK_INT", "I", true);
   j.DefineField("android/os/Build$VERSION", "RELEASE", "Ljava/lang/String;", true);
+  j.DefineField("android/os/Build$VERSION", "INCREMENTAL", "Ljava/lang/String;", true);
   SetStaticInt(j, "android/os/Build$VERSION", "SDK_INT", env.sdk_int);
   SetStaticString(j, "android/os/Build$VERSION", "RELEASE", env.release);
+  SetStaticString(j, "android/os/Build$VERSION", "INCREMENTAL", "retrobug");
 
   // ---- android/util/Log: the guest's log calls become the app's log, with the same priority names.
   j.DefineClass("android/util/Log", "java/lang/Object");

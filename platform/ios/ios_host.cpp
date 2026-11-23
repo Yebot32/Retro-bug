@@ -16,6 +16,7 @@
 
 #include "egl_shim.h"
 #include "gl_symbols.h"
+#include "pcm_output.h"
 #include "rb/abi/guest_log.h"
 #include "rb/audio/silent_sles.h"
 #include "rb/gfx/thunk_table.h"
@@ -237,6 +238,7 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
   AddSpecial("glTexSubImage2D", [this](exec::MachineState& s, std::string* why) {
     return TextureUpload(true, s, p_.memory(), why);
   });
+  InstallLegacyClientArrays();
   // glGetString/glGetStringi return a host string: copied into guest memory, as a device's driver's is not.
   AddSpecial("glGetString", [this](exec::MachineState& s, std::string* why) {
     using Fn = const unsigned char* (*)(unsigned);
@@ -753,9 +755,7 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
     return true;
   });
 
-  // ---- OpenSL ES over a muted sink. Failing engine creation is not a "run silently" contract:
-  // KitKat's OpenAL startup asks for an output mix and a player regardless, so the guest gets the
-  // same object model a device would hand it and its buffers are dropped. See silent_sles.h.
+  // OpenSL ES buffer-queue players publish their PCM through iOS AudioQueue.
   {
     rb::audio::SilentSlesHost h;
     h.mem = &p_.memory();
@@ -770,6 +770,7 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
     };
     h.data_symbol = [this](const std::string& name, std::uint32_t at) { AddDataSymbol(name, at); };
     h.log = log_;
+    h.open_pcm = [this](audio::PcmFormat format) { return OpenPcmOutput(format, log_); };
     sles_ = std::make_unique<rb::audio::SilentSles>(std::move(h));
   }
 
@@ -832,6 +833,142 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
                            "__loader_android_get_exported_namespace"}) {
     AddSpecial(name, [](exec::MachineState& s, std::string*) { s.r[0] = 0; return true; });
   }
+}
+
+void IosHost::PumpAudio() {
+  runtime::Ggl::Held lock(p_.ggl());
+  sles_->Pump([this](std::uint32_t fn, std::uint32_t queue, std::uint32_t context) {
+    exec::RunResult result{};
+    p_.abi().CallGuest(fn, {abi::Value32::Ptr(queue), abi::Value32::Ptr(context)},
+                       abi::Shorty::For("VII"), 10000000, &result);
+    if (result.reason != exec::StopReason::Returned && FirstRefusal("audio callback") && log_) {
+      log_("audio: OpenSL queue callback stopped: " + result.detail);
+    }
+  });
+}
+
+void IosHost::InstallLegacyClientArrays() {
+  using Pointer = void (*)(GLint, GLenum, GLsizei, const void*);
+  using NormalPointer = void (*)(GLenum, GLsizei, const void*);
+  using ClientTexture = void (*)(GLenum);
+  struct Array {
+    std::string name;
+    void* method = nullptr;
+    unsigned width = 0;
+    GLenum type = 0;
+    unsigned stride = 0;
+    std::uint32_t address = 0;
+    const void* direct_host = nullptr;
+    std::vector<std::uint8_t> storage;
+  };
+  struct State {
+    std::map<std::pair<GLenum, GLenum>, Array> arrays;
+    std::vector<std::pair<GLenum, Array*>> staged;
+    GLenum texture = GL_TEXTURE0;
+  };
+  const auto state = std::make_shared<State>();
+  const auto apply = [](const Array& array, const void* data) {
+    if (array.name == "glNormalPointer") {
+      reinterpret_cast<NormalPointer>(array.method)(array.type, array.stride, data);
+    } else {
+      reinterpret_cast<Pointer>(array.method)(array.width, array.type, array.stride, data);
+    }
+  };
+  for (const auto& [name, kind] : {std::pair{"glVertexPointer", 0x8074u}, {"glNormalPointer", 0x8075u},
+                                  {"glColorPointer", 0x8076u}, {"glTexCoordPointer", 0x8078u}}) {
+    void* const method = HostSymbol(name);
+    if (method == nullptr) continue;
+    AddSpecial(name, [this, state, apply, name, kind, method](exec::MachineState& s, std::string*) {
+      const bool normal = kind == 0x8075;
+      const auto key = std::make_pair(kind, kind == 0x8078 ? state->texture : 0u);
+      auto& array = state->arrays[key];
+      array.name = name;
+      array.method = method;
+      array.width = normal ? 3 : s.r[0];
+      array.type = s.r[normal ? 0 : 1];
+      array.stride = s.r[normal ? 1 : 2];
+      const auto ptr = s.r[normal ? 2 : 3];
+      const bool vbo = GlBufferBound(GL_ARRAY_BUFFER_BINDING);
+      array.address = vbo ? 0 : ptr;
+      array.direct_host = vbo ? reinterpret_cast<const void*>(static_cast<std::uintptr_t>(ptr))
+                              : p_.memory().HostForAccess(ptr);
+      apply(array, array.direct_host);
+      return true;
+    });
+  }
+  const auto client_texture = reinterpret_cast<ClientTexture>(HostSymbol("glClientActiveTexture"));
+  if (client_texture) {
+    AddSpecial("glClientActiveTexture", [state, client_texture](exec::MachineState& s, std::string*) {
+      client_texture(s.r[0]);
+      if (s.r[0] >= GL_TEXTURE0 && s.r[0] < GL_TEXTURE0 + 32) state->texture = s.r[0];
+      return true;
+    });
+  }
+  AddSpecial("glDrawArrays", [this, state, apply, client_texture](exec::MachineState& s, std::string* why) {
+    const auto first = static_cast<GLint>(s.r[1]);
+    const auto count = static_cast<GLsizei>(s.r[2]);
+    if (EglShim::Instance().context_version() != 1 || state->arrays.empty() || first < 0 || count <= 0) {
+      glDrawArrays(s.r[0], first, count);
+      return true;
+    }
+    auto& staged = state->staged;
+    staged.clear();
+    for (auto& [key, array] : state->arrays) {
+      if (array.address == 0) continue;
+      if (key.second && client_texture) client_texture(key.second);
+      GLboolean enabled = GL_FALSE;
+      glGetBooleanv(key.first, &enabled);
+      if (!enabled) continue;
+      const unsigned scalar = array.type == GL_BYTE || array.type == GL_UNSIGNED_BYTE ? 1 :
+                              array.type == GL_SHORT || array.type == GL_UNSIGNED_SHORT ? 2 : 4;
+      if (array.width == 0 || array.width > 4) continue;
+      const auto stride = array.stride ? array.stride : array.width * scalar;
+      const auto start = std::uint64_t{stride} * first;
+      const auto end = std::uint64_t{stride} * (std::uint64_t{static_cast<unsigned>(first)} + count - 1) +
+                       array.width * scalar;
+      const auto available = p_.memory().window_bytes();
+      if (array.address >= available || end > available - array.address || end > (32u << 20)) {
+        if (client_texture) client_texture(state->texture);
+        *why = "GLES1 client array outside guest memory for " + array.name;
+        return false;
+      }
+      const auto& memory = p_.memory();
+      if (end <= mem::kGuestPage - (array.address & (mem::kGuestPage - 1)) &&
+          (memory.ProtAt(array.address) & mem::kRead) &&
+          memory.HostForAccess(array.address) == array.direct_host) continue;
+      array.storage.resize(static_cast<std::size_t>(end));
+      if (!memory.Read(array.address + static_cast<std::uint32_t>(start),
+                           array.storage.data() + start, static_cast<std::size_t>(end - start))) {
+        if (client_texture) client_texture(state->texture);
+        *why = "GLES1 client array is unreadable for " + array.name;
+        return false;
+      }
+      staged.emplace_back(key.second, &array);
+    }
+    GLint original = 0;
+    if (!staged.empty()) {
+      glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &original);
+      if (original != 0) glBindBuffer(GL_ARRAY_BUFFER, 0);
+      for (const auto& [unit, array] : staged) {
+        if (unit && client_texture) client_texture(unit);
+        apply(*array, array->storage.data());
+      }
+    }
+    if (client_texture) client_texture(state->texture);
+    glDrawArrays(s.r[0], first, count);
+    for (const auto& [unit, array] : staged) {
+      if (unit && client_texture) client_texture(unit);
+      apply(*array, array->direct_host);
+    }
+    if (original != 0) glBindBuffer(GL_ARRAY_BUFFER, static_cast<GLuint>(original));
+    if (!staged.empty() && client_texture) client_texture(state->texture);
+    return true;
+  });
+}
+
+void IosHost::SetAudioPaused(bool paused) {
+  runtime::Ggl::Held lock(p_.ggl());
+  sles_->SetPaused(paused);
 }
 
 bool IosHost::OpenApk(const std::string& path, std::string* err) {

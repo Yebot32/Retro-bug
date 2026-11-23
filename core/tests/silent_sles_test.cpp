@@ -21,6 +21,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <unistd.h>
@@ -69,7 +70,7 @@ struct Rig {
   std::unique_ptr<audio::SilentSles> sles;
   bool ok = false;
 
-  Rig() {
+  explicit Rig(std::function<std::unique_ptr<audio::PcmOutput>(audio::PcmFormat)> open_pcm = {}) {
     mem::AddressModel model;
     model.kind = mem::AddressModel::kBiased;
     // Apple Silicon has 16 KiB host pages; the model refuses a finer granule rather than lie about it.
@@ -101,6 +102,7 @@ struct Rig {
     };
     h.data_symbol = [this](const std::string& name, std::uint32_t at) { data[name] = at; };
     h.log = [this](const std::string& line) { said.push_back(line); };
+    h.open_pcm = std::move(open_pcm);
     sles = std::make_unique<audio::SilentSles>(std::move(h));
   }
 
@@ -279,12 +281,74 @@ void unknown_interface_is_named_and_does_not_write_out() {
   CHECK(named);
 }
 
+void native_output_delivers_pcm_and_completion() {
+  struct Output final : audio::PcmOutput {
+    std::vector<std::uint8_t> bytes;
+    unsigned completed = 0;
+    bool playing = false;
+    bool Enqueue(std::span<const std::uint8_t> pcm) override { bytes.assign(pcm.begin(), pcm.end()); return true; }
+    void SetPlaying(bool value) override { playing = value; }
+    void Clear() override { bytes.clear(); completed = 0; }
+    unsigned TakeCompleted() override { return std::exchange(completed, 0); }
+  };
+  Output* output = nullptr;
+  Rig r([&](audio::PcmFormat format) {
+    CHECK(format.sample_rate == 44100 && format.channels == 2 && format.bits == 16 && format.buffers == 2);
+    auto sink = std::make_unique<Output>();
+    output = sink.get();
+    return sink;
+  });
+  CHECK(r.ok);
+  if (!r.ok) return;
+  CHECK(r.Call(r.names.at("slCreateEngine"), {kScratch}) == kSuccess);
+  CHECK(r.Method(r.U32(kScratch), kGetInterface, {r.Iid("SL_IID_ENGINE"), kScratch + 4}) == kSuccess);
+  const auto engine = r.U32(kScratch + 4);
+  constexpr auto source = kScratch + 32;
+  constexpr std::uint32_t locator[] = {0x800007bd, 2};
+  constexpr std::uint32_t fmt[] = {2, 2, 44100000, 16, 16, 3, 2};
+  r.Put(source, source + 8);
+  r.Put(source + 4, source + 16);
+  CHECK(r.mem->Write(source + 8, locator, sizeof locator));
+  CHECK(r.mem->Write(source + 16, fmt, sizeof fmt));
+  CHECK(r.Method(engine, kCreateAudioPlayer, {kScratch + 8, source, 0, 0, 0, 0}) == kSuccess);
+  CHECK(output != nullptr);
+  if (!output) return;
+  const auto player = r.U32(kScratch + 8);
+  CHECK(r.Method(player, kGetInterface, {r.Iid("SL_IID_ANDROIDSIMPLEBUFFERQUEUE"), kScratch + 12}) == kSuccess);
+  CHECK(r.Method(player, kGetInterface, {r.Iid("SL_IID_PLAY"), kScratch + 16}) == kSuccess);
+  const auto queue = r.U32(kScratch + 12);
+  CHECK(r.Method(r.U32(kScratch + 16), kSetPlayState, {3}) == kSuccess && output->playing);
+  CHECK(r.Method(queue, kBqRegisterCallback, {0x3001, 0x1234}) == kSuccess);
+  const std::vector<std::uint8_t> samples{1, 2, 3, 4, 5, 6, 7, 8};
+  const auto data = kScratch + 0xffc;
+  CHECK(r.mem->Write(data, samples.data(), samples.size()));
+  CHECK(r.Method(queue, kEnqueue, {data, 8}) == kSuccess && output->bytes == samples);
+  output->completed = 1;
+  unsigned callbacks = 0;
+  const auto pump = [&] {
+    r.sles->Pump([&](auto fn, auto self, auto context) {
+      CHECK(fn == 0x3001 && self == queue && context == 0x1234);
+      ++callbacks;
+    });
+  };
+  r.sles->SetPaused(true);
+  pump();
+  CHECK(!output->playing && callbacks == 0);
+  r.sles->SetPaused(false);
+  pump();
+  pump();
+  CHECK(output->playing && callbacks == 1);
+  CHECK(r.Method(queue, kBqGetState, {kScratch + 80}) == kSuccess);
+  CHECK(r.U32(kScratch + 80) == 0 && r.U32(kScratch + 84) == 1);
+}
+
 }  // namespace
 
 int main() {
   iids_are_guest_pointers_to_distinct_guids();
   openal_startup_contract_succeeds();
   unknown_interface_is_named_and_does_not_write_out();
+  native_output_delivers_pcm_and_completion();
   std::printf("%d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;
 }

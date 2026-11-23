@@ -31,6 +31,8 @@ constexpr char kPackageInfo[] = "android/content/pm/PackageInfo";
 constexpr char kPrefs[] = "android/content/SharedPreferences";
 constexpr char kEditor[] = "android/content/SharedPreferences$Editor";
 constexpr char kMotion[] = "android/view/MotionEvent";
+constexpr char kDisplayManager[] = "android/hardware/display/DisplayManager";
+constexpr char kDisplay[] = "android/view/Display";
 
 using Java = java::TableJava;
 
@@ -211,9 +213,40 @@ void InstallPowerManager(Java& vm) {
   vm.SetField('L', true, cls, power_field, power);
   vm.DeleteLocalRef(power);
   vm.DeleteLocalRef(cls);
+  vm.DefineField(context, "DISPLAY_SERVICE", "Ljava/lang/String;", true);
+  const auto display_context = vm.FindClass(context);
+  const auto display_key = vm.NewString(u"display");
+  vm.SetField('L', true, display_context,
+              vm.GetFieldID(display_context, "DISPLAY_SERVICE", "Ljava/lang/String;", true), display_key);
+  vm.DeleteLocalRef(display_key);
+  vm.DeleteLocalRef(display_context);
+  vm.DefineClass(kDisplayManager, "java/lang/Object");
+  vm.DefineClass(kDisplay, "java/lang/Object");
+  vm.DefineMethod(kDisplayManager, "getDisplay", "(I)Landroid/view/Display;", false,
+                  [](Java& j, int, const auto& args) { return args.at(0) == 0 ? j.NewInstance(kDisplay) : 0; });
+  vm.DefineMethod(kDisplayManager, "getDisplays", "()[Landroid/view/Display;", false,
+                  [](Java& j, int, const auto&) {
+    const auto cls = j.FindClass(kDisplay);
+    const auto primary = j.NewInstance(kDisplay);
+    const auto all = j.NewArray('L', 1, cls, primary);
+    j.DeleteLocalRef(cls);
+    j.DeleteLocalRef(primary);
+    return all;
+  });
+  vm.DefineMethod(kDisplayManager, "getDisplays", "(Ljava/lang/String;)[Landroid/view/Display;", false,
+                  [](Java& j, int, const auto&) {
+    const auto cls = j.FindClass(kDisplay);
+    const auto all = j.NewArray('L', 0, cls, 0);
+    j.DeleteLocalRef(cls);
+    return all;
+  });
+  vm.DefineMethod(kDisplay, "getDisplayId", "()I", false, [](Java&, int, const auto&) { return 0u; });
   vm.DefineMethod(context, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;", false,
                   [](Java& j, int, const auto& args) {
-    return j.StringOf(j.ObjectOf(args.at(0))) == u"power" ? j.NewInstance("android/os/PowerManager") : 0;
+    const auto service = j.StringOf(j.ObjectOf(args.at(0)));
+    if (service == u"power") return j.NewInstance("android/os/PowerManager");
+    if (service == u"display") return j.NewInstance(kDisplayManager);
+    return Java::Ref{0};
   });
   vm.DefineMethod(manager, "newWakeLock", "(ILjava/lang/String;)Landroid/os/PowerManager$WakeLock;", false,
                   [](Java& j, int, const auto&) { return j.NewInstance("android/os/PowerManager$WakeLock"); });

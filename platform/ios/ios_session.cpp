@@ -545,7 +545,7 @@ void Take(RbIosSession* s, int kind, int id, float x, float y) {
 bool RbIosSession::Boot(std::string* err) {
   RbIosSession* self = this;
   rb::java::AndroidEnv env;
-  env.package_name = unity_apk ? apk_identity.package : "retrobug.game";
+  if (!apk_identity.package.empty()) env.package_name = apk_identity.package;
   env.apk_path = apk;
   env.files_dir = data_dir + "/files";
   env.cache_dir = data_dir + "/cache";
@@ -603,7 +603,8 @@ bool RbIosSession::Boot(std::string* err) {
     rb::java::InstallDlgl(*java, env);
     rb::java::InstallBlockyroads(*java, env);
     rb::java::InstallPikPok(*java, env);
-    rb::java::InstallHalfbrick(*java);
+    rb::java::InstallHalfbrick(*java, env.model, env.manufacturer, env.package_name,
+                               self->apk_identity.version_name, env.sdk_int);
     if (self->unity_apk) {
       rb::platform::ios::UnityBootstrap::JavaServices services;
       services.log = [self](const std::string& line) { self->Log(line); };
@@ -659,14 +660,20 @@ bool RbIosSession::Boot(std::string* err) {
     // with the app's permissions, and a title that unpacks its resources out of the APK (Halfbrick does,
     // opening the APK path itself) cannot do that with every open refused. The app is sandboxed, so the
     // guest reaches the app's container and nothing else.
-    const auto cpuinfo = rb::runtime::GuestProcess::CpuInfo(std::thread::hardware_concurrency());
-    process.monitor().set_file_provider([&process, cpuinfo](const std::string& path)
+    const auto cpu_count = std::max(1u, std::thread::hardware_concurrency());
+    const auto cpuinfo = rb::runtime::GuestProcess::CpuInfo(cpu_count);
+    std::string proc_stat = "cpu  0 0 0 0 0 0 0 0 0 0\n";
+    for (unsigned cpu = 0; cpu < cpu_count; ++cpu) {
+      proc_stat += "cpu" + std::to_string(cpu) + " 0 0 0 0 0 0 0 0 0 0\n";
+    }
+    process.monitor().set_file_provider([&process, cpuinfo, proc_stat](const std::string& path)
                                            -> std::optional<std::vector<std::uint8_t>> {
       if (path == "/proc/self/maps") {
         const auto maps = process.ProcMaps();
         return std::vector<std::uint8_t>(maps.begin(), maps.end());
       }
       if (path == "/proc/cpuinfo") return std::vector<std::uint8_t>(cpuinfo.begin(), cpuinfo.end());
+      if (path == "/proc/stat") return std::vector<std::uint8_t>(proc_stat.begin(), proc_stat.end());
       return std::nullopt;
     });
     process.monitor().set_host_io(true);
@@ -974,7 +981,7 @@ extern "C" RbIosSession* rb_ios_create(const char* apk_path, const char* lib_nam
   }
   s->stock_apk = s->lib_dir != "assets/rb32/";
   s->unity_apk = unity || s->lib == "libunity.so";
-  if (s->unity_apk) {
+  {
     std::string why;
     auto archive = rb::loader::ApkArchive::Open(s->apk, &why);
     if (archive && archive->EntrySize("AndroidManifest.xml").value_or(0) <= 2 * 1024 * 1024) {
@@ -982,6 +989,8 @@ extern "C" RbIosSession* rb_ios_create(const char* apk_path, const char* lib_nam
         s->apk_identity = rb::platform::ios::ReadApkIdentity(*manifest);
       }
     }
+  }
+  if (s->unity_apk) {
     if (s->apk_identity.package.empty()) {
       s->Log("unity: APK manifest has no readable package identity");
       s->apk_identity.package = "retrobug.game";
@@ -1159,12 +1168,14 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
             s->Fail(e);
             break;
           }
+          s->host->SetAudioPaused(!want);
           app_paused = !want;
         }
         if (app_paused) {
           std::this_thread::sleep_for(std::chrono::milliseconds(50));
           continue;
         }
+        s->host->PumpAudio();
         std::vector<RbIosSession::Touch> queued;
         {
           std::lock_guard<std::mutex> lk(s->touch_mu);
