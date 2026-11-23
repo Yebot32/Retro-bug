@@ -1337,7 +1337,8 @@ extern "C" void rb_ios_destroy(RbIosSession* s) {
   if (s == nullptr) return;
   if (auto* guest = s->process.load(std::memory_order_acquire)) guest->RequestStop();
   rb_ios_stop(s);
-  s->process.store(nullptr, std::memory_order_release);  // no report may reach a process about to go
+  // Stop callbacks before releasing any engine adapter or its Java references.
+  if (auto* guest = s->process.exchange(nullptr, std::memory_order_acq_rel)) guest->Quiesce();
   s->game.reset();
   s->unity.reset();
   s->boot.reset();
