@@ -136,7 +136,7 @@ jobs:
     name: iOS — unsigned IPA
     if: github.event_name == 'workflow_dispatch'
     # XcodeGen writes the current project format; macos-15's Xcode 16 reads it (macos-14's 15.4 does not).
-    runs-on: macos-26
+    runs-on: macos-26-intel
     steps:
       - uses: actions/checkout@v4
         with:
