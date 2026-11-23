@@ -46,6 +46,7 @@
 #include "cocos2dx_bootstrap.h"
 #include "dlgl_bootstrap.h"
 #include "egl_shim.h"
+#include "gumball_bootstrap.h"
 #include "ios_host.h"
 #include "rb/crypto/sha256.h"
 #include "rb/host/boot.h"
@@ -430,6 +431,7 @@ struct RbIosSession {
   bool unity_apk = false;
   rb::platform::ios::ApkIdentity apk_identity;
   std::shared_ptr<rb::platform::ios::UnityJavaTasks> unity_tasks;
+  std::unique_ptr<rb::platform::ios::GumballBootstrap> gumball;
   bool dlgl_apk = false;  ///< the APK ships assets/rb32/libdlgl.so: boot the whole DLGE Java load order
   bool booted = false;  ///< render thread only
   bool runtime_jit = true;  ///< configured before the render thread starts
@@ -641,6 +643,9 @@ bool RbIosSession::Boot(std::string* err) {
   };
   cfg.resolve_host = [self](const std::string& name) -> std::optional<rb::exec::GuestAddr> {
     return self->host ? self->host->Resolve(name) : std::nullopt;
+  };
+  cfg.resolve_dynamic_host = [self](const std::string& name) -> std::optional<rb::exec::GuestAddr> {
+    return self->host ? self->host->ResolveDynamic(name) : std::nullopt;
   };
   cfg.read_system_lib = [](const std::string& name) { return ReadBundledSystemLib(name); };
   // What only this layer knows when the guest faults: the GL context version and the host calls that led
@@ -923,6 +928,10 @@ bool RbIosSession::Boot(std::string* err) {
     halfbrick = std::make_unique<rb::platform::ios::HalfbrickBootstrap>(
         *boot, *java, lib, self->data_dir + "/files", self->data_dir + "/cache");
     self->Log("engine: Halfbrick Mortar (file manager, step renderer, touch)");
+  } else if (exports(rb::platform::ios::GumballBootstrap::kInitExport)) {
+    gumball = std::make_unique<rb::platform::ios::GumballBootstrap>(*boot, *java, lib, data_dir + "/files");
+    client_version = 1;
+    self->Log("engine: Gumball JNI surface (APK assets, GLES1 and touch)");
   } else if (exports("Java_org_cocos2dx_lib_Cocos2dxHelper_nativeSetApkPath")) {
     game = std::make_unique<rb::platform::ios::Cocos2dxBootstrap>(*boot, *java, lib);
     self->Log("engine: Cocos2d-x (Cocos2dxHelper natives)");
@@ -1145,7 +1154,9 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
         s->booted = true;
         s->Log("game: booted");
       }
-      egl.SetLayer(layer, s->client_version);
+      const bool unity_gles2 = s->unity && s->apk_identity.gl_es_version <= 0x20000;
+      if (unity_gles2) s->Log("egl: Unity GLES2 compatibility for this APK's graphics requirements");
+      egl.SetLayer(layer, s->client_version, unity_gles2 ? 2 : 3);
       if (!egl.Begin(&why)) {
         s->Fail("EGL context: " + why);
         egl.ReleaseThread();
@@ -1157,6 +1168,7 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
                            : s->pikpok    ? s->pikpok->Start(s->apk, s->width, s->height, &why)
                            : s->halfbrick ? s->halfbrick->Start(s->apk, s->width, s->height, &why)
                            : s->unity     ? s->unity->Start(s->apk, &why)
+                           : s->gumball   ? s->gumball->Start(s->apk, egl.width(), egl.height(), &why)
                                           : s->game->Start(s->apk, s->width, s->height, &why);
       if (!started) {
         s->Fail(std::string{s->dlgl        ? "dlxInit"
@@ -1180,6 +1192,7 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
             else if (s->pikpok) s->pikpok->Resume(&e);
             else if (s->halfbrick) s->halfbrick->Resume(&e);
             else if (s->unity) s->unity->Resume(&e);
+            else if (s->gumball) s->gumball->Resume();
             else s->game->Resume(&e);
             s->Log("resume");
           } else {
@@ -1187,7 +1200,7 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
             else if (s->pikpok) s->pikpok->Pause(&e);
             else if (s->halfbrick) s->halfbrick->Pause(&e);
             else if (s->unity) s->unity->Pause(&e);
-            else s->game->Pause(&e);
+            else if (s->game) s->game->Pause(&e);
             s->Log("pause");
           }
           if (s->unity && !e.empty()) {
@@ -1212,6 +1225,10 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
             s->unity->Touch(t.kind, t.id, t.x, t.y);
             continue;
           }
+          if (s->gumball) {
+            s->gumball->Touch(t.kind, t.id, t.x, t.y);
+            continue;
+          }
           if (s->dlgl || s->pikpok || s->halfbrick) {
             // Android's MotionEvent action: down 0, up 1, move 2, cancel 3.
             const int action = t.kind == 0 ? 0 : t.kind == 1 ? 2 : t.kind == 2 ? 1 : 3;
@@ -1233,11 +1250,12 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
                               : s->pikpok    ? s->pikpok->Render(&why)
                               : s->halfbrick ? s->halfbrick->Render(&why)
                               : s->unity     ? s->unity->Render(&why)
+                              : s->gumball   ? s->gumball->Render(&why)
                                              : s->game->Render(&why);
         const auto render_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                    std::chrono::steady_clock::now() - render_start).count();
         if (!rendered) {
-          s->Fail(std::string{s->dlgl ? "dlxDraw" : "nativeRender"} + ": " + why);
+          s->Fail(std::string{s->dlgl ? "dlxDraw" : s->gumball ? "jniRun" : "nativeRender"} + ": " + why);
           break;
         }
         if (s->unity && egl.presents() == presents_before) {
@@ -1317,13 +1335,14 @@ extern "C" void rb_ios_resume(RbIosSession* s) {
 
 extern "C" void rb_ios_destroy(RbIosSession* s) {
   if (s == nullptr) return;
+  if (auto* guest = s->process.load(std::memory_order_acquire)) guest->RequestStop();
   rb_ios_stop(s);
   s->process.store(nullptr, std::memory_order_release);  // no report may reach a process about to go
-  rb::platform::ios::EglShim::Instance().Detach();
   s->game.reset();
   s->unity.reset();
-  s->host.reset();
   s->boot.reset();
+  s->host.reset();
+  rb::platform::ios::EglShim::Instance().Detach();
   s->Log("destroy");
   if (s->log_file != nullptr) {
     std::fclose(s->log_file);

@@ -301,13 +301,21 @@ std::optional<BionicLayout> VerifyBionicLayout(const mem::GuestMemory& mem, cons
 // ------------------------------------------------------------------------------------ GuestProcess
 
 GuestProcess::~GuestProcess() {
+  Quiesce();
+}
+
+void GuestProcess::RequestStop() {
+  if (monitor_ != nullptr) monitor_->RequestGroupExit("the guest process is stopping");
+  futex_.Shutdown();
+}
+
+void GuestProcess::Quiesce() {
   // Order matters (lock discipline, M2 Task 5): first stop the guest (sticky group exit, every futex waiter and
   // sleeper woken) so an adopted host thread's exit hook that is mid-way through guest destructors stops at its
   // next check; then take `alive_`'s mutex exclusively (never held by anyone waiting for the GGL's holder) to cut every
   // later hook off; then join the clone()d threads. Adopted GuestThreads go with `adopted_`; their destructors
   // clear the binding cells of host threads still alive, which then read as unbound.
-  if (monitor_ != nullptr) monitor_->RequestGroupExit("the guest process is being destroyed");
-  futex_.Shutdown();
+  RequestStop();
   {
     std::unique_lock<std::shared_mutex> lk(alive_->mu);  // waits out every exit hook in flight
     alive_->proc = nullptr;

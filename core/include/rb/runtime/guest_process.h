@@ -131,6 +131,8 @@ class GuestProcess {
   /// and no host thread is inside a call into this process (an adopted host thread that is merely alive is fine:
   /// it reads as unbound afterwards, and its exit runs nothing here).
   ~GuestProcess();
+  void RequestStop();
+  void Quiesce();  ///< Stops guest execution and joins workers before their host callbacks are destroyed.
   GuestProcess(const GuestProcess&) = delete;
   GuestProcess& operator=(const GuestProcess&) = delete;
 

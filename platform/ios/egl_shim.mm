@@ -285,7 +285,8 @@ void EglShim::Detach() {
   width_ = height_ = 0;
 }
 
-void EglShim::SetLayer(void* ca_eagl_layer, int client_version) {
+void EglShim::SetLayer(void* ca_eagl_layer, int client_version, int max_client_version) {
+  max_client_version_ = max_client_version;
   if (layer_ != nullptr && layer_ != ca_eagl_layer) {
     CFRelease(static_cast<CFTypeRef>(layer_));
     layer_ = nullptr;
@@ -334,7 +335,8 @@ std::uint32_t EglShim::ChooseConfig(void* display, const std::int32_t* attribs, 
       error_ = kBadMatch;
       return 1;  // "no config matched" is a successful query with zero results, as in EGL
     }
-    if (attribs[i] == kRenderableType && (attribs[i + 1] & ~kSupportedApis) != 0) {
+    const auto supported = max_client_version_ >= 3 ? kSupportedApis : kEs1Bit | kEs2Bit;
+    if (attribs[i] == kRenderableType && attribs[i + 1] != -1 && (attribs[i + 1] & ~supported) != 0) {
       if (num_config != nullptr) *num_config = 0;
       return 1;
     }
@@ -360,8 +362,8 @@ std::uint32_t EglShim::GetConfigAttrib(void* display, void* config, std::int32_t
     case kSamples:
     case kSampleBuffers: *value = 0; break;
     case kSurfaceType: *value = kWindowBit; break;
-    case kRenderableType: *value = kSupportedApis; break;
-    case kConformant: *value = kSupportedApis; break;
+    case kRenderableType:
+    case kConformant: *value = max_client_version_ >= 3 ? kSupportedApis : kEs1Bit | kEs2Bit; break;
     case kConfigCaveat: *value = kNone; break;
     case kConfigId: *value = 1; break;
     case kNativeVisualId:
@@ -386,7 +388,7 @@ void* EglShim::CreateContext(void* display, void* config, void* share, const std
     return nullptr;
   }
   const int version = ContextVersion(attribs, config_version_);
-  if (version < 1 || version > 3) {
+  if (version < 1 || version > max_client_version_) {
     error_ = kBadMatch;
     return nullptr;
   }

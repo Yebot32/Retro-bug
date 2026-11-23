@@ -46,6 +46,7 @@ Boot::Boot(BootConfig config) : cfg_(std::move(config)) {}
 
 Boot::~Boot() {
   StopMonitor();
+  if (proc_) proc_->Quiesce();
   // The trace is a diagnostic; flushing it here covers the normal return path. The recorder also
   // registers an atexit hook, so a process that leaves through exit() still gets its last buffer.
   rb::exec::trace::Stop();
@@ -658,7 +659,8 @@ std::optional<std::uint32_t> Boot::DlSym(std::uint32_t handle, const std::string
       if (auto e = m->FindExport(name)) return e->tagged();
     }
   }
-  auto at = cfg_.resolve_host ? cfg_.resolve_host(name) : std::nullopt;
+  const auto& resolve = cfg_.resolve_dynamic_host ? cfg_.resolve_dynamic_host : cfg_.resolve_host;
+  auto at = resolve ? resolve(name) : std::nullopt;
   if (!at) {  // named once each: a NULL the game may call later (an engine probing for optional entry points)
     static std::set<std::string> said;
     static std::mutex said_mu;

@@ -91,11 +91,14 @@ ApkIdentity ReadApkIdentity(Bytes manifest) {
     if (application) in_application = true;
     const bool meta = depth == 3 && in_application && element == u"meta-data";
     const bool sdk = depth == 2 && element == u"uses-sdk";
-    if (!root && !application && !meta && !sdk) continue;
+    const bool feature = depth == 2 && element == u"uses-feature";
+    if (!root && !application && !meta && !sdk && !feature) continue;
     const std::size_t stride = U16(chunk, 26), count = U16(chunk, 28), first = 16 + U16(chunk, 24);
     if (stride < 20 || first < 36 || first > chunk.size() || count > (chunk.size() - first) / stride) return {};
     std::u16string metadata_name;
     std::optional<std::variant<bool, std::int32_t, std::u16string>> metadata_value;
+    std::uint32_t api = 0;
+    bool required = true;
     for (std::size_t i = 0; i < count; ++i) {
       const auto attr = chunk.subspan(first + i * stride, 20);
       const auto ns = U32(attr, 0);
@@ -116,6 +119,8 @@ ApkIdentity ReadApkIdentity(Bytes manifest) {
         if (application && kind == 1 && name == u"icon") identity.icon = data;
         if (application && kind == 1 && name == u"roundIcon") identity.round_icon = data;
         if (sdk && name == u"targetSdkVersion" && (kind == 0x10 || kind == 0x11)) identity.target_sdk = data;
+        if (feature && name == u"glEsVersion" && (kind == 0x10 || kind == 0x11)) api = data;
+        if (feature && name == u"required" && kind == 0x12) required = data != 0;
         if (meta && name == u"name") metadata_name = PoolString(strings, string);
         if (meta && name == u"value") {
           if (kind == 0x12) metadata_value = data != 0;
@@ -125,6 +130,7 @@ ApkIdentity ReadApkIdentity(Bytes manifest) {
       }
     }
     if (!metadata_name.empty() && metadata_value) identity.metadata[metadata_name] = std::move(*metadata_value);
+    if (required && api > identity.gl_es_version) identity.gl_es_version = api;
     root = false;
   }
   return identity;

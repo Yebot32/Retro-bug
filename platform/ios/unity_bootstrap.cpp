@@ -125,6 +125,10 @@ void InstallPackageManager(Java& vm, const ApkIdentity& identity, const std::u16
   vm.DefineField(kManager, "GET_META_DATA", "I", true);
   const auto manager = vm.FindClass(kManager);
   vm.SetField('I', true, manager, vm.GetFieldID(manager, "GET_META_DATA", "I", true), 0x80);
+  for (const auto& [name, value] : {std::pair{"PERMISSION_GRANTED", 0u}, {"PERMISSION_DENIED", 0xffffffffu}}) {
+    vm.DefineField(kManager, name, "I", true);
+    vm.SetField('I', true, manager, vm.GetFieldID(manager, name, "I", true), value);
+  }
   vm.DeleteLocalRef(manager);
   vm.DefineClass(kPackageInfo, "java/lang/Object");
   vm.DefineClass("android/app/ApplicationErrorReport", "java/lang/Object");
@@ -294,13 +298,26 @@ void InstallSystemServices(Java& vm, const UnityBootstrap::JavaServices& service
   vm.DeleteLocalRef(power);
   vm.DeleteLocalRef(cls);
   vm.DefineField(context, "DISPLAY_SERVICE", "Ljava/lang/String;", true);
+  vm.DefineField(context, "TELEPHONY_SERVICE", "Ljava/lang/String;", true);
   const auto display_context = vm.FindClass(context);
   const auto display_key = vm.NewString(u"display");
   vm.SetField('L', true, display_context,
               vm.GetFieldID(display_context, "DISPLAY_SERVICE", "Ljava/lang/String;", true), display_key);
   vm.DeleteLocalRef(display_key);
+  const auto phone_key = vm.NewString(u"phone");
+  vm.SetField('L', true, display_context,
+              vm.GetFieldID(display_context, "TELEPHONY_SERVICE", "Ljava/lang/String;", true), phone_key);
+  vm.DeleteLocalRef(phone_key);
   vm.DeleteLocalRef(display_context);
   vm.DefineClass(kDisplayManager, "java/lang/Object");
+  vm.DefineClass("android/telephony/TelephonyManager", "java/lang/Object");
+  for (const auto* method : {"getNetworkOperatorName", "getNetworkOperator", "getNetworkCountryIso",
+                            "getSimCountryIso", "getSimOperatorName"}) {
+    vm.DefineMethod("android/telephony/TelephonyManager", method, "()Ljava/lang/String;", false,
+                    [](Java& j, int, const auto&) { return j.NewString(u""); });
+  }
+  vm.DefineMethod("android/telephony/TelephonyManager", "getPhoneType", "()I", false,
+                  [](Java&, int, const auto&) { return 0u; });
   vm.DefineClass(kDisplay, "java/lang/Object");
   vm.DefineClass("android/view/WindowManager", "java/lang/Object");
   vm.DefineClass("android/graphics/Point", "java/lang/Object");
@@ -382,6 +399,7 @@ void InstallSystemServices(Java& vm, const UnityBootstrap::JavaServices& service
     if (service == u"power") return j.NewInstance("android/os/PowerManager");
     if (service == u"display") return j.NewInstance(kDisplayManager);
     if (service == u"window") return j.NewInstance("android/view/WindowManager");
+    if (service == u"phone") return j.NewInstance("android/telephony/TelephonyManager");
     return Java::Ref{0};
   });
   for (const auto* method : {"checkCallingOrSelfPermission", "checkSelfPermission"}) {

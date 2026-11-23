@@ -27,7 +27,7 @@ class EglShim {
 
   /// The shell's drawable: the CAEAGLLayer the render thread presents into. Called on the render thread
   /// before any guest code runs. `client_version` is the shell's GLES default.
-  void SetLayer(void* ca_eagl_layer, int client_version);
+  void SetLayer(void* ca_eagl_layer, int client_version, int max_client_version = 3);
   [[nodiscard]] bool has_layer() const { return layer_ != nullptr; }
   [[nodiscard]] int width() const { return width_; }
   [[nodiscard]] int height() const { return height_; }
@@ -93,6 +93,7 @@ class EglShim {
   void* context_ = nullptr;  ///< EAGLContext*, retained
   void* last_made_current_ = nullptr;  ///< the context the last logged make-current named
   int client_version_ = 1;
+  int max_client_version_ = 3;
   int config_version_ = 1;
   int width_ = 0, height_ = 0;
   std::atomic<std::uint64_t> presents_{0};

@@ -123,6 +123,24 @@ void InstallAndroidBase(TableJava& j, AndroidEnv env) {
     return cls;
   });
   j.DefineClass("java/lang/Class", "java/lang/Object");
+  j.DefineClass("java/lang/ClassLoader", "java/lang/Object");
+  const auto class_loader_ref = j.NewInstance("java/lang/ClassLoader");
+  const auto class_loader = j.ObjectOf(class_loader_ref);
+  j.DeleteLocalRef(class_loader_ref);
+  j.DefineMethod("java/lang/Class", "getClassLoader", "()Ljava/lang/ClassLoader;", false,
+                 [class_loader](TableJava& f, int self, const auto&) -> Ref {
+    const auto name = f.ClassName(self);
+    if (name.empty() || name.starts_with("java/") || name.starts_with("android/")) return 0;
+    return f.MakeRef(class_loader);
+  });
+  for (const auto* method : {"loadClass", "findClass"}) {
+    j.DefineMethod("java/lang/ClassLoader", method, "(Ljava/lang/String;)Ljava/lang/Class;", false,
+                   [](TableJava& f, int, const auto& args) {
+      auto name = StrArg(f, args, 0);
+      std::replace(name.begin(), name.end(), '.', '/');
+      return f.FindClass(name);
+    });
+  }
   j.DefineMethod("java/lang/Class", "getName", "()Ljava/lang/String;", false,
                  [](TableJava& f, int self, const auto&) {
     auto name = f.ClassName(self);
@@ -133,6 +151,7 @@ void InstallAndroidBase(TableJava& j, AndroidEnv env) {
   // ---- java/lang/String. TableJava creates instances of this class for every string the guest makes or is
   // handed, so the methods here are what a guest's string calls reach.
   j.DefineClass("java/lang/String", "java/lang/Object");
+  j.DefineMethod("java/lang/String", "<init>", "()V", false, [](TableJava&, int, const auto&) { return 0u; });
   const auto bytes_constructor = [](TableJava& f, int self, const auto& args) {
     const auto array = static_cast<Ref>(args.at(0));
     if (array == 0 || (args.size() == 2 && args[1] == 0)) {
@@ -549,6 +568,8 @@ void InstallAndroidBase(TableJava& j, AndroidEnv env) {
   j.DefineClass("android/content/Context", "java/lang/Object");
   j.DefineClass("android/content/ContextWrapper", "android/content/Context");
   j.DefineClass("android/app/Activity", "android/content/ContextWrapper");
+  j.DefineMethod("android/content/Context", "getClassLoader", "()Ljava/lang/ClassLoader;", false,
+                 [class_loader](TableJava& f, int, const auto&) { return f.MakeRef(class_loader); });
   j.DefineClass("android/content/res/AssetManager", "java/lang/Object");
   // PikPok's native calls Destroy() on the manager it was handed when the game ends.
   j.DefineMethod("android/content/res/AssetManager", "Destroy", "()V", false,
@@ -632,7 +653,22 @@ void InstallAndroidBase(TableJava& j, AndroidEnv env) {
   j.DefineMethod("android/app/Activity", "getWindowManager", "()Landroid/view/WindowManager;", false,
                  [](TableJava&, int, const std::vector<std::uint64_t>&) { return static_cast<std::uint64_t>(0); });
   j.DefineMethod("android/app/Activity", "setRequestedOrientation", "(I)V", false,
-                 [](TableJava&, int, const std::vector<std::uint64_t>&) { return static_cast<std::uint64_t>(0); });
+                 [](TableJava& f, int self, const auto& args) {
+    // Store offset by one so a fresh Activity reports SCREEN_ORIENTATION_UNSPECIFIED (-1).
+    f.PutField(self, "orientation", static_cast<std::uint32_t>(args.at(0)) + 1u);
+    return 0u;
+  });
+  j.DefineMethod("android/app/Activity", "getRequestedOrientation", "()I", false,
+                 [](TableJava& f, int self, const auto&) {
+    return static_cast<std::uint32_t>(f.FieldOf(self, "orientation")) - 1u;
+  });
+  j.DefineClass("android/content/pm/ActivityInfo", "android/content/pm/PackageItemInfo");
+  for (const auto& [name, value] : {std::pair{"SCREEN_ORIENTATION_UNSPECIFIED", -1},
+       {"SCREEN_ORIENTATION_LANDSCAPE", 0}, {"SCREEN_ORIENTATION_PORTRAIT", 1},
+       {"SCREEN_ORIENTATION_SENSOR", 4}, {"SCREEN_ORIENTATION_FULL_SENSOR", 10}}) {
+    j.DefineField("android/content/pm/ActivityInfo", name, "I", true);
+    SetStaticInt(j, "android/content/pm/ActivityInfo", name, value);
+  }
   j.DefineMethod("android/app/Activity", "setVolumeControlStream", "(I)V", false,
                  [](TableJava&, int, const std::vector<std::uint64_t>&) { return static_cast<std::uint64_t>(0); });
 }

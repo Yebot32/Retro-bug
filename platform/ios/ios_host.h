@@ -71,6 +71,7 @@ class IosHost {
   /// The guest address `name` should bind to, or nullopt (it then stays a named trap). Repeated names answer
   /// the same slot. Called while the guest's libraries load, and by eglGetProcAddress at runtime.
   std::optional<std::uint32_t> Resolve(const std::string& name);
+  std::optional<std::uint32_t> ResolveDynamic(const std::string& name);
 
   abi::HandleTable& handles() { return handles_; }
   /// Interns a driver string in guest memory; 0 when none is left.

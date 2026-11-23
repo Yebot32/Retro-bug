@@ -406,7 +406,7 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
   // eglGetProcAddress: an address the guest can call — this registry's slot for that name, 0 if none.
   AddSpecial("eglGetProcAddress", [this](exec::MachineState& s, std::string*) {
     const std::string name = GuestStringOrEmpty(p_.memory(), s.r[0]);
-    const auto at = name.empty() ? std::nullopt : Resolve(name);
+    const auto at = ResolveDynamic(name);
     if (!at && !name.empty()) {
       if (FirstRefusal("proc:" + name) && log_) {
         log_("egl: eglGetProcAddress(\"" + name + "\") = NULL (no iOS implementation)");
@@ -467,23 +467,60 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
       *why = "glShaderSource: count " + std::to_string(count) + " is absurd";
       return false;
     }
-    std::vector<const char*> ptrs(count);
-    for (std::uint32_t i = 0; i < count; ++i) {
-      std::uint32_t at = 0;
-      if (!p_.memory().Read(strings + 4u * i, &at, 4) ||
-          (ptrs[i] = static_cast<const char*>(p_.memory().HostForAccess(at))) == nullptr) {
-        *why = "glShaderSource: string " + std::to_string(i) + " is not guest memory";
-        return false;
-      }
+    if (EglShim::Instance().GetCurrentContext() == nullptr) return true;
+    const auto& mem = p_.memory();
+    std::vector<std::uint32_t> addresses(count);
+    std::vector<int> lens(count, -1);
+    if (count != 0 && (!mem.Read(strings, addresses.data(), addresses.size() * sizeof addresses[0]) ||
+        (lengths != 0 && !mem.Read(lengths, lens.data(), lens.size() * sizeof lens[0])))) {
+      *why = "glShaderSource: unreadable guest string or length array";
+      return false;
     }
-    const void* lens = lengths == 0 ? nullptr : p_.memory().HostForAccess(lengths);
+    constexpr std::size_t kMaxSources = 8u << 20;
+    std::size_t remaining = kMaxSources;
+    std::vector<std::string> source(count);
+    std::vector<const char*> ptrs(count);
+    std::array<char, mem::kGuestPage> page;
+    for (std::uint32_t i = 0; i < count; ++i) {
+      std::uint64_t at = addresses[i];
+      auto& text = source[i];
+      if (lens[i] >= 0) {
+        const auto size = static_cast<std::size_t>(lens[i]);
+        if (size > remaining || (size != 0 && at == 0)) {
+          *why = "glShaderSource: invalid length or pointer for source " + std::to_string(i);
+          return false;
+        }
+        text.resize(size);
+        if (size != 0 && !mem.Read(addresses[i], text.data(), size)) {
+          *why = "glShaderSource: unreadable explicit source " + std::to_string(i);
+          return false;
+        }
+      } else {
+        bool terminated = false;
+        while (at != 0 && at < mem.window_bytes() && text.size() < remaining) {
+          const auto n = std::min<std::size_t>(mem::kGuestPage - (at & (mem::kGuestPage - 1)),
+                                               remaining - text.size());
+          if (!mem.Read(static_cast<std::uint32_t>(at), page.data(), n)) break;
+          const auto end = std::find(page.begin(), page.begin() + n, '\0');
+          text.append(page.begin(), end);
+          if (end != page.begin() + n) { terminated = true; break; }
+          at += n;
+        }
+        if (!terminated) {
+          *why = "glShaderSource: unreadable or unterminated guest source " + std::to_string(i);
+          return false;
+        }
+      }
+      remaining -= text.size();
+      ptrs[i] = text.c_str();
+    }
     using Fn = void (*)(unsigned, int, const char* const*, const int*);
     const auto f = reinterpret_cast<Fn>(HostSymbol("glShaderSource"));
     if (f == nullptr) {
       *why = "glShaderSource is not exported by OpenGLES.framework";
       return false;
     }
-    f(shader, static_cast<int>(count), ptrs.data(), static_cast<const int*>(lens));
+    f(shader, static_cast<int>(count), ptrs.data(), lens.data());
     return true;
   });
 
@@ -991,6 +1028,11 @@ void IosHost::EmitLog(int priority, const std::string& tag, const std::string& t
   std::string line = text;
   while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
   log_("guest log: " + abi::PrioName(priority) + "/" + tag + ": " + line);
+}
+
+std::optional<std::uint32_t> IosHost::ResolveDynamic(const std::string& name) {
+  if (name.starts_with("gl") && !specials_.contains(name) && !HostSymbol(name)) return std::nullopt;
+  return name.empty() ? std::nullopt : Resolve(name);
 }
 
 std::optional<std::uint32_t> IosHost::Resolve(const std::string& name) {

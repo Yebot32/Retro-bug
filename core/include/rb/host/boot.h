@@ -60,6 +60,7 @@ struct BootConfig {
   /// The host's answers for imports no guest image defines (GLES/EGL/dl/log on Android; the gfx/audio
   /// adapters on iOS). Same contract as `GuestProcessOptions::host_resolver`.
   std::function<std::optional<rb::exec::GuestAddr>(const std::string&)> resolve_host;
+  std::function<std::optional<rb::exec::GuestAddr>(const std::string&)> resolve_dynamic_host;
   /// A system library (`libc.so`, `libm.so`, `libz.so`, `libstdc++.so`) the APK does not carry. A
   /// repackaged APK keeps them under `assets/rb32sys/`; a stock store APK has only its own libraries
   /// under lib/armeabi-v7a and cannot boot without them, so the platform answers from its own copy (the
