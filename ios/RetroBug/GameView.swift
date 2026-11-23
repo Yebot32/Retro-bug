@@ -154,7 +154,7 @@ final class GameUIView: UIView {
         rb_ios_resume(s)
     }
 
-    private static func dataDir() -> String {
+    static func dataDir() -> String {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let dir = base.appendingPathComponent("RetroBug", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

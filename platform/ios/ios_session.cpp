@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <filesystem>
 #include <fstream>
 #include <limits.h>
 #if defined(__APPLE__) && __has_include(<execinfo.h>)
@@ -84,6 +85,7 @@ namespace {
 /// The last line a real host fault can write: the guest's own faults go through the interpreter and
 /// already have names; this catches the host failing under it (terminate, a bad callback, a driver).
 std::atomic<int> g_crash_fd{-1};
+std::atomic<RbIosSession*> g_drawable_owner{nullptr};
 std::atomic<bool> g_crash_handlers_installed{false};
 
 #if defined(__APPLE__)
@@ -391,6 +393,30 @@ void WriteMarker(const std::string& path, const std::string& value) {
   }
 }
 
+std::u16string HalfbrickInstallationId(const std::string& session_dir) {
+  const auto path = session_dir + "/INSTALLATION";
+  std::string id = ReadMarker(path);
+  if (id.size() != 36 || id.find_first_not_of("0123456789abcdefABCDEF-") != id.npos) {
+    auto uuid = CFUUIDCreate(kCFAllocatorDefault);
+    if (uuid == nullptr) return {};
+    auto text = CFUUIDCreateString(kCFAllocatorDefault, uuid);
+    CFRelease(uuid);
+    if (text == nullptr) return {};
+    char buf[37]{};
+    const bool converted = CFStringGetCString(text, buf, sizeof buf, kCFStringEncodingASCII);
+    CFRelease(text);
+    if (!converted) return {};
+    id.assign(buf);
+    std::transform(id.begin(), id.end(), id.begin(), [](char ch) {
+      return ch >= 'A' && ch <= 'F' ? static_cast<char>(ch - 'A' + 'a') : ch;
+    });
+    const auto staged = path + ".tmp";
+    WriteMarker(staged, id);
+    ::rename(staged.c_str(), path.c_str());
+  }
+  return std::u16string(id.begin(), id.end());
+}
+
 }  // namespace
 
 struct RbIosSession {
@@ -400,7 +426,7 @@ struct RbIosSession {
     float x = 0, y = 0;
   };
 
-  std::string apk, lib, data_dir;
+  std::string apk, lib, data_dir, session_dir;
   /// Where this APK keeps its 32-bit libraries: the repack layout's assets/rb32/ or a stock store
   /// APK's lib/armeabi-v7a/ (lib/armeabi/ only when v7a is absent). The boot reads through the same
   /// answer.
@@ -553,8 +579,18 @@ bool RbIosSession::Boot(std::string* err) {
   if (!apk_identity.package.empty()) env.package_name = apk_identity.package;
   env.apk_path = apk;
   env.files_dir = data_dir + "/files";
-  env.cache_dir = data_dir + "/cache";
-  if (!data_dir.empty()) env.obb_dir = data_dir + "/obb";
+  env.cache_dir = session_dir + "/cache";
+  if (!data_dir.empty()) {
+    env.obb_dir = data_dir + "/obb";
+    if (!apk_identity.package.empty()) {
+      env.obb_dir += "/" + apk_identity.package;
+      std::error_code error;
+      std::filesystem::create_directories(env.obb_dir, error);
+      if (error) self->Log("assets: could not create the package's OBB directory: " + error.message());
+      const auto obb = "/main." + std::to_string(apk_identity.version_code) + "." + apk_identity.package + ".obb";
+      if (std::filesystem::is_regular_file(env.obb_dir + obb, error)) self->Log("assets: found " + obb.substr(1));
+    }
+  }
   env.model = "iPad";
   env.manufacturer = "Apple";
   env.brand = "Apple";
@@ -610,6 +646,10 @@ bool RbIosSession::Boot(std::string* err) {
     rb::java::InstallPikPok(*java, env);
     rb::java::InstallHalfbrick(*java, env.model, env.manufacturer, env.package_name,
                                self->apk_identity.version_name, env.sdk_int);
+    java->DefineMethod("com/halfbrick/mortar/HBSupport", "GetUUID", "()Ljava/lang/String;", true,
+                       [directory = self->session_dir](auto& java, int, const auto&) {
+      return java.NewString(HalfbrickInstallationId(directory));
+    });
     if (self->unity_apk) {
       rb::platform::ios::UnityBootstrap::JavaServices services;
       services.log = [self](const std::string& line) { self->Log(line); };
@@ -736,16 +776,8 @@ bool RbIosSession::Boot(std::string* err) {
     }
   }
 #endif
-  const std::string jit_marker = self->data_dir + "/jit-attempt";
-  std::string marker_build;
-  if (FILE* f = std::fopen(jit_marker.c_str(), "r")) {
-    char buf[64] = {};
-    if (std::fgets(buf, sizeof buf, f) != nullptr) marker_build = buf;
-    std::fclose(f);
-    while (!marker_build.empty() && (marker_build.back() == '\n' || marker_build.back() == '\r')) {
-      marker_build.pop_back();
-    }
-  }
+  const std::string jit_marker = self->session_dir + "/jit-attempt";
+  const std::string marker_build = ReadMarker(jit_marker);
   // A launch holds a JIT only when the kernel grants MAP_JIT; the probe says which engine list to build.
   bool jit_wanted = self->runtime_jit && JitAvailable();
   const bool jit_crashed_this_build = marker_build == build;
@@ -793,7 +825,7 @@ bool RbIosSession::Boot(std::string* err) {
   // The same crash marker as Tier J's: written before an AOT boot, cleared by the first frame. A build
   // whose AOT launch died therefore runs Tier I on the next launch instead of dying again, and the log's
   // breadcrumbs name the step it reached.
-  const std::string aot_marker = self->data_dir + "/aot-attempt";
+  const std::string aot_marker = self->session_dir + "/aot-attempt";
   const bool aot_crashed_this_build = ReadMarker(aot_marker) == build;
   if (aot_crashed_this_build) {
 #if defined(RB_AOT_PROFILE)
@@ -866,15 +898,16 @@ bool RbIosSession::Boot(std::string* err) {
     }
     boot = std::make_unique<rb::host::Boot>(std::move(attempt_cfg));
     const rb::host::BootResult result = boot->BootJavaLibraries(apk, lib);
-    if (mode == Engine::Jit) ::remove(jit_marker.c_str());
-    // A graceful AOT failure is not a crash: the retry chain below handles it, and the marker must not
-    // disable AOT for the whole build.
-    if (mode == Engine::Aot && !result.ok) ::remove(aot_marker.c_str());
+    if (!result.ok || java == nullptr) {
+      if (mode == Engine::Jit) ::remove(jit_marker.c_str());
+      if (mode == Engine::Aot) ::remove(aot_marker.c_str());
+    }
     if (result.ok && java != nullptr) {
       const bool aot_really = mode == Engine::Aot && boot->process() != nullptr &&
                               boot->process()->aot_active();
       self->engine = mode == Engine::Jit ? 2 : (aot_really ? 1 : 0);
       if (mode == Engine::Aot && !aot_really) {
+        ::remove(aot_marker.c_str());
         self->Log("aot: the profile was refused at load — running Tier I");
       }
       break;
@@ -926,7 +959,7 @@ bool RbIosSession::Boot(std::string* err) {
     self->Log("engine: PikPok Mab (initApplication + GLSurfaceView renderer + touch)");
   } else if (exports("Java_com_halfbrick_mortar_NativeGameLib_native_1SystemInit")) {
     halfbrick = std::make_unique<rb::platform::ios::HalfbrickBootstrap>(
-        *boot, *java, lib, self->data_dir + "/files", self->data_dir + "/cache");
+        *boot, *java, lib, env.files_dir, env.cache_dir);
     self->Log("engine: Halfbrick Mortar (file manager, step renderer, touch)");
   } else if (exports(rb::platform::ios::GumballBootstrap::kInitExport)) {
     gumball = std::make_unique<rb::platform::ios::GumballBootstrap>(*boot, *java, lib, data_dir + "/files");
@@ -962,7 +995,6 @@ extern "C" RbIosSession* rb_ios_create(const char* apk_path, const char* lib_nam
   }
   auto s = std::make_unique<RbIosSession>();
   if (log_path != nullptr && log_path[0] != '\0') s->log_file = std::fopen(log_path, "ab");
-  InstallCrashLog(s->log_file);
   s->apk = apk_path;
   s->lib = lib_name;
   bool unity = false;
@@ -1021,7 +1053,6 @@ extern "C" RbIosSession* rb_ios_create(const char* apk_path, const char* lib_nam
   if (s->unity_apk) {
     if (s->apk_identity.package.empty()) {
       s->Log("unity: APK manifest has no readable package identity");
-      s->apk_identity.package = "retrobug.game";
     } else {
       s->Log("unity: package " + s->apk_identity.package + " version code " +
              std::to_string(s->apk_identity.version_code));
@@ -1035,6 +1066,17 @@ extern "C" RbIosSession* rb_ios_create(const char* apk_path, const char* lib_nam
     ::mkdir((s->data_dir + "/files").c_str(), 0755);
     ::mkdir((s->data_dir + "/cache").c_str(), 0755);
     ::mkdir((s->data_dir + "/obb").c_str(), 0755);
+    const auto key = !s->apk_identity.package.empty()
+        ? "pkg-" + s->apk_identity.package
+        : "apk-" + std::filesystem::path(s->apk).filename().string();
+    s->session_dir = s->data_dir + "/sessions/" + key;
+    std::error_code error;
+    std::filesystem::create_directories(s->session_dir + "/cache", error);
+    if (error) {
+      CopyOut("could not create the game cache: " + error.message(), err, err_len);
+      if (s->log_file) std::fclose(s->log_file);
+      return nullptr;
+    }
   }
   s->window_bytes = PickWindowBytes(s.get());
   s->Log("create: apk=" + s->apk + " lib=" + s->lib + " (boot deferred to the render thread)");
@@ -1139,6 +1181,14 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
   });
 
   s->render = std::thread([s, layer] {
+    while (s->running.load()) {
+      RbIosSession* owner = nullptr;
+      if (g_drawable_owner.compare_exchange_strong(owner, s) || owner == s) break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (!s->running.load()) return;
+    InstallCrashLog(s->log_file);
+    const auto start_time = std::chrono::steady_clock::now();
     rb::platform::ios::EglShim& egl = rb::platform::ios::EglShim::Instance();
     std::string why;
     try {
@@ -1282,12 +1332,14 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
           break;
         }
         ++s->frames;
-        if (s->frames.load(std::memory_order_relaxed) == 1 &&
-            s->engine.load(std::memory_order_relaxed) == 1) {
-          // The AOT launch reached its first drawn frame, which is what "this launch finished" means for
-          // the crash marker; until here a death leaves the next launch on Tier I.
-          ::remove((s->data_dir + "/aot-attempt").c_str());
-          s->Log("aot: the first frame is drawn — AOT is marked good for this build");
+        if (next_frame == 1) {
+          const int engine = s->engine.load(std::memory_order_relaxed);
+          if (engine == 1) ::remove((s->session_dir + "/aot-attempt").c_str());
+          if (engine == 2) ::remove((s->session_dir + "/jit-attempt").c_str());
+          const auto first_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now() - start_time).count();
+          s->Log("render: first frame presented after " + std::to_string(first_ms) +
+                 " ms (GLES " + std::to_string(egl.context_version()) + ")");
         }
         // A cheap heartbeat past the sampled frames: it dates the log during a long run without a pixel
         // readback every time (~1 line per 10 s at 30 fps).
@@ -1301,6 +1353,9 @@ extern "C" int rb_ios_start(RbIosSession* s, void* layer, int width, int height,
     } catch (...) {
       s->Fail("host exception of an unknown type");
     }
+    // Clean exits and reported guest errors are distinguishable from a host crash or kill.
+    if (s->engine == 1) ::remove((s->session_dir + "/aot-attempt").c_str());
+    if (s->engine == 2) ::remove((s->session_dir + "/jit-attempt").c_str());
     egl.ReleaseThread();
     s->running.store(false);
   });
@@ -1316,11 +1371,7 @@ extern "C" void rb_ios_stop(RbIosSession* s) {
 
 extern "C" void rb_ios_stop_async(RbIosSession* s) {
   if (s == nullptr) return;
-  // The EXIT button used to call rb_ios_stop on the main thread, which joins a render thread that can be
-  // minutes inside one nativeRender while a level loads — the launcher froze with no overlay and looked
-  // crashed. The stop is the same; only the thread it runs on changed. Detach is safe against a session
-  // starting before this finishes: each session retains its own layer/context and Detach only clears the
-  // calling thread's current context.
+  // The launcher can return immediately while the render thread and guest workers shut down.
   s->running.store(false);
   std::thread([s] { rb_ios_destroy(s); }).detach();
 }
@@ -1343,12 +1394,17 @@ extern "C" void rb_ios_destroy(RbIosSession* s) {
   s->unity.reset();
   s->boot.reset();
   s->host.reset();
-  rb::platform::ios::EglShim::Instance().Detach();
+  const bool owns_drawable = g_drawable_owner.load() == s;
+  if (owns_drawable) {
+    rb::platform::ios::EglShim::Instance().Detach();
+    g_crash_fd.store(-1, std::memory_order_release);
+  }
   s->Log("destroy");
   if (s->log_file != nullptr) {
     std::fclose(s->log_file);
     s->log_file = nullptr;
   }
+  if (owns_drawable) g_drawable_owner.store(nullptr);
   delete s;
 }
 

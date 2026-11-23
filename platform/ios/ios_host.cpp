@@ -426,39 +426,58 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
       // choose: (dpy, attribs, configs, size, num_config on the stack); get: (dpy, configs, size, num_config)
       const std::uint32_t attribs = choose ? s.r[1] : 0;
       const std::uint32_t out = choose ? s.r[2] : s.r[1];
-      std::uint32_t size = choose ? s.r[3] : s.r[2];
+      const auto size = static_cast<std::int32_t>(choose ? s.r[3] : s.r[2]);
       std::uint32_t num = choose ? 0u : s.r[3];
       if (choose && !p_.memory().Read(s.r[13], &num, 4)) {
         *why = std::string{which} + ": the num_config argument on the stack is unreadable";
         return false;
       }
-      if (size > 4096) size = 4096;
-      std::vector<void*> host(out != 0 ? size : 0);
+      void* host = nullptr;
       std::int32_t n = 0;
       std::uint32_t ok = 0;
       if (choose) {
         using Fn = std::uint32_t (*)(void*, const std::int32_t*, void**, std::int32_t, std::int32_t*);
         const auto f = reinterpret_cast<Fn>(HostSymbol(which));
-        const void* a = attribs == 0 ? nullptr : p_.memory().HostForAccess(attribs);
-        ok = f != nullptr ? f(dpy, static_cast<const std::int32_t*>(a), out != 0 ? host.data() : nullptr,
-                              static_cast<std::int32_t>(host.size()), &n)
-                          : 0u;
+        std::array<std::int32_t, 129> attributes;
+        if (!ReadEglAttributes(attribs, attributes, why)) return false;
+        ok = f != nullptr ? f(dpy, attribs != 0 ? attributes.data() : nullptr,
+                              out != 0 ? &host : nullptr, std::min(size, 1), num != 0 ? &n : nullptr) : 0u;
       } else {
         using Fn = std::uint32_t (*)(void*, void**, std::int32_t, std::int32_t*);
         const auto f = reinterpret_cast<Fn>(HostSymbol(which));
-        ok = f != nullptr ? f(dpy, out != 0 ? host.data() : nullptr, static_cast<std::int32_t>(host.size()), &n) : 0u;
+        ok = f != nullptr ? f(dpy, out != 0 ? &host : nullptr, std::min(size, 1), num != 0 ? &n : nullptr) : 0u;
       }
-      for (std::int32_t i = 0; ok != 0 && out != 0 && i < n; ++i) {
-        const std::uint32_t h = handles_.Put(host[static_cast<std::size_t>(i)]);
-        p_.memory().Write(out + 4u * static_cast<std::uint32_t>(i), &h, 4);
+      if (ok != 0 && out != 0 && host != nullptr) {
+        const std::uint32_t h = handles_.Put(host);
+        if (!p_.memory().Write(out, &h, sizeof h)) {
+          *why = std::string(which) + ": could not write the config handle";
+          return false;
+        }
       }
-      if (num != 0) p_.memory().Write(num, &n, 4);
+      if (ok != 0 && num != 0 && !p_.memory().Write(num, &n, sizeof n)) {
+        *why = std::string(which) + ": could not write the config count";
+        return false;
+      }
       s.r[0] = ok;
       return true;
     };
   };
   AddSpecial("eglChooseConfig", configs("eglChooseConfig", true));
   AddSpecial("eglGetConfigs", configs("eglGetConfigs", false));
+  AddSpecial("eglCreateContext", [this](exec::MachineState& s, std::string* why) {
+    void* display = nullptr;
+    void* config = nullptr;
+    void* share = nullptr;
+    if (!handles_.Get(s.r[0], &display) || !handles_.Get(s.r[1], &config) || !handles_.Get(s.r[2], &share)) {
+      *why = "eglCreateContext: unknown EGL handle";
+      return false;
+    }
+    std::array<std::int32_t, 129> attributes;
+    if (!ReadEglAttributes(s.r[3], attributes, why)) return false;
+    s.r[0] = handles_.Put(EglShim::Instance().CreateContext(
+        display, config, share, s.r[3] != 0 ? attributes.data() : nullptr));
+    return true;
+  });
 
   // glShaderSource(shader, count, const char* const* strings, const GLint* lengths): an array of guest pointers.
   AddSpecial("glShaderSource", [this](exec::MachineState& s, std::string* why) {
@@ -530,9 +549,7 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
   AddSpecial("glBindFramebuffer", [this](exec::MachineState& s, std::string* why) {
     const std::uint32_t fbo = s.r[1];
     if (fbo == 0) {
-      if (!EglShim::Instance().BindDrawable(why)) return false;
-      bound_fbo_ = 0;
-      return true;
+      return EglShim::Instance().BindDrawable(why, s.r[0]);
     }
     using Fn = void (*)(unsigned, unsigned);
     static const auto f = reinterpret_cast<Fn>(HostSymbol("glBindFramebuffer"));
@@ -541,15 +558,12 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
       return false;
     }
     f(static_cast<unsigned>(s.r[0]), fbo);
-    bound_fbo_ = fbo;
     return true;
   });
   AddSpecial("glBindFramebufferOES", [this](exec::MachineState& s, std::string* why) {
     const std::uint32_t fbo = s.r[1];
     if (fbo == 0) {
-      if (!EglShim::Instance().BindDrawable(why)) return false;
-      bound_fbo_ = 0;
-      return true;
+      return EglShim::Instance().BindDrawable(why, s.r[0]);
     }
     using Fn = void (*)(unsigned, unsigned);
     static const auto f = reinterpret_cast<Fn>(HostSymbol("glBindFramebufferOES"));
@@ -558,7 +572,6 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
       return false;
     }
     f(static_cast<unsigned>(s.r[0]), fbo);
-    bound_fbo_ = fbo;
     return true;
   });
   AddSpecial("glGetIntegerv", [this](exec::MachineState& s, std::string* why) {
@@ -568,10 +581,6 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
       *why = "glGetIntegerv: the out pointer is not guest memory";
       return false;
     }
-    if (pname == 0x8CA6u) {  // GL_FRAMEBUFFER_BINDING
-      *out = static_cast<int>(bound_fbo_);
-      return true;
-    }
     using Fn = void (*)(unsigned, int*);
     static const auto f = reinterpret_cast<Fn>(GlSymbol("glGetIntegerv"));
     if (f == nullptr) {
@@ -579,20 +588,9 @@ IosHost::IosHost(rb::runtime::GuestProcess& process, rb::host::Boot& boot,
       return false;
     }
     f(pname, out);
-    return true;
-  });
-  AddSpecial("glCheckFramebufferStatus", [this](exec::MachineState& s, std::string* why) {
-    if (bound_fbo_ == 0) {
-      s.r[0] = 0x8CD5u;  // GL_FRAMEBUFFER_COMPLETE: the drawable is complete by construction
-      return true;
-    }
-    using Fn = unsigned (*)(unsigned);
-    static const auto f = reinterpret_cast<Fn>(GlSymbol("glCheckFramebufferStatus"));
-    if (f == nullptr) {
-      *why = "glCheckFramebufferStatus is not exported by OpenGLES.framework";
-      return false;
-    }
-    s.r[0] = f(static_cast<unsigned>(s.r[0]));
+    const auto& egl = EglShim::Instance();
+    if ((pname == GL_FRAMEBUFFER_BINDING || (pname == GL_READ_FRAMEBUFFER_BINDING && egl.context_version() == 3)) &&
+        static_cast<std::uint32_t>(*out) == egl.drawable_framebuffer()) *out = 0;
     return true;
   });
 
@@ -1028,6 +1026,20 @@ void IosHost::EmitLog(int priority, const std::string& tag, const std::string& t
   std::string line = text;
   while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
   log_("guest log: " + abi::PrioName(priority) + "/" + tag + ": " + line);
+}
+
+bool IosHost::ReadEglAttributes(std::uint32_t address, std::array<std::int32_t, 129>& out,
+                                std::string* why) const {
+  if (address == 0) return true;
+  const auto& memory = p_.memory();
+  auto at = static_cast<std::uint64_t>(address);
+  for (std::size_t i = 0; i < out.size(); ++i, at += sizeof(out[i])) {
+    if (at >= memory.window_bytes() ||
+        !memory.Read(static_cast<std::uint32_t>(at), &out[i], sizeof(out[i]))) break;
+    if (i % 2 == 0 && out[i] == 0x3038) return true;  // EGL_NONE
+  }
+  *why = "unreadable or unterminated EGL attribute list";
+  return false;
 }
 
 std::optional<std::uint32_t> IosHost::ResolveDynamic(const std::string& name) {

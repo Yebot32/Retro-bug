@@ -76,6 +76,7 @@ class IosHost {
   abi::HandleTable& handles() { return handles_; }
   /// Interns a driver string in guest memory; 0 when none is left.
   std::uint32_t GuestString(const std::string& text);
+  bool ReadEglAttributes(std::uint32_t address, std::array<std::int32_t, 129>& out, std::string* why) const;
 
   /// A hand-written thunk. Register before Resolve sees the name; a special wins over the shared table.
   void AddSpecial(const std::string& name, Special fn) { specials_[name] = std::move(fn); }
@@ -135,7 +136,6 @@ class IosHost {
   /// Data imports (the OpenSL ES interface IDs): their guest address is a cell holding a value, not a
   /// host slot — the guest loads the value rather than calling it.
   std::map<std::string, std::uint32_t> data_symbols_;
-  std::uint32_t bound_fbo_ = 0;  ///< the guest's current framebuffer; 0 is our EAGL drawable
   bool manager_logged_ = false;
   int asset_logs_ = 0;
   struct DirState;

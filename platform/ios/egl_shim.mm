@@ -54,6 +54,7 @@ constexpr std::int32_t kBadParameter = 0x300C;
 constexpr std::int32_t kBadSurface = 0x300D;
 
 constexpr std::int32_t kAlphaSize = 0x3021;
+constexpr std::int32_t kBufferSize = 0x3020;
 constexpr std::int32_t kBlueSize = 0x3022;
 constexpr std::int32_t kGreenSize = 0x3023;
 constexpr std::int32_t kRedSize = 0x3024;
@@ -78,6 +79,7 @@ constexpr std::int32_t kHeight = 0x3056;
 constexpr std::int32_t kWidth = 0x3057;
 constexpr std::int32_t kClientApis = 0x308D;
 constexpr std::int32_t kContextClientVersion = 0x3098;
+constexpr std::int32_t kContextMinorVersion = 0x30FB;
 constexpr std::int32_t kWindowBit = 0x0004;
 constexpr std::int32_t kEs1Bit = 0x0001;
 constexpr std::int32_t kEs2Bit = 0x0004;
@@ -104,25 +106,6 @@ std::string ContextText(const void* context) {
   char buf[24];
   std::snprintf(buf, sizeof buf, "0x%llx", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(context)));
   return buf;
-}
-
-int ConfigVersion(const std::int32_t* attribs) {
-  int version = 1;
-  if (attribs == nullptr) return version;
-  for (int i = 0; attribs[i] != kNone; i += 2) {
-    if (attribs[i] != kRenderableType) continue;
-    if ((attribs[i + 1] & kEs3Bit) != 0) version = 3;
-    else if ((attribs[i + 1] & kEs2Bit) != 0) version = 2;
-  }
-  return version;
-}
-
-int ContextVersion(const std::int32_t* attribs, int fallback) {
-  if (attribs == nullptr) return fallback;
-  for (int i = 0; attribs[i] != kNone; i += 2) {
-    if (attribs[i] == kContextClientVersion) return attribs[i + 1];
-  }
-  return fallback;
 }
 
 // The table rb::platform::ios::EglShim::Symbol hands the host-slot layer. Each entry has the EGL prototype
@@ -171,12 +154,7 @@ std::uint32_t EglReleaseThread() { return EglShim::Instance().ReleaseThread(); }
 std::uint32_t EglWaitClient() { return EglShim::Instance().WaitClient(); }
 void* EglGetCurrentDisplay() { return EglShim::Instance().GetCurrentDisplay(); }
 std::uint32_t EglGetConfigs(void* d, void** c, std::int32_t n, std::int32_t* num) {
-  (void)d;
-  if (num != nullptr) *num = 1;
-  if (c == nullptr) return 1;
-  if (n < 1) return 0;
-  c[0] = &g_config_marker;
-  return 1;
+  return EglShim::Instance().GetConfigs(d, c, n, num);
 }
 
 const std::map<std::string, void*>& Symbols() {
@@ -219,6 +197,7 @@ EglShim& EglShim::Instance() {
 }
 
 EglShim::EglShim() = default;
+thread_local std::int32_t EglShim::error_ = kSuccess;
 
 EglShim::~EglShim() { Detach(); }
 
@@ -243,10 +222,13 @@ bool EglShim::Present(std::string* err) {
 void EglShim::SamplePixels(std::string* out) {
   out->clear();
   if (!drawable_ready_ || width_ <= 0 || height_ <= 0) return;
+  const GLenum target = client_version_ == 3 ? 0x8CA8 : 0x8D40; // GL_READ_FRAMEBUFFER or GL_FRAMEBUFFER
+  GLint previous = 0;
+  glGetIntegerv(client_version_ == 3 ? 0x8CAA : 0x8CA6, &previous);
   if (client_version_ == 1) {
     glBindFramebufferOES(GL_FRAMEBUFFER_OES, framebuffer_);
   } else {
-    glBindFramebuffer(0x8D40, framebuffer_);
+    glBindFramebuffer(target, framebuffer_);
   }
   char line[384];
   std::size_t used = 0;
@@ -258,13 +240,11 @@ void EglShim::SamplePixels(std::string* out) {
       glReadPixels(x, y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
       const int n = std::snprintf(line + used, sizeof line - used, "%s%d,%d=%02x%02x%02x%02x",
                                   used == 0 ? "" : " ", x, y, rgba[0], rgba[1], rgba[2], rgba[3]);
-      if (n <= 0 || static_cast<std::size_t>(n) >= sizeof line - used) {
-        out->assign(line, used);
-        return;
-      }
-      used += static_cast<std::size_t>(n);
+      if (n > 0 && static_cast<std::size_t>(n) < sizeof line - used) used += static_cast<std::size_t>(n);
     }
   }
+  if (client_version_ == 1) glBindFramebufferOES(GL_FRAMEBUFFER_OES, previous);
+  else glBindFramebuffer(target, previous);
   out->assign(line, used);
 }
 
@@ -283,9 +263,11 @@ void EglShim::Detach() {
   }
   framebuffer_ = color_buffer_ = depth_buffer_ = 0;
   width_ = height_ = 0;
+  logged_config_misses_.clear();
 }
 
 void EglShim::SetLayer(void* ca_eagl_layer, int client_version, int max_client_version) {
+  error_ = kSuccess;
   max_client_version_ = max_client_version;
   if (layer_ != nullptr && layer_ != ca_eagl_layer) {
     CFRelease(static_cast<CFTypeRef>(layer_));
@@ -328,21 +310,53 @@ std::uint32_t EglShim::ChooseConfig(void* display, const std::int32_t* attribs, 
     error_ = kBadDisplay;
     return 0;
   }
+  if (num_config == nullptr || config_size < 0) {
+    error_ = kBadParameter;
+    return 0;
+  }
   for (int i = 0; attribs != nullptr && attribs[i] != kNone; i += 2) {
-    // The two attributes this shim cannot satisfy: a non-window surface and an unknown renderable type.
-    if (attribs[i] == kSurfaceType && (attribs[i + 1] & kWindowBit) == 0) {
-      if (num_config != nullptr) *num_config = 0;
-      error_ = kBadMatch;
-      return 1;  // "no config matched" is a successful query with zero results, as in EGL
+    const auto name = attribs[i], requested = attribs[i + 1];
+    if (requested == -1) continue;  // EGL_DONT_CARE
+    std::int32_t available = 0;
+    if (!GetConfigAttrib(display, &g_config_marker, name, &available)) return 0;
+    bool matches;
+    switch (name) {
+      case kRenderableType: case kConformant: case kSurfaceType:
+        matches = (available & requested) == requested;
+        break;
+      case kBufferSize: case kRedSize: case kGreenSize: case kBlueSize: case kAlphaSize:
+      case kDepthSize: case kStencilSize: case kSamples: case kSampleBuffers:
+        matches = available >= requested;
+        break;
+      default:
+        matches = available == requested;
+        break;
     }
-    const auto supported = max_client_version_ >= 3 ? kSupportedApis : kEs1Bit | kEs2Bit;
-    if (attribs[i] == kRenderableType && attribs[i + 1] != -1 && (attribs[i + 1] & ~supported) != 0) {
-      if (num_config != nullptr) *num_config = 0;
+    if (!matches) {
+      if (logged_config_misses_.emplace(name, requested, available).second) {
+        char line[128];
+        std::snprintf(line, sizeof line, "egl: no matching config for attribute 0x%x (requested %d, available %d)",
+                      static_cast<unsigned>(name), requested, available);
+        LogLine(line);
+      }
+      *num_config = 0;
       return 1;
     }
   }
-  config_version_ = ConfigVersion(attribs);
-  if (num_config != nullptr) *num_config = 1;
+  return GetConfigs(display, configs, config_size, num_config);
+}
+
+std::uint32_t EglShim::GetConfigs(void* display, void** configs, std::int32_t config_size,
+                                  std::int32_t* num_config) {
+  if (display == nullptr) {
+    error_ = kBadDisplay;
+    return 0;
+  }
+  if (num_config == nullptr || config_size < 0) {
+    error_ = kBadParameter;
+    return 0;
+  }
+  *num_config = configs == nullptr || config_size > 0 ? 1 : 0;
   if (configs != nullptr && config_size > 0) configs[0] = &g_config_marker;
   return 1;
 }
@@ -353,14 +367,27 @@ std::uint32_t EglShim::GetConfigAttrib(void* display, void* config, std::int32_t
     return 0;
   }
   switch (attrib) {
+    case kBufferSize: *value = 32; break;
     case kRedSize:
     case kGreenSize:
     case kBlueSize: *value = 8; break;
     case kAlphaSize: *value = 8; break;
-    case kDepthSize: *value = config_version_ == 3 ? 24 : 16; break;
-    case kStencilSize: *value = config_version_ == 3 ? 8 : 0; break;
+    case kDepthSize: *value = client_version_ == 3 || packed_depth_stencil_ ? 24 : 16; break;
+    case kStencilSize: *value = client_version_ == 3 || packed_depth_stencil_ ? 8 : 0; break;
     case kSamples:
     case kSampleBuffers: *value = 0; break;
+    case 0x3029:  // EGL_LEVEL
+    case 0x302A:  // EGL_MAX_PBUFFER_HEIGHT
+    case 0x302B:  // EGL_MAX_PBUFFER_PIXELS
+    case 0x302C:  // EGL_MAX_PBUFFER_WIDTH
+    case 0x302D:  // EGL_NATIVE_RENDERABLE
+    case 0x3039:  // EGL_BIND_TO_TEXTURE_RGB
+    case 0x303A:  // EGL_BIND_TO_TEXTURE_RGBA
+    case 0x303B:  // EGL_MIN_SWAP_INTERVAL
+      *value = 0; break;
+    case 0x3034: *value = kNone; break;  // EGL_TRANSPARENT_TYPE
+    case 0x303C: *value = 1; break;  // EGL_MAX_SWAP_INTERVAL
+    case 0x303F: *value = 0x308E; break;  // EGL_COLOR_BUFFER_TYPE, EGL_RGB_BUFFER
     case kSurfaceType: *value = kWindowBit; break;
     case kRenderableType:
     case kConformant: *value = max_client_version_ >= 3 ? kSupportedApis : kEs1Bit | kEs2Bit; break;
@@ -387,7 +414,14 @@ void* EglShim::CreateContext(void* display, void* config, void* share, const std
     error_ = kBadConfig;
     return nullptr;
   }
-  const int version = ContextVersion(attribs, config_version_);
+  int version = config_version_;
+  for (int i = 0; attribs != nullptr && attribs[i] != kNone; i += 2) {
+    if (attribs[i] == kContextClientVersion) version = attribs[i + 1];
+    if (attribs[i] == kContextMinorVersion && attribs[i + 1] != 0) {
+      error_ = kBadMatch;
+      return nullptr;
+    }
+  }
   if (version < 1 || version > max_client_version_) {
     error_ = kBadMatch;
     return nullptr;
@@ -410,6 +444,7 @@ void* EglShim::CreateContext(void* display, void* config, void* share, const std
   framebuffer_ = color_buffer_ = depth_buffer_ = 0;
   LogLine("egl: createContext -> GLES" + std::to_string(version) + " context created");
   client_version_ = version;
+  packed_depth_stencil_ = false;
   context_ = const_cast<void*>(CFBridgingRetain(ctx));
   return context_;
 }
@@ -507,9 +542,14 @@ bool EglShim::EnsureDrawable(std::string* err) {
       glGetRenderbufferParameteriv(0x8D41, 0x8D43, &height_);            // RENDERBUFFER_HEIGHT
       if (depth_buffer_ == 0) glGenRenderbuffers(1, &depth_buffer_);
       glBindRenderbuffer(0x8D41, depth_buffer_);
-      glRenderbufferStorage(0x8D41, client_version_ == 3 ? 0x88F0 : 0x81A5, width_, height_);
+      if (client_version_ == 2) {
+        const auto* extensions = reinterpret_cast<const char*>(glGetString(GL_EXTENSIONS));
+        packed_depth_stencil_ = extensions && std::strstr(extensions, "GL_OES_packed_depth_stencil");
+      }
+      const bool packed = client_version_ == 3 || packed_depth_stencil_;
+      glRenderbufferStorage(0x8D41, packed ? 0x88F0 : 0x81A5, width_, height_);
       glFramebufferRenderbuffer(0x8D40, 0x8D00, 0x8D41, depth_buffer_);
-      if (client_version_ == 3) glFramebufferRenderbuffer(0x8D40, 0x8D20, 0x8D41, depth_buffer_);
+      if (packed) glFramebufferRenderbuffer(0x8D40, 0x8D20, 0x8D41, depth_buffer_);
       glBindRenderbuffer(0x8D41, color_buffer_);
       if (glCheckFramebufferStatus(0x8D40) != 0x8CD5) {                  // GL_FRAMEBUFFER_COMPLETE
         if (err != nullptr) *err = "the EAGL framebuffer is incomplete";
@@ -522,16 +562,16 @@ bool EglShim::EnsureDrawable(std::string* err) {
   return true;
 }
 
-bool EglShim::BindDrawable(std::string* err) {
+bool EglShim::BindDrawable(std::string* err, std::uint32_t target) {
   std::string why;
   if (!EnsureDrawable(&why)) {
     if (err != nullptr) *err = why;
     return false;
   }
   if (client_version_ == 1) {
-    glBindFramebufferOES(GL_FRAMEBUFFER_OES, framebuffer_);
+    glBindFramebufferOES(target, framebuffer_);
   } else {
-    glBindFramebuffer(0x8D40, framebuffer_);
+    glBindFramebuffer(target, framebuffer_);
   }
   return true;
 }
@@ -577,12 +617,17 @@ std::uint32_t EglShim::SwapBuffers(void* display, void* surface) {
   std::string err;
   if (!EnsureDrawable(&err)) return 0;
   EAGLContext* ctx = (__bridge EAGLContext*)context_;
+  GLint previous = 0;
+  glGetIntegerv(0x8CA7, &previous);  // GL_RENDERBUFFER_BINDING
   if (client_version_ == 1) {
     glBindRenderbufferOES(GL_RENDERBUFFER_OES, color_buffer_);
   } else {
     glBindRenderbuffer(0x8D41, color_buffer_);
   }
-  if (![ctx presentRenderbuffer:0x8D41]) {  // GL_RENDERBUFFER
+  const bool presented = [ctx presentRenderbuffer:0x8D41];
+  if (client_version_ == 1) glBindRenderbufferOES(GL_RENDERBUFFER_OES, previous);
+  else glBindRenderbuffer(0x8D41, previous);
+  if (!presented) {
     error_ = kBadSurface;
     return 0;
   }

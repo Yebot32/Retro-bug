@@ -104,7 +104,7 @@ struct LauncherView: View {
             }
         }
         .confirmationDialog("Add games", isPresented: $addSource, titleVisibility: .visible) {
-            Button("Choose APK") {
+            Button("Choose APK or OBB") {
                 AppLog.write("picker: requested (apk)")
                 // The dialog's dismissal and the sheet's presentation in the same runloop step race: the
                 // sheet is presented while the dialog is still on screen and UIKit drops it.
@@ -234,14 +234,21 @@ struct LauncherView: View {
     }
 
     /// Validate the staged copy before replacing an existing game. A failed copy leaves the old APK in place.
-    private static func copyAPK(_ source: URL, to destination: URL) throws {
+    private static func copyImport(_ source: URL, to destination: URL) throws {
         let fm = FileManager.default
         let directory = destination.deletingLastPathComponent()
         try fm.createDirectory(at: directory, withIntermediateDirectories: true)
         let staging = directory.appendingPathComponent(".import-\(UUID().uuidString)")
         defer { try? fm.removeItem(at: staging) }
         try fm.copyItem(at: source, to: staging)
-        guard hasZipHeader(staging) else { throw CocoaError(.fileReadCorruptFile) }
+        if destination.pathExtension.lowercased() == "apk" {
+            guard hasZipHeader(staging) else { throw CocoaError(.fileReadCorruptFile) }
+        } else {
+            let values = try staging.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+            guard values.isRegularFile == true, (values.fileSize ?? 0) > 0 else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+        }
         if fm.fileExists(atPath: destination.path) {
             _ = try fm.replaceItemAt(destination, withItemAt: staging)
         } else {
@@ -250,12 +257,28 @@ struct LauncherView: View {
     }
 
     private func importURL(_ url: URL) {
-        guard url.pathExtension.lowercased() == "apk" else {
-            show("\(url.lastPathComponent) is not an APK")
-            AppLog.write("import: refused, extension is \(url.pathExtension)")
+        let extensionName = url.pathExtension.lowercased()
+        let apk = extensionName == "apk"
+        let dest: URL
+        if apk {
+            dest = gamesDir.appendingPathComponent(url.lastPathComponent)
+        } else if extensionName == "obb" {
+            let parts = url.deletingPathExtension().lastPathComponent.split(separator: ".", maxSplits: 2)
+            guard parts.count == 3, parts[0] == "main" || parts[0] == "patch",
+                  parts[1].utf8.allSatisfy({ (48...57).contains($0) }),
+                  String(parts[2]).range(of: #"\A[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+\z"#,
+                                         options: .regularExpression) != nil else {
+                show("Choose an OBB with its original Android expansion filename.")
+                return
+            }
+            dest = URL(fileURLWithPath: GameUIView.dataDir(), isDirectory: true)
+                .appendingPathComponent("obb", isDirectory: true)
+                .appendingPathComponent(String(parts[2]), isDirectory: true)
+                .appendingPathComponent(url.lastPathComponent)
+        } else {
+            show("Choose an APK or OBB file.")
             return
         }
-        let dest = gamesDir.appendingPathComponent(url.lastPathComponent)
         if url.standardizedFileURL == dest.standardizedFileURL {
             reload()
             return
@@ -264,17 +287,19 @@ struct LauncherView: View {
         importsInFlight += 1
         Self.fileQueue.async {
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-            let result = Result { try Self.copyAPK(url, to: dest) }
+            let result = Result { try Self.copyImport(url, to: dest) }
             DispatchQueue.main.async {
                 importsInFlight -= 1
                 switch result {
                 case .success:
-                    icons.invalidate(dest)
-                    icons.load(dest)
+                    if apk {
+                        icons.invalidate(dest)
+                        icons.load(dest)
+                    }
                     show("Added \(dest.lastPathComponent)")
                     AppLog.write("import: copied \(dest.lastPathComponent)")
                 case .failure(let error):
-                    show("Could not add \(url.lastPathComponent). Check that the APK opens in Files and try again.")
+                    show("Could not add \(url.lastPathComponent). Check that the file opens in Files and try again.")
                     AppLog.write("import: FAILED \(url.lastPathComponent): \(error.localizedDescription)")
                 }
                 reload()
@@ -306,7 +331,7 @@ struct LauncherView: View {
                     continue
                 }
                 do {
-                    try Self.copyAPK(src, to: dest)
+                    try Self.copyImport(src, to: dest)
                     added += 1
                     AppLog.write("import: copied \(src.lastPathComponent)")
                 } catch {

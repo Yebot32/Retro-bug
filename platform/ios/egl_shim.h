@@ -11,6 +11,8 @@
 
 #include <cstdint>
 #include <atomic>
+#include <set>
+#include <tuple>
 #include <functional>
 #include <string>
 
@@ -44,6 +46,7 @@ class EglShim {
   std::uint32_t Terminate(void* display);
   std::uint32_t ChooseConfig(void* display, const std::int32_t* attribs, void** configs, std::int32_t config_size,
                              std::int32_t* num_config);
+  std::uint32_t GetConfigs(void* display, void** configs, std::int32_t config_size, std::int32_t* num_config);
   std::uint32_t GetConfigAttrib(void* display, void* config, std::int32_t attrib, std::int32_t* value);
   void* CreateContext(void* display, void* config, void* share, const std::int32_t* attribs);
   void* CreateWindowSurface(void* display, void* config, void* native_window, const std::int32_t* attribs);
@@ -69,7 +72,8 @@ class EglShim {
   bool Begin(std::string* err);
   /// Binds the drawable framebuffer (what the guest means by framebuffer 0) and returns true, or false
   /// with `err` when no drawable is ready. A device's default framebuffer is the surface; EAGL has none.
-  bool BindDrawable(std::string* err);
+  bool BindDrawable(std::string* err, std::uint32_t target = 0x8D40);
+  std::uint32_t drawable_framebuffer() const { return framebuffer_; }
   /// Presents the drawable (the shell calls it after the guest render entry; the guest never swaps).
   bool Present(std::string* err);
   /// A 3x3 RGBA sample of the current drawable, for the log. `out` is empty on failure.
@@ -99,8 +103,10 @@ class EglShim {
   std::atomic<std::uint64_t> presents_{0};
   std::uint32_t framebuffer_ = 0, color_buffer_ = 0, depth_buffer_ = 0;
   bool drawable_ready_ = false;
+  bool packed_depth_stencil_ = false;
+  std::set<std::tuple<std::int32_t, std::int32_t, std::int32_t>> logged_config_misses_;
   std::int32_t swap_interval_ = 1;
-  std::int32_t error_ = 0;  ///< 0x3000 (EGL_SUCCESS)
+  static thread_local std::int32_t error_;
 };
 
 }  // namespace rb::platform::ios
