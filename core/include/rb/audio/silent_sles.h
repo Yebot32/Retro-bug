@@ -1,15 +1,15 @@
 // RetroBug — RetroBug contributors. SPDX-License-Identifier: Apache-2.0
 //
-// A complete-enough OpenSL ES object graph for a host with no audio backend.
+// OpenSL ES guest objects with optional native PCM output.
 //
 // Titles built on OpenAL Soft (KitKat Challenge's DLGE engine is one) do not treat a failed
 // `slCreateEngine` as "run without sound": their startup path still uses the device it asked for.
 // The safe compatibility answer is therefore a real object model whose objects satisfy the calls
-// that open a device and build a player, while accepting buffers and dropping them.
+// that open a device and build a player. A host without PCM support accepts buffers silently.
 //
 // It is deliberately not a stub: every interface pointer is a guest cell holding a guest vtable,
 // exactly as Android's real libOpenSLES answers them, so the guest's own `(*itf)->Method` path is
-// exercised. Buffer callbacks are not delivered; audio remains silent.
+// exercised. Hosts that provide PCM output deliver completions on a guest-capable thread.
 #pragma once
 
 #include <cstddef>

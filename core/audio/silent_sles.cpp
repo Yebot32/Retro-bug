@@ -5,7 +5,7 @@
 //   * `self` is that same guest word, so each interface cell is also the host's key;
 //   * method slots are ordinary host slots, resolved once when the vtable is built.
 //
-// Only the interfaces a silent OpenAL/DLGE startup reaches are exposed. Anything else answers
+// Only the interfaces used by the supported OpenAL/DLGE players are exposed. Anything else answers
 // FEATURE_UNSUPPORTED, which is the same answer a real device gives for an interface it lacks.
 #include "rb/audio/silent_sles.h"
 
@@ -370,8 +370,8 @@ struct SilentSles::Impl {
             }
             auto& object = *objects.at(player);
             object.output = OpenPcm(s.r[2]);
-            Say(object.output ? "pcm" : "player", object.output ? "sles: PCM output opened"
-                                                                 : "sles: audio format or device unavailable; player muted");
+            Say(object.output ? "pcm" : "player", object.output ? "sles: CreateAudioPlayer opened PCM output"
+                 : "sles: CreateAudioPlayer could not open the format or device; player muted");
             return true;
           }
           case 7: {  // CreateOutputMix
